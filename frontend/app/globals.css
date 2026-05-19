@@ -273,6 +273,32 @@ button:disabled {
   font-size: 0.86rem;
 }
 
+.stream-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(240, 232, 220, 0.52);
+  padding: 10px;
+}
+
+.stream-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.stream-copy strong {
+  color: var(--ink);
+  font-size: 0.83rem;
+}
+
+.stream-copy small {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
 .status-copy {
   display: grid;
   gap: 2px;
@@ -421,19 +447,81 @@ button:disabled {
   flex: 1;
 }
 
-pre {
+.output-list {
+  display: grid;
+  gap: 10px;
   min-height: 290px;
-  margin: 0;
+  max-height: 42vh;
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #3f3a34;
-  color: #eee2d5;
-  padding: 16px;
-  line-height: 1.65;
+  background: rgba(255, 252, 246, 0.76);
+  padding: 10px;
+}
+
+.output-entry {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(251, 248, 242, 0.92);
+  padding: 10px 12px;
+}
+
+.output-entry p {
+  margin: 0;
+  color: var(--ink);
+  line-height: 1.55;
+  font-size: 0.88rem;
   white-space: pre-wrap;
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-  font-size: 0.86rem;
+  overflow-wrap: anywhere;
+}
+
+.output-entry-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.output-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  border-radius: 999px;
+  padding: 0 8px;
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.output-meta {
+  color: var(--muted);
+  font-size: 0.74rem;
+  text-align: right;
+}
+
+.output-thinking {
+  background: rgba(220, 229, 216, 0.4);
+}
+
+.output-tool-call {
+  background: rgba(234, 215, 205, 0.42);
+}
+
+.output-answer {
+  background: rgba(251, 248, 242, 0.96);
+}
+
+.output-runtime {
+  background: rgba(240, 232, 220, 0.58);
+}
+
+.output-system {
+  background: rgba(238, 226, 213, 0.68);
 }
 
 .notice-strip {
@@ -492,6 +580,7 @@ pre {
   flex: 0 0 auto;
   color: var(--muted);
   font-size: 0.8rem;
+  white-space: nowrap;
 }
 
 .empty-state {

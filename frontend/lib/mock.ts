@@ -1,4 +1,5 @@
-import type { ApiArtifact, ApiSession } from "@/lib/dashboard";
+import type { ApiArtifact, ApiSession, OutputEntry } from "@/lib/dashboard";
+import { createOutputEntry } from "@/lib/dashboard";
 
 const now = Date.now();
 const minutesAgo = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
@@ -81,11 +82,43 @@ export const mockArtifactsBySession: Record<string, ApiArtifact[]> = {
   mock_sess_101: []
 };
 
-export const mockOutputLines = [
-  "agent.output booting a local fallback view.",
-  "agent.output loading sample session state.",
-  "agent.output artifacts are mirrored from cached data."
-];
+export const mockOutputBySession: Record<string, OutputEntry[]> = {
+  mock_sess_103: [
+    createOutputEntry({
+      stream: "runtime",
+      line: "completed a sample report run",
+      source: "mock",
+      time: minutesAgo(83)
+    }),
+    createOutputEntry({
+      stream: "answer",
+      line: "wrote summary.csv, trend.png, and report.md",
+      source: "mock",
+      time: minutesAgo(82)
+    })
+  ],
+  mock_sess_102: [
+    createOutputEntry({
+      stream: "runtime",
+      line: "mock session is still running a shell smoke task",
+      source: "mock",
+      time: minutesAgo(9)
+    }),
+    createOutputEntry({
+      stream: "thinking",
+      line: "scanning workspace artifacts",
+      source: "mock",
+      time: minutesAgo(8)
+    }),
+    createOutputEntry({
+      stream: "tool-call",
+      line: "writing workspace.log",
+      source: "mock",
+      time: minutesAgo(7)
+    })
+  ],
+  mock_sess_101: []
+};
 
 export function createMockSession(agent: string): ApiSession {
   const createdAt = new Date().toISOString();
@@ -109,8 +142,28 @@ export function createMockTaskOutput(content: string) {
   const firstLine = trimmed.split(/\r?\n/, 1)[0] || "one-shot task";
 
   return [
-    "agent.output mock fallback accepted the one-shot task.",
-    `agent.output task: ${firstLine}`,
-    "agent.output real backend is not connected; no sandbox was started."
+    createOutputEntry({
+      stream: "runtime",
+      line: "mock fallback accepted the one-shot task.",
+      source: "mock"
+    }),
+    createOutputEntry({
+      stream: "thinking",
+      line: `task: ${firstLine}`,
+      source: "mock"
+    }),
+    createOutputEntry({
+      stream: "answer",
+      line: "real backend is not connected; no sandbox was started.",
+      source: "mock"
+    })
   ];
+}
+
+export function getMockSessionOutput(sessionId: string | null) {
+  if (!sessionId) {
+    return [];
+  }
+
+  return mockOutputBySession[sessionId] ?? [];
 }

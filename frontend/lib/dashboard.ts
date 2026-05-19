@@ -28,6 +28,25 @@ export type ApiErrorResponse = {
   upstream?: string;
 };
 
+export type OutputStreamKind = "thinking" | "tool-call" | "answer" | "runtime" | "system";
+
+export type OutputEntry = {
+  id: string;
+  time: string;
+  stream: string;
+  kind: OutputStreamKind;
+  label: string;
+  line: string;
+  source: "real" | "mock";
+};
+
+export type HarnessEvent = {
+  type: string;
+  session_id?: string;
+  time?: string;
+  payload?: unknown;
+};
+
 export type SendMessageResponse = {
   status: string;
   session_id: string;
@@ -57,6 +76,8 @@ const FULL_TIME = new Intl.DateTimeFormat("en-US", {
   hour: "2-digit",
   minute: "2-digit"
 });
+
+const DEFAULT_WS_BASE_URL = "ws://127.0.0.1:8090";
 
 export function requestJson<T>(input: RequestInfo | URL, init?: RequestInit) {
   return fetch(input, {
@@ -98,6 +119,12 @@ export function requestJson<T>(input: RequestInfo | URL, init?: RequestInit) {
       status: 0,
       error: error instanceof Error ? error.message : "network error"
     })) as Promise<RequestResult<T>>;
+}
+
+export function buildEventsWebSocketUrl(sessionId: string) {
+  const url = new URL("/api/events", getWebSocketBaseUrl());
+  url.searchParams.set("session_id", sessionId);
+  return url.toString();
 }
 
 export function formatTime(value: string | null | undefined) {
@@ -228,6 +255,66 @@ export function buildArtifactHref(sessionId: string, path: string) {
   return `/artifacts/${encodeURIComponent(sessionId)}/${encodedPath}`;
 }
 
+export function classifyOutputStream(stream: string): OutputStreamKind {
+  const normalized = stream.trim().toLowerCase().replace(/[_\s]+/g, "-");
+
+  switch (normalized) {
+    case "thinking":
+      return "thinking";
+    case "tool":
+    case "tool-call":
+      return "tool-call";
+    case "answer":
+    case "final":
+      return "answer";
+    case "system":
+      return "system";
+    default:
+      return "runtime";
+  }
+}
+
+export function outputKindLabel(kind: OutputStreamKind) {
+  switch (kind) {
+    case "thinking":
+      return "Thinking";
+    case "tool-call":
+      return "Tool call";
+    case "answer":
+      return "Answer";
+    case "system":
+      return "System";
+    default:
+      return "Runtime";
+  }
+}
+
+export function createOutputEntry(options: {
+  stream: string;
+  line: string;
+  source: "real" | "mock";
+  time?: string;
+  id?: string;
+}): OutputEntry {
+  const kind = classifyOutputStream(options.stream);
+  return {
+    id:
+      options.id ??
+      `${options.source}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+    time: options.time ?? new Date().toISOString(),
+    stream: options.stream,
+    kind,
+    label: outputKindLabel(kind),
+    line: options.line,
+    source: options.source
+  };
+}
+
+export function getWebSocketBaseUrl() {
+  const configured = process.env.NEXT_PUBLIC_HARNESS_WS_URL ?? DEFAULT_WS_BASE_URL;
+  return normalizeWebSocketBaseUrl(configured);
+}
+
 function extractError(payload: unknown, fallback: string) {
   if (payload && typeof payload === "object" && "error" in payload) {
     const error = (payload as ApiErrorResponse).error;
@@ -237,4 +324,18 @@ function extractError(payload: unknown, fallback: string) {
   }
 
   return fallback;
+}
+
+function normalizeWebSocketBaseUrl(value: string) {
+  const trimmed = value.trim().replace(/\/+$/, "");
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed.replace(/^http/i, "ws");
+  }
+
+  if (/^wss?:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+
+  return `ws://${trimmed.replace(/^\/+/, "")}`;
 }
