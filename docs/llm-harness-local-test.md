@@ -95,5 +95,5 @@ opencode run --pure \
 ## 对项目的影响
 
 - Phase 0 的 LLM API / harness 连通性已验证：本机已有可用的 Anthropic-compatible proxy。
-- Phase 1 在 VM 内集成时，可以优先复用同一组约定：`ANTHROPIC_BASE_URL` 指向 proxy 的 `/v1` base URL，`ANTHROPIC_API_KEY` 使用本地 client key。
-- OpenCode 和 Claude Code 均可作为 harness 候选，但二者对配置来源和 base URL 拼接细节不同，后续 VM bootstrap 需要分别适配。
+- Phase 1 在 sandbox 内集成时，可以优先复用同一组约定：`ANTHROPIC_BASE_URL` 指向 proxy 的 `/v1` base URL，`ANTHROPIC_API_KEY` 使用本地 client key（通过 OCI `process.env` 注入，不烤进 rootfs）。
+- OpenCode 和 Claude Code 均可作为 harness 候选，但二者对配置来源和 base URL 拼接细节不同，后续 sandbox 启动时需要分别适配。

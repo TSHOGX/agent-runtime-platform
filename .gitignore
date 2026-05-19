@@ -4,13 +4,14 @@ docs/doris-connection.md
 **/secrets/
 **/.secrets/
 
-# Firecracker 产物
-*.ext4
-*.img
-*.vmstate
-*.memfile
-snapshot/out/
-vm-image/out/
+# gVisor / sandbox 产物
+sandbox-image/rootfs/
+sandbox-image/out/
+bundle/out/
+bundle/checkpoints/
+/var/lib/harness/
+*.oci.tar
+*.rootfs.tar
 
 # 通用
 .DS_Store
