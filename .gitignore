@@ -1,0 +1,28 @@
+# 密钥 / 凭据
+docs/doris-connection.md
+**/*.env
+**/secrets/
+**/.secrets/
+
+# Firecracker 产物
+*.ext4
+*.img
+*.vmstate
+*.memfile
+snapshot/out/
+vm-image/out/
+
+# 通用
+.DS_Store
+node_modules/
+dist/
+build/
+.next/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
