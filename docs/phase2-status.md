@@ -38,15 +38,15 @@ bundle/restore-sandbox.sh
 Result:
 
 - `/var/lib/harness/sessions/phase2-smoke/ok.txt` was written from inside the restored sandbox.
-- Latest standard restore timing observed: `139 ms`.
+- Latest standard restore timing observed: `124 ms`.
 
 ## Important Notes
 
-- The installed `runsc` is `0.0~20230807.0`.
-- This version supports `checkpoint` / `restore`, but does **not** expose the planned `--warm-sentry` flag.
+- The installed `runsc` is `release-20260511.0`.
+- This version supports `checkpoint` / `restore`, but does **not** expose `--warm-sentry`; it does expose `-background`, `-direct`, and `-fs-restore-direct` for further tuning.
 - `runsc checkpoint` on this host does not support `--network=host`, so Phase 2 defaults to `RUNSC_NETWORK=sandbox`.
 - `runsc restore` failed with the default `overlay2=root:self`, so Phase 2 explicitly uses `RUNSC_OVERLAY2=none`.
-- The `<100 ms` warm restore gate should be re-tested after upgrading `runsc` to a build with warm sentry support. Current standard restore is close but above target.
+- The `<100 ms` warm restore gate should now be approached with pool-based reuse and restore tuning; the official release no longer has warm sentry, and current standard restore on this host is about `124 ms`.
 
 ## Next Step
 

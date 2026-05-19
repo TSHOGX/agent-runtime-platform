@@ -11,6 +11,8 @@
 - [docs/llm-harness-local-test.md](./docs/llm-harness-local-test.md) — 本机 Claude Code / OpenCode 通过 proxy 的连通性测试
 - [docs/phase1-status.md](./docs/phase1-status.md) — Phase 1 手工 sandbox 验证状态
 - [docs/phase2-status.md](./docs/phase2-status.md) — Phase 2 rootfs / bundle / restore 脚本状态
+- [docs/phase3-status.md](./docs/phase3-status.md) — Phase 3 Go orchestrator MVP 状态
+- [docs/runsc-warm-sentry-research.md](./docs/runsc-warm-sentry-research.md) — 新版 `runsc` 与 warm sentry 调研结论
 - `docs/doris-connection.md` — Doris 连接凭据（**不入 git**，本机本地查看）
 
 ## 当前状态
@@ -19,7 +21,9 @@ Phase 0 已完成：本机虚拟化能力已排查（`/dev/kvm` 缺失，AMD `sv
 
 Phase 1 已完成最小验证：手工 rootfs、`runsc` sandbox、workspace bind mount、Doris 元数据查询和 Claude Code 到本机 proxy 的连通性均已跑通；业务表 SELECT 仍等 Doris compute group 授权。
 
-Phase 2 已补齐脚本：`sandbox-image/build-rootfs.sh`、`bundle/bake-bundle.sh`、`bundle/restore-sandbox.sh` 可一键生成 rootfs / bundle / checkpoint 并 restore sandbox。当前本机 `runsc` 版本没有 `--warm-sentry`，标准 restore smoke test 约 139 ms，升级后复测 <100 ms。
+Phase 2 已补齐脚本：`sandbox-image/build-rootfs.sh`、`bundle/bake-bundle.sh`、`bundle/restore-sandbox.sh` 可一键生成 rootfs / bundle / checkpoint 并 restore sandbox。当前本机 `runsc release-20260511.0` 没有 `--warm-sentry`，但提供 `-background` / `-direct` / `-fs-restore-direct` 等官方 restore 选项；标准 restore smoke test 约 124 ms，后续转向参数压测和预恢复 sandbox pool。
+
+Phase 3 已补齐 Go orchestrator MVP：HTTP 会话 API、WebSocket 生命周期 / artifact 事件流、共享密码登录、SQLite 元数据、artifact watcher，以及对 Phase 2 `restore-sandbox.sh` 的 runtime adapter。当前 MVP 支持每个 sandbox 的首条消息全链路；新版 `runsc restore` 已在长期运行 Go 服务场景下稳定，当前路径不再保留 cold `runsc run` fallback。
 
 ## 仓库结构
 

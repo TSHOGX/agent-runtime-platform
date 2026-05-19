@@ -47,23 +47,23 @@
 | vsock port 10000 跑 agent stdio | orchestrator 直接当 `runsc run` 的父进程，读写其 stdin/stdout | 简化，少写一个 vsock multiplexer |
 | vsock port 10001 跑 artifact 事件 | bind-mount `/workspace/<session_id>` 到 host，host 端 `fanotify`/`inotify` 监听，**根本不需要 in-sandbox uploader** | 大幅简化 |
 | per-VM TAP + iptables 出站白名单 | gVisor netstack（用户态 TCP/IP）出口走 host veth；nftables 挂在 veth 或 cgroup classid 上 | 等价 |
-| bake snapshot → restore（vmstate + memfile） | OCI bundle + `runsc checkpoint`/`restore` + `--warm-sentry` | 等价或更简单 |
+| bake snapshot → restore（vmstate + memfile） | OCI bundle + `runsc checkpoint`/`restore` | 等价或更简单 |
 | 每会话凭据通过 vsock bootstrap 注入 | OCI `process.env` 在 `runsc run` 时直接塞 | 简化 |
 | `rootfs.ext4` + Firecracker init | OCI rootfs 目录（debootstrap 或 skopeo+umoci）；**host 上不跑 Docker** | 工具链更熟 |
 | `firecracker-go-sdk` 管 VM 生命周期 | `os/exec` 调 `runsc` | 选择更多 |
 
 ### 4.3 启动延迟
 
-最新 [warm sentry mode](https://github.com/google/gvisor/issues/12809)（2026）+ checkpoint/restore，GCE n2-standard-8 实测：
+官方 `runsc release-20260511.0` 不包含 warm sentry。下面这组数字只保留为历史参考，不是本项目当前依赖：
 
 | 场景 | 延迟 |
 |---|---|
 | Firecracker snapshot restore（原 PLAN 假设） | ~200 ms |
 | gVisor cold restore `--network=sandbox` | 160 ms |
-| gVisor warm restore（`runsc reset` 复用 sentry） | **79 ms** |
+| gVisor warm restore（已关闭提案，未合入官方 gVisor） | **79 ms** |
 | [`gvisord`](https://github.com/shayonj/gvisord) 池化 | **<50 ms** |
 
-Warm pool 在 gVisor 上是一等公民，**比 Firecracker 还简单**（不用管 vmstate/memfile 文件、不用管 TAP/CID 分配）。
+当前项目的低延迟路径是 orchestrator 级别的预恢复 sandbox pool，而不是依赖 warm sentry。
 
 ### 4.4 安全模型
 

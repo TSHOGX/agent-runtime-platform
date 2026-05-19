@@ -1,0 +1,79 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"harness-platform/orchestrator/internal/artifacts"
+	"harness-platform/orchestrator/internal/config"
+	"harness-platform/orchestrator/internal/events"
+	"harness-platform/orchestrator/internal/runtime"
+	"harness-platform/orchestrator/internal/server"
+	"harness-platform/orchestrator/internal/store"
+)
+
+func main() {
+	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	signal.Ignore(syscall.SIGPIPE)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	cfg, err := config.Load()
+	if err != nil {
+		log.Error("failed to load config", "error", err)
+		os.Exit(1)
+	}
+
+	db, err := store.Open(ctx, cfg.DBPath)
+	if err != nil {
+		log.Error("failed to open store", "error", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+	if err := db.EnsureUser(ctx, "lab", "Lab User"); err != nil {
+		log.Error("failed to ensure lab user", "error", err)
+		os.Exit(1)
+	}
+
+	hub := events.NewHub()
+	watcher := artifacts.New(cfg.SessionsRoot, db, hub, log)
+	go func() {
+		if err := watcher.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error("artifact watcher stopped", "error", err)
+		}
+	}()
+
+	rt := runtime.New(runtime.Config{
+		RestoreScript: cfg.RestoreScript,
+		RunscRoot:     cfg.RunscRoot,
+		SessionsRoot:  cfg.SessionsRoot,
+		DefaultAgent:  cfg.DefaultAgent,
+	})
+	app := server.New(cfg, db, rt, watcher, hub, log)
+	httpServer := &http.Server{
+		Addr:              cfg.Addr,
+		Handler:           app.Routes(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	go func() {
+		log.Info("orchestrator listening", "addr", cfg.Addr)
+		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("http server stopped", "error", err)
+			stop()
+		}
+	}()
+
+	<-ctx.Done()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		log.Warn("http shutdown failed", "error", err)
+	}
+}

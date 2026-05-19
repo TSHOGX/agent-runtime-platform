@@ -74,16 +74,7 @@ mv "${CONTROL_FILE}.tmp" "${CONTROL_FILE}"
 
 log "session workspace: ${SESSIONS_ROOT}/${SESSION_ID}"
 log "control file: ${CONTROL_FILE}"
-
-restore_help="$(runsc restore --help 2>&1 || true)"
-case "${restore_help}" in
-  *warm-sentry*|*warm_sentry*)
-    log "installed runsc advertises warm-sentry support"
-    ;;
-  *)
-    log "installed runsc has no warm-sentry flag; using standard restore"
-    ;;
-esac
+log "runsc version: $(runsc --version 2>&1 | tr '\n' ' ' | sed 's/[[:space:]]\+$//')"
 
 runsc -root "${RUNSC_ROOT}" kill "${RESTORE_ID}" KILL >/dev/null 2>&1 || true
 runsc -root "${RUNSC_ROOT}" delete "${RESTORE_ID}" >/dev/null 2>&1 || true
@@ -102,6 +93,22 @@ restore_cmd=(
   -image-path "${CHECKPOINT_DIR}"
   -pid-file "${SESSIONS_ROOT}/${SESSION_ID}/runsc.pid"
 )
+
+if [ "${RUNSC_RESTORE_DIRECT:-0}" = "1" ]; then
+  restore_cmd+=(-direct)
+fi
+
+if [ "${RUNSC_RESTORE_BACKGROUND:-0}" = "1" ]; then
+  restore_cmd+=(-background)
+fi
+
+if [ -n "${RUNSC_FS_RESTORE_IMAGE_PATH:-}" ]; then
+  restore_cmd+=(-fs-restore-image-path "${RUNSC_FS_RESTORE_IMAGE_PATH}")
+fi
+
+if [ "${RUNSC_FS_RESTORE_DIRECT:-0}" = "1" ]; then
+  restore_cmd+=(-fs-restore-direct)
+fi
 
 if [ "${DETACH}" = "1" ]; then
   restore_cmd+=(-detach)
