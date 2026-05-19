@@ -106,7 +106,7 @@
 
 ### 已创建 commit hash
 
-- 待提交。
+- `d928655` — `frontend: add real backend client`
 
 ### 下一步
 
