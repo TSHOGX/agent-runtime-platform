@@ -1,0 +1,46 @@
+#!/bin/sh
+set -eu
+
+CONTROL_FILE="${HARNESS_CONTROL_FILE:-/harness-control/session.env}"
+POLL_INTERVAL="${HARNESS_POLL_INTERVAL:-0.05}"
+
+while [ ! -f "$CONTROL_FILE" ]; do
+  sleep "$POLL_INTERVAL"
+done
+
+# shellcheck disable=SC1090
+. "$CONTROL_FILE"
+
+: "${SESSION_ID:?SESSION_ID is required in control file}"
+
+SESSION_WORKSPACE="${SESSION_WORKSPACE:-/sessions/$SESSION_ID}"
+mkdir -p "$SESSION_WORKSPACE"
+
+if [ -d /workspace ] && [ ! -L /workspace ]; then
+  rmdir /workspace 2>/dev/null || true
+fi
+ln -sfn "$SESSION_WORKSPACE" /workspace
+
+cd /workspace
+
+case "${HARNESS_AGENT:-demo}" in
+  demo)
+    exec /usr/local/bin/phase1_demo.py
+    ;;
+  claude)
+    PROMPT="${FIRST_MESSAGE:-Reply exactly: hi}"
+    exec /usr/local/bin/claude \
+      --bare \
+      -p \
+      --model "${CLAUDE_MODEL:-sonnet}" \
+      --output-format "${CLAUDE_OUTPUT_FORMAT:-json}" \
+      "$PROMPT"
+    ;;
+  sh)
+    exec /bin/sh -lc "${HARNESS_COMMAND:-echo harness-agent-entrypoint ready}"
+    ;;
+  *)
+    echo "unknown HARNESS_AGENT: ${HARNESS_AGENT}" >&2
+    exit 64
+    ;;
+esac

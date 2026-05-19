@@ -9,11 +9,17 @@
 - [docs/PLAN.md](./docs/PLAN.md) — 总体技术方案 & 分阶段实施计划
 - [docs/gvisor-decision.md](./docs/gvisor-decision.md) — 运行时选型决策记录（为什么放弃 Firecracker，gVisor 能力对照）
 - [docs/llm-harness-local-test.md](./docs/llm-harness-local-test.md) — 本机 Claude Code / OpenCode 通过 proxy 的连通性测试
+- [docs/phase1-status.md](./docs/phase1-status.md) — Phase 1 手工 sandbox 验证状态
+- [docs/phase2-status.md](./docs/phase2-status.md) — Phase 2 rootfs / bundle / restore 脚本状态
 - `docs/doris-connection.md` — Doris 连接凭据（**不入 git**，本机本地查看）
 
 ## 当前状态
 
-Phase 0 已完成：本机虚拟化能力已排查（`/dev/kvm` 缺失，AMD `svm` 被宿主屏蔽，Firecracker 不可用，改用 gVisor），LLM harness 本地连通性已通过 Claude Code Proxy 验证，Doris 只读账号已就绪。下一步进入 **Phase 1**：在本机装 `runsc`、手工建 rootfs 目录、用单个 sandbox 跑通"Claude Code → Doris → CSV / PNG / report.md"端到端 DEMO。
+Phase 0 已完成：本机虚拟化能力已排查（`/dev/kvm` 缺失，AMD `svm` 被宿主屏蔽，Firecracker 不可用，改用 gVisor），LLM harness 本地连通性已通过 Claude Code Proxy 验证，Doris 只读账号已就绪。
+
+Phase 1 已完成最小验证：手工 rootfs、`runsc` sandbox、workspace bind mount、Doris 元数据查询和 Claude Code 到本机 proxy 的连通性均已跑通；业务表 SELECT 仍等 Doris compute group 授权。
+
+Phase 2 已补齐脚本：`sandbox-image/build-rootfs.sh`、`bundle/bake-bundle.sh`、`bundle/restore-sandbox.sh` 可一键生成 rootfs / bundle / checkpoint 并 restore sandbox。当前本机 `runsc` 版本没有 `--warm-sentry`，标准 restore smoke test 约 139 ms，升级后复测 <100 ms。
 
 ## 仓库结构
 
