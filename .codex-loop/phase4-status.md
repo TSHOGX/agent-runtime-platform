@@ -1,7 +1,52 @@
 # Phase 4 Frontend Status
 
-> Last updated: 2026-05-20 02:12 Asia/Shanghai
+> Last updated: 2026-05-20 04:17 Asia/Shanghai
 > Scope guard: only frontend Phase 4 files and this status file were changed in this round.
+
+## Round 4/8
+
+### 本轮完成内容
+
+- 接入真实 WebSocket 事件流 `GET /api/events?session_id=<id>`。
+- 将 `session.created`、`session.running`、`session.completed`、`session.failed`、`session.destroyed`、`session.error`、`artifact.updated` 和 `agent.output` 映射到前端状态。
+- 中栏改为结构化流式输出卡片，不再是单一 `pre` 文本块。
+- 右栏 artifact 行补齐文件名、更新时间、大小和下载入口。
+- WebSocket 连接失败或真实后端不可用时，自动切换到 mock fallback，并保留 `Retry real`。
+- 更新 `frontend/README.md`，补充 WebSocket 和 fallback 说明。
+
+### 测试结果
+
+- `cd frontend && npm run typecheck`：通过。
+- `cd frontend && npm run lint`：先报 `react-hooks/set-state-in-effect`，已修复后通过。
+- `cd frontend && npm run build`：通过。
+- `PORT=8000 npm run dev`：通过，`http://127.0.0.1:8000/` 返回 200，页面渲染出三栏工作台。
+- HTTP smoke：
+  - `curl -I --max-time 5 http://127.0.0.1:8000/` 返回 HTTP 200。
+  - `curl --max-time 5 http://127.0.0.1:8000/` 返回实际工作台 HTML，不是空白页或错误页。
+- Real backend smoke：
+  - 通过 frontend proxy `POST /api/sessions` 创建真实 `sh` session。
+  - 通过 frontend proxy `POST /api/sessions/:id/messages` 提交首条任务，返回 HTTP 202。
+  - `GET /api/events?session_id=<id>` WebSocket 收到 `session.running`、`agent.output`、`artifact.updated`、`session.completed`。
+
+### Real backend 是否可用
+
+- 可用。
+- 本轮已确认真实 orchestrator 的 HTTP 与 WebSocket 链路都可用。
+
+### mock fallback 是否验证
+
+- 已验证。
+- 当 WebSocket 连接失败时，前端切换到 `Mock fallback`。
+- 之前几轮的 HTTP 不可达 fallback 也保持有效。
+
+### 已创建 commit hash
+
+- `4803e2c` — `frontend: add websocket workbench`
+
+### 下一步
+
+- Phase 4 完成。
+- 创建 `.codex-loop/phase4-DONE` 并做最终状态提交。
 
 ## Round 1/8
 
