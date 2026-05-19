@@ -86,3 +86,31 @@ export const mockOutputLines = [
   "agent.output loading sample session state.",
   "agent.output artifacts are mirrored from cached data."
 ];
+
+export function createMockSession(agent: string): ApiSession {
+  const createdAt = new Date().toISOString();
+  const id = `mock_sess_${Math.random().toString(36).slice(2, 8)}`;
+
+  return {
+    id,
+    user_id: "lab",
+    status: "created",
+    agent,
+    workspace: `/workspace/${id}`,
+    restore_id: `phase4-${id}`,
+    created_at: createdAt,
+    updated_at: createdAt,
+    expires_at: new Date(Date.now() + 24 * 60 * 60_000).toISOString()
+  };
+}
+
+export function createMockTaskOutput(content: string) {
+  const trimmed = content.trim();
+  const firstLine = trimmed.split(/\r?\n/, 1)[0] || "one-shot task";
+
+  return [
+    "agent.output mock fallback accepted the one-shot task.",
+    `agent.output task: ${firstLine}`,
+    "agent.output real backend is not connected; no sandbox was started."
+  ];
+}

@@ -28,6 +28,11 @@ export type ApiErrorResponse = {
   upstream?: string;
 };
 
+export type SendMessageResponse = {
+  status: string;
+  session_id: string;
+};
+
 export type RequestResult<T> =
   | {
       ok: true;
@@ -185,6 +190,18 @@ export function statusTone(status: string) {
     default:
       return "ready";
   }
+}
+
+export function canSendFirstTask(session: ApiSession | null) {
+  return session?.status === "created";
+}
+
+export function isBackendUnavailable(result: RequestResult<unknown>) {
+  if (result.ok) {
+    return false;
+  }
+
+  return result.status === 0 || result.status >= 500;
 }
 
 export function choosePrimarySessionId(sessions: ApiSession[]) {

@@ -39,3 +39,10 @@ Environment overrides:
 - `PORT=8000` for local frontend development.
 
 The UI checks `/api/healthz` first. If the real backend is unavailable or a proxied HTTP request fails, the dashboard switches to a clearly labeled mock fallback and provides a `Retry real` action.
+
+## Current MVP Flow
+
+- Pick an agent and create a session through `POST /api/sessions`.
+- Send one task prompt through `POST /api/sessions/:id/messages`.
+- The Phase 3 backend currently accepts only the first message for a sandbox, so the UI treats each session as a one-shot run.
+- WebSocket output streaming is planned for the next Phase 4 slice; until then, the UI shows request state and the existing artifact list.

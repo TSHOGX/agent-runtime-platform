@@ -3,19 +3,28 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   buildArtifactHref,
+  canSendFirstTask,
   choosePrimarySessionId,
   displayAgentName,
   formatBytes,
   formatFullTime,
   formatTime,
+  isBackendUnavailable,
   requestJson,
+  type SendMessageResponse,
   statusLabel,
   statusTone,
   type ApiArtifact,
   type ApiSession,
   type BackendMode
 } from "@/lib/dashboard";
-import { mockArtifactsBySession, mockOutputLines, mockSessions } from "@/lib/mock";
+import {
+  createMockSession,
+  createMockTaskOutput,
+  mockArtifactsBySession,
+  mockOutputLines,
+  mockSessions
+} from "@/lib/mock";
 
 type BackendState = {
   mode: "loading" | BackendMode;
@@ -28,6 +37,23 @@ type ArtifactState = {
   loading: boolean;
   error: string | null;
 };
+
+type RunState = {
+  submitting: boolean;
+  error: string | null;
+  outputLines: string[];
+};
+
+type AgentOption = "claude" | "opencode" | "sh";
+
+const AGENT_OPTIONS: { value: AgentOption; label: string }[] = [
+  { value: "claude", label: "Claude Code" },
+  { value: "opencode", label: "OpenCode" },
+  { value: "sh", label: "Shell smoke" }
+];
+
+const DEFAULT_TASK_PROMPT =
+  "Summarize the available data, write a concise report, and save artifacts under /workspace.";
 
 function getSessionPillTone(state: BackendState) {
   if (state.mode === "real") {
@@ -62,6 +88,15 @@ export default function Workbench() {
   const [artifactState, setArtifactState] = useState<ArtifactState>({
     loading: false,
     error: null
+  });
+  const [selectedAgent, setSelectedAgent] = useState<AgentOption>("claude");
+  const [creatingSession, setCreatingSession] = useState(false);
+  const [createSessionError, setCreateSessionError] = useState<string | null>(null);
+  const [taskPrompt, setTaskPrompt] = useState(DEFAULT_TASK_PROMPT);
+  const [runState, setRunState] = useState<RunState>({
+    submitting: false,
+    error: null,
+    outputLines: []
   });
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [booting, setBooting] = useState(true);
@@ -98,12 +133,20 @@ export default function Workbench() {
     setSelectedSessionId(choosePrimarySessionId(mockSessions));
     setRealArtifacts([]);
     setArtifactState({ loading: false, error: null });
+    setCreateSessionError(null);
+    setRunState({
+      submitting: false,
+      error: null,
+      outputLines: mockOutputLines
+    });
     setBooting(false);
   }, []);
 
   const loadRealDashboard = useCallback(async () => {
     setBooting(true);
     setSessionError(null);
+    setCreateSessionError(null);
+    setRunState({ submitting: false, error: null, outputLines: [] });
     setArtifactState({ loading: false, error: null });
     setBackend({
       mode: "loading",
@@ -114,7 +157,7 @@ export default function Workbench() {
 
     const healthResult = await requestJson<{ status: string }>("/api/healthz");
     if (!healthResult.ok) {
-      if (healthResult.status === 0 || healthResult.status >= 500) {
+      if (isBackendUnavailable(healthResult)) {
         enterMockFallback(healthResult.error);
         return;
       }
@@ -135,7 +178,7 @@ export default function Workbench() {
 
     const sessionsResult = await requestJson<{ sessions: ApiSession[] }>("/api/sessions");
     if (!sessionsResult.ok) {
-      if (sessionsResult.status === 0 || sessionsResult.status >= 500) {
+      if (isBackendUnavailable(sessionsResult)) {
         enterMockFallback(sessionsResult.error);
         return;
       }
@@ -206,7 +249,7 @@ export default function Workbench() {
         return;
       }
 
-      if (artifactResult.status === 0 || artifactResult.status >= 500) {
+      if (isBackendUnavailable(artifactResult)) {
         enterMockFallback(artifactResult.error);
         return;
       }
@@ -220,19 +263,162 @@ export default function Workbench() {
     };
   }, [backend.mode, enterMockFallback, selectedSessionId]);
 
+  const handleCreateSession = async () => {
+    setCreateSessionError(null);
+    setSessionError(null);
+
+    if (backend.mode === "loading") {
+      return;
+    }
+
+    if (backend.mode === "mock") {
+      const session = createMockSession(selectedAgent);
+      setSessions((current) => [session, ...current]);
+      setSelectedSessionId(session.id);
+      setRunState({ submitting: false, error: null, outputLines: [] });
+      return;
+    }
+
+    setCreatingSession(true);
+
+    const result = await requestJson<ApiSession>("/api/sessions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ agent: selectedAgent })
+    });
+
+    setCreatingSession(false);
+
+    if (!result.ok) {
+      if (isBackendUnavailable(result)) {
+        enterMockFallback(result.error);
+        return;
+      }
+
+      setCreateSessionError(result.error);
+      return;
+    }
+
+    setSessions((current) => [result.data, ...current.filter((session) => session.id !== result.data.id)]);
+    setSelectedSessionId(result.data.id);
+    setRealArtifacts([]);
+    setRunState({ submitting: false, error: null, outputLines: [] });
+    setBackend((current) => ({
+      ...current,
+      detail: "Session created",
+      checkedAt: new Date().toISOString()
+    }));
+  };
+
+  const handleRunTask = async () => {
+    const prompt = taskPrompt.trim();
+
+    if (!selectedSession || !canSendFirstTask(selectedSession) || !prompt || runState.submitting) {
+      return;
+    }
+
+    setRunState({
+      submitting: true,
+      error: null,
+      outputLines: ["agent.output submitting one-shot task."]
+    });
+
+    if (backend.mode === "mock") {
+      const updatedAt = new Date().toISOString();
+      setSessions((current) =>
+        current.map((session) =>
+          session.id === selectedSession.id
+            ? { ...session, status: "running", updated_at: updatedAt }
+            : session
+        )
+      );
+      setRunState({
+        submitting: false,
+        error: null,
+        outputLines: createMockTaskOutput(prompt)
+      });
+      return;
+    }
+
+    if (backend.mode !== "real") {
+      setRunState({ submitting: false, error: "Backend is still checking.", outputLines: [] });
+      return;
+    }
+
+    const result = await requestJson<SendMessageResponse>(
+      `/api/sessions/${encodeURIComponent(selectedSession.id)}/messages`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({ content: prompt })
+      }
+    );
+
+    if (!result.ok) {
+      if (isBackendUnavailable(result)) {
+        enterMockFallback(result.error);
+        return;
+      }
+
+      setRunState({
+        submitting: false,
+        error: result.error,
+        outputLines: []
+      });
+      return;
+    }
+
+    const updatedAt = new Date().toISOString();
+    setSessions((current) =>
+      current.map((session) =>
+        session.id === selectedSession.id
+          ? { ...session, status: result.data.status || "running", updated_at: updatedAt }
+          : session
+      )
+    );
+    setRunState({
+      submitting: false,
+      error: null,
+      outputLines: ["agent.output task accepted; waiting for event stream."]
+    });
+    setBackend((current) => ({
+      ...current,
+      detail: "Task accepted by real backend",
+      checkedAt: new Date().toISOString()
+    }));
+  };
+
   const modeLabel =
     backend.mode === "loading"
       ? "Checking"
       : backend.mode === "real"
         ? "Real backend"
         : "Mock fallback";
-  const outputLines = backend.mode === "mock" ? mockOutputLines : [];
+  const outputLines = runState.outputLines;
   const artifactsLoading =
     backend.mode === "real" && Boolean(selectedSessionId) && artifactState.loading;
   const artifactError = backend.mode === "real" ? artifactState.error : null;
   const selectedSessionSubtitle = selectedSession
     ? `${displayAgentName(selectedSession.agent)} - ${statusLabel(selectedSession.status)} - updated ${formatTime(selectedSession.updated_at)}`
     : "No session selected";
+  const runDisabledReason = !selectedSession
+    ? "Create or select a session first."
+    : !canSendFirstTask(selectedSession)
+      ? "This MVP accepts the first message only."
+      : !taskPrompt.trim()
+        ? "Enter a task prompt."
+        : null;
+  const canCreateSession = backend.mode !== "loading" && !creatingSession;
+  const canRunTask =
+    backend.mode !== "loading" &&
+    !runState.submitting &&
+    Boolean(selectedSession) &&
+    canSendFirstTask(selectedSession) &&
+    Boolean(taskPrompt.trim());
 
   return (
     <main className="workbench-shell">
@@ -270,16 +456,35 @@ export default function Workbench() {
 
         <div className="control-group">
           <label htmlFor="agent">Agent</label>
-          <select id="agent" defaultValue="claude" disabled>
-            <option value="claude">Claude Code</option>
-            <option value="opencode">OpenCode</option>
-            <option value="sh">Shell smoke</option>
+          <select
+            id="agent"
+            value={selectedAgent}
+            onChange={(event) => setSelectedAgent(event.target.value as AgentOption)}
+            disabled={backend.mode === "loading" || creatingSession}
+          >
+            {AGENT_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
           </select>
         </div>
 
-        <button className="primary-action" type="button" disabled>
-          Create session
+        <button
+          className="primary-action"
+          type="button"
+          onClick={handleCreateSession}
+          disabled={!canCreateSession}
+        >
+          {creatingSession ? "Creating..." : "Create session"}
         </button>
+
+        {createSessionError ? (
+          <div className="notice-strip notice-error" role="alert">
+            <strong>Create failed</strong>
+            <p>{createSessionError}</p>
+          </div>
+        ) : null}
 
         <div className="section-heading">
           <h2>Sessions</h2>
@@ -370,18 +575,43 @@ export default function Workbench() {
           </div>
         </div>
 
-        <form className="task-form">
+        <form
+          className="task-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void handleRunTask();
+          }}
+        >
           <label htmlFor="task">Task prompt</label>
-          <textarea id="task" rows={6} placeholder="One-shot task" disabled value="" readOnly />
+          <textarea
+            id="task"
+            rows={6}
+            placeholder="One-shot task"
+            value={taskPrompt}
+            onChange={(event) => setTaskPrompt(event.target.value)}
+            disabled={backend.mode === "loading" || runState.submitting}
+          />
           <div className="form-actions">
-            <button className="primary-action" type="button" disabled>
-              Run task
+            <button className="primary-action" type="submit" disabled={!canRunTask}>
+              {runState.submitting ? "Submitting..." : "Run task"}
             </button>
             <button className="secondary-action" type="button" disabled>
               Stop
             </button>
           </div>
         </form>
+
+        {runState.error ? (
+          <div className="notice-strip notice-error" role="alert">
+            <strong>Run failed</strong>
+            <p>{runState.error}</p>
+          </div>
+        ) : runDisabledReason ? (
+          <div className="notice-strip" role="status">
+            <strong>Not ready</strong>
+            <p>{runDisabledReason}</p>
+          </div>
+        ) : null}
 
         <div className="run-state">
           <span className="status-dot muted" aria-hidden="true" />
