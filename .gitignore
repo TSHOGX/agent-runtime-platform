@@ -13,6 +13,10 @@ bundle/checkpoints/
 *.oci.tar
 *.rootfs.tar
 
+# 构建产物
+orchestrator/orchestrator
+scripts/
+
 # 通用
 .DS_Store
 node_modules/
