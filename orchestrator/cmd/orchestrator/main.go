@@ -50,12 +50,22 @@ func main() {
 	}()
 
 	rt := runtime.New(runtime.Config{
-		RestoreScript: cfg.RestoreScript,
-		RunscRoot:     cfg.RunscRoot,
-		SessionsRoot:  cfg.SessionsRoot,
-		DefaultAgent:  cfg.DefaultAgent,
+		RestoreScript:   cfg.RestoreScript,
+		RunscRoot:       cfg.RunscRoot,
+		SessionsRoot:    cfg.SessionsRoot,
+		CheckpointsRoot: cfg.CheckpointsRoot,
+		BundleRoot:      cfg.BundleRoot,
+		DefaultAgent:    cfg.DefaultAgent,
 	})
 	app := server.New(cfg, db, rt, watcher, hub, log)
+
+	// Start idle session monitoring
+	go func() {
+		if err := app.MonitorIdleSessions(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error("idle session monitor stopped", "error", err)
+		}
+	}()
+
 	httpServer := &http.Server{
 		Addr:              cfg.Addr,
 		Handler:           app.Routes(),

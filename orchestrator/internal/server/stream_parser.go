@@ -1,0 +1,167 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+
+	"harness-platform/orchestrator/internal/events"
+	"harness-platform/orchestrator/internal/runtime"
+)
+
+// streamParser converts a runtime stdout/stderr stream into chat-friendly
+// hub events. Lines that successfully decode as Claude Code stream-json get
+// translated to agent.delta / agent.message; everything else is forwarded as
+// the legacy agent.output (used by demo / sh agents that don't speak
+// stream-json) so the UI stays compatible.
+type streamParser struct {
+	srv       *Server
+	sessionID string
+	// pending text chunks per assistant message id, flushed when we see the
+	// matching "assistant" full message (or when the runtime exits).
+	pending map[string]*strings.Builder
+}
+
+func newStreamParser(srv *Server, sessionID string) *streamParser {
+	return &streamParser{srv: srv, sessionID: sessionID, pending: map[string]*strings.Builder{}}
+}
+
+func (p *streamParser) handle(output runtime.Output) {
+	line := strings.TrimSpace(output.Line)
+	if line == "" {
+		return
+	}
+	// stderr always goes to agent.output (debug/logs)
+	if output.Stream == "stderr" {
+		p.publish("agent.output", output)
+		return
+	}
+	// stdout: try to parse as stream-json first
+	if strings.HasPrefix(line, "{") {
+		var event struct {
+			Type    string          `json:"type"`
+			Subtype string          `json:"subtype,omitempty"`
+			Event   json.RawMessage `json:"event,omitempty"`
+			Message json.RawMessage `json:"message,omitempty"`
+			Result  string          `json:"result,omitempty"`
+		}
+		if err := json.Unmarshal([]byte(line), &event); err == nil {
+			switch event.Type {
+			case "stream_event":
+				p.handleStreamEvent(event.Event)
+				return
+			case "assistant":
+				p.handleAssistantMessage(event.Message)
+				return
+			case "result":
+				if event.Subtype == "success" && event.Result != "" {
+					p.persistAssistant(event.Result)
+				}
+				return
+			default:
+				// system/init/user/error/etc.
+				p.publish("agent.output", output)
+				return
+			}
+		}
+	}
+	// stdout non-JSON: treat as assistant message (sh/demo agents)
+	p.persistAssistant(line)
+}
+
+func (p *streamParser) handleStreamEvent(raw json.RawMessage) {
+	if len(raw) == 0 {
+		return
+	}
+	var inner struct {
+		Type  string `json:"type"`
+		Index int    `json:"index"`
+		Delta struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"delta"`
+		Message struct {
+			ID string `json:"id"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &inner); err != nil {
+		return
+	}
+	if inner.Type != "content_block_delta" || inner.Delta.Type != "text_delta" || inner.Delta.Text == "" {
+		return
+	}
+	// Claude stream_event doesn't always nest the message id; use a stable
+	// fallback so the UI can still group deltas.
+	id := inner.Message.ID
+	if id == "" {
+		id = "assistant_pending"
+	}
+	if _, ok := p.pending[id]; !ok {
+		p.pending[id] = &strings.Builder{}
+	}
+	p.pending[id].WriteString(inner.Delta.Text)
+	p.srv.hub.Publish(events.Event{
+		Type:      "agent.delta",
+		SessionID: p.sessionID,
+		Payload:   map[string]any{"message_id": id, "text": inner.Delta.Text},
+	})
+}
+
+func (p *streamParser) handleAssistantMessage(raw json.RawMessage) {
+	if len(raw) == 0 {
+		return
+	}
+	var msg struct {
+		ID      string `json:"id"`
+		Role    string `json:"role"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return
+	}
+	var b strings.Builder
+	for _, part := range msg.Content {
+		if part.Type == "text" {
+			b.WriteString(part.Text)
+		}
+	}
+	text := b.String()
+	if text == "" {
+		return
+	}
+	delete(p.pending, msg.ID)
+	delete(p.pending, "assistant_pending")
+	p.persistAssistant(text)
+}
+
+func (p *streamParser) persistAssistant(text string) {
+	stored, err := p.srv.store.AddMessage(context.Background(), p.sessionID, "assistant", text)
+	if err != nil {
+		p.srv.log.Warn("failed to store assistant message", "session_id", p.sessionID, "error", err)
+		return
+	}
+	p.srv.hub.Publish(events.Event{Type: "agent.message", SessionID: p.sessionID, Payload: stored})
+}
+
+func (p *streamParser) flush() {
+	// If the runtime exited mid-stream without ever delivering an "assistant"
+	// or "result" event, salvage whatever we buffered into a final message.
+	if len(p.pending) == 0 {
+		return
+	}
+	var b strings.Builder
+	for _, sb := range p.pending {
+		b.WriteString(sb.String())
+	}
+	p.pending = map[string]*strings.Builder{}
+	if text := strings.TrimSpace(b.String()); text != "" {
+		p.persistAssistant(text)
+	}
+}
+
+func (p *streamParser) publish(eventType string, output runtime.Output) {
+	p.srv.hub.Publish(events.Event{Type: eventType, SessionID: p.sessionID, Payload: output})
+}

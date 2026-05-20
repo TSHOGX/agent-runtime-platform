@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
 	"harness-platform/orchestrator/internal/artifacts"
@@ -131,6 +132,8 @@ func (s *Server) sessionRoute(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch {
+	case len(parts) == 2 && parts[1] == "messages" && r.Method == http.MethodGet:
+		s.listMessages(w, r, sessionID)
 	case len(parts) == 2 && parts[1] == "messages" && r.Method == http.MethodPost:
 		s.sendMessage(w, r, sessionID)
 	case len(parts) == 2 && parts[1] == "artifacts" && r.Method == http.MethodGet:
@@ -173,15 +176,16 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 	expiresAt := now.Add(s.cfg.SessionTTL)
 	session := store.Session{
-		ID:        id,
-		UserID:    labUserID,
-		Status:    "created",
-		Agent:     req.Agent,
-		Workspace: filepath.Join(s.cfg.SessionsRoot, id),
-		RestoreID: "phase3-" + id,
-		CreatedAt: now,
-		UpdatedAt: now,
-		ExpiresAt: &expiresAt,
+		ID:                id,
+		UserID:            labUserID,
+		Status:            "created",
+		Agent:             req.Agent,
+		Workspace:         filepath.Join(s.cfg.SessionsRoot, id),
+		RestoreID:         "phase3-" + id,
+		ClaudeSessionUUID: uuid.NewString(),
+		CreatedAt:         now,
+		UpdatedAt:         now,
+		ExpiresAt:         &expiresAt,
 	}
 	if err := os.MkdirAll(session.Workspace, 0o755); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -225,42 +229,71 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, sessionID s
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if session.Status != "created" {
-		writeError(w, http.StatusConflict, "MVP accepts the first message only for this sandbox")
+	switch session.Status {
+	case "created", "running_idle", "checkpointed":
+		// ok - can accept messages
+	case "running_active":
+		writeError(w, http.StatusConflict, "session is busy")
+		return
+	default:
+		writeError(w, http.StatusConflict, "session is "+session.Status)
 		return
 	}
-	if err := s.store.AddMessage(r.Context(), sessionID, "user", req.Content); err != nil {
+
+	msg, err := s.store.AddMessage(r.Context(), sessionID, "user", req.Content)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := s.store.UpdateSessionStatus(r.Context(), sessionID, "running", nil); err != nil {
+	if err := s.store.UpdateSessionStatus(r.Context(), sessionID, "running_active", nil); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	s.hub.Publish(events.Event{Type: "session.running", SessionID: sessionID})
+	s.hub.Publish(events.Event{Type: "message.created", SessionID: sessionID, Payload: msg})
+	s.hub.Publish(events.Event{Type: "session.running_active", SessionID: sessionID})
 	go s.runSession(context.Background(), session, req.Content)
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "running", "session_id": sessionID})
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "running_active", "session_id": sessionID, "message": msg})
+}
+
+func (s *Server) listMessages(w http.ResponseWriter, r *http.Request, sessionID string) {
+	if _, err := s.store.GetSession(r.Context(), sessionID); errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	messages, err := s.store.ListMessages(r.Context(), sessionID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"messages": messages})
 }
 
 func (s *Server) runSession(ctx context.Context, session store.Session, message string) {
+	parser := newStreamParser(s, session.ID)
 	result := s.runtime.Start(ctx, runtime.StartRequest{
-		SessionID:    session.ID,
-		RestoreID:    session.RestoreID,
-		Agent:        session.Agent,
-		FirstMessage: message,
+		SessionID:         session.ID,
+		RestoreID:         session.RestoreID,
+		Agent:             session.Agent,
+		FirstMessage:      message,
+		ClaudeSessionUUID: session.ClaudeSessionUUID,
 	}, func(output runtime.Output) {
-		s.log.Info("runtime output", "session_id", session.ID, "stream", output.Stream, "line", output.Line)
-		s.hub.Publish(events.Event{Type: "agent.output", SessionID: session.ID, Payload: output})
+		s.log.Debug("runtime output", "session_id", session.ID, "stream", output.Stream)
+		parser.handle(output)
 	})
+	parser.flush()
 
-	status := "completed"
+	now := time.Now()
+	status := "running_idle"
 	if result.Err != nil {
 		status = "failed"
 		s.log.Warn("runtime failed", "session_id", session.ID, "error", result.Err)
 		s.hub.Publish(events.Event{Type: "session.error", SessionID: session.ID, Payload: map[string]string{"error": result.Err.Error()}})
 	}
-	if err := s.store.UpdateSessionStatus(ctx, session.ID, status, result.RestoreMS); err != nil {
+	if err := s.store.UpdateSessionStatusAndActivity(ctx, session.ID, status, result.RestoreMS, now); err != nil {
 		s.log.Warn("failed to update session status", "session_id", session.ID, "error", err)
 	}
 	if err := s.watcher.ScanSession(ctx, session.ID); err != nil {
@@ -372,3 +405,49 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
+
+func (s *Server) MonitorIdleSessions(ctx context.Context) error {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			sessions, err := s.store.ListSessionsByStatus(ctx, "running_idle")
+			if err != nil {
+				s.log.Warn("failed to list idle sessions", "error", err)
+				continue
+			}
+			for _, session := range sessions {
+				if session.LastActivityAt != nil && time.Since(*session.LastActivityAt) > 30*time.Minute {
+					go s.checkpointSession(ctx, session)
+				}
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func (s *Server) checkpointSession(ctx context.Context, session store.Session) {
+	s.log.Info("checkpointing idle session", "session_id", session.ID)
+
+	if err := s.store.UpdateSessionStatus(ctx, session.ID, "checkpointing", nil); err != nil {
+		s.log.Warn("failed to update session status to checkpointing", "session_id", session.ID, "error", err)
+		return
+	}
+
+	if err := s.runtime.Checkpoint(ctx, session.ID); err != nil {
+		s.log.Warn("checkpoint failed", "session_id", session.ID, "error", err)
+		_ = s.store.UpdateSessionStatus(ctx, session.ID, "failed", nil)
+		return
+	}
+
+	if err := s.store.UpdateSessionStatus(ctx, session.ID, "checkpointed", nil); err != nil {
+		s.log.Warn("failed to update session status to checkpointed", "session_id", session.ID, "error", err)
+		return
+	}
+
+	s.hub.Publish(events.Event{Type: "session.checkpointed", SessionID: session.ID})
+}
+

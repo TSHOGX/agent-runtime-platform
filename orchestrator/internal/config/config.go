@@ -8,17 +8,19 @@ import (
 )
 
 type Config struct {
-	Addr          string
-	SharedSecret  string
-	CookieName    string
-	SessionTTL    time.Duration
-	RepoRoot      string
-	RestoreScript string
-	RunscRoot     string
-	SessionsRoot  string
-	DBPath        string
-	DefaultAgent  string
-	MaxSessions   int
+	Addr            string
+	SharedSecret    string
+	CookieName      string
+	SessionTTL      time.Duration
+	RepoRoot        string
+	RestoreScript   string
+	RunscRoot       string
+	SessionsRoot    string
+	CheckpointsRoot string
+	BundleRoot      string
+	DBPath          string
+	DefaultAgent    string
+	MaxSessions     int
 }
 
 func Load() (Config, error) {
@@ -32,17 +34,19 @@ func Load() (Config, error) {
 
 	sessionsRoot := getenv("HARNESS_SESSIONS_ROOT", "/var/lib/harness/sessions")
 	cfg := Config{
-		Addr:          getenv("HARNESS_ORCHESTRATOR_ADDR", ":8090"),
-		SharedSecret:  os.Getenv("HARNESS_LAB_PASSWORD"),
-		CookieName:    getenv("HARNESS_COOKIE_NAME", "harness_auth"),
-		SessionTTL:    durationEnv("HARNESS_SESSION_TTL", 2*time.Hour),
-		RepoRoot:      getenv("HARNESS_REPO_ROOT", repoRoot),
-		RestoreScript: getenv("HARNESS_RESTORE_SCRIPT", filepath.Join(repoRoot, "bundle", "restore-sandbox.sh")),
-		RunscRoot:     getenv("RUNSC_ROOT", "/var/lib/harness/runsc"),
-		SessionsRoot:  sessionsRoot,
-		DBPath:        getenv("HARNESS_DB_PATH", filepath.Join(sessionsRoot, "orchestrator.db")),
-		DefaultAgent:  getenv("HARNESS_DEFAULT_AGENT", "demo"),
-		MaxSessions:   intEnv("HARNESS_MAX_SESSIONS", 30),
+		Addr:            getenv("HARNESS_ORCHESTRATOR_ADDR", ":8090"),
+		SharedSecret:    os.Getenv("HARNESS_LAB_PASSWORD"),
+		CookieName:      getenv("HARNESS_COOKIE_NAME", "harness_auth"),
+		SessionTTL:      durationEnv("HARNESS_SESSION_TTL", 2*time.Hour),
+		RepoRoot:        getenv("HARNESS_REPO_ROOT", repoRoot),
+		RestoreScript:   getenv("HARNESS_RESTORE_SCRIPT", filepath.Join(repoRoot, "bundle", "restore-sandbox.sh")),
+		RunscRoot:       getenv("RUNSC_ROOT", "/var/lib/harness/runsc"),
+		SessionsRoot:    sessionsRoot,
+		CheckpointsRoot: getenv("HARNESS_CHECKPOINTS_ROOT", "/var/lib/harness/checkpoints"),
+		BundleRoot:      getenv("HARNESS_BUNDLE_ROOT", filepath.Join(repoRoot, "bundle", "out")),
+		DBPath:          getenv("HARNESS_DB_PATH", filepath.Join(sessionsRoot, "orchestrator.db")),
+		DefaultAgent:    getenv("HARNESS_DEFAULT_AGENT", "demo"),
+		MaxSessions:     intEnv("HARNESS_MAX_SESSIONS", 30),
 	}
 	return cfg, nil
 }
