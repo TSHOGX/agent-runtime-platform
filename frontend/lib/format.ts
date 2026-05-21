@@ -38,9 +38,15 @@ export function statusLabel(status: string) {
     case "created":
       return "Ready";
     case "running":
+    case "running_active":
       return "Running";
     case "idle":
+    case "running_idle":
       return "Idle";
+    case "checkpointing":
+      return "Checkpointing";
+    case "checkpointed":
+      return "Checkpointed";
     case "completed":
       return "Completed";
     case "failed":
@@ -66,7 +72,7 @@ export function agentLabel(agent: string) {
 }
 
 export function isAcceptingInput(status: string) {
-  return status === "created" || status === "idle";
+  return status === "created" || status === "idle" || status === "running_idle" || status === "checkpointed";
 }
 
 export function isTerminal(status: string) {

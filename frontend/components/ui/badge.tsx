@@ -35,8 +35,12 @@ export function StatusDot({ tone = "muted" }: DotProps) {
 export function statusTone(status: string): DotProps["tone"] {
   switch (status) {
     case "running":
+    case "running_active":
+    case "checkpointing":
       return "running";
     case "idle":
+    case "running_idle":
+    case "checkpointed":
       return "idle";
     case "created":
       return "ready";

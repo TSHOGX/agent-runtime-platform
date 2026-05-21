@@ -1,4 +1,14 @@
-export type SessionStatus = "created" | "running" | "idle" | "completed" | "failed" | "destroyed";
+export type SessionStatus =
+  | "created"
+  | "running"
+  | "running_active"
+  | "idle"
+  | "running_idle"
+  | "checkpointing"
+  | "checkpointed"
+  | "completed"
+  | "failed"
+  | "destroyed";
 
 export type AgentKind = "claude" | "opencode" | "sh";
 

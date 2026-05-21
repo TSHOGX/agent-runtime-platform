@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
+	"sync"
 
 	"harness-platform/orchestrator/internal/events"
 	"harness-platform/orchestrator/internal/runtime"
@@ -17,13 +19,36 @@ import (
 type streamParser struct {
 	srv       *Server
 	sessionID string
+	agent     string
 	// pending text chunks per assistant message id, flushed when we see the
 	// matching "assistant" full message (or when the runtime exits).
 	pending map[string]*strings.Builder
+	done    chan struct{}
+	once    sync.Once
+	err     error
+	last    string
 }
 
-func newStreamParser(srv *Server, sessionID string) *streamParser {
-	return &streamParser{srv: srv, sessionID: sessionID, pending: map[string]*strings.Builder{}}
+func newStreamParser(srv *Server, sessionID, agent string) *streamParser {
+	return &streamParser{
+		srv:       srv,
+		sessionID: sessionID,
+		agent:     agent,
+		pending:   map[string]*strings.Builder{},
+		done:      make(chan struct{}),
+	}
+}
+
+func (p *streamParser) Done() <-chan struct{} {
+	return p.done
+}
+
+func (p *streamParser) Err() error {
+	return p.err
+}
+
+func (p *streamParser) complete() {
+	p.once.Do(func() { close(p.done) })
 }
 
 func (p *streamParser) handle(output runtime.Output) {
@@ -31,6 +56,13 @@ func (p *streamParser) handle(output runtime.Output) {
 	if line == "" {
 		return
 	}
+
+	// runtime stream → system.status event (system status messages)
+	if output.Stream == "runtime" {
+		p.publish("system.status", output)
+		return
+	}
+
 	// stderr always goes to agent.output (debug/logs)
 	if output.Stream == "stderr" {
 		p.publish("agent.output", output)
@@ -54,9 +86,12 @@ func (p *streamParser) handle(output runtime.Output) {
 				p.handleAssistantMessage(event.Message)
 				return
 			case "result":
-				if event.Subtype == "success" && event.Result != "" {
-					p.persistAssistant(event.Result)
-				}
+				p.handleResult(event.Subtype, event.Result)
+				return
+			case "error":
+				p.err = fmt.Errorf("claude stream error")
+				p.publish("agent.output", output)
+				p.complete()
 				return
 			default:
 				// system/init/user/error/etc.
@@ -137,12 +172,28 @@ func (p *streamParser) handleAssistantMessage(raw json.RawMessage) {
 	p.persistAssistant(text)
 }
 
+func (p *streamParser) handleResult(subtype, result string) {
+	if subtype != "" && subtype != "success" {
+		p.err = fmt.Errorf("claude result subtype %s", subtype)
+	}
+	if result != "" {
+		p.persistAssistant(result)
+	} else {
+		p.flush()
+	}
+	p.complete()
+}
+
 func (p *streamParser) persistAssistant(text string) {
+	if strings.TrimSpace(text) == "" || text == p.last {
+		return
+	}
 	stored, err := p.srv.store.AddMessage(context.Background(), p.sessionID, "assistant", text)
 	if err != nil {
 		p.srv.log.Warn("failed to store assistant message", "session_id", p.sessionID, "error", err)
 		return
 	}
+	p.last = text
 	p.srv.hub.Publish(events.Event{Type: "agent.message", SessionID: p.sessionID, Payload: stored})
 }
 

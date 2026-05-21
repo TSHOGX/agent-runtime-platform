@@ -72,10 +72,10 @@ config = {
         ],
         "cwd": "/",
         "capabilities": {
-            "bounding": ["CAP_AUDIT_WRITE", "CAP_KILL", "CAP_NET_BIND_SERVICE"],
-            "effective": ["CAP_AUDIT_WRITE", "CAP_KILL", "CAP_NET_BIND_SERVICE"],
+            "bounding": ["CAP_AUDIT_WRITE", "CAP_CHOWN", "CAP_KILL", "CAP_NET_BIND_SERVICE", "CAP_SETGID", "CAP_SETUID"],
+            "effective": ["CAP_AUDIT_WRITE", "CAP_CHOWN", "CAP_KILL", "CAP_NET_BIND_SERVICE", "CAP_SETGID", "CAP_SETUID"],
             "inheritable": [],
-            "permitted": ["CAP_AUDIT_WRITE", "CAP_KILL", "CAP_NET_BIND_SERVICE"],
+            "permitted": ["CAP_AUDIT_WRITE", "CAP_CHOWN", "CAP_KILL", "CAP_NET_BIND_SERVICE", "CAP_SETGID", "CAP_SETUID"],
             "ambient": [],
         },
         "rlimits": [{"type": "RLIMIT_NOFILE", "hard": 1024, "soft": 1024}],

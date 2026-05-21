@@ -205,7 +205,8 @@ FROM sessions ORDER BY created_at DESC`)
 func (s *Store) CountActiveSessions(ctx context.Context) (int, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `
-SELECT COUNT(*) FROM sessions WHERE status IN ('created', 'running', 'idle')`).Scan(&count)
+SELECT COUNT(*) FROM sessions
+WHERE status IN ('created', 'running', 'idle', 'running_active', 'running_idle', 'checkpointing', 'checkpointed')`).Scan(&count)
 	return count, err
 }
 

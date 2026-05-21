@@ -38,6 +38,10 @@ export async function fetchSessions() {
   return request<{ sessions: ApiSession[] }>("/api/sessions");
 }
 
+export async function fetchSession(sessionId: string) {
+  return request<ApiSession>(`/api/sessions/${encodeURIComponent(sessionId)}`);
+}
+
 export async function createSession(agent: string) {
   return request<ApiSession>("/api/sessions", {
     method: "POST",

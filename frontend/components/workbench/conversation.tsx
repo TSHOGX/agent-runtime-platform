@@ -82,7 +82,7 @@ export function Conversation() {
         )}
       </div>
 
-      {showRuntimeFooter && session.status === "running" ? (
+      {showRuntimeFooter && (session.status === "running" || session.status === "running_active") ? (
         <div className="border-t border-[var(--color-border)] bg-[var(--color-surface-muted)] px-6 py-1.5 font-mono text-[11px] text-[var(--color-foreground-muted)] truncate">
           {lastStreamLine.stream}: {lastStreamLine.line}
         </div>

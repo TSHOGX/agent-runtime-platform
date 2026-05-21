@@ -5,15 +5,10 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type RouteContext = {
-  params:
-    | Promise<{
-        sessionId: string;
-        path?: string[];
-      }>
-    | {
-        sessionId: string;
-        path?: string[];
-      };
+  params: Promise<{
+    sessionId: string;
+    path?: string[];
+  }>;
 };
 
 async function handle(request: NextRequest, context: RouteContext) {

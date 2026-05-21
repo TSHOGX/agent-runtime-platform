@@ -1,20 +1,54 @@
 #!/bin/sh
 set -eu
 
+echo "[entrypoint] starting" >&2
+
 CONTROL_FILE="${HARNESS_CONTROL_FILE:-/harness-control/session.env}"
 POLL_INTERVAL="${HARNESS_POLL_INTERVAL:-0.05}"
 
+echo "[entrypoint] waiting for control file: $CONTROL_FILE" >&2
 while [ ! -f "$CONTROL_FILE" ]; do
   sleep "$POLL_INTERVAL"
 done
 
+echo "[entrypoint] sourcing control file" >&2
 # shellcheck disable=SC1090
 . "$CONTROL_FILE"
+
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export PATH
+
+# Export Claude proxy env vars so the CLI picks them up. Under --bare,
+# Claude Code auth is driven by ANTHROPIC_API_KEY, not the host keychain.
+[ -n "${ANTHROPIC_BASE_URL:-}" ] && export ANTHROPIC_BASE_URL
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  export ANTHROPIC_API_KEY
+elif [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+  ANTHROPIC_API_KEY="$ANTHROPIC_AUTH_TOKEN"
+  export ANTHROPIC_API_KEY
+fi
+if [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+  export ANTHROPIC_AUTH_TOKEN
+elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  ANTHROPIC_AUTH_TOKEN="$ANTHROPIC_API_KEY"
+  export ANTHROPIC_AUTH_TOKEN
+fi
+[ -n "${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-}" ] && export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
 
 : "${SESSION_ID:?SESSION_ID is required in control file}"
 
 SESSION_WORKSPACE="${SESSION_WORKSPACE:-/sessions/$SESSION_ID}"
 mkdir -p "$SESSION_WORKSPACE"
+
+AGENT_USER="${HARNESS_AGENT_USER:-harness}"
+AGENT_UID="${HARNESS_AGENT_UID:-65534}"
+AGENT_GID="${HARNESS_AGENT_GID:-65534}"
+AGENT_HOME="${HARNESS_AGENT_HOME:-$SESSION_WORKSPACE/.home}"
+
+ensure_agent_user() {
+  mkdir -p "$AGENT_HOME"
+  chown -R "$AGENT_UID:$AGENT_GID" "$AGENT_HOME" "$SESSION_WORKSPACE" 2>/dev/null || true
+}
 
 if [ -d /workspace ] && [ ! -L /workspace ]; then
   rmdir /workspace 2>/dev/null || true
@@ -23,21 +57,39 @@ ln -sfn "$SESSION_WORKSPACE" /workspace
 
 cd /workspace
 
+echo "[entrypoint] agent: ${HARNESS_AGENT:-demo}" >&2
 case "${HARNESS_AGENT:-demo}" in
   demo)
     exec /usr/local/bin/phase1_demo.py
     ;;
   claude)
-    PROMPT="${FIRST_MESSAGE:-Reply exactly: hi}"
-    exec /usr/local/bin/claude \
+    echo "[entrypoint] claude agent starting in interactive mode" >&2
+    : "${CLAUDE_SESSION_UUID:?CLAUDE_SESSION_UUID is required for claude agent}"
+    ensure_agent_user
+
+    echo "[entrypoint] exec claude" >&2
+    set -- /usr/local/bin/claude \
       --bare \
+      --permission-mode bypassPermissions \
       -p \
       --model "${CLAUDE_MODEL:-sonnet}" \
-      --output-format "${CLAUDE_OUTPUT_FORMAT:-json}" \
-      "$PROMPT"
+      --input-format stream-json \
+      --output-format "${CLAUDE_OUTPUT_FORMAT:-stream-json}" \
+      --include-partial-messages \
+      --replay-user-messages \
+      --verbose
+    if [ "${CLAUDE_RESUME:-0}" = "1" ]; then
+      set -- "$@" --resume "$CLAUDE_SESSION_UUID"
+    else
+      set -- "$@" --session-id "$CLAUDE_SESSION_UUID"
+    fi
+    exec setpriv --reuid "$AGENT_UID" --regid "$AGENT_GID" --clear-groups \
+      env HOME="$AGENT_HOME" USER="$AGENT_USER" LOGNAME="$AGENT_USER" \
+      "$@"
     ;;
   sh)
-    exec /bin/sh -lc "${HARNESS_COMMAND:-echo harness-agent-entrypoint ready}"
+    echo "[entrypoint] sh agent starting" >&2
+    exec /bin/sh -l
     ;;
   *)
     echo "unknown HARNESS_AGENT: ${HARNESS_AGENT}" >&2
