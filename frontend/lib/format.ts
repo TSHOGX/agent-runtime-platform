@@ -54,19 +54,6 @@ export function statusLabel(status: string) {
   }
 }
 
-export function agentLabel(agent: string) {
-  switch (agent) {
-    case "claude":
-      return "Claude Code";
-    case "opencode":
-      return "OpenCode";
-    case "sh":
-      return "Shell";
-    default:
-      return agent || "Agent";
-  }
-}
-
 export function isAcceptingInput(status: string) {
   return status === "created" || status === "running_idle" || status === "checkpointed";
 }

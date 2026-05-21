@@ -200,7 +200,7 @@ Orchestrator:
 | `HARNESS_CHECKPOINTS_ROOT` | `/var/lib/harness/checkpoints` | Checkpoint image root |
 | `HARNESS_BUNDLE_ROOT` | `<repo>/bundle/out` | OCI bundle root |
 | `HARNESS_DB_PATH` | `<sessions_root>/orchestrator.db` | SQLite DB path |
-| `HARNESS_DEFAULT_AGENT` | `demo` | Default session agent |
+| `HARNESS_DEFAULT_AGENT` | `claude` | Default session agent |
 | `HARNESS_MAX_SESSIONS` | `30` | Active session cap |
 | `RUNSC_ROOT` | `/var/lib/harness/runsc` | runsc state root |
 
@@ -240,7 +240,6 @@ running_idle -> checkpointing -> checkpointed
 
 ## Current Limitations
 
-- OpenCode is verified locally but is not launched by the sandbox entrypoint yet.
 - Non-Claude agents do not emit structured turn-completion frames.
 - Artifact UX is still basic: metadata, preview, and download are present; richer live tree and file operations are future work.
 - Resource limits and egress policy are not yet documented as production-ready defaults.

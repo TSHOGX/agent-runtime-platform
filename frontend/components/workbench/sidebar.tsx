@@ -1,20 +1,14 @@
 "use client";
 
 import { useState } from "react";
-import { Loader2, Plus, RotateCw } from "lucide-react";
+import { ChevronDown, Loader2, Plus, RotateCw } from "lucide-react";
 
 import { useHarness } from "@/components/harness-provider";
 import { Button } from "@/components/ui/button";
 import { StatusDot, statusTone } from "@/components/ui/badge";
-import { agentLabel, formatRelative, statusLabel } from "@/lib/format";
+import { NEW_SESSION_OPTIONS, agentLabel, type RuntimeAgent } from "@/lib/agents";
+import { formatRelative, statusLabel } from "@/lib/format";
 import { cn } from "@/lib/cn";
-import type { AgentKind } from "@/lib/types";
-
-const AGENT_OPTIONS: { value: AgentKind; label: string }[] = [
-  { value: "claude", label: "Claude Code" },
-  { value: "opencode", label: "OpenCode" },
-  { value: "sh", label: "Shell" }
-];
 
 export function Sidebar() {
   const { state, selectSession, createSession, refresh } = useHarness();
@@ -22,7 +16,7 @@ export function Sidebar() {
   const [createError, setCreateError] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
 
-  const handleCreate = async (agent: AgentKind) => {
+  const handleCreate = async (agent: RuntimeAgent) => {
     setPickerOpen(false);
     setCreating(true);
     setCreateError(null);
@@ -59,15 +53,17 @@ export function Sidebar() {
         >
           {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
           New session
+          <ChevronDown className="ml-auto h-4 w-4" />
         </Button>
         {pickerOpen ? (
           <div className="absolute left-3 right-3 top-[calc(100%-0.25rem)] z-10 rounded-[var(--radius)] border border-[var(--color-border-strong)] bg-[var(--color-background)] p-1 shadow-lg">
-            {AGENT_OPTIONS.map((opt) => (
+            {NEW_SESSION_OPTIONS.map((opt) => (
               <button
                 key={opt.value}
-                className="w-full rounded-[var(--radius-sm)] px-3 py-2 text-left text-sm hover:bg-[var(--color-surface-muted)]"
-                onClick={() => void handleCreate(opt.value)}
+                className="flex w-full items-center gap-2 rounded-[var(--radius-sm)] px-3 py-2 text-left text-sm hover:bg-[var(--color-surface-muted)]"
+                onClick={() => void handleCreate(opt.agent)}
               >
+                <opt.icon className="h-4 w-4 shrink-0 text-[var(--color-foreground-muted)]" />
                 {opt.label}
               </button>
             ))}

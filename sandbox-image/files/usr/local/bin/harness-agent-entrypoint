@@ -59,11 +59,8 @@ ln -sfn "$SESSION_WORKSPACE" /workspace
 
 cd /workspace
 
-echo "[entrypoint] agent: ${HARNESS_AGENT:-demo}" >&2
-case "${HARNESS_AGENT:-demo}" in
-  demo)
-    exec /usr/local/bin/phase1_demo.py
-    ;;
+echo "[entrypoint] agent: ${HARNESS_AGENT:-claude}" >&2
+case "${HARNESS_AGENT:-claude}" in
   claude)
     echo "[entrypoint] claude turn loop starting" >&2
     : "${CLAUDE_SESSION_UUID:?CLAUDE_SESSION_UUID is required for claude agent}"

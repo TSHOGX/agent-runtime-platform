@@ -21,6 +21,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
+	"harness-platform/orchestrator/internal/agents"
 	"harness-platform/orchestrator/internal/artifacts"
 	"harness-platform/orchestrator/internal/config"
 	"harness-platform/orchestrator/internal/events"
@@ -162,8 +163,13 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 	}
+	req.Agent = strings.TrimSpace(req.Agent)
 	if req.Agent == "" {
-		req.Agent = s.cfg.DefaultAgent
+		req.Agent = strings.TrimSpace(s.cfg.DefaultAgent)
+	}
+	if _, ok := agents.Lookup(req.Agent); !ok {
+		writeError(w, http.StatusBadRequest, "unsupported agent")
+		return
 	}
 	count, err := s.store.CountActiveSessions(r.Context())
 	if err != nil {
@@ -275,7 +281,7 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request, sessionID 
 }
 
 func (s *Server) runSession(ctx context.Context, session store.Session, message string) {
-	parser := newStreamParser(s, session.ID, session.Agent)
+	parser := newStreamParser(s, session.ID)
 	turnCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
 

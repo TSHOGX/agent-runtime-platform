@@ -14,12 +14,10 @@ import (
 // streamParser converts a runtime stdout/stderr stream into chat-friendly
 // hub events. Lines that successfully decode as Claude Code stream-json get
 // translated to agent.delta / agent.message; everything else is forwarded as
-// the legacy agent.output (used by demo / sh agents that don't speak
-// stream-json) so the UI stays compatible.
+// agent.output so the UI stays compatible with raw-text agents.
 type streamParser struct {
 	srv       *Server
 	sessionID string
-	agent     string
 	// pending text chunks per assistant message id, flushed when we see the
 	// matching "assistant" full message (or when the runtime exits).
 	pending map[string]*strings.Builder
@@ -29,11 +27,10 @@ type streamParser struct {
 	last    string
 }
 
-func newStreamParser(srv *Server, sessionID, agent string) *streamParser {
+func newStreamParser(srv *Server, sessionID string) *streamParser {
 	return &streamParser{
 		srv:       srv,
 		sessionID: sessionID,
-		agent:     agent,
 		pending:   map[string]*strings.Builder{},
 		done:      make(chan struct{}),
 	}
@@ -100,7 +97,7 @@ func (p *streamParser) handle(output runtime.Output) {
 			}
 		}
 	}
-	// stdout non-JSON: treat as assistant message (sh/demo agents)
+	// stdout non-JSON: treat as assistant message for raw-text agents.
 	p.persistAssistant(line)
 }
 

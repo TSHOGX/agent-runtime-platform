@@ -12,7 +12,7 @@
 - 多轮输出路由已通过 per-container `OutputHub` 修复；每次用户 turn 都会订阅当前容器输出。
 - 浏览器事件流走 frontend same-origin SSE：`GET /api/events/stream`，orchestrator 仍保留 WebSocket 兼容端点 `/api/events`。
 - 前端会在发送消息后轮询 messages/session/artifacts，作为 SSE 断线时的状态补偿。
-- Claude Code 是当前主路径；`sh`/`demo` 用于 smoke，OpenCode 已做本机连通性验证但尚未接入 sandbox entrypoint。
+- Claude Code 是当前主路径；`Shell` 走 `sh` smoke 路径，`Agent` 直接映射到 Claude Code。
 
 ## 文档
 

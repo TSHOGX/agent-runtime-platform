@@ -2,10 +2,25 @@ package runtime
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 )
+
+func TestRuntimeStartRejectsUnsupportedAgent(t *testing.T) {
+	rt := New(Config{DefaultAgent: "claude"})
+	res := rt.Start(context.Background(), StartRequest{
+		SessionID: "sess_1",
+		Agent:     "opencode",
+	}, nil)
+	if res.Err == nil {
+		t.Fatal("expected unsupported agent error")
+	}
+	if !strings.Contains(res.Err.Error(), "unsupported agent") {
+		t.Fatalf("expected unsupported agent error, got %v", res.Err)
+	}
+}
 
 func TestWriteUserTurnClaudeJSONLFraming(t *testing.T) {
 	var buf bytes.Buffer
@@ -76,6 +91,17 @@ func TestWriteUserTurnNonClaudeRawText(t *testing.T) {
 	}
 	if buf.String() != "ls -la\n" {
 		t.Fatalf("expected raw text passthrough for non-claude agents, got %q", buf.String())
+	}
+}
+
+func TestWriteUserTurnRejectsUnsupportedAgent(t *testing.T) {
+	var buf bytes.Buffer
+	err := writeUserTurn(&buf, "opencode", "hello")
+	if err == nil {
+		t.Fatal("expected unsupported agent error")
+	}
+	if !strings.Contains(err.Error(), "unsupported agent") {
+		t.Fatalf("expected unsupported agent error, got %v", err)
 	}
 }
 

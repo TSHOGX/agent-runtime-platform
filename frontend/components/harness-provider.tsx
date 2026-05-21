@@ -21,9 +21,9 @@ import {
   fetchSessions,
   postMessage as apiPostMessage
 } from "@/lib/api";
+import type { RuntimeAgent } from "@/lib/agents";
 import { buildEventsStreamUrl } from "@/lib/ws";
 import type {
-  AgentKind,
   ApiArtifact,
   ApiMessage,
   ApiSession,
@@ -53,7 +53,7 @@ type HarnessState = {
 type HarnessApi = {
   state: HarnessState;
   selectSession: (id: string | null) => void;
-  createSession: (agent: AgentKind) => Promise<{ ok: boolean; error?: string; session?: ApiSession }>;
+  createSession: (agent: RuntimeAgent) => Promise<{ ok: boolean; error?: string; session?: ApiSession }>;
   destroySession: (id: string) => Promise<void>;
   sendMessage: (id: string, content: string) => Promise<{ ok: boolean; error?: string }>;
   refresh: () => Promise<void>;
@@ -473,7 +473,7 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
   );
 
   const createSession = useCallback(
-    async (agent: AgentKind) => {
+    async (agent: RuntimeAgent) => {
       const res = await apiCreateSession(agent);
       if (!res.ok) return { ok: false as const, error: res.error };
       const session = res.data;

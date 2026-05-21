@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"harness-platform/orchestrator/internal/agents"
 )
 
 type Config struct {
@@ -71,9 +73,11 @@ func New(cfg Config) *Runtime {
 }
 
 func (r *Runtime) Start(ctx context.Context, req StartRequest, output func(Output)) Result {
-	if req.Agent == "" {
-		req.Agent = r.cfg.DefaultAgent
+	agent, err := resolveAgent(req.Agent, r.cfg.DefaultAgent)
+	if err != nil {
+		return Result{Err: err}
 	}
+	req.Agent = agent
 
 	// Check if container already exists (hot path)
 	r.mu.RLock()
@@ -92,6 +96,20 @@ func (r *Runtime) Start(ctx context.Context, req StartRequest, output func(Outpu
 
 	// Fresh start (cold path)
 	return r.startFresh(ctx, req, output)
+}
+
+func resolveAgent(agent, fallback string) (string, error) {
+	agent = strings.TrimSpace(agent)
+	if agent == "" {
+		agent = strings.TrimSpace(fallback)
+	}
+	if agent == "" {
+		return "", errors.New("agent is required")
+	}
+	if _, ok := agents.Lookup(agent); !ok {
+		return "", fmt.Errorf("unsupported agent %q", agent)
+	}
+	return agent, nil
 }
 
 func scanLines(wg *sync.WaitGroup, r io.Reader, stream string, hub *OutputHub) {
@@ -258,12 +276,16 @@ type claudeContentBlock struct {
 
 // writeUserTurn delivers a user message to the agent's stdin.
 //
-// The claude agent runs with `--input-format stream-json`, which expects one
-// JSONL frame per turn and keeps stdin open between turns. Other agents (sh,
-// demo) consume raw text lines. The server holds the session in running_active
-// until the current turn's parser sees a completion event.
+// Claude Code runs with `--input-format stream-json`, which expects one JSONL
+// frame per turn and keeps stdin open between turns. Other agents consume raw
+// text lines. The server holds the session in running_active until the current
+// turn's parser sees a completion event.
 func writeUserTurn(stdin io.Writer, agent, message string) error {
-	if agent == "claude" {
+	def, ok := agents.Lookup(agent)
+	if !ok {
+		return fmt.Errorf("unsupported agent %q", agent)
+	}
+	if def.Protocol == agents.ProtocolClaudeStreamJSON {
 		frame := claudeInputFrame{
 			Type: "user",
 			Message: claudeInputMessage{
