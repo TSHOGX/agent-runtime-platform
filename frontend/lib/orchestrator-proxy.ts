@@ -80,9 +80,8 @@ export async function proxyRequest(request: Request, upstreamPath: string) {
 export async function proxyToResponse(request: Request, upstreamPath: string) {
   try {
     const upstreamResponse = await proxyRequest(request, upstreamPath);
-    const body = await upstreamResponse.arrayBuffer();
 
-    return new Response(body, {
+    return new Response(upstreamResponse.body, {
       status: upstreamResponse.status,
       headers: copyResponseHeaders(upstreamResponse.headers)
     });

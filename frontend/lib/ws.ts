@@ -1,25 +1,13 @@
-const DEFAULT_WS_BASE_URL = "ws://127.0.0.1:8090";
-
-export function getWebSocketBaseUrl() {
-  const configured = process.env.NEXT_PUBLIC_HARNESS_WS_URL ?? DEFAULT_WS_BASE_URL;
-  return normalize(configured);
-}
-
-export function buildEventsWebSocketUrl(sessionId?: string) {
-  const url = new URL("/api/events", getWebSocketBaseUrl());
+export function buildEventsStreamUrl(sessionId?: string) {
+  const base =
+    typeof window !== "undefined"
+      ? window.location.origin
+      : "http://127.0.0.1:8000";
+  const url = new URL("/api/events/stream", base);
   if (sessionId) {
     url.searchParams.set("session_id", sessionId);
   }
   return url.toString();
 }
 
-function normalize(value: string) {
-  const trimmed = value.trim().replace(/\/+$/, "");
-  if (/^https?:\/\//i.test(trimmed)) {
-    return trimmed.replace(/^http/i, "ws");
-  }
-  if (/^wss?:\/\//i.test(trimmed)) {
-    return trimmed;
-  }
-  return `ws://${trimmed.replace(/^\/+/, "")}`;
-}
+export const buildEventsWebSocketUrl = buildEventsStreamUrl;

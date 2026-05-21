@@ -105,6 +105,8 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.createSession(w, r)
 	case r.URL.Path == "/api/events" && r.Method == http.MethodGet:
 		s.events(w, r)
+	case r.URL.Path == "/api/events/stream" && r.Method == http.MethodGet:
+		s.eventsStream(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/sessions/"):
 		s.sessionRoute(w, r)
 	default:
@@ -273,15 +275,20 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request, sessionID 
 }
 
 func (s *Server) runSession(ctx context.Context, session store.Session, message string) {
-	parser := newStreamParser(s, session.ID)
-	result := s.runtime.Start(ctx, runtime.StartRequest{
+	parser := newStreamParser(s, session.ID, session.Agent)
+	turnCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+	defer cancel()
+
+	result := s.runtime.Start(turnCtx, runtime.StartRequest{
 		SessionID:         session.ID,
 		RestoreID:         session.RestoreID,
 		Agent:             session.Agent,
 		FirstMessage:      message,
 		ClaudeSessionUUID: session.ClaudeSessionUUID,
+		ResumeClaude:      session.Status != "created",
+		Done:              parser.Done(),
 	}, func(output runtime.Output) {
-		s.log.Debug("runtime output", "session_id", session.ID, "stream", output.Stream)
+		s.log.Debug("runtime output", "session_id", session.ID, "stream", output.Stream, "line", output.Line)
 		parser.handle(output)
 	})
 	parser.flush()
@@ -292,6 +299,10 @@ func (s *Server) runSession(ctx context.Context, session store.Session, message 
 		status = "failed"
 		s.log.Warn("runtime failed", "session_id", session.ID, "error", result.Err)
 		s.hub.Publish(events.Event{Type: "session.error", SessionID: session.ID, Payload: map[string]string{"error": result.Err.Error()}})
+	} else if err := parser.Err(); err != nil {
+		status = "failed"
+		s.log.Warn("runtime stream failed", "session_id", session.ID, "error", err)
+		s.hub.Publish(events.Event{Type: "session.error", SessionID: session.ID, Payload: map[string]string{"error": err.Error()}})
 	}
 	if err := s.store.UpdateSessionStatusAndActivity(ctx, session.ID, status, result.RestoreMS, now); err != nil {
 		s.log.Warn("failed to update session status", "session_id", session.ID, "error", err)
@@ -355,6 +366,58 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	for event := range ch {
 		if err := conn.WriteJSON(event); err != nil {
 			return
+		}
+	}
+}
+
+func (s *Server) eventsStream(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+
+	header := w.Header()
+	header.Set("Content-Type", "text/event-stream")
+	header.Set("Cache-Control", "no-cache, no-transform")
+	header.Set("Connection", "keep-alive")
+	header.Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	sessionID := r.URL.Query().Get("session_id")
+	ch, cancel := s.hub.Subscribe(sessionID)
+	defer cancel()
+
+	if _, err := w.Write([]byte(": connected\n\n")); err != nil {
+		return
+	}
+	flusher.Flush()
+
+	heartbeat := time.NewTicker(20 * time.Second)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-heartbeat.C:
+			if _, err := w.Write([]byte(": ping\n\n")); err != nil {
+				return
+			}
+			flusher.Flush()
+		case event, ok := <-ch:
+			if !ok {
+				return
+			}
+			payload, err := json.Marshal(event)
+			if err != nil {
+				s.log.Warn("failed to marshal stream event", "error", err)
+				continue
+			}
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err != nil {
+				return
+			}
+			flusher.Flush()
 		}
 	}
 }
@@ -450,4 +513,3 @@ func (s *Server) checkpointSession(ctx context.Context, session store.Session) {
 
 	s.hub.Publish(events.Event{Type: "session.checkpointed", SessionID: session.ID})
 }
-

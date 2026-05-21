@@ -9,6 +9,7 @@ import {
   useRef,
   useState
 } from "react";
+import { toast } from "sonner";
 
 import {
   createSession as apiCreateSession,
@@ -16,10 +17,11 @@ import {
   fetchArtifacts,
   fetchHealth,
   fetchMessages,
+  fetchSession,
   fetchSessions,
   postMessage as apiPostMessage
 } from "@/lib/api";
-import { buildEventsWebSocketUrl } from "@/lib/ws";
+import { buildEventsStreamUrl } from "@/lib/ws";
 import type {
   AgentKind,
   ApiArtifact,
@@ -61,12 +63,16 @@ const HarnessContext = createContext<HarnessApi | null>(null);
 const initialState: HarnessState = {
   ready: false,
   bootError: null,
-  connection: "idle",
+  connection: "connecting",
   sessions: [],
   selectedId: null,
   conversations: {},
   artifacts: {}
 };
+
+const ACTIVE_STATUSES = new Set(["running", "running_active"]);
+const MESSAGE_POLL_INTERVAL_MS = 1000;
+const MESSAGE_POLL_TIMEOUT_MS = 120_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -95,14 +101,21 @@ function emptyConvo(): ConversationState {
   return { messages: [], streaming: null, stream: [], loading: false };
 }
 
+function delay(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+function isActiveStatus(status: string) {
+  return ACTIVE_STATUSES.has(status);
+}
+
 export function HarnessProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<HarnessState>(initialState);
   const stateRef = useRef(state);
 
-  const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const backoffRef = useRef(1000);
   const aliveRef = useRef(true);
+  const pollingRef = useRef<Set<string>>(new Set());
+  const connectedOnceRef = useRef(false);
 
   useEffect(() => {
     stateRef.current = state;
@@ -123,6 +136,86 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
     []
   );
 
+  const loadSessionDetails = useCallback(
+    (id: string, skipLoaded = false) => {
+      const convo = stateRef.current.conversations[id];
+      if (skipLoaded && convo && convo.messages.length > 0) return;
+      upsertConvo(id, (c) => ({ ...c, loading: true }));
+      void fetchMessages(id).then((res) => {
+        upsertConvo(id, (c) => ({
+          ...c,
+          loading: false,
+          messages: res.ok ? res.data.messages ?? [] : c.messages
+        }));
+      });
+      void fetchArtifacts(id).then((res) => {
+        if (!res.ok) return;
+        const list = res.data.artifacts ?? [];
+        setState((p) => ({ ...p, artifacts: { ...p.artifacts, [id]: list } }));
+      });
+    },
+    [upsertConvo]
+  );
+
+  const pollConversation = useCallback(
+    async (id: string, afterMessageId?: number) => {
+      if (pollingRef.current.has(id)) return;
+      pollingRef.current.add(id);
+      const deadline = Date.now() + MESSAGE_POLL_TIMEOUT_MS;
+
+      try {
+        while (aliveRef.current && Date.now() < deadline) {
+          const [messagesRes, sessionRes, artifactsRes] = await Promise.all([
+            fetchMessages(id),
+            fetchSession(id),
+            fetchArtifacts(id)
+          ]);
+          let sawAssistant = false;
+          let active = true;
+
+          if (messagesRes.ok) {
+            const messages = messagesRes.data.messages ?? [];
+            sawAssistant = messages.some(
+              (m) => m.role === "assistant" && (afterMessageId === undefined || m.id > afterMessageId)
+            );
+            upsertConvo(id, (c) => ({
+              ...c,
+              loading: false,
+              streaming: sawAssistant ? null : c.streaming,
+              messages
+            }));
+          }
+
+          if (sessionRes.ok) {
+            const session = sessionRes.data;
+            active = isActiveStatus(session.status);
+            setState((p) => ({
+              ...p,
+              sessions: p.sessions.some((s) => s.id === session.id)
+                ? p.sessions.map((s) => (s.id === session.id ? session : s))
+                : [session, ...p.sessions],
+              conversations: ensureConvo(p.conversations, session.id)
+            }));
+            if (!active) {
+              upsertConvo(id, (c) => ({ ...c, streaming: null }));
+            }
+          }
+
+          if (artifactsRes.ok) {
+            const list = artifactsRes.data.artifacts ?? [];
+            setState((p) => ({ ...p, artifacts: { ...p.artifacts, [id]: list } }));
+          }
+
+          if (!active || (sawAssistant && !sessionRes.ok)) return;
+          await delay(MESSAGE_POLL_INTERVAL_MS);
+        }
+      } finally {
+        pollingRef.current.delete(id);
+      }
+    },
+    [ensureConvo, upsertConvo]
+  );
+
   const handleEvent = useCallback(
     (event: HarnessEvent) => {
       const sessionId = event.session_id;
@@ -139,7 +232,11 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
           return;
         }
         case "session.running":
+        case "session.running_active":
         case "session.idle":
+        case "session.running_idle":
+        case "session.checkpointing":
+        case "session.checkpointed":
         case "session.completed":
         case "session.failed":
         case "session.destroyed": {
@@ -149,7 +246,7 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
             ...p,
             sessions: p.sessions.map((s) => (s.id === sessionId ? { ...s, status, updated_at: time } : s))
           }));
-          if (status !== "running") {
+          if (status !== "running" && status !== "running_active") {
             upsertConvo(sessionId, (c) => ({ ...c, streaming: null }));
           }
           return;
@@ -203,6 +300,34 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
           upsertConvo(sessionId, (c) => ({ ...c, stream: [...c.stream, entry].slice(-400) }));
           return;
         }
+        case "system.status": {
+          // System status messages: display as Toast notification
+          if (!sessionId || !isRecord(event.payload)) return;
+          const line = typeof event.payload.line === "string" ? event.payload.line : "";
+          if (!line) return;
+
+          // Display Toast notification
+          toast.info(line, { duration: 3000 });
+
+          // Also log in development mode
+          if (process.env.NODE_ENV === "development") {
+            console.log(`[System] ${line}`);
+          }
+          return;
+        }
+        case "session.error": {
+          if (!isRecord(event.payload)) return;
+          const error = typeof event.payload.error === "string" ? event.payload.error : "Session failed";
+          toast.error(error, { duration: 6000 });
+          if (sessionId) {
+            setState((p) => ({
+              ...p,
+              sessions: p.sessions.map((s) => (s.id === sessionId ? { ...s, status: "failed", updated_at: time } : s))
+            }));
+            upsertConvo(sessionId, (c) => ({ ...c, streaming: null }));
+          }
+          return;
+        }
         case "artifact.updated": {
           const artifact = readArtifact(event.payload);
           if (!artifact) return;
@@ -240,76 +365,84 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
       return;
     }
     const list = sessions.data.sessions ?? [];
+    const currentSelected = stateRef.current.selectedId;
+    const selectedId = currentSelected && list.some((s) => s.id === currentSelected) ? currentSelected : list[0]?.id ?? null;
     setState((p) => {
       const conversations = { ...p.conversations };
       for (const s of list) {
         if (!conversations[s.id]) conversations[s.id] = emptyConvo();
       }
-      const selectedId = p.selectedId && list.some((s) => s.id === p.selectedId) ? p.selectedId : list[0]?.id ?? null;
       return { ...p, ready: true, bootError: null, sessions: list, selectedId, conversations };
     });
-  }, []);
+    if (selectedId) {
+      loadSessionDetails(selectedId, true);
+      const selected = list.find((s) => s.id === selectedId);
+      if (selected && isActiveStatus(selected.status)) {
+        void pollConversation(selectedId);
+      }
+    }
+  }, [loadSessionDetails, pollConversation]);
 
   useEffect(() => {
     aliveRef.current = true;
     let cleanedUp = false;
+    connectedOnceRef.current = false;
 
-    const connect = () => {
+    let source: EventSource;
+    try {
+      source = new EventSource(buildEventsStreamUrl());
+    } catch {
+      const failureTimer = setTimeout(() => {
+        if (!cleanedUp) {
+          setState((p) => ({ ...p, connection: "down" }));
+        }
+      }, 0);
+      return () => {
+        cleanedUp = true;
+        aliveRef.current = false;
+        clearTimeout(failureTimer);
+      };
+    }
+
+    source.onopen = () => {
       if (cleanedUp) return;
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
-      setState((p) => ({ ...p, connection: p.connection === "live" ? "reconnecting" : "connecting" }));
-      let ws: WebSocket;
+      const wasConnected = connectedOnceRef.current;
+      connectedOnceRef.current = true;
+      setState((p) => ({ ...p, connection: "live" }));
+      if (wasConnected) {
+        void refresh();
+      }
+    };
+
+    source.onmessage = (ev) => {
       try {
-        ws = new WebSocket(buildEventsWebSocketUrl());
+        const data = JSON.parse(typeof ev.data === "string" ? ev.data : "");
+        if (data && typeof data.type === "string") {
+          handleEventRef.current(data as HarnessEvent);
+        }
       } catch {
-        schedule();
+        // ignore malformed frames
+      }
+    };
+
+    source.onerror = () => {
+      if (cleanedUp) return;
+      if (source.readyState === EventSource.CLOSED) {
+        setState((p) => ({ ...p, connection: "down" }));
         return;
       }
-      wsRef.current = ws;
-      ws.onopen = () => {
-        backoffRef.current = 1000;
-        setState((p) => ({ ...p, connection: "live" }));
-      };
-      ws.onmessage = (ev) => {
-        try {
-          const data = JSON.parse(typeof ev.data === "string" ? ev.data : "");
-          if (data && typeof data.type === "string") {
-            handleEventRef.current(data as HarnessEvent);
-          }
-        } catch {
-          // ignore malformed frames
-        }
-      };
-      ws.onclose = () => {
-        wsRef.current = null;
-        if (cleanedUp) return;
-        setState((p) => ({ ...p, connection: "down" }));
-        schedule();
-      };
-    };
-    const schedule = () => {
-      if (cleanedUp) return;
-      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
-      const delay = Math.min(backoffRef.current, 8000);
-      reconnectTimerRef.current = setTimeout(() => {
-        backoffRef.current = Math.min(backoffRef.current * 2, 8000);
-        connect();
-      }, delay);
+      setState((p) => ({ ...p, connection: connectedOnceRef.current ? "reconnecting" : "connecting" }));
     };
 
     const bootTimer = setTimeout(() => {
       void refresh();
-      connect();
     }, 0);
 
     return () => {
       cleanedUp = true;
       aliveRef.current = false;
       clearTimeout(bootTimer);
-      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
-      if (wsRef.current) {
-        try { wsRef.current.close(); } catch { /* noop */ }
-      }
+      source.close();
     };
   }, [refresh]);
 
@@ -317,23 +450,13 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
     (id: string | null) => {
       setState((p) => ({ ...p, selectedId: id }));
       if (!id) return;
-      const convo = stateRef.current.conversations[id];
-      if (convo && convo.messages.length > 0) return;
-      upsertConvo(id, (c) => ({ ...c, loading: true }));
-      void fetchMessages(id).then((res) => {
-        upsertConvo(id, (c) => ({
-          ...c,
-          loading: false,
-          messages: res.ok ? res.data.messages ?? [] : c.messages
-        }));
-      });
-      void fetchArtifacts(id).then((res) => {
-        if (!res.ok) return;
-        const list = res.data.artifacts ?? [];
-        setState((p) => ({ ...p, artifacts: { ...p.artifacts, [id]: list } }));
-      });
+      loadSessionDetails(id, true);
+      const session = stateRef.current.sessions.find((s) => s.id === id);
+      if (session && isActiveStatus(session.status)) {
+        void pollConversation(id);
+      }
     },
-    [upsertConvo]
+    [loadSessionDetails, pollConversation]
   );
 
   const createSession = useCallback(
@@ -368,9 +491,16 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
           messages: c.messages.some((m) => m.id === msg.id) ? c.messages : [...c.messages, msg]
         }));
       }
+      setState((p) => ({
+        ...p,
+        sessions: p.sessions.map((s) =>
+          s.id === id ? { ...s, status: res.data.status, updated_at: new Date().toISOString() } : s
+        )
+      }));
+      void pollConversation(id, msg?.id);
       return { ok: true as const };
     },
-    [upsertConvo]
+    [pollConversation, upsertConvo]
   );
 
   const value = useMemo<HarnessApi>(
