@@ -14,7 +14,7 @@ export function Badge({ className, ...rest }: HTMLAttributes<HTMLSpanElement>) {
   );
 }
 
-type DotProps = { tone?: "running" | "idle" | "ready" | "completed" | "failed" | "muted" };
+type DotProps = { tone?: "running" | "idle" | "ready" | "failed" | "muted" };
 
 export function StatusDot({ tone = "muted" }: DotProps) {
   const color =
@@ -24,8 +24,6 @@ export function StatusDot({ tone = "muted" }: DotProps) {
       ? "bg-[var(--color-success)]"
       : tone === "ready"
       ? "bg-[var(--color-warning)]"
-      : tone === "completed"
-      ? "bg-[var(--color-success)]"
       : tone === "failed"
       ? "bg-[var(--color-danger)]"
       : "bg-[var(--color-border-strong)]";
@@ -34,18 +32,14 @@ export function StatusDot({ tone = "muted" }: DotProps) {
 
 export function statusTone(status: string): DotProps["tone"] {
   switch (status) {
-    case "running":
     case "running_active":
     case "checkpointing":
       return "running";
-    case "idle":
     case "running_idle":
     case "checkpointed":
       return "idle";
     case "created":
       return "ready";
-    case "completed":
-      return "completed";
     case "failed":
       return "failed";
     default:

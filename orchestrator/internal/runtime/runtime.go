@@ -19,6 +19,7 @@ type Config struct {
 	RestoreScript   string
 	RunscRoot       string
 	SessionsRoot    string
+	AgentHomesRoot  string
 	CheckpointsRoot string
 	BundleRoot      string
 	DefaultAgent    string
@@ -123,6 +124,20 @@ func (r *Runtime) cleanupRunscContainer(ctx context.Context, restoreID string) {
 	_ = r.deleteRunscContainer(ctx, restoreID)
 }
 
+func (r *Runtime) removeContainer(container *Container) {
+	r.mu.Lock()
+	if current := r.containers[container.SessionID]; current == container {
+		delete(r.containers, container.SessionID)
+	}
+	r.mu.Unlock()
+}
+
+func (r *Runtime) stopContainer(container *Container) {
+	r.removeContainer(container)
+	container.Cancel()
+	r.cleanupRunscContainer(context.Background(), container.RestoreID)
+}
+
 func (r *Runtime) readRestoreMS(sessionID string) *int64 {
 	data, err := os.ReadFile(filepath.Join(r.cfg.SessionsRoot, sessionID, "restore_ms.txt"))
 	if err != nil {
@@ -142,8 +157,11 @@ func getenv(key, fallback string) string {
 	return fallback
 }
 
-func buildControlContent(req StartRequest, sessionsRoot string) string {
+func buildControlContent(req StartRequest) string {
 	containerSessionsRoot := getenv("HARNESS_CONTAINER_SESSIONS_ROOT", "/sessions")
+	containerAgentHomesRoot := getenv("HARNESS_CONTAINER_AGENT_HOMES_ROOT", "/agent-homes")
+	sessionWorkspace := filepath.Join(containerSessionsRoot, req.SessionID)
+	agentHome := filepath.Join(containerAgentHomesRoot, req.SessionID)
 	claudeBaseURL := firstNonEmpty(
 		os.Getenv("HARNESS_CLAUDE_BASE_URL"),
 		os.Getenv("HARNESS_ANTHROPIC_BASE_URL"),
@@ -166,8 +184,8 @@ func buildControlContent(req StartRequest, sessionsRoot string) string {
 		{"HARNESS_AGENT", req.Agent},
 		{"CLAUDE_SESSION_UUID", req.ClaudeSessionUUID},
 		{"CLAUDE_RESUME", boolEnv(req.ResumeClaude)},
-		{"SESSION_WORKSPACE", filepath.Join(containerSessionsRoot, req.SessionID)},
-		{"HARNESS_AGENT_HOME", getenv("HARNESS_AGENT_HOME", "/var/lib/harness-agent")},
+		{"SESSION_WORKSPACE", sessionWorkspace},
+		{"HARNESS_AGENT_HOME", agentHome},
 		{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", getenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")},
 		{"CLAUDE_MODEL", getenv("CLAUDE_MODEL", "sonnet")},
 		{"ANTHROPIC_BASE_URL", claudeBaseURL},
@@ -184,6 +202,20 @@ func buildControlContent(req StartRequest, sessionsRoot string) string {
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+func (r *Runtime) prepareSessionDirs(sessionID string) error {
+	if r.cfg.SessionsRoot != "" {
+		if err := os.MkdirAll(filepath.Join(r.cfg.SessionsRoot, sessionID), 0o755); err != nil {
+			return fmt.Errorf("create session workspace: %w", err)
+		}
+	}
+	if r.cfg.AgentHomesRoot != "" {
+		if err := os.MkdirAll(filepath.Join(r.cfg.AgentHomesRoot, sessionID), 0o755); err != nil {
+			return fmt.Errorf("create agent home: %w", err)
+		}
+	}
+	return nil
 }
 
 func firstNonEmpty(values ...string) string {
@@ -281,13 +313,15 @@ func (r *Runtime) sendMessage(ctx context.Context, container *Container, message
 	defer cancel()
 
 	if err := writeUserTurn(container.Stdin, container.Agent, message); err != nil {
-		r.mu.Lock()
-		delete(r.containers, container.SessionID)
-		r.mu.Unlock()
+		r.stopContainer(container)
 		return Result{Err: fmt.Errorf("write to stdin: %w", err)}
 	}
 
-	return forwardOutput(ctx, outputCh, done, output)
+	result := forwardOutput(ctx, outputCh, done, output)
+	if result.Err != nil {
+		r.stopContainer(container)
+	}
+	return result
 }
 
 func (r *Runtime) startFresh(ctx context.Context, req StartRequest, output func(Output)) Result {
@@ -297,6 +331,10 @@ func (r *Runtime) startFresh(ctx context.Context, req StartRequest, output func(
 
 	hub.Publish(OutputEvent{Stream: "runtime", Line: "starting fresh container"})
 
+	if err := r.prepareSessionDirs(req.SessionID); err != nil {
+		return Result{Err: err}
+	}
+
 	// Create control file in the shared control directory
 	controlDir := "/var/lib/harness/control/phase2-template"
 	if err := os.MkdirAll(controlDir, 0o755); err != nil {
@@ -304,7 +342,7 @@ func (r *Runtime) startFresh(ctx context.Context, req StartRequest, output func(
 	}
 
 	controlFile := filepath.Join(controlDir, "session.env")
-	controlContent := buildControlContent(req, r.cfg.SessionsRoot)
+	controlContent := buildControlContent(req)
 
 	if err := os.WriteFile(controlFile, []byte(controlContent), 0o644); err != nil {
 		return Result{Err: fmt.Errorf("write control file: %w", err)}
@@ -315,7 +353,7 @@ func (r *Runtime) startFresh(ctx context.Context, req StartRequest, output func(
 	bundlePath := filepath.Join(r.cfg.BundleRoot, "phase2-template-bundle")
 	r.cleanupRunscContainer(ctx, containerID)
 
-	cmdCtx, cancelCmd := context.WithCancel(ctx)
+	cmdCtx, cancelCmd := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(cmdCtx, "runsc",
 		"-root", r.cfg.RunscRoot,
 		"-platform", "systrap",
@@ -384,11 +422,16 @@ func (r *Runtime) startFresh(ctx context.Context, req StartRequest, output func(
 	// Send first message
 	if req.FirstMessage != "" {
 		if err := writeUserTurn(stdin, req.Agent, req.FirstMessage); err != nil {
+			r.stopContainer(container)
 			return Result{Err: fmt.Errorf("write first message: %w", err)}
 		}
 	}
 
-	return forwardOutput(ctx, outputCh, req.Done, output)
+	result := forwardOutput(ctx, outputCh, req.Done, output)
+	if result.Err != nil {
+		r.stopContainer(container)
+	}
+	return result
 }
 
 func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, output func(Output)) Result {
@@ -398,13 +441,17 @@ func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, ou
 
 	hub.Publish(OutputEvent{Stream: "runtime", Line: "resuming from checkpoint"})
 
+	if err := r.prepareSessionDirs(req.SessionID); err != nil {
+		return Result{Err: err}
+	}
+
 	// Similar to startFresh but use runsc restore
 	checkpointPath := filepath.Join(r.cfg.CheckpointsRoot, req.SessionID)
 	containerID := fmt.Sprintf("phase3-%s", req.SessionID)
 	bundlePath := filepath.Join(r.cfg.BundleRoot, "phase2-template-bundle")
 	r.cleanupRunscContainer(ctx, containerID)
 
-	cmdCtx, cancelCmd := context.WithCancel(ctx)
+	cmdCtx, cancelCmd := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(cmdCtx, "runsc",
 		"-root", r.cfg.RunscRoot,
 		"-platform", "systrap",
@@ -469,11 +516,16 @@ func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, ou
 
 	if req.FirstMessage != "" {
 		if err := writeUserTurn(stdin, req.Agent, req.FirstMessage); err != nil {
+			r.stopContainer(container)
 			return Result{Err: fmt.Errorf("write first message: %w", err)}
 		}
 	}
 
-	return forwardOutput(ctx, outputCh, req.Done, output)
+	result := forwardOutput(ctx, outputCh, req.Done, output)
+	if result.Err != nil {
+		r.stopContainer(container)
+	}
+	return result
 }
 
 func (r *Runtime) Checkpoint(ctx context.Context, sessionID string) error {

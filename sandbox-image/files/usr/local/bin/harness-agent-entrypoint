@@ -43,8 +43,9 @@ mkdir -p "$SESSION_WORKSPACE"
 AGENT_USER="${HARNESS_AGENT_USER:-harness}"
 AGENT_UID="${HARNESS_AGENT_UID:-65534}"
 AGENT_GID="${HARNESS_AGENT_GID:-65534}"
-# Keep the agent's writable HOME outside the user-visible workspace.
-AGENT_HOME="${HARNESS_AGENT_HOME:-/var/lib/harness-agent}"
+# Keep the agent's writable HOME outside /workspace so Claude internals do not
+# appear in the user-visible file tree or artifact list.
+AGENT_HOME="${HARNESS_AGENT_HOME:-/agent-homes/$SESSION_ID}"
 
 ensure_agent_user() {
   mkdir -p "$AGENT_HOME"
@@ -64,29 +65,41 @@ case "${HARNESS_AGENT:-demo}" in
     exec /usr/local/bin/phase1_demo.py
     ;;
   claude)
-    echo "[entrypoint] claude agent starting in interactive mode" >&2
+    echo "[entrypoint] claude turn loop starting" >&2
     : "${CLAUDE_SESSION_UUID:?CLAUDE_SESSION_UUID is required for claude agent}"
     ensure_agent_user
 
-    echo "[entrypoint] exec claude" >&2
-    set -- /usr/local/bin/claude \
-      --bare \
-      --permission-mode bypassPermissions \
-      -p \
-      --model "${CLAUDE_MODEL:-sonnet}" \
-      --input-format stream-json \
-      --output-format "${CLAUDE_OUTPUT_FORMAT:-stream-json}" \
-      --include-partial-messages \
-      --replay-user-messages \
-      --verbose
-    if [ "${CLAUDE_RESUME:-0}" = "1" ]; then
-      set -- "$@" --resume "$CLAUDE_SESSION_UUID"
-    else
-      set -- "$@" --session-id "$CLAUDE_SESSION_UUID"
-    fi
-    exec setpriv --reuid "$AGENT_UID" --regid "$AGENT_GID" --clear-groups \
-      env HOME="$AGENT_HOME" USER="$AGENT_USER" LOGNAME="$AGENT_USER" \
-      "$@"
+    first_turn=1
+    while IFS= read -r turn; do
+      [ -n "$turn" ] || continue
+      echo "[entrypoint] claude turn starting" >&2
+      set -- /usr/local/bin/claude \
+        --bare \
+        --permission-mode bypassPermissions \
+        -p \
+        --model "${CLAUDE_MODEL:-sonnet}" \
+        --input-format stream-json \
+        --output-format "${CLAUDE_OUTPUT_FORMAT:-stream-json}" \
+        --include-partial-messages \
+        --replay-user-messages \
+        --verbose
+      if [ "$first_turn" = "1" ] && [ "${CLAUDE_RESUME:-0}" != "1" ]; then
+        set -- "$@" --session-id "$CLAUDE_SESSION_UUID"
+      else
+        set -- "$@" --resume "$CLAUDE_SESSION_UUID"
+      fi
+      set +e
+      printf '%s\n' "$turn" | setpriv --reuid "$AGENT_UID" --regid "$AGENT_GID" --clear-groups \
+        env HOME="$AGENT_HOME" USER="$AGENT_USER" LOGNAME="$AGENT_USER" \
+        "$@"
+      status=$?
+      set -e
+      if [ "$status" -ne 0 ]; then
+        echo "[entrypoint] claude turn exited with status $status" >&2
+      fi
+      first_turn=0
+    done
+    echo "[entrypoint] stdin closed; exiting" >&2
     ;;
   sh)
     echo "[entrypoint] sh agent starting" >&2

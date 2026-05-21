@@ -11,7 +11,7 @@
   - Shared-password login via `HARNESS_LAB_PASSWORD`.
 - Added SQLite metadata store.
   - `users`, `sessions`, `messages`, and `artifacts` tables.
-  - Session lifecycle states: `created`, `running`, `completed`, `failed`, `destroyed`.
+  - Session lifecycle states are now `created`, `running_active`, `running_idle`, `checkpointing`, `checkpointed`, `failed`, and `destroyed`.
 - Added runtime adapter around `bundle/restore-sandbox.sh`.
   - Creates one restored sandbox on the first session message.
   - Emits session lifecycle events around restore execution.

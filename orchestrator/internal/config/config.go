@@ -16,6 +16,7 @@ type Config struct {
 	RestoreScript   string
 	RunscRoot       string
 	SessionsRoot    string
+	AgentHomesRoot  string
 	CheckpointsRoot string
 	BundleRoot      string
 	DBPath          string
@@ -42,6 +43,7 @@ func Load() (Config, error) {
 		RestoreScript:   getenv("HARNESS_RESTORE_SCRIPT", filepath.Join(repoRoot, "bundle", "restore-sandbox.sh")),
 		RunscRoot:       getenv("RUNSC_ROOT", "/var/lib/harness/runsc"),
 		SessionsRoot:    sessionsRoot,
+		AgentHomesRoot:  getenv("HARNESS_AGENT_HOMES_ROOT", "/var/lib/harness/agent-homes"),
 		CheckpointsRoot: getenv("HARNESS_CHECKPOINTS_ROOT", "/var/lib/harness/checkpoints"),
 		BundleRoot:      getenv("HARNESS_BUNDLE_ROOT", filepath.Join(repoRoot, "bundle", "out")),
 		DBPath:          getenv("HARNESS_DB_PATH", filepath.Join(sessionsRoot, "orchestrator.db")),

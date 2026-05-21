@@ -46,6 +46,10 @@ func main() {
 		log.Error("failed to ensure lab user", "error", err)
 		os.Exit(1)
 	}
+	if err := os.MkdirAll(cfg.AgentHomesRoot, 0o755); err != nil {
+		log.Error("failed to create agent homes root", "error", err)
+		os.Exit(1)
+	}
 
 	hub := events.NewHub()
 	watcher := artifacts.New(cfg.SessionsRoot, db, hub, log)
@@ -59,6 +63,7 @@ func main() {
 		RestoreScript:   cfg.RestoreScript,
 		RunscRoot:       cfg.RunscRoot,
 		SessionsRoot:    cfg.SessionsRoot,
+		AgentHomesRoot:  cfg.AgentHomesRoot,
 		CheckpointsRoot: cfg.CheckpointsRoot,
 		BundleRoot:      cfg.BundleRoot,
 		DefaultAgent:    cfg.DefaultAgent,

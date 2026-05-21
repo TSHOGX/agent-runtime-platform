@@ -40,6 +40,7 @@ Useful environment variables:
 - `HARNESS_ORCHESTRATOR_ADDR` defaults to `:8090`.
 - `HARNESS_LAB_PASSWORD` enables shared-password auth. Leave empty for local no-auth smoke tests.
 - `HARNESS_SESSIONS_ROOT` defaults to `/var/lib/harness/sessions`.
+- `HARNESS_AGENT_HOMES_ROOT` defaults to `/var/lib/harness/agent-homes`.
 - `HARNESS_CHECKPOINTS_ROOT` defaults to `/var/lib/harness/checkpoints`.
 - `HARNESS_BUNDLE_ROOT` defaults to `<repo>/bundle/out`.
 - `HARNESS_DEFAULT_AGENT` defaults to `demo`.

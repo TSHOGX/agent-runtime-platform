@@ -86,7 +86,7 @@ export function Sidebar() {
       <div className="flex-1 overflow-y-auto">
         {state.sessions.length === 0 ? (
           <p className="px-4 py-6 text-center text-xs text-[var(--color-foreground-muted)]">
-            {state.ready ? "No sessions yet. Create one to get started." : "Loading…"}
+            {state.ready || state.connection === "live" ? "No sessions yet. Create one to get started." : "Loading…"}
           </p>
         ) : (
           <ul className="px-1.5 pb-3 space-y-0.5">

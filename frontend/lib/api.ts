@@ -1,4 +1,4 @@
-import type { ApiArtifact, ApiMessage, ApiSession } from "./types";
+import type { ApiArtifact, ApiMessage, ApiSession, SessionStatus } from "./types";
 
 export type RequestResult<T> =
   | { ok: true; data: T; response: Response }
@@ -51,7 +51,7 @@ export async function createSession(agent: string) {
 }
 
 export async function destroySession(sessionId: string) {
-  return request<{ status: string }>(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+  return request<{ status: SessionStatus }>(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
 }
 
 export async function fetchMessages(sessionId: string) {
@@ -59,7 +59,7 @@ export async function fetchMessages(sessionId: string) {
 }
 
 export async function postMessage(sessionId: string, content: string) {
-  return request<{ status: string; session_id: string; message: ApiMessage }>(
+  return request<{ status: SessionStatus; session_id: string; message: ApiMessage }>(
     `/api/sessions/${encodeURIComponent(sessionId)}/messages`,
     {
       method: "POST",

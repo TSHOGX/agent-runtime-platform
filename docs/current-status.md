@@ -12,6 +12,7 @@ Harness Platform now has a working end-to-end lab stack:
 - gVisor `runsc` runtime using the baked Phase 2 OCI bundle.
 - SQLite persistence for sessions, messages, and artifact metadata.
 - Per-session workspace under `/var/lib/harness/sessions/<session_id>`.
+- Per-session Claude HOME under `/var/lib/harness/agent-homes/<session_id>`, mounted in gVisor as `/agent-homes/<session_id>` and kept outside `/workspace`.
 - Claude Code stream-json parsing into persisted assistant messages and live UI deltas.
 
 ## Recent Commits
@@ -66,6 +67,18 @@ Idle monitor
   -> runsc checkpoint
   -> status: checkpointed
 ```
+
+Canonical session statuses:
+
+- `created`
+- `running_active`
+- `running_idle`
+- `checkpointing`
+- `checkpointed`
+- `failed`
+- `destroyed`
+
+`running`, `idle`, and `completed` are not current session statuses.
 
 ## Public Interfaces
 

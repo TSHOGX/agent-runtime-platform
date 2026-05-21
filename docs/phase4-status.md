@@ -10,6 +10,7 @@ The current frontend baseline has moved beyond this round log:
 - Live browser events now use same-origin SSE at `GET /api/events/stream?session_id=<id>`.
 - The frontend provider polls session/messages/artifacts after message submission to recover from missed frames.
 - The UI no longer depends on a direct browser WebSocket connection to the orchestrator.
+- The current session lifecycle uses only canonical long-lived states: `created`, `running_active`, `running_idle`, `checkpointing`, `checkpointed`, `failed`, and `destroyed`.
 - The top-level "backend unreachable" state is the current non-healthy backend behavior; there is no separate mock workspace in the live path.
 - The `agent.selector` still exposes multiple values, but Claude Code is the primary supported multi-turn path.
 
@@ -18,7 +19,7 @@ The current frontend baseline has moved beyond this round log:
 ### 本轮完成内容
 
 - 接入真实 WebSocket 事件流 `GET /api/events?session_id=<id>`。
-- 将 `session.created`、`session.running`、`session.completed`、`session.failed`、`session.destroyed`、`session.error`、`artifact.updated` 和 `agent.output` 映射到前端状态。
+- 当时将早期 session lifecycle 事件、`session.error`、`artifact.updated` 和 `agent.output` 映射到前端状态；当前 baseline 已改为 canonical long-lived session 事件。
 - 中栏改为结构化流式输出卡片，不再是单一 `pre` 文本块。
 - 右栏 artifact 行补齐文件名、更新时间、大小和下载入口。
 - WebSocket 连接失败或真实后端不可用时，自动切换到 mock fallback，并保留 `Retry real`。
@@ -36,7 +37,7 @@ The current frontend baseline has moved beyond this round log:
 - Real backend smoke：
   - 通过 frontend proxy `POST /api/sessions` 创建真实 `sh` session。
   - 通过 frontend proxy `POST /api/sessions/:id/messages` 提交首条任务，返回 HTTP 202。
-  - `GET /api/events?session_id=<id>` WebSocket 收到 `session.running`、`agent.output`、`artifact.updated`、`session.completed`。
+  - `GET /api/events?session_id=<id>` WebSocket 收到早期 lifecycle 事件、`agent.output` 和 `artifact.updated`。
 
 ### Real backend 是否可用
 
@@ -199,7 +200,7 @@ The current frontend baseline has moved beyond this round log:
   - `GET http://127.0.0.1:8090/healthz` 返回 HTTP 200。
   - 经 frontend proxy `POST /api/sessions` 创建真实 `sh` session：`sess_295vQPZrLfa0f_8Q`。
   - 经 frontend proxy `POST /api/sessions/sess_295vQPZrLfa0f_8Q/messages` 提交首条任务，返回 HTTP 202。
-  - 随后 `GET /api/sessions/sess_295vQPZrLfa0f_8Q` 返回 `completed`，`restore_ms` 为 133。
+  - 随后 `GET /api/sessions/sess_295vQPZrLfa0f_8Q` 返回早期 one-shot 终态，`restore_ms` 为 133。
   - `GET /api/sessions/sess_295vQPZrLfa0f_8Q/artifacts` 返回 `phase4-round3.txt`、`restore_ms.txt`、`runsc.pid`。
   - `curl -I http://127.0.0.1:8000/` 返回 HTTP 200。
 - Mock fallback smoke：

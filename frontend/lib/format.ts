@@ -37,18 +37,14 @@ export function statusLabel(status: string) {
   switch (status as SessionStatus) {
     case "created":
       return "Ready";
-    case "running":
     case "running_active":
       return "Running";
-    case "idle":
     case "running_idle":
       return "Idle";
     case "checkpointing":
       return "Checkpointing";
     case "checkpointed":
       return "Checkpointed";
-    case "completed":
-      return "Completed";
     case "failed":
       return "Failed";
     case "destroyed":
@@ -72,9 +68,9 @@ export function agentLabel(agent: string) {
 }
 
 export function isAcceptingInput(status: string) {
-  return status === "created" || status === "idle" || status === "running_idle" || status === "checkpointed";
+  return status === "created" || status === "running_idle" || status === "checkpointed";
 }
 
 export function isTerminal(status: string) {
-  return status === "completed" || status === "failed" || status === "destroyed";
+  return status === "failed" || status === "destroyed";
 }

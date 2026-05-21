@@ -25,6 +25,7 @@ import (
 	"harness-platform/orchestrator/internal/config"
 	"harness-platform/orchestrator/internal/events"
 	"harness-platform/orchestrator/internal/runtime"
+	"harness-platform/orchestrator/internal/sessionstate"
 	"harness-platform/orchestrator/internal/store"
 )
 
@@ -180,7 +181,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	session := store.Session{
 		ID:                id,
 		UserID:            labUserID,
-		Status:            "created",
+		Status:            string(sessionstate.Created),
 		Agent:             req.Agent,
 		Workspace:         filepath.Join(s.cfg.SessionsRoot, id),
 		RestoreID:         "phase3-" + id,
@@ -231,13 +232,11 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, sessionID s
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	switch session.Status {
-	case "created", "running_idle", "checkpointed":
-		// ok - can accept messages
-	case "running_active":
-		writeError(w, http.StatusConflict, "session is busy")
-		return
-	default:
+	if !sessionstate.CanAcceptInput(session.Status) {
+		if sessionstate.IsBusy(session.Status) {
+			writeError(w, http.StatusConflict, "session is busy")
+			return
+		}
 		writeError(w, http.StatusConflict, "session is "+session.Status)
 		return
 	}
@@ -247,15 +246,16 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, sessionID s
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := s.store.UpdateSessionStatus(r.Context(), sessionID, "running_active", nil); err != nil {
+	runningStatus := string(sessionstate.RunningActive)
+	if err := s.store.UpdateSessionStatus(r.Context(), sessionID, runningStatus, nil); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	s.hub.Publish(events.Event{Type: "message.created", SessionID: sessionID, Payload: msg})
-	s.hub.Publish(events.Event{Type: "session.running_active", SessionID: sessionID})
+	s.hub.Publish(events.Event{Type: "session." + runningStatus, SessionID: sessionID})
 	go s.runSession(context.Background(), session, req.Content)
-	writeJSON(w, http.StatusAccepted, map[string]any{"status": "running_active", "session_id": sessionID, "message": msg})
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": runningStatus, "session_id": sessionID, "message": msg})
 }
 
 func (s *Server) listMessages(w http.ResponseWriter, r *http.Request, sessionID string) {
@@ -285,7 +285,7 @@ func (s *Server) runSession(ctx context.Context, session store.Session, message 
 		Agent:             session.Agent,
 		FirstMessage:      message,
 		ClaudeSessionUUID: session.ClaudeSessionUUID,
-		ResumeClaude:      session.Status != "created",
+		ResumeClaude:      session.Status != string(sessionstate.Created),
 		Done:              parser.Done(),
 	}, func(output runtime.Output) {
 		s.log.Debug("runtime output", "session_id", session.ID, "stream", output.Stream, "line", output.Line)
@@ -294,13 +294,13 @@ func (s *Server) runSession(ctx context.Context, session store.Session, message 
 	parser.flush()
 
 	now := time.Now()
-	status := "running_idle"
+	status := string(sessionstate.RunningIdle)
 	if result.Err != nil {
-		status = "failed"
+		status = string(sessionstate.Failed)
 		s.log.Warn("runtime failed", "session_id", session.ID, "error", result.Err)
 		s.hub.Publish(events.Event{Type: "session.error", SessionID: session.ID, Payload: map[string]string{"error": result.Err.Error()}})
 	} else if err := parser.Err(); err != nil {
-		status = "failed"
+		status = string(sessionstate.Failed)
 		s.log.Warn("runtime stream failed", "session_id", session.ID, "error", err)
 		s.hub.Publish(events.Event{Type: "session.error", SessionID: session.ID, Payload: map[string]string{"error": err.Error()}})
 	}
@@ -326,12 +326,13 @@ func (s *Server) destroySession(w http.ResponseWriter, r *http.Request, sessionI
 	if err := s.runtime.Destroy(r.Context(), session.RestoreID); err != nil {
 		s.log.Warn("runtime destroy returned error", "session_id", sessionID, "error", err)
 	}
-	if err := s.store.UpdateSessionStatus(r.Context(), sessionID, "destroyed", nil); err != nil {
+	if err := s.store.UpdateSessionStatus(r.Context(), sessionID, string(sessionstate.Destroyed), nil); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.hub.Publish(events.Event{Type: "session.destroyed", SessionID: sessionID})
-	writeJSON(w, http.StatusOK, map[string]string{"status": "destroyed"})
+	status := string(sessionstate.Destroyed)
+	s.hub.Publish(events.Event{Type: "session." + status, SessionID: sessionID})
+	writeJSON(w, http.StatusOK, map[string]string{"status": status})
 }
 
 func (s *Server) listArtifacts(w http.ResponseWriter, r *http.Request, sessionID string) {
@@ -340,23 +341,12 @@ func (s *Server) listArtifacts(w http.ResponseWriter, r *http.Request, sessionID
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	filtered := make([]store.Artifact, 0, len(items))
-	for _, item := range items {
-		if artifacts.IsInternalArtifactPath(item.Path) {
-			continue
-		}
-		filtered = append(filtered, item)
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"artifacts": filtered})
+	writeJSON(w, http.StatusOK, map[string]any{"artifacts": items})
 }
 
 func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) {
 	parts := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/artifacts/"), "/", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || strings.Contains(parts[1], "..") {
-		writeError(w, http.StatusBadRequest, "invalid artifact path")
-		return
-	}
-	if artifacts.IsInternalArtifactPath(parts[1]) {
 		writeError(w, http.StatusBadRequest, "invalid artifact path")
 		return
 	}
@@ -487,7 +477,7 @@ func (s *Server) MonitorIdleSessions(ctx context.Context) error {
 	for {
 		select {
 		case <-ticker.C:
-			sessions, err := s.store.ListSessionsByStatus(ctx, "running_idle")
+			sessions, err := s.store.ListSessionsByStatus(ctx, string(sessionstate.RunningIdle))
 			if err != nil {
 				s.log.Warn("failed to list idle sessions", "error", err)
 				continue
@@ -506,21 +496,21 @@ func (s *Server) MonitorIdleSessions(ctx context.Context) error {
 func (s *Server) checkpointSession(ctx context.Context, session store.Session) {
 	s.log.Info("checkpointing idle session", "session_id", session.ID)
 
-	if err := s.store.UpdateSessionStatus(ctx, session.ID, "checkpointing", nil); err != nil {
+	if err := s.store.UpdateSessionStatus(ctx, session.ID, string(sessionstate.Checkpointing), nil); err != nil {
 		s.log.Warn("failed to update session status to checkpointing", "session_id", session.ID, "error", err)
 		return
 	}
 
 	if err := s.runtime.Checkpoint(ctx, session.ID); err != nil {
 		s.log.Warn("checkpoint failed", "session_id", session.ID, "error", err)
-		_ = s.store.UpdateSessionStatus(ctx, session.ID, "failed", nil)
+		_ = s.store.UpdateSessionStatus(ctx, session.ID, string(sessionstate.Failed), nil)
 		return
 	}
 
-	if err := s.store.UpdateSessionStatus(ctx, session.ID, "checkpointed", nil); err != nil {
+	if err := s.store.UpdateSessionStatus(ctx, session.ID, string(sessionstate.Checkpointed), nil); err != nil {
 		s.log.Warn("failed to update session status to checkpointed", "session_id", session.ID, "error", err)
 		return
 	}
 
-	s.hub.Publish(events.Event{Type: "session.checkpointed", SessionID: session.ID})
+	s.hub.Publish(events.Event{Type: "session." + string(sessionstate.Checkpointed), SessionID: session.ID})
 }

@@ -95,7 +95,7 @@ export function Conversation() {
         )}
       </div>
 
-      {showRuntimeFooter && (session.status === "running" || session.status === "running_active") ? (
+      {showRuntimeFooter && session.status === "running_active" ? (
         <div className="border-t border-[var(--color-border)] bg-[var(--color-surface-muted)] px-6 py-2">
           <div className="flex min-w-0 gap-2 font-mono text-[11px] leading-4 text-[var(--color-foreground-muted)]">
             <span className="shrink-0">{lastStreamLine.stream}</span>

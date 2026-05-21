@@ -16,6 +16,7 @@ CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SCRIPT_DIR}/checkpoints/phase2-template}"
 RUNSC_ROOT="${RUNSC_ROOT:-/var/lib/harness/runsc}"
 RUNSC_LOG_DIR="${RUNSC_LOG_DIR:-/var/lib/harness/logs}"
 SESSIONS_ROOT="${SESSIONS_ROOT:-/var/lib/harness/sessions}"
+AGENT_HOMES_ROOT="${AGENT_HOMES_ROOT:-/var/lib/harness/agent-homes}"
 CONTROL_DIR="${CONTROL_DIR:-/var/lib/harness/control/phase2-template}"
 RUNSC_NETWORK="${RUNSC_NETWORK:-sandbox}"
 RUNSC_PLATFORM="${RUNSC_PLATFORM:-systrap}"
@@ -49,12 +50,13 @@ if [ ! -d "${CHECKPOINT_DIR}" ]; then
   exit 1
 fi
 
-mkdir -p "${SESSIONS_ROOT}/${SESSION_ID}" "${CONTROL_DIR}" "${RUNSC_LOG_DIR}"
+mkdir -p "${SESSIONS_ROOT}/${SESSION_ID}" "${AGENT_HOMES_ROOT}/${SESSION_ID}" "${CONTROL_DIR}" "${RUNSC_LOG_DIR}"
 
 CONTROL_FILE="${CONTROL_DIR}/session.env"
 {
   write_env_line SESSION_ID "${SESSION_ID}"
   write_env_line SESSION_WORKSPACE "/sessions/${SESSION_ID}"
+  write_env_line HARNESS_AGENT_HOME "/agent-homes/${SESSION_ID}"
   write_env_line HARNESS_AGENT "${HARNESS_AGENT}"
   write_env_line HARNESS_COMMAND "${HARNESS_COMMAND:-}"
   write_env_line DORIS_HOST "${DORIS_HOST:-172.16.0.138}"

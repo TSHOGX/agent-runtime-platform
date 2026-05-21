@@ -11,6 +11,7 @@ CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SCRIPT_DIR}/checkpoints/phase2-template}"
 RUNSC_ROOT="${RUNSC_ROOT:-/var/lib/harness/runsc}"
 RUNSC_LOG_DIR="${RUNSC_LOG_DIR:-/var/lib/harness/logs}"
 SESSIONS_ROOT="${SESSIONS_ROOT:-/var/lib/harness/sessions}"
+AGENT_HOMES_ROOT="${AGENT_HOMES_ROOT:-/var/lib/harness/agent-homes}"
 CONTROL_DIR="${CONTROL_DIR:-/var/lib/harness/control/phase2-template}"
 CONTAINER_ID="${CONTAINER_ID:-phase2-warm-template}"
 RUNSC_NETWORK="${RUNSC_NETWORK:-sandbox}"
@@ -38,12 +39,13 @@ if ! command -v runsc >/dev/null 2>&1; then
   exit 1
 fi
 
-mkdir -p "${BUNDLE_DIR}" "${CHECKPOINT_DIR}" "${RUNSC_ROOT}" "${RUNSC_LOG_DIR}" "${SESSIONS_ROOT}" "${CONTROL_DIR}"
+mkdir -p "${BUNDLE_DIR}" "${CHECKPOINT_DIR}" "${RUNSC_ROOT}" "${RUNSC_LOG_DIR}" "${SESSIONS_ROOT}" "${AGENT_HOMES_ROOT}" "${CONTROL_DIR}"
 rm -f "${CONTROL_DIR}/session.env"
 
 log "writing OCI config to ${BUNDLE_DIR}/config.json"
 ROOTFS_DIR="${ROOTFS_DIR}" \
 SESSIONS_ROOT="${SESSIONS_ROOT}" \
+AGENT_HOMES_ROOT="${AGENT_HOMES_ROOT}" \
 CONTROL_DIR="${CONTROL_DIR}" \
 REPO_ROOT="${REPO_ROOT}" \
 MEMORY_LIMIT_BYTES="${MEMORY_LIMIT_BYTES}" \
@@ -55,6 +57,7 @@ import os
 
 rootfs = os.environ["ROOTFS_DIR"]
 sessions_root = os.environ["SESSIONS_ROOT"]
+agent_homes_root = os.environ["AGENT_HOMES_ROOT"]
 control_dir = os.environ["CONTROL_DIR"]
 repo_root = os.environ["REPO_ROOT"]
 
@@ -129,6 +132,12 @@ config = {
             "options": ["rbind", "rw"],
         },
         {
+            "destination": "/agent-homes",
+            "type": "bind",
+            "source": agent_homes_root,
+            "options": ["rbind", "rw"],
+        },
+        {
             "destination": "/harness-control",
             "type": "bind",
             "source": control_dir,
@@ -171,6 +180,7 @@ CHECKPOINT_DIR='${CHECKPOINT_DIR}'
 RUNSC_ROOT='${RUNSC_ROOT}'
 RUNSC_LOG_DIR='${RUNSC_LOG_DIR}'
 SESSIONS_ROOT='${SESSIONS_ROOT}'
+AGENT_HOMES_ROOT='${AGENT_HOMES_ROOT}'
 CONTROL_DIR='${CONTROL_DIR}'
 CONTAINER_ID='${CONTAINER_ID}'
 RUNSC_NETWORK='${RUNSC_NETWORK}'

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"harness-platform/orchestrator/internal/sessionstate"
 )
 
 func TestListMessagesAndUUID(t *testing.T) {
@@ -22,7 +24,7 @@ func TestListMessagesAndUUID(t *testing.T) {
 	want := Session{
 		ID:                "sess_1",
 		UserID:            "lab",
-		Status:            "created",
+		Status:            string(sessionstate.Created),
 		Agent:             "claude",
 		Workspace:         dir,
 		RestoreID:         "phase3-sess_1",
@@ -67,22 +69,6 @@ func TestListMessagesAndUUID(t *testing.T) {
 	}
 }
 
-func TestEnsureColumnIsIdempotent(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
-
-	ctx := context.Background()
-	st, err := Open(ctx, dbPath)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer st.Close()
-
-	if err := st.ensureColumn(ctx, "sessions", "claude_session_uuid", "TEXT"); err != nil {
-		t.Fatalf("second ensureColumn call should be a no-op, got %v", err)
-	}
-}
-
 func TestUpdateSessionStatusAndActivity(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
@@ -98,7 +84,7 @@ func TestUpdateSessionStatusAndActivity(t *testing.T) {
 	session := Session{
 		ID:        "sess_test",
 		UserID:    "lab",
-		Status:    "created",
+		Status:    string(sessionstate.Created),
 		Agent:     "claude",
 		Workspace: dir,
 		RestoreID: "phase3-sess_test",
@@ -112,7 +98,7 @@ func TestUpdateSessionStatusAndActivity(t *testing.T) {
 	// Update status and activity
 	activityTime := now.Add(5 * time.Minute)
 	restoreMS := int64(250)
-	if err := st.UpdateSessionStatusAndActivity(ctx, session.ID, "running_idle", &restoreMS, activityTime); err != nil {
+	if err := st.UpdateSessionStatusAndActivity(ctx, session.ID, string(sessionstate.RunningIdle), &restoreMS, activityTime); err != nil {
 		t.Fatalf("update status and activity: %v", err)
 	}
 
@@ -121,8 +107,8 @@ func TestUpdateSessionStatusAndActivity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get session: %v", err)
 	}
-	if got.Status != "running_idle" {
-		t.Errorf("status: want running_idle, got %s", got.Status)
+	if got.Status != string(sessionstate.RunningIdle) {
+		t.Errorf("status: want %s, got %s", sessionstate.RunningIdle, got.Status)
 	}
 	if got.RestoreMS == nil || *got.RestoreMS != 250 {
 		t.Errorf("restore_ms: want 250, got %v", got.RestoreMS)
@@ -153,7 +139,7 @@ func TestListSessionsByStatus(t *testing.T) {
 		{
 			ID:        "sess_1",
 			UserID:    "lab",
-			Status:    "running_idle",
+			Status:    string(sessionstate.RunningIdle),
 			Agent:     "claude",
 			Workspace: dir,
 			RestoreID: "phase3-sess_1",
@@ -163,7 +149,7 @@ func TestListSessionsByStatus(t *testing.T) {
 		{
 			ID:        "sess_2",
 			UserID:    "lab",
-			Status:    "running_active",
+			Status:    string(sessionstate.RunningActive),
 			Agent:     "claude",
 			Workspace: dir,
 			RestoreID: "phase3-sess_2",
@@ -173,7 +159,7 @@ func TestListSessionsByStatus(t *testing.T) {
 		{
 			ID:        "sess_3",
 			UserID:    "lab",
-			Status:    "running_idle",
+			Status:    string(sessionstate.RunningIdle),
 			Agent:     "claude",
 			Workspace: dir,
 			RestoreID: "phase3-sess_3",
@@ -191,15 +177,15 @@ func TestListSessionsByStatus(t *testing.T) {
 	// Update activity times
 	activity1 := now.Add(-10 * time.Minute)
 	activity3 := now.Add(-35 * time.Minute)
-	if err := st.UpdateSessionStatusAndActivity(ctx, "sess_1", "running_idle", nil, activity1); err != nil {
+	if err := st.UpdateSessionStatusAndActivity(ctx, "sess_1", string(sessionstate.RunningIdle), nil, activity1); err != nil {
 		t.Fatalf("update sess_1: %v", err)
 	}
-	if err := st.UpdateSessionStatusAndActivity(ctx, "sess_3", "running_idle", nil, activity3); err != nil {
+	if err := st.UpdateSessionStatusAndActivity(ctx, "sess_3", string(sessionstate.RunningIdle), nil, activity3); err != nil {
 		t.Fatalf("update sess_3: %v", err)
 	}
 
 	// List idle sessions
-	idleSessions, err := st.ListSessionsByStatus(ctx, "running_idle")
+	idleSessions, err := st.ListSessionsByStatus(ctx, string(sessionstate.RunningIdle))
 	if err != nil {
 		t.Fatalf("list sessions by status: %v", err)
 	}
@@ -214,5 +200,85 @@ func TestListSessionsByStatus(t *testing.T) {
 	}
 	if idleSessions[1].ID != "sess_1" {
 		t.Errorf("second idle session should be sess_1, got %s", idleSessions[1].ID)
+	}
+}
+
+func TestRejectsLegacyStatuses(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	ctx := context.Background()
+	st, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	now := time.Now().UTC()
+	session := Session{
+		ID:        "sess_legacy",
+		UserID:    "lab",
+		Status:    "idle",
+		Agent:     "claude",
+		Workspace: dir,
+		RestoreID: "phase3-sess_legacy",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := st.CreateSession(ctx, session); err == nil {
+		t.Fatalf("create session with legacy status should fail")
+	}
+	if err := st.UpdateSessionStatus(ctx, "sess_legacy", "completed", nil); err == nil {
+		t.Fatalf("update to legacy status should fail")
+	}
+	if _, err := st.ListSessionsByStatus(ctx, "running"); err == nil {
+		t.Fatalf("listing legacy status should fail")
+	}
+}
+
+func TestCountActiveSessionsUsesCanonicalStatuses(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	ctx := context.Background()
+	st, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	now := time.Now().UTC()
+	statuses := []sessionstate.Status{
+		sessionstate.Created,
+		sessionstate.RunningActive,
+		sessionstate.RunningIdle,
+		sessionstate.Checkpointing,
+		sessionstate.Checkpointed,
+		sessionstate.Failed,
+		sessionstate.Destroyed,
+	}
+	for i, status := range statuses {
+		id := "sess_count_" + string(rune('a'+i))
+		session := Session{
+			ID:        id,
+			UserID:    "lab",
+			Status:    string(status),
+			Agent:     "claude",
+			Workspace: dir,
+			RestoreID: "phase3-" + id,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+		if err := st.CreateSession(ctx, session); err != nil {
+			t.Fatalf("create session %s: %v", status, err)
+		}
+	}
+
+	count, err := st.CountActiveSessions(ctx)
+	if err != nil {
+		t.Fatalf("count active sessions: %v", err)
+	}
+	if count != 5 {
+		t.Fatalf("want 5 active sessions, got %d", count)
 	}
 }

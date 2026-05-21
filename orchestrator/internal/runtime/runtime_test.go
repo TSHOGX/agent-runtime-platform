@@ -65,7 +65,7 @@ func TestBuildControlContentUsesHarnessClaudeKey(t *testing.T) {
 		SessionID:         "sess_1",
 		Agent:             "claude",
 		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
-	}, "/tmp/sessions")
+	})
 
 	if !strings.Contains(content, "export ANTHROPIC_API_KEY='123'\n") {
 		t.Fatalf("expected harness Claude API key in control content, got:\n%s", content)
@@ -86,7 +86,7 @@ func TestBuildControlContentDefaultsToKey123(t *testing.T) {
 		SessionID:         "sess_1",
 		Agent:             "claude",
 		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
-	}, "/tmp/sessions")
+	})
 
 	if !strings.Contains(content, "export ANTHROPIC_API_KEY='123'\n") {
 		t.Fatalf("expected default Claude API key 123 in control content, got:\n%s", content)
@@ -99,7 +99,7 @@ func TestBuildControlContentUsesContainerWorkspaceAndResumeFlag(t *testing.T) {
 		Agent:             "claude",
 		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
 		ResumeClaude:      true,
-	}, "/tmp/host-sessions")
+	})
 
 	if !strings.Contains(content, "export SESSION_WORKSPACE='/sessions/sess_1'\n") {
 		t.Fatalf("expected container workspace path in control content, got:\n%s", content)
@@ -112,19 +112,36 @@ func TestBuildControlContentUsesContainerWorkspaceAndResumeFlag(t *testing.T) {
 	}
 }
 
-func TestBuildControlContentUsesPrivateAgentHome(t *testing.T) {
+func TestBuildControlContentUsesSessionAgentHome(t *testing.T) {
 	t.Setenv("HARNESS_AGENT_HOME", "")
 
 	content := buildControlContent(StartRequest{
 		SessionID:         "sess_1",
 		Agent:             "claude",
 		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
-	}, "/tmp/host-sessions")
+	})
 
-	if !strings.Contains(content, "export HARNESS_AGENT_HOME='/var/lib/harness-agent'\n") {
-		t.Fatalf("expected private agent home in control content, got:\n%s", content)
+	if !strings.Contains(content, "export HARNESS_AGENT_HOME='/agent-homes/sess_1'\n") {
+		t.Fatalf("expected per-session agent home outside workspace in control content, got:\n%s", content)
 	}
-	if strings.Contains(content, "/tmp/host-sessions/.home") {
-		t.Fatalf("control content must not place agent home under the workspace, got:\n%s", content)
+	if strings.Contains(content, ".agent-home") || strings.Contains(content, "/sessions/sess_1/.") {
+		t.Fatalf("agent home must not be under the workspace, got:\n%s", content)
+	}
+}
+
+func TestBuildControlContentIgnoresUnsafeAgentHomeOverride(t *testing.T) {
+	t.Setenv("HARNESS_AGENT_HOME", "/sessions/sess_1/.home")
+
+	content := buildControlContent(StartRequest{
+		SessionID:         "sess_1",
+		Agent:             "claude",
+		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
+	})
+
+	if !strings.Contains(content, "export HARNESS_AGENT_HOME='/agent-homes/sess_1'\n") {
+		t.Fatalf("expected canonical agent home path, got:\n%s", content)
+	}
+	if strings.Contains(content, "/sessions/sess_1/.home") {
+		t.Fatalf("unsafe workspace agent home override leaked into control content:\n%s", content)
 	}
 }

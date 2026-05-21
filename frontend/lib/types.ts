@@ -1,12 +1,9 @@
 export type SessionStatus =
   | "created"
-  | "running"
   | "running_active"
-  | "idle"
   | "running_idle"
   | "checkpointing"
   | "checkpointed"
-  | "completed"
   | "failed"
   | "destroyed";
 
@@ -15,7 +12,7 @@ export type AgentKind = "claude" | "opencode" | "sh";
 export type ApiSession = {
   id: string;
   user_id: string;
-  status: string;
+  status: SessionStatus;
   agent: string;
   workspace: string;
   restore_id: string;
@@ -24,7 +21,7 @@ export type ApiSession = {
   created_at: string;
   updated_at: string;
   expires_at?: string | null;
-  completed_at?: string | null;
+  ended_at?: string | null;
 };
 
 export type ApiArtifact = {

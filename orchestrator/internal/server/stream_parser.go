@@ -174,7 +174,12 @@ func (p *streamParser) handleAssistantMessage(raw json.RawMessage) {
 
 func (p *streamParser) handleResult(subtype, result string) {
 	if subtype != "" && subtype != "success" {
-		p.err = fmt.Errorf("claude result subtype %s", subtype)
+		p.publish("system.status", runtime.Output{Stream: "runtime", Line: fmt.Sprintf("claude result subtype %s", subtype)})
+		if strings.TrimSpace(result) == "" {
+			p.persistAssistant(fmt.Sprintf("Claude turn ended with %s.", subtype))
+		}
+		p.complete()
+		return
 	}
 	if result != "" {
 		p.persistAssistant(result)

@@ -27,6 +27,7 @@ Next.js frontend
 Go orchestrator
   |-- HTTP API / auth
   |-- global Event Hub
+  |-- canonical Session State
   |-- SQLite Store
   |-- Artifact Watcher
   `-- Runtime
@@ -38,7 +39,8 @@ Go orchestrator
         gVisor sandbox
           |-- harness-agent-entrypoint
           |-- Claude Code / smoke agent
-          `-- /workspace -> /var/lib/harness/sessions/<session_id>
+          |-- /workspace -> /var/lib/harness/sessions/<session_id>
+          `-- /agent-homes/<session_id> -> /var/lib/harness/agent-homes/<session_id>
 ```
 
 The frontend talks to its own origin. Route handlers forward API calls to the orchestrator, including the SSE stream:
@@ -62,6 +64,18 @@ created
 Any active state can fail or be destroyed.
 ```
 
+The canonical session status set is:
+
+```text
+created
+running_active
+running_idle
+checkpointing
+checkpointed
+failed
+destroyed
+```
+
 State meanings:
 
 | State | Meaning |
@@ -74,7 +88,7 @@ State meanings:
 | `failed` | Runtime or parser error. |
 | `destroyed` | User or API explicitly ended the session. |
 
-Legacy UI types still include `running`, `idle`, and `completed`, but the current orchestrator path uses `running_active` and `running_idle` for the long-lived model.
+Input is accepted only in `created`, `running_idle`, and `checkpointed`. `running_active` and `checkpointing` are busy states. `failed` and `destroyed` are terminal states. The older `running`, `idle`, and `completed` names are not part of the current schema or API contract.
 
 ## Runtime Flow
 
@@ -121,7 +135,7 @@ The stream parser marks a turn complete when it sees:
 
 - `{"type":"result","subtype":"success",...}`
 - `{"type":"error",...}`
-- a non-success result subtype, which fails the session
+- a non-success result subtype, which is reported as turn output while the session returns to `running_idle`
 
 For non-Claude agents, stdin is raw text. These agents are suitable for smoke tests but do not emit Claude result frames, so they are not equivalent to the full multi-turn Claude path.
 
@@ -161,11 +175,15 @@ Events:
 - `GET /api/events/stream?session_id=<id>` - SSE
 - `GET /api/events?session_id=<id>` - WebSocket compatibility
 
-Compatibility-only session event names still accepted by the frontend:
+Session lifecycle event names use the canonical status values:
 
-- `session.running`
-- `session.completed`
-- `session.idle`
+- `session.created`
+- `session.running_active`
+- `session.running_idle`
+- `session.checkpointing`
+- `session.checkpointed`
+- `session.failed`
+- `session.destroyed`
 
 ## Configuration
 
@@ -178,6 +196,7 @@ Orchestrator:
 | `HARNESS_COOKIE_NAME` | `harness_auth` | Auth cookie name |
 | `HARNESS_SESSION_TTL` | `2h` | Session expiry horizon |
 | `HARNESS_SESSIONS_ROOT` | `/var/lib/harness/sessions` | Host workspace root |
+| `HARNESS_AGENT_HOMES_ROOT` | `/var/lib/harness/agent-homes` | Host root for per-session agent HOME state, mounted outside `/workspace` |
 | `HARNESS_CHECKPOINTS_ROOT` | `/var/lib/harness/checkpoints` | Checkpoint image root |
 | `HARNESS_BUNDLE_ROOT` | `<repo>/bundle/out` | OCI bundle root |
 | `HARNESS_DB_PATH` | `<sessions_root>/orchestrator.db` | SQLite DB path |
@@ -192,6 +211,7 @@ Claude control env:
 | `HARNESS_CLAUDE_BASE_URL` / `HARNESS_ANTHROPIC_BASE_URL` | Preferred Anthropic-compatible proxy URL |
 | `HARNESS_CLAUDE_API_KEY` / `HARNESS_CLAUDE_AUTH_TOKEN` | Preferred local Claude proxy credential |
 | `HARNESS_CONTAINER_SESSIONS_ROOT` | In-container sessions mount, default `/sessions` |
+| `HARNESS_CONTAINER_AGENT_HOMES_ROOT` | In-container agent home mount, default `/agent-homes` |
 | `CLAUDE_MODEL` | Claude model alias, default `sonnet` |
 
 Frontend:
@@ -236,6 +256,7 @@ orchestrator/
 ├── internal/runtime/output_hub.go
 ├── internal/server/server.go
 ├── internal/server/stream_parser.go
+├── internal/sessionstate/state.go
 └── internal/store/store.go
 
 frontend/

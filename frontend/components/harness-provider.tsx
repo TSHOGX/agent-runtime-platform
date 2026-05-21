@@ -29,6 +29,7 @@ import type {
   ApiSession,
   ConnectionStatus,
   HarnessEvent,
+  SessionStatus,
   StreamLine
 } from "@/lib/types";
 
@@ -70,7 +71,15 @@ const initialState: HarnessState = {
   artifacts: {}
 };
 
-const ACTIVE_STATUSES = new Set(["running", "running_active"]);
+const RUNNING_STATUSES = new Set<SessionStatus>(["running_active"]);
+const SESSION_EVENT_STATUSES = new Set<SessionStatus>([
+  "running_active",
+  "running_idle",
+  "checkpointing",
+  "checkpointed",
+  "failed",
+  "destroyed"
+]);
 const MESSAGE_POLL_INTERVAL_MS = 1000;
 const MESSAGE_POLL_TIMEOUT_MS = 120_000;
 
@@ -105,8 +114,14 @@ function delay(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
-function isActiveStatus(status: string) {
-  return ACTIVE_STATUSES.has(status);
+function isActiveStatus(status: SessionStatus) {
+  return RUNNING_STATUSES.has(status);
+}
+
+function readSessionStatusEvent(type: string): SessionStatus | null {
+  if (!type.startsWith("session.")) return null;
+  const status = type.slice("session.".length) as SessionStatus;
+  return SESSION_EVENT_STATUSES.has(status) ? status : null;
 }
 
 export function HarnessProvider({ children }: { children: React.ReactNode }) {
@@ -231,22 +246,20 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
           }));
           return;
         }
-        case "session.running":
         case "session.running_active":
-        case "session.idle":
         case "session.running_idle":
         case "session.checkpointing":
         case "session.checkpointed":
-        case "session.completed":
         case "session.failed":
         case "session.destroyed": {
           if (!sessionId) return;
-          const status = event.type.split(".")[1];
+          const status = readSessionStatusEvent(event.type);
+          if (!status) return;
           setState((p) => ({
             ...p,
             sessions: p.sessions.map((s) => (s.id === sessionId ? { ...s, status, updated_at: time } : s))
           }));
-          if (status !== "running" && status !== "running_active") {
+          if (status !== "running_active") {
             upsertConvo(sessionId, (c) => ({ ...c, streaming: null }));
           }
           return;

@@ -4,9 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+
+	"harness-platform/orchestrator/internal/sessionstate"
 
 	_ "modernc.org/sqlite"
 )
@@ -23,7 +27,7 @@ type Session struct {
 	CreatedAt         time.Time  `json:"created_at"`
 	UpdatedAt         time.Time  `json:"updated_at"`
 	ExpiresAt         *time.Time `json:"expires_at,omitempty"`
-	CompletedAt       *time.Time `json:"completed_at,omitempty"`
+	EndedAt           *time.Time `json:"ended_at,omitempty"`
 	LastActivityAt    *time.Time `json:"last_activity_at,omitempty"`
 	CheckpointPath    string     `json:"checkpoint_path,omitempty"`
 }
@@ -72,6 +76,7 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) migrate(ctx context.Context) error {
+	statusCheck := sqlStringList(sessionstate.AllStatuses())
 	if _, err := s.db.ExecContext(ctx, `
 PRAGMA busy_timeout=5000;
 PRAGMA journal_mode=WAL;
@@ -86,7 +91,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
-  status TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN (`+statusCheck+`)),
   agent TEXT NOT NULL,
   workspace TEXT NOT NULL,
   restore_id TEXT NOT NULL,
@@ -95,7 +100,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   expires_at TEXT,
-  completed_at TEXT
+  ended_at TEXT,
+  last_activity_at TEXT,
+  checkpoint_path TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -120,38 +127,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
 `); err != nil {
 		return err
 	}
-	if err := s.ensureColumn(ctx, "sessions", "claude_session_uuid", "TEXT"); err != nil {
-		return err
-	}
-	if err := s.ensureColumn(ctx, "sessions", "last_activity_at", "TEXT"); err != nil {
-		return err
-	}
-	if err := s.ensureColumn(ctx, "sessions", "checkpoint_path", "TEXT"); err != nil {
-		return err
-	}
 	return nil
-}
-
-func (s *Store) ensureColumn(ctx context.Context, table, column, decl string) error {
-	rows, err := s.db.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return err
-		}
-		if name == column {
-			return rows.Err()
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	_, err = s.db.ExecContext(ctx, "ALTER TABLE "+table+" ADD COLUMN "+column+" "+decl)
-	return err
 }
 
 func (s *Store) EnsureUser(ctx context.Context, id, name string) error {
@@ -164,6 +140,9 @@ ON CONFLICT(id) DO NOTHING`, id, name, now)
 }
 
 func (s *Store) CreateSession(ctx context.Context, session Session) error {
+	if err := sessionstate.Validate(session.Status); err != nil {
+		return err
+	}
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO sessions (
   id, user_id, status, agent, workspace, restore_id, claude_session_uuid, created_at, updated_at, expires_at
@@ -177,21 +156,21 @@ INSERT INTO sessions (
 
 func (s *Store) GetSession(ctx context.Context, id string) (Session, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT id, user_id, status, agent, workspace, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, completed_at, last_activity_at, checkpoint_path
+SELECT id, user_id, status, agent, workspace, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path
 FROM sessions WHERE id = ?`, id)
 	return scanSession(row)
 }
 
 func (s *Store) ListSessions(ctx context.Context) ([]Session, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, user_id, status, agent, workspace, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, completed_at, last_activity_at, checkpoint_path
+SELECT id, user_id, status, agent, workspace, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path
 FROM sessions ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var sessions []Session
+	sessions := []Session{}
 	for rows.Next() {
 		session, err := scanSession(rows)
 		if err != nil {
@@ -204,22 +183,31 @@ FROM sessions ORDER BY created_at DESC`)
 
 func (s *Store) CountActiveSessions(ctx context.Context) (int, error) {
 	var count int
+	statuses := sessionstate.ActiveStatuses()
+	placeholders := sqlPlaceholders(len(statuses))
+	args := make([]any, len(statuses))
+	for i, status := range statuses {
+		args[i] = status
+	}
 	err := s.db.QueryRowContext(ctx, `
 SELECT COUNT(*) FROM sessions
-WHERE status IN ('created', 'running', 'idle', 'running_active', 'running_idle', 'checkpointing', 'checkpointed')`).Scan(&count)
+WHERE status IN (`+placeholders+`)`, args...).Scan(&count)
 	return count, err
 }
 
 func (s *Store) UpdateSessionStatus(ctx context.Context, id, status string, restoreMS *int64) error {
+	if err := sessionstate.Validate(status); err != nil {
+		return err
+	}
 	now := time.Now().UTC()
-	var completed any
-	if status == "completed" || status == "failed" || status == "destroyed" {
-		completed = formatTime(now)
+	var terminalAt any
+	if sessionstate.IsTerminal(status) {
+		terminalAt = formatTime(now)
 	}
 	_, err := s.db.ExecContext(ctx, `
 UPDATE sessions
-SET status = ?, restore_ms = COALESCE(?, restore_ms), updated_at = ?, completed_at = COALESCE(?, completed_at)
-WHERE id = ?`, status, restoreMS, formatTime(now), completed, id)
+SET status = ?, restore_ms = COALESCE(?, restore_ms), updated_at = ?, ended_at = COALESCE(?, ended_at)
+WHERE id = ?`, status, restoreMS, formatTime(now), terminalAt, id)
 	return err
 }
 
@@ -247,7 +235,7 @@ FROM messages WHERE session_id = ? ORDER BY id ASC`, sessionID)
 	}
 	defer rows.Close()
 
-	var messages []Message
+	messages := []Message{}
 	for rows.Next() {
 		var m Message
 		var createdAt string
@@ -290,7 +278,7 @@ FROM artifacts WHERE session_id = ? ORDER BY path`, sessionID)
 	}
 	defer rows.Close()
 
-	var artifacts []Artifact
+	artifacts := []Artifact{}
 	for rows.Next() {
 		var artifact Artifact
 		var modTime, createdAt, updatedAt string
@@ -314,11 +302,11 @@ func scanSession(row scanner) (Session, error) {
 	var restoreMS sql.NullInt64
 	var claudeUUID sql.NullString
 	var createdAt, updatedAt string
-	var expiresAt, completedAt, lastActivityAt sql.NullString
+	var expiresAt, endedAt, lastActivityAt sql.NullString
 	var checkpointPath sql.NullString
 	err := row.Scan(
 		&session.ID, &session.UserID, &session.Status, &session.Agent, &session.Workspace, &session.RestoreID,
-		&restoreMS, &claudeUUID, &createdAt, &updatedAt, &expiresAt, &completedAt, &lastActivityAt, &checkpointPath,
+		&restoreMS, &claudeUUID, &createdAt, &updatedAt, &expiresAt, &endedAt, &lastActivityAt, &checkpointPath,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, err
@@ -338,9 +326,9 @@ func scanSession(row scanner) (Session, error) {
 		t := parseTime(expiresAt.String)
 		session.ExpiresAt = &t
 	}
-	if completedAt.Valid {
-		t := parseTime(completedAt.String)
-		session.CompletedAt = &t
+	if endedAt.Valid {
+		t := parseTime(endedAt.String)
+		session.EndedAt = &t
 	}
 	if lastActivityAt.Valid {
 		t := parseTime(lastActivityAt.String)
@@ -376,28 +364,34 @@ func parseTime(value string) time.Time {
 }
 
 func (s *Store) UpdateSessionStatusAndActivity(ctx context.Context, id, status string, restoreMS *int64, lastActivity time.Time) error {
+	if err := sessionstate.Validate(status); err != nil {
+		return err
+	}
 	now := time.Now().UTC()
-	var completed any
-	if status == "completed" || status == "failed" || status == "destroyed" {
-		completed = formatTime(now)
+	var terminalAt any
+	if sessionstate.IsTerminal(status) {
+		terminalAt = formatTime(now)
 	}
 	_, err := s.db.ExecContext(ctx, `
 UPDATE sessions
-SET status = ?, restore_ms = COALESCE(?, restore_ms), updated_at = ?, completed_at = COALESCE(?, completed_at), last_activity_at = ?
-WHERE id = ?`, status, restoreMS, formatTime(now), completed, formatTime(lastActivity), id)
+SET status = ?, restore_ms = COALESCE(?, restore_ms), updated_at = ?, ended_at = COALESCE(?, ended_at), last_activity_at = ?
+WHERE id = ?`, status, restoreMS, formatTime(now), terminalAt, formatTime(lastActivity), id)
 	return err
 }
 
 func (s *Store) ListSessionsByStatus(ctx context.Context, status string) ([]Session, error) {
+	if err := sessionstate.Validate(status); err != nil {
+		return nil, err
+	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, user_id, status, agent, workspace, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, completed_at, last_activity_at, checkpoint_path
+SELECT id, user_id, status, agent, workspace, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path
 FROM sessions WHERE status = ? ORDER BY last_activity_at ASC`, status)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var sessions []Session
+	sessions := []Session{}
 	for rows.Next() {
 		session, err := scanSession(rows)
 		if err != nil {
@@ -406,4 +400,16 @@ FROM sessions WHERE status = ? ORDER BY last_activity_at ASC`, status)
 		sessions = append(sessions, session)
 	}
 	return sessions, rows.Err()
+}
+
+func sqlPlaceholders(count int) string {
+	return strings.TrimSuffix(strings.Repeat("?,", count), ",")
+}
+
+func sqlStringList(values []string) string {
+	quoted := make([]string, len(values))
+	for i, value := range values {
+		quoted[i] = fmt.Sprintf("'%s'", strings.ReplaceAll(value, "'", "''"))
+	}
+	return strings.Join(quoted, ",")
 }

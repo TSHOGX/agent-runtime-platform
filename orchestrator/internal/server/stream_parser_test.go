@@ -9,6 +9,7 @@ import (
 
 	"harness-platform/orchestrator/internal/events"
 	"harness-platform/orchestrator/internal/runtime"
+	"harness-platform/orchestrator/internal/sessionstate"
 	"harness-platform/orchestrator/internal/store"
 )
 
@@ -26,7 +27,7 @@ func newParserTestServer(t *testing.T) (*Server, *store.Store) {
 	if err := st.CreateSession(ctx, store.Session{
 		ID:        "sess_1",
 		UserID:    "lab",
-		Status:    "running_active",
+		Status:    string(sessionstate.RunningActive),
 		Agent:     "claude",
 		Workspace: t.TempDir(),
 		RestoreID: "phase3-sess_1",
@@ -86,5 +87,29 @@ func TestStreamParserPersistsResultWhenAssistantMessageIsMissing(t *testing.T) {
 	}
 	if len(messages) != 1 || messages[0].Content != "hi" {
 		t.Fatalf("expected result text to be persisted, got %+v", messages)
+	}
+}
+
+func TestStreamParserDoesNotFailSessionOnClaudeExecutionError(t *testing.T) {
+	srv, st := newParserTestServer(t)
+	parser := newStreamParser(srv, "sess_1", "claude")
+
+	parser.handle(runtime.Output{Stream: "stdout", Line: `{"type":"result","subtype":"error_during_execution"}`})
+
+	select {
+	case <-parser.Done():
+	case <-time.After(time.Second):
+		t.Fatal("parser did not complete after error result event")
+	}
+	if err := parser.Err(); err != nil {
+		t.Fatalf("claude turn execution error should not fail the session: %v", err)
+	}
+
+	messages, err := st.ListMessages(context.Background(), "sess_1")
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	if len(messages) != 1 || messages[0].Content != "Claude turn ended with error_during_execution." {
+		t.Fatalf("expected turn error message to be persisted, got %+v", messages)
 	}
 }
