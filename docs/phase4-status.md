@@ -1,7 +1,17 @@
 # Phase 4 Frontend Status
 
-> Last updated: 2026-05-20 04:17 Asia/Shanghai
+> Last updated: 2026-05-21 Asia/Shanghai
 > Scope guard: only frontend Phase 4 files and this status file were changed in this round.
+
+## Current Note
+
+The current frontend baseline has moved beyond this round log:
+
+- Live browser events now use same-origin SSE at `GET /api/events/stream?session_id=<id>`.
+- The frontend provider polls session/messages/artifacts after message submission to recover from missed frames.
+- The UI no longer depends on a direct browser WebSocket connection to the orchestrator.
+- The top-level "backend unreachable" state is the current non-healthy backend behavior; there is no separate mock workspace in the live path.
+- The `agent.selector` still exposes multiple values, but Claude Code is the primary supported multi-turn path.
 
 ## Round 4/8
 

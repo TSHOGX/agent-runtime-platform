@@ -1,6 +1,6 @@
-# Harness Frontend
+# Frontend
 
-Phase 4 Next.js workbench for the harness platform.
+Next.js workbench for the harness platform.
 
 ## Run
 
@@ -12,6 +12,25 @@ PORT=8000 npm run dev
 
 Open <http://127.0.0.1:8000>.
 
+## Rebuild / Restart
+
+Development rebuilds are handled by Next.js hot reload, but you still need to restart the process when environment variables, dependencies, or route-handler wiring changes.
+
+```bash
+# stop the current dev server with Ctrl+C, then rerun
+PORT=8000 npm run dev
+```
+
+For a production-style rebuild:
+
+```bash
+cd frontend
+npm run build
+PORT=8000 npm run start
+```
+
+If you need a clean rebuild after dependency changes, rerun `npm install` first, then `npm run build`.
+
 ## Checks
 
 ```bash
@@ -22,7 +41,7 @@ npm run build
 
 ## Backend Bridge
 
-The frontend calls the Phase 3 orchestrator through same-origin route handlers. This keeps browser requests on the frontend origin and avoids direct CORS/cookie coupling.
+The frontend talks to the orchestrator through same-origin route handlers. This keeps browser requests on the frontend origin and avoids direct CORS/cookie coupling.
 
 Implemented proxy routes:
 
@@ -37,13 +56,19 @@ Environment overrides:
 - `HARNESS_API_BASE_URL` or `ORCHESTRATOR_URL` for the server-side proxy.
 - `PORT=8000` for local frontend development.
 
-The UI checks `/api/healthz` first. If the real backend is unavailable or a proxied HTTP request fails, the dashboard switches to a clearly labeled mock fallback and provides a `Retry real` action.
+## Current UI Flow
 
-## Current MVP Flow
+- The UI checks `/api/healthz` first.
+- If the real backend is unavailable or a proxied HTTP request fails, the app shows the backend-unreachable state instead of a mock workspace.
+- Live events come from `GET /api/events/stream?session_id=<id>` through the frontend proxy.
+- The stream renders `agent.delta`, `agent.message`, `agent.output`, `system.status`, and session lifecycle events.
+- After a successful message post, the provider also polls session/messages/artifacts for a short period so the view can recover from missed events.
+- The same-origin SSE path replaced the earlier direct browser WebSocket connection.
 
-- Pick an agent and create a session through `POST /api/sessions`.
-- Send one task prompt through `POST /api/sessions/:id/messages`.
-- The Phase 3 backend currently accepts only the first message for a sandbox, so the UI treats each session as a one-shot run.
-- Event streaming is connected to `GET /api/events/stream?session_id=<id>` through the frontend proxy.
-- The stream renders `agent.output` lines as separate thinking, tool-call, answer, and runtime entries.
-- If the WS endpoint fails, the UI falls back to cached mock stream data and keeps the backend mode badge visible.
+## Current Agent Flow
+
+- Create a session through `POST /api/sessions`.
+- Send a task prompt through `POST /api/sessions/:id/messages`.
+- The orchestrator currently keeps a session alive across turns once the sandbox is running.
+- Claude Code is the primary supported agent path.
+- `sh` remains useful for smoke tests.

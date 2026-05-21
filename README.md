@@ -1,60 +1,76 @@
 # harness-platform
 
-每会话独立 **gVisor sandbox** 的数据分析 Agent 平台。Agent（Claude Code / OpenCode）跑在 sandbox 内，通过只读账号查询远端 Apache Doris，前端类 Claude.ai 三栏布局（会话列表 / 聊天 / artifact）。
+每会话独立 **gVisor sandbox** 的数据分析 Agent 平台。Agent 运行在 sandbox 内，通过 stdio 与 Go orchestrator 通信，可查询远端 Apache Doris、生成文件 artifact，并由 Next.js 工作台展示会话、对话和产物。
 
-底层运行时是 [gVisor `runsc`](https://gvisor.dev/) 的 `systrap` 平台（用户态 syscall 拦截，不依赖 KVM / 嵌套虚拟化），host 上**不跑 Docker**，直接消费 OCI bundle（`config.json` + `rootfs/`）。
-
-## 文档
-
-### 核心文档
-- [docs/architecture.md](./docs/architecture.md) — 当前架构设计与技术决策
-- [docs/PLAN.md](./docs/PLAN.md) — 总体技术方案 & 分阶段实施计划
-
-### 技术决策与研究
-- [docs/gvisor-decision.md](./docs/gvisor-decision.md) — 运行时选型决策记录
-- [docs/runsc-warm-sentry-research.md](./docs/runsc-warm-sentry-research.md) — runsc 与 warm sentry 调研
-- [docs/llm-harness-local-test.md](./docs/llm-harness-local-test.md) — LLM harness 连通性测试
-
-### 开发历史
-- [docs/phase1-status.md](./docs/phase1-status.md) — Phase 1 手工 sandbox 验证
-- [docs/phase2-status.md](./docs/phase2-status.md) — Phase 2 rootfs / bundle / restore 脚本
-- [docs/phase3-status.md](./docs/phase3-status.md) — Phase 3 Go orchestrator MVP
-- [docs/phase4-status.md](./docs/phase4-status.md) — Phase 4 前端开发历史
-- [docs/phase4-frontend-prompt.md](./docs/phase4-frontend-prompt.md) — Phase 4 前端开发指南
-
-### 敏感信息
-- `docs/doris-connection.md` — Doris 连接凭据（**不入 git**）
+当前底层运行时是 gVisor `runsc` 的 `systrap` 平台。宿主机不依赖 Docker daemon，直接消费 OCI bundle（`config.json` + `rootfs/`）。
 
 ## 当前状态
 
-**Phase 3 已完成**：长生命周期容器架构已实现，支持：
-- 容器在消息之间保持运行（热路径 ~10ms 延迟）
-- Idle 30 分钟后自动 checkpoint 并释放资源
-- 从 checkpoint 恢复会话上下文（~200ms）
-- WebSocket 实时事件流
-- SQLite 会话和消息持久化
+最新基线见 [docs/current-status.md](./docs/current-status.md)。
 
-**Phase 4 已完成**：前端 MVP 已实现：
-- 三栏布局（会话列表 / 对话 / Artifacts）
-- WebSocket 流式输出
-- Real backend / Mock fallback 自动切换
-- Artifact 预览和下载
+- Orchestrator 已改为长生命周期容器：会话在消息之间保持运行，空闲后 checkpoint。
+- 多轮输出路由已通过 per-container `OutputHub` 修复；每次用户 turn 都会订阅当前容器输出。
+- 浏览器事件流走 frontend same-origin SSE：`GET /api/events/stream`，orchestrator 仍保留 WebSocket 兼容端点 `/api/events`。
+- 前端会在发送消息后轮询 messages/session/artifacts，作为 SSE 断线时的状态补偿。
+- Claude Code 是当前主路径；`sh`/`demo` 用于 smoke，OpenCode 已做本机连通性验证但尚未接入 sandbox entrypoint。
 
-**已知问题**：
-- 多轮对话输出流路由问题（第二条消息后输出无法到达前端）
-- 需要实现 per-container Event Hub 架构来解决
+## 文档
 
-详见 [docs/architecture.md](./docs/architecture.md)。
+### 当前设计
+
+- [docs/current-status.md](./docs/current-status.md) - 当前可用能力、最近两次提交影响和约束
+- [docs/architecture.md](./docs/architecture.md) - 当前架构、状态机、事件流和运行时设计
+- [docs/PLAN.md](./docs/PLAN.md) - 总体路线图和后续阶段
+
+### 技术决策与研究
+
+- [docs/gvisor-decision.md](./docs/gvisor-decision.md) - 运行时选型决策记录
+- [docs/runsc-warm-sentry-research.md](./docs/runsc-warm-sentry-research.md) - runsc 与 warm sentry 调研
+- [docs/llm-harness-local-test.md](./docs/llm-harness-local-test.md) - LLM harness 连通性测试
+
+### 阶段记录
+
+- [docs/phase1-status.md](./docs/phase1-status.md) - Phase 1 手工 sandbox 验证
+- [docs/phase2-status.md](./docs/phase2-status.md) - Phase 2 rootfs / bundle / restore 脚本
+- [docs/phase3-status.md](./docs/phase3-status.md) - Phase 3 Go orchestrator MVP
+- [docs/phase4-status.md](./docs/phase4-status.md) - Phase 4 前端 MVP
+
+### 数据与敏感信息
+
+- [schema-pack/doris-schema.md](./schema-pack/doris-schema.md) - Doris schema 整理稿
+- `docs/doris-connection.md` - Doris 连接凭据，本地文件，不应提交到 git
+
+## 快速启动
+
+Orchestrator:
+
+```bash
+cd orchestrator
+go run ./cmd/orchestrator
+```
+
+Frontend:
+
+```bash
+cd frontend
+npm install
+PORT=8000 npm run dev
+```
+
+默认访问：
+
+- Frontend: <http://127.0.0.1:8000>
+- Orchestrator: <http://127.0.0.1:8090>
 
 ## 仓库结构
 
-```
+```text
 harness-platform/
-├── docs/               # 设计文档、决策记录、Doris schema
-├── orchestrator/       # Go：sandbox 生命周期、warm pool、stdio 桥、会话 API（Phase 3）
-├── frontend/           # Next.js：三栏 UI（Phase 4）
-├── sandbox-image/      # rootfs 构建脚本、OCI config.json 模板（Phase 1–2）
-├── bundle/             # runsc checkpoint/restore 脚本（Phase 2）
-├── schema-pack/        # Doris 表 schema markdown（Phase 0）
-└── infra/              # nftables、systemd unit、运行手册（Phase 6）
+├── docs/               # 当前设计、路线图、阶段记录和研究文档
+├── orchestrator/       # Go：会话 API、runtime、事件流、artifact watcher
+├── frontend/           # Next.js：三栏工作台和 same-origin proxy
+├── sandbox-image/      # rootfs 构建脚本、OCI config.json 模板、entrypoint
+├── bundle/             # runsc bundle/checkpoint 辅助脚本
+├── schema-pack/        # Doris 表 schema markdown
+└── infra/              # 后续系统配置与运行手册预留
 ```

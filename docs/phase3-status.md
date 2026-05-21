@@ -1,7 +1,7 @@
 # Phase 3 Status
 
-> Date: 2026-05-20
-> Scope: Go orchestrator MVP for session API, sandbox restore boundary, WebSocket events, artifact metadata, and lab auth.
+> Date: 2026-05-21
+> Scope: Go orchestrator MVP for session API, sandbox restore boundary, event publication, artifact metadata, and lab auth.
 
 ## Completed
 
@@ -20,6 +20,16 @@
   - Records file create/write events.
   - Scans the session workspace after sandbox completion.
   - Publishes `artifact.updated` events.
+
+## Current Note
+
+The Phase 3 foundation is now running with the newer runtime path from commits `e8b84f0` and `9b803b6`:
+
+- The runtime uses a per-container `OutputHub` instead of a single callback.
+- Claude turns are written as stream-json user frames and complete on `result` / `error`.
+- The orchestrator now drives `runsc` directly for fresh starts and restores.
+- Browser event delivery is now SSE on the frontend origin, with WebSocket kept only for compatibility.
+- The old "multi-turn routing is not implemented yet" note is no longer current.
 
 ## API Gate
 
@@ -52,7 +62,7 @@ If `HARNESS_LAB_PASSWORD` is set, first call `/api/login` and pass the returned 
 
 ## Important Notes
 
-- The MVP reuses the Phase 2 shell script as the runtime boundary. This keeps the checkpoint/restore path stable while the API and event contract are introduced.
-- For deterministic curl smoke tests, use `agent:"sh"` and put the shell command in the first message; the runtime passes it through `HARNESS_COMMAND`.
-- The upgraded `runsc release-20260511.0` no longer reproduces the long-running service restore panic on this host, so the MVP now uses restore directly and keeps the cold fallback out of the path.
-- Multi-turn stdio routing is not fully implemented yet because the current sandbox entrypoint consumes `FIRST_MESSAGE` and runs the selected agent as a one-shot process. The first Phase 3 gate is still covered: create session, send one message, stream output, and inspect artifacts.
+- The MVP originally reused the Phase 2 shell script as the runtime boundary. That note is now historical; the active orchestrator path drives `runsc` directly.
+- For deterministic curl smoke tests, `sh` is still useful, but Claude is the supported multi-turn path.
+- The upgraded `runsc release-20260511.0` no longer reproduces the long-running service restore panic on this host, so the direct runtime path stays on restore instead of a cold fallback script.
+- Multi-turn routing is now handled by the per-container `OutputHub` and stream parser completion logic.
