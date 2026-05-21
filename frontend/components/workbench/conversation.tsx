@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 import { Bot } from "lucide-react";
 
 import { useConversation, useHarness, useSelectedSession } from "@/components/harness-provider";
+import { ShellConversation } from "./shell-conversation";
 import { MessageBubble, StreamingBubble } from "./message-bubble";
 import { Composer } from "./composer";
 import { StatusDot, statusTone } from "@/components/ui/badge";
@@ -24,6 +25,14 @@ function formatRuntimeLine(line: string) {
 }
 
 export function Conversation() {
+  const session = useSelectedSession();
+  if (session?.agent === "sh") {
+    return <ShellConversation />;
+  }
+  return <ChatConversation />;
+}
+
+function ChatConversation() {
   const session = useSelectedSession();
   const convo = useConversation(session?.id ?? null);
   const { sendMessage } = useHarness();

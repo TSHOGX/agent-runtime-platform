@@ -84,13 +84,40 @@ func TestWriteUserTurnClaudeEscapesNewlines(t *testing.T) {
 	}
 }
 
-func TestWriteUserTurnNonClaudeRawText(t *testing.T) {
+func TestWriteUserTurnShellJSONFraming(t *testing.T) {
 	var buf bytes.Buffer
 	if err := writeUserTurn(&buf, "sh", "ls -la"); err != nil {
 		t.Fatalf("writeUserTurn: %v", err)
 	}
-	if buf.String() != "ls -la\n" {
-		t.Fatalf("expected raw text passthrough for non-claude agents, got %q", buf.String())
+	out := buf.String()
+	if !strings.HasSuffix(out, "\n") {
+		t.Fatalf("expected trailing newline for shell JSON framing, got %q", out)
+	}
+	var frame struct {
+		Type    string `json:"type"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSuffix(out, "\n")), &frame); err != nil {
+		t.Fatalf("invalid JSON frame %q: %v", out, err)
+	}
+	if frame.Type != "turn" || frame.Content != "ls -la" {
+		t.Fatalf("unexpected shell frame: %+v", frame)
+	}
+}
+
+func TestWriteInterruptShellJSONFraming(t *testing.T) {
+	var buf bytes.Buffer
+	if err := writeInterrupt(&buf, "sh"); err != nil {
+		t.Fatalf("writeInterrupt: %v", err)
+	}
+	var frame struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &frame); err != nil {
+		t.Fatalf("invalid interrupt frame %q: %v", buf.String(), err)
+	}
+	if frame.Type != "interrupt" {
+		t.Fatalf("unexpected interrupt frame: %+v", frame)
 	}
 }
 

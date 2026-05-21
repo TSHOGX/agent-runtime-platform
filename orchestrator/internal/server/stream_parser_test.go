@@ -46,7 +46,7 @@ func newParserTestServer(t *testing.T) (*Server, *store.Store) {
 
 func TestStreamParserCompletesOnClaudeResultWithoutDuplicate(t *testing.T) {
 	srv, st := newParserTestServer(t)
-	parser := newStreamParser(srv, "sess_1")
+	parser := newStreamParser(srv, "sess_1", "claude")
 
 	parser.handle(runtime.Output{Stream: "stdout", Line: `{"type":"assistant","message":{"id":"msg_1","role":"assistant","content":[{"type":"text","text":"hi"}]}}`})
 	parser.handle(runtime.Output{Stream: "stdout", Line: `{"type":"result","subtype":"success","result":"hi"}`})
@@ -71,7 +71,7 @@ func TestStreamParserCompletesOnClaudeResultWithoutDuplicate(t *testing.T) {
 
 func TestStreamParserPersistsResultWhenAssistantMessageIsMissing(t *testing.T) {
 	srv, st := newParserTestServer(t)
-	parser := newStreamParser(srv, "sess_1")
+	parser := newStreamParser(srv, "sess_1", "claude")
 
 	parser.handle(runtime.Output{Stream: "stdout", Line: `{"type":"result","subtype":"success","result":"hi"}`})
 
@@ -92,7 +92,7 @@ func TestStreamParserPersistsResultWhenAssistantMessageIsMissing(t *testing.T) {
 
 func TestStreamParserDoesNotFailSessionOnClaudeExecutionError(t *testing.T) {
 	srv, st := newParserTestServer(t)
-	parser := newStreamParser(srv, "sess_1")
+	parser := newStreamParser(srv, "sess_1", "claude")
 
 	parser.handle(runtime.Output{Stream: "stdout", Line: `{"type":"result","subtype":"error_during_execution"}`})
 
@@ -116,7 +116,7 @@ func TestStreamParserDoesNotFailSessionOnClaudeExecutionError(t *testing.T) {
 
 func TestStreamParserPersistsNonSuccessResultText(t *testing.T) {
 	srv, st := newParserTestServer(t)
-	parser := newStreamParser(srv, "sess_1")
+	parser := newStreamParser(srv, "sess_1", "claude")
 
 	parser.handle(runtime.Output{Stream: "stdout", Line: `{"type":"result","subtype":"error_during_execution","result":"API Error: 400 {\"detail\":\"Erro\"}"}`})
 
@@ -135,5 +135,30 @@ func TestStreamParserPersistsNonSuccessResultText(t *testing.T) {
 	}
 	if len(messages) != 1 || messages[0].Content != `API Error: 400 {"detail":"Erro"}` {
 		t.Fatalf("expected result error text to be persisted, got %+v", messages)
+	}
+}
+
+func TestStreamParserPersistsShellOutputAndCompletesOnTurnDone(t *testing.T) {
+	srv, st := newParserTestServer(t)
+	parser := newStreamParser(srv, "sess_1", "sh")
+
+	parser.handle(runtime.Output{Stream: "stdout", Line: `{"type":"harness.shell_output","stream":"stdout","text":"hello from shell\n"}`})
+	parser.handle(runtime.Output{Stream: "stdout", Line: `{"type":"harness.turn_done","exit_code":0}`})
+
+	select {
+	case <-parser.Done():
+	case <-time.After(time.Second):
+		t.Fatal("parser did not complete after shell turn_done event")
+	}
+
+	messages, err := st.ListMessages(context.Background(), "sess_1")
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("expected one shell output message, got %d: %+v", len(messages), messages)
+	}
+	if messages[0].Role != "assistant" || messages[0].Content != "hello from shell\n" {
+		t.Fatalf("unexpected shell output message: %+v", messages[0])
 	}
 }

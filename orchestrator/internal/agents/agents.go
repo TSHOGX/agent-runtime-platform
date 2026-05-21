@@ -11,7 +11,7 @@ type Protocol string
 
 const (
 	ProtocolClaudeStreamJSON Protocol = "claude_stream_json"
-	ProtocolRaw              Protocol = "raw"
+	ProtocolShellPTY         Protocol = "shell_pty"
 )
 
 type Definition struct {
@@ -29,7 +29,7 @@ var supported = map[ID]Definition{
 	Shell: {
 		ID:       Shell,
 		Label:    "Shell",
-		Protocol: ProtocolRaw,
+		Protocol: ProtocolShellPTY,
 	},
 }
 

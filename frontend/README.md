@@ -70,5 +70,5 @@ Environment overrides:
 - Create a session through `POST /api/sessions`.
 - Send a task prompt through `POST /api/sessions/:id/messages`.
 - The orchestrator currently keeps a session alive across turns once the sandbox is running.
-- The new session picker exposes `Shell` and `Agent`, where `Agent` maps to Claude Code.
+- The new session picker exposes `Shell` and `Agent`, where `Agent` maps to the agent runtime.
 - `sh` remains useful for smoke tests.

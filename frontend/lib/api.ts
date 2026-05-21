@@ -55,6 +55,12 @@ export async function destroySession(sessionId: string) {
   return request<{ status: SessionStatus }>(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
 }
 
+export async function interruptSession(sessionId: string) {
+  return request<{ status: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/interrupt`, {
+    method: "POST"
+  });
+}
+
 export async function fetchMessages(sessionId: string) {
   return request<{ messages: ApiMessage[] | null }>(`/api/sessions/${encodeURIComponent(sessionId)}/messages`);
 }

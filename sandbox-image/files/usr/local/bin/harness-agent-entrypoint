@@ -100,7 +100,7 @@ case "${HARNESS_AGENT:-claude}" in
     ;;
   sh)
     echo "[entrypoint] sh agent starting" >&2
-    exec /bin/sh -l
+    exec /usr/local/bin/harness-shell-agent
     ;;
   *)
     echo "unknown HARNESS_AGENT: ${HARNESS_AGENT}" >&2

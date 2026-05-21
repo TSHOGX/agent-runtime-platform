@@ -142,6 +142,8 @@ func (s *Server) sessionRoute(w http.ResponseWriter, r *http.Request) {
 		s.sendMessage(w, r, sessionID)
 	case len(parts) == 2 && parts[1] == "artifacts" && r.Method == http.MethodGet:
 		s.listArtifacts(w, r, sessionID)
+	case len(parts) == 2 && parts[1] == "interrupt" && r.Method == http.MethodPost:
+		s.interruptSession(w, r, sessionID)
 	default:
 		writeError(w, http.StatusNotFound, "not found")
 	}
@@ -281,11 +283,9 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request, sessionID 
 }
 
 func (s *Server) runSession(ctx context.Context, session store.Session, message string) {
-	parser := newStreamParser(s, session.ID)
-	turnCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
-	defer cancel()
+	parser := newStreamParser(s, session.ID, session.Agent)
 
-	result := s.runtime.Start(turnCtx, runtime.StartRequest{
+	result := s.runtime.Start(ctx, runtime.StartRequest{
 		SessionID:         session.ID,
 		RestoreID:         session.RestoreID,
 		Agent:             session.Agent,
@@ -317,6 +317,31 @@ func (s *Server) runSession(ctx context.Context, session store.Session, message 
 		s.log.Warn("failed to scan session artifacts", "session_id", session.ID, "error", err)
 	}
 	s.hub.Publish(events.Event{Type: "session." + status, SessionID: session.ID, Payload: map[string]any{"restore_ms": result.RestoreMS}})
+}
+
+func (s *Server) interruptSession(w http.ResponseWriter, r *http.Request, sessionID string) {
+	session, err := s.store.GetSession(r.Context(), sessionID)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if session.Status != string(sessionstate.RunningActive) {
+		writeError(w, http.StatusConflict, "session is not running")
+		return
+	}
+	if session.Agent != string(agents.Shell) {
+		writeError(w, http.StatusConflict, "interrupt is only supported for shell sessions")
+		return
+	}
+	if err := s.runtime.Interrupt(sessionID); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "interrupting"})
 }
 
 func (s *Server) destroySession(w http.ResponseWriter, r *http.Request, sessionID string) {

@@ -19,6 +19,7 @@ import {
   fetchMessages,
   fetchSession,
   fetchSessions,
+  interruptSession as apiInterruptSession,
   postMessage as apiPostMessage
 } from "@/lib/api";
 import type { RuntimeAgent } from "@/lib/agents";
@@ -55,6 +56,7 @@ type HarnessApi = {
   selectSession: (id: string | null) => void;
   createSession: (agent: RuntimeAgent) => Promise<{ ok: boolean; error?: string; session?: ApiSession }>;
   destroySession: (id: string) => Promise<void>;
+  interruptSession: (id: string) => Promise<{ ok: boolean; error?: string }>;
   sendMessage: (id: string, content: string) => Promise<{ ok: boolean; error?: string }>;
   refresh: () => Promise<void>;
 };
@@ -492,6 +494,12 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
     await apiDestroySession(id);
   }, []);
 
+  const interruptSession = useCallback(async (id: string) => {
+    const res = await apiInterruptSession(id);
+    if (!res.ok) return { ok: false as const, error: res.error };
+    return { ok: true as const };
+  }, []);
+
   const sendMessage = useCallback(
     async (id: string, content: string) => {
       const res = await apiPostMessage(id, content);
@@ -517,8 +525,8 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
   );
 
   const value = useMemo<HarnessApi>(
-    () => ({ state, selectSession, createSession, destroySession, sendMessage, refresh }),
-    [state, selectSession, createSession, destroySession, sendMessage, refresh]
+    () => ({ state, selectSession, createSession, destroySession, interruptSession, sendMessage, refresh }),
+    [state, selectSession, createSession, destroySession, interruptSession, sendMessage, refresh]
   );
 
   return <HarnessContext.Provider value={value}>{children}</HarnessContext.Provider>;

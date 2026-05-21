@@ -62,6 +62,7 @@ type Container struct {
 	Stdout    io.ReadCloser
 	Stderr    io.ReadCloser
 	Cancel    context.CancelFunc
+	InputMu   sync.Mutex
 	OutputHub *OutputHub // Per-container pub/sub for output events
 }
 
@@ -274,12 +275,17 @@ type claudeContentBlock struct {
 	Text string `json:"text"`
 }
 
+type shellInputFrame struct {
+	Type    string `json:"type"`
+	Content string `json:"content,omitempty"`
+}
+
 // writeUserTurn delivers a user message to the agent's stdin.
 //
 // Claude Code runs with `--input-format stream-json`, which expects one JSONL
-// frame per turn and keeps stdin open between turns. Other agents consume raw
-// text lines. The server holds the session in running_active until the current
-// turn's parser sees a completion event.
+// frame per turn and keeps stdin open between turns. Shell runs a JSON turn
+// protocol over a PTY-backed shim. The server holds the session in
+// running_active until the current turn's parser sees a completion event.
 func writeUserTurn(stdin io.Writer, agent, message string) error {
 	def, ok := agents.Lookup(agent)
 	if !ok {
@@ -304,8 +310,47 @@ func writeUserTurn(stdin io.Writer, agent, message string) error {
 		}
 		return nil
 	}
+	if def.Protocol == agents.ProtocolShellPTY {
+		frame := shellInputFrame{
+			Type:    "turn",
+			Content: message,
+		}
+		encoded, err := json.Marshal(frame)
+		if err != nil {
+			return fmt.Errorf("encode shell turn: %w", err)
+		}
+		if _, err := stdin.Write(append(encoded, '\n')); err != nil {
+			return err
+		}
+		return nil
+	}
 	_, err := fmt.Fprintln(stdin, message)
 	return err
+}
+
+func writeInterrupt(stdin io.Writer, agent string) error {
+	def, ok := agents.Lookup(agent)
+	if !ok {
+		return fmt.Errorf("unsupported agent %q", agent)
+	}
+	if def.Protocol != agents.ProtocolShellPTY {
+		return fmt.Errorf("interrupt not supported for agent %q", agent)
+	}
+	frame := shellInputFrame{Type: "interrupt"}
+	encoded, err := json.Marshal(frame)
+	if err != nil {
+		return fmt.Errorf("encode shell interrupt: %w", err)
+	}
+	if _, err := stdin.Write(append(encoded, '\n')); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *Runtime) writeContainerInput(container *Container, fn func(io.Writer) error) error {
+	container.InputMu.Lock()
+	defer container.InputMu.Unlock()
+	return fn(container.Stdin)
 }
 
 func forwardOutput(ctx context.Context, outputCh <-chan OutputEvent, done <-chan struct{}, output func(Output)) Result {
@@ -351,7 +396,9 @@ func (r *Runtime) sendMessage(ctx context.Context, container *Container, message
 	outputCh, cancel := container.OutputHub.Subscribe()
 	defer cancel()
 
-	if err := writeUserTurn(container.Stdin, container.Agent, message); err != nil {
+	if err := r.writeContainerInput(container, func(stdin io.Writer) error {
+		return writeUserTurn(stdin, container.Agent, message)
+	}); err != nil {
 		r.stopContainer(container)
 		return Result{Err: fmt.Errorf("write to stdin: %w", err)}
 	}
@@ -460,7 +507,9 @@ func (r *Runtime) startFresh(ctx context.Context, req StartRequest, output func(
 
 	// Send first message
 	if req.FirstMessage != "" {
-		if err := writeUserTurn(stdin, req.Agent, req.FirstMessage); err != nil {
+		if err := r.writeContainerInput(container, func(stdin io.Writer) error {
+			return writeUserTurn(stdin, req.Agent, req.FirstMessage)
+		}); err != nil {
 			r.stopContainer(container)
 			return Result{Err: fmt.Errorf("write first message: %w", err)}
 		}
@@ -554,7 +603,9 @@ func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, ou
 	}()
 
 	if req.FirstMessage != "" {
-		if err := writeUserTurn(stdin, req.Agent, req.FirstMessage); err != nil {
+		if err := r.writeContainerInput(container, func(stdin io.Writer) error {
+			return writeUserTurn(stdin, req.Agent, req.FirstMessage)
+		}); err != nil {
 			r.stopContainer(container)
 			return Result{Err: fmt.Errorf("write first message: %w", err)}
 		}
@@ -608,4 +659,16 @@ func (r *Runtime) Checkpoint(ctx context.Context, sessionID string) error {
 	_ = deleteCmd.Run()
 
 	return nil
+}
+
+func (r *Runtime) Interrupt(sessionID string) error {
+	r.mu.RLock()
+	container, exists := r.containers[sessionID]
+	r.mu.RUnlock()
+	if !exists {
+		return errors.New("container not found")
+	}
+	return r.writeContainerInput(container, func(stdin io.Writer) error {
+		return writeInterrupt(stdin, container.Agent)
+	})
 }

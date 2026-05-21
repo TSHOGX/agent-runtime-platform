@@ -18,6 +18,7 @@ import (
 type streamParser struct {
 	srv       *Server
 	sessionID string
+	agent     string
 	// pending text chunks per assistant message id, flushed when we see the
 	// matching "assistant" full message (or when the runtime exits).
 	pending map[string]*strings.Builder
@@ -27,10 +28,11 @@ type streamParser struct {
 	last    string
 }
 
-func newStreamParser(srv *Server, sessionID string) *streamParser {
+func newStreamParser(srv *Server, sessionID, agent string) *streamParser {
 	return &streamParser{
 		srv:       srv,
 		sessionID: sessionID,
+		agent:     agent,
 		pending:   map[string]*strings.Builder{},
 		done:      make(chan struct{}),
 	}
@@ -49,7 +51,8 @@ func (p *streamParser) complete() {
 }
 
 func (p *streamParser) handle(output runtime.Output) {
-	line := strings.TrimSpace(output.Line)
+	rawLine := output.Line
+	line := strings.TrimSpace(rawLine)
 	if line == "" {
 		return
 	}
@@ -68,11 +71,15 @@ func (p *streamParser) handle(output runtime.Output) {
 	// stdout: try to parse as stream-json first
 	if strings.HasPrefix(line, "{") {
 		var event struct {
-			Type    string          `json:"type"`
-			Subtype string          `json:"subtype,omitempty"`
-			Event   json.RawMessage `json:"event,omitempty"`
-			Message json.RawMessage `json:"message,omitempty"`
-			Result  string          `json:"result,omitempty"`
+			Type     string          `json:"type"`
+			Subtype  string          `json:"subtype,omitempty"`
+			Event    json.RawMessage `json:"event,omitempty"`
+			Message  json.RawMessage `json:"message,omitempty"`
+			Result   string          `json:"result,omitempty"`
+			Stream   string          `json:"stream,omitempty"`
+			Text     string          `json:"text,omitempty"`
+			Line     string          `json:"line,omitempty"`
+			ExitCode int             `json:"exit_code,omitempty"`
 		}
 		if err := json.Unmarshal([]byte(line), &event); err == nil {
 			switch event.Type {
@@ -85,6 +92,20 @@ func (p *streamParser) handle(output runtime.Output) {
 			case "result":
 				p.handleResult(event.Subtype, event.Result)
 				return
+			case "harness.shell_output":
+				if p.agent == "sh" {
+					text := event.Text
+					if text == "" {
+						text = event.Line
+					}
+					p.handleShellOutput(event.Stream, text)
+					return
+				}
+			case "harness.turn_done":
+				if p.agent == "sh" {
+					p.handleShellTurnDone(event.ExitCode)
+					return
+				}
 			case "error":
 				p.err = fmt.Errorf("claude stream error")
 				p.publish("agent.output", output)
@@ -98,6 +119,10 @@ func (p *streamParser) handle(output runtime.Output) {
 		}
 	}
 	// stdout non-JSON: treat as assistant message for raw-text agents.
+	if p.agent == "sh" {
+		p.persistAssistant(rawLine)
+		return
+	}
 	p.persistAssistant(line)
 }
 
@@ -190,6 +215,25 @@ func (p *streamParser) handleResult(subtype, result string) {
 	p.complete()
 }
 
+func (p *streamParser) handleShellOutput(stream, text string) {
+	if stream == "" {
+		stream = "stdout"
+	}
+	if text == "" {
+		return
+	}
+	out := runtime.Output{Stream: stream, Line: text}
+	p.publish("agent.output", out)
+	p.persistShellOutput(text)
+}
+
+func (p *streamParser) handleShellTurnDone(exitCode int) {
+	if exitCode != 0 {
+		p.srv.log.Info("shell turn completed", "session_id", p.sessionID, "exit_code", exitCode)
+	}
+	p.complete()
+}
+
 func (p *streamParser) persistAssistant(text string) {
 	if strings.TrimSpace(text) == "" || text == p.last {
 		return
@@ -200,6 +244,15 @@ func (p *streamParser) persistAssistant(text string) {
 		return
 	}
 	p.last = text
+	p.srv.hub.Publish(events.Event{Type: "agent.message", SessionID: p.sessionID, Payload: stored})
+}
+
+func (p *streamParser) persistShellOutput(text string) {
+	stored, err := p.srv.store.AddMessage(context.Background(), p.sessionID, "assistant", text)
+	if err != nil {
+		p.srv.log.Warn("failed to store shell output", "session_id", p.sessionID, "error", err)
+		return
+	}
 	p.srv.hub.Publish(events.Event{Type: "agent.message", SessionID: p.sessionID, Payload: stored})
 }
 

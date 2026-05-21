@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+import fcntl
+import json
+import os
+import pty
+import re
+import select
+import signal
+import sys
+import termios
+import time
+import tempfile
+import uuid
+
+
+def emit(payload):
+    sys.stdout.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+
+class ShellAgent:
+    def __init__(self):
+        self.master_fd = None
+        self.child_pid = None
+        self.stdin_buf = ""
+        self.pty_buf = ""
+        token = uuid.uuid4().hex
+        self.prompt_prefix = f"__HARNESS_PROMPT_{token}__["
+        self.prompt_suffix = "]__"
+        self.prompt_re = re.compile(
+            re.escape(self.prompt_prefix) + r"(\d+)" + re.escape(self.prompt_suffix)
+        )
+        self.turn_active = False
+        self.shell_path = self.detect_shell()
+        self.rcfile_path = None
+
+    def detect_shell(self):
+        for path in ("/bin/bash", "/usr/bin/bash", "/bin/sh"):
+            if os.path.exists(path):
+                return path
+        return "/bin/sh"
+
+    def spawn(self):
+        if self.shell_path.endswith("bash"):
+            fd, path = tempfile.mkstemp(prefix="harness-shell-", suffix=".rc")
+            self.rcfile_path = path
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write("stty -echo\n")
+                f.write("bind 'set enable-bracketed-paste off'\n")
+                f.write("HISTFILE=/dev/null\n")
+                f.write("PS1=''\n")
+                f.write("PS2=''\n")
+                f.write("PS4=''\n")
+                f.write(
+                    f'PROMPT_COMMAND=\'printf "%s%d%s" "{self.prompt_prefix}" "$?" "{self.prompt_suffix}"\'\n'
+                )
+
+        pid, master_fd = pty.fork()
+        if pid == 0:
+            try:
+                attrs = termios.tcgetattr(0)
+                attrs[3] &= ~termios.ECHO
+                termios.tcsetattr(0, termios.TCSANOW, attrs)
+            except Exception:
+                pass
+
+            os.environ["TERM"] = os.environ.get("TERM", "dumb")
+            if self.shell_path.endswith("bash"):
+                os.execv(self.shell_path, [self.shell_path, "--noprofile", "--rcfile", self.rcfile_path, "-i"])
+
+            os.environ["PS1"] = f"{self.prompt_prefix}$?{self.prompt_suffix}"
+            os.environ["PS2"] = ""
+            os.environ["PS4"] = ""
+            os.environ["HISTFILE"] = "/dev/null"
+            os.environ["ENV"] = ""
+            os.environ["BASH_ENV"] = ""
+            os.execv(self.shell_path, [self.shell_path, "-i"])
+
+        self.child_pid = pid
+        self.master_fd = master_fd
+        self.prime_prompt()
+        self.set_echo(False)
+        if self.rcfile_path:
+            try:
+                os.unlink(self.rcfile_path)
+            except OSError:
+                pass
+        for fd in (sys.stdin.fileno(), self.master_fd):
+            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+            fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+    def set_echo(self, enabled):
+        if self.master_fd is None:
+            return
+        try:
+            attrs = termios.tcgetattr(self.master_fd)
+            if enabled:
+                attrs[3] |= termios.ECHO
+            else:
+                attrs[3] &= ~termios.ECHO
+            termios.tcsetattr(self.master_fd, termios.TCSANOW, attrs)
+        except Exception:
+            pass
+
+    def prime_prompt(self):
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            timeout = max(0, deadline - time.time())
+            readable, _, _ = select.select([self.master_fd], [], [], timeout)
+            if self.master_fd not in readable:
+                break
+            try:
+                data = os.read(self.master_fd, 4096)
+            except BlockingIOError:
+                continue
+            if not data:
+                break
+            self.pty_buf += data.decode("utf-8", errors="replace")
+            match = self.prompt_re.search(self.pty_buf)
+            if match:
+                self.pty_buf = self.pty_buf[match.end():].lstrip("\r\n")
+                return
+        self.pty_buf = ""
+
+    def write_turn(self, content):
+        if self.turn_active:
+            emit({"type": "harness.error", "message": "turn already active"})
+            return
+        if content and not content.endswith("\n"):
+            content += "\n"
+        self.turn_active = True
+        self.set_echo(False)
+        try:
+            os.write(self.master_fd, content.encode("utf-8"))
+        except OSError as err:
+            self.turn_active = False
+            emit({"type": "harness.error", "message": str(err)})
+
+    def interrupt(self):
+        if not self.turn_active:
+            return
+        try:
+            os.write(self.master_fd, b"\x03")
+        except OSError:
+            pass
+        try:
+            os.kill(self.child_pid, signal.SIGINT)
+        except OSError:
+            pass
+
+    def emit_output(self, text):
+        if not text:
+            return
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        normalized = normalized.replace("\x1b[?2004h", "").replace("\x1b[?2004l", "")
+        if not normalized.strip():
+            return
+        emit({"type": "harness.shell_output", "stream": "stdout", "text": normalized})
+
+    def process_buffer(self):
+        while self.pty_buf:
+            match = self.prompt_re.search(self.pty_buf)
+            if match:
+                before = self.pty_buf[: match.start()]
+                if before:
+                    self.emit_output(before)
+                exit_code = int(match.group(1))
+                self.pty_buf = self.pty_buf[match.end() :]
+                self.pty_buf = self.pty_buf.lstrip("\r\n")
+                if self.turn_active:
+                    self.turn_active = False
+                    emit({"type": "harness.turn_done", "exit_code": exit_code})
+                continue
+
+            if "\n" in self.pty_buf:
+                chunk, rest = self.pty_buf.split("\n", 1)
+                self.pty_buf = rest
+                self.emit_output(chunk + "\n")
+                continue
+
+            break
+
+    def loop(self):
+        stdin_fd = sys.stdin.fileno()
+        while True:
+            readable, _, _ = select.select([stdin_fd, self.master_fd], [], [])
+            if stdin_fd in readable:
+                try:
+                    data = os.read(stdin_fd, 4096)
+                except BlockingIOError:
+                    data = b""
+                if not data:
+                    return
+                self.stdin_buf += data.decode("utf-8", errors="replace")
+                while "\n" in self.stdin_buf:
+                    line, self.stdin_buf = self.stdin_buf.split("\n", 1)
+                    if not line.strip():
+                        continue
+                    try:
+                        frame = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    frame_type = frame.get("type")
+                    if frame_type == "turn":
+                        self.write_turn(str(frame.get("content", "")))
+                    elif frame_type == "interrupt":
+                        self.interrupt()
+
+            if self.master_fd in readable:
+                try:
+                    data = os.read(self.master_fd, 4096)
+                except BlockingIOError:
+                    data = b""
+                if not data:
+                    return
+                self.pty_buf += data.decode("utf-8", errors="replace")
+                self.process_buffer()
+
+
+def main():
+    agent = ShellAgent()
+    agent.spawn()
+    agent.loop()
+
+
+if __name__ == "__main__":
+    main()

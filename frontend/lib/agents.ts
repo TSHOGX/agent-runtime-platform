@@ -12,7 +12,7 @@ export type NewSessionOption = {
 };
 
 const AGENT_LABELS: Record<RuntimeAgent, string> = {
-  claude: "Claude Code",
+  claude: "Agent",
   sh: "Shell"
 };
 
