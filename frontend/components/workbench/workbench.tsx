@@ -21,7 +21,7 @@ function Shell() {
     );
   }
   return (
-    <div className="grid h-screen grid-cols-[280px_1fr_400px] bg-[var(--color-background)]">
+    <div className="grid h-screen grid-cols-[280px_minmax(0,1fr)_400px] bg-[var(--color-background)]">
       <Sidebar />
       <Conversation />
       <ArtifactPane />

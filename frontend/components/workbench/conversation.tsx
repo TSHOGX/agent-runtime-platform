@@ -9,6 +9,19 @@ import { Composer } from "./composer";
 import { StatusDot, statusTone } from "@/components/ui/badge";
 import { agentLabel, isAcceptingInput, isTerminal, statusLabel } from "@/lib/format";
 
+function formatRuntimeLine(line: string) {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) {
+    return line;
+  }
+
+  try {
+    return JSON.stringify(JSON.parse(trimmed), null, 2);
+  } catch {
+    return line;
+  }
+}
+
 export function Conversation() {
   const session = useSelectedSession();
   const convo = useConversation(session?.id ?? null);
@@ -47,7 +60,7 @@ export function Conversation() {
   const lastStreamLine = convo.stream[convo.stream.length - 1];
 
   return (
-    <main className="flex h-full min-h-0 flex-col bg-[var(--color-background)]">
+    <main className="flex h-full min-h-0 min-w-0 flex-col bg-[var(--color-background)]">
       <header className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-surface)] px-6 py-3">
         <div className="flex min-w-0 items-center gap-2">
           <StatusDot tone={statusTone(session.status)} />
@@ -83,8 +96,13 @@ export function Conversation() {
       </div>
 
       {showRuntimeFooter && (session.status === "running" || session.status === "running_active") ? (
-        <div className="border-t border-[var(--color-border)] bg-[var(--color-surface-muted)] px-6 py-1.5 font-mono text-[11px] text-[var(--color-foreground-muted)] truncate">
-          {lastStreamLine.stream}: {lastStreamLine.line}
+        <div className="border-t border-[var(--color-border)] bg-[var(--color-surface-muted)] px-6 py-2">
+          <div className="flex min-w-0 gap-2 font-mono text-[11px] leading-4 text-[var(--color-foreground-muted)]">
+            <span className="shrink-0">{lastStreamLine.stream}</span>
+            <div className="min-w-0 flex-1 whitespace-pre-wrap break-words">
+              {formatRuntimeLine(lastStreamLine.line)}
+            </div>
+          </div>
         </div>
       ) : null}
 

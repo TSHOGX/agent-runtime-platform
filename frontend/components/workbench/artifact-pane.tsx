@@ -19,7 +19,7 @@ export function ArtifactPane() {
 
   if (!session) {
     return (
-      <aside className="flex h-full flex-col border-l border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 text-xs text-[var(--color-foreground-muted)]">
+      <aside className="flex h-full min-w-0 flex-col border-l border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 text-xs text-[var(--color-foreground-muted)]">
         <span>Files will appear here once a session is running.</span>
       </aside>
     );

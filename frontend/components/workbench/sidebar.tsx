@@ -32,7 +32,7 @@ export function Sidebar() {
   };
 
   return (
-    <aside className="flex h-full w-[280px] flex-col border-r border-[var(--color-border)] bg-[var(--color-surface)]">
+    <aside className="flex h-full w-[280px] min-w-0 flex-col border-r border-[var(--color-border)] bg-[var(--color-surface)]">
       <div className="flex items-center justify-between px-4 py-3">
         <div className="flex flex-col">
           <span className="text-sm font-semibold tracking-tight">Harness</span>
