@@ -40,7 +40,7 @@ if ! command -v runsc >/dev/null 2>&1; then
 fi
 
 mkdir -p "${BUNDLE_DIR}" "${CHECKPOINT_DIR}" "${RUNSC_ROOT}" "${RUNSC_LOG_DIR}" "${SESSIONS_ROOT}" "${AGENT_HOMES_ROOT}" "${CONTROL_DIR}"
-rm -f "${CONTROL_DIR}/session.env"
+rm -f "${CONTROL_DIR}/session.json" "${CONTROL_DIR}/session.env"
 
 log "writing OCI config to ${BUNDLE_DIR}/config.json"
 ROOTFS_DIR="${ROOTFS_DIR}" \
@@ -71,7 +71,6 @@ config = {
             "PATH=/usr/local/bin:/usr/bin:/bin",
             "LANG=C.UTF-8",
             "MPLCONFIGDIR=/tmp/matplotlib",
-            "HARNESS_CONTROL_FILE=/harness-control/session.env",
         ],
         "cwd": "/",
         "capabilities": {
@@ -165,9 +164,7 @@ config = {
     },
 }
 
-netns_path = os.environ.get("NETNS_PATH")
-if netns_path:
-    config["linux"]["namespaces"].append({"type": "network", "path": netns_path})
+config["linux"]["namespaces"].append({"type": "network", "path": "/var/run/netns/phase1-demo"})
 
 json.dump(config, fp=os.sys.stdout, indent=2)
 print()

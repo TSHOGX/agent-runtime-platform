@@ -9,7 +9,7 @@
 - [x] **Phase 2**: scripted rootfs build, bundle bake, and restore smoke path
 - [x] **Phase 3**: Go orchestrator MVP with session API, checkpoint/restore, artifact metadata, and event hub
 - [x] **Phase 4**: Next.js workbench with same-origin proxy, SSE event stream, and fallback/refresh behavior
-- [x] **Phase 5**: per-container `OutputHub` and stream-parser turn completion routing
+- [x] **Phase 5**: per-container `OutputHub`, stream-parser turn completion routing, and interactive shell sessions
 - [ ] **Phase 6**: artifact UX hardening, live file tree, and richer previews
 - [ ] **Phase 7**: multi-user auth, egress policy, cgroup limits, observability, and a second harness adapter
 
@@ -17,7 +17,7 @@
 
 The project is now past the "prove the runtime" stage. The immediate goals are:
 
-1. Keep the current Claude Code multi-turn path stable.
+1. Keep the current Claude Code and shell session paths stable.
 2. Harden the runtime boundary so the lab shortcut network model can be replaced with the intended sandbox egress policy.
 3. Expand artifact handling from metadata listing to a more interactive file browser.
 4. Prepare the runtime abstraction for a second agent harness.
@@ -74,11 +74,12 @@ The browser reads live events from SSE at `/api/events/stream`. The orchestrator
 - Moved runtime output transport away from a single callback.
 - Added turn completion handling for Claude stream-json frames.
 - Added same-origin SSE on the frontend side.
+- Added the PTY-backed shell session path and shell interrupt support.
 
 ## Remaining Risks
 
-- `runsc` network mode is now configurable, but the current deployment still needs host networking so the local Claude proxy stays reachable; idle checkpointing is disabled in this mode because `runsc checkpoint` cannot handle `hostinet`.
-- Non-Claude agents need their own completion contract before they are first-class multi-turn citizens.
+- `runsc` network mode is now sandbox by default, and the template bundle uses the fixed `/var/run/netns/phase1-demo` namespace so the local Claude proxy stays reachable at `http://10.200.1.1:8082`; idle checkpointing stays on the sandbox path because `runsc checkpoint` cannot handle `hostinet`.
+- Additional agent adapters beyond Claude Code and the shell shim need their own completion contract before they are first-class multi-turn citizens.
 - Artifact browsing is still metadata-first, not file-explorer-first.
 - `OutputHub` drops lines for slow subscribers by design; that is fine for UI logs but not for a forensic audit stream.
 

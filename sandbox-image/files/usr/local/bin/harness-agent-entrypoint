@@ -3,36 +3,70 @@ set -eu
 
 echo "[entrypoint] starting" >&2
 
-CONTROL_FILE="${HARNESS_CONTROL_FILE:-/harness-control/session.env}"
-POLL_INTERVAL="${HARNESS_POLL_INTERVAL:-0.05}"
+CONTROL_JSON_FILE="/harness-control/session.json"
+CONTROL_ENV_FILE="/harness-control/session.env"
+POLL_INTERVAL="0.05"
+AGENT_USER="harness"
+AGENT_UID="65534"
+AGENT_GID="65534"
 
-echo "[entrypoint] waiting for control file: $CONTROL_FILE" >&2
-while [ ! -f "$CONTROL_FILE" ]; do
+echo "[entrypoint] waiting for control file: $CONTROL_JSON_FILE or $CONTROL_ENV_FILE" >&2
+while [ ! -f "$CONTROL_JSON_FILE" ] && [ ! -f "$CONTROL_ENV_FILE" ]; do
   sleep "$POLL_INTERVAL"
 done
 
-echo "[entrypoint] sourcing control file" >&2
-# shellcheck disable=SC1090
-. "$CONTROL_FILE"
+CONTROL_FILE="$CONTROL_ENV_FILE"
+CONTROL_FORMAT="env"
+if [ -f "$CONTROL_JSON_FILE" ]; then
+  CONTROL_FILE="$CONTROL_JSON_FILE"
+  CONTROL_FORMAT="json"
+fi
+
+echo "[entrypoint] loading control file: $CONTROL_FILE" >&2
+if [ "$CONTROL_FORMAT" = "json" ]; then
+  # shellcheck disable=SC2016
+  eval "$(
+    python3 - "$CONTROL_FILE" <<'PY'
+import json
+import shlex
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+def emit(key, value):
+    if value is None or value == "":
+        return
+    if isinstance(value, bool):
+        value = "1" if value else "0"
+    print(f"export {key}={shlex.quote(str(value))}")
+
+emit("SESSION_ID", data.get("session_id"))
+emit("SESSION_WORKSPACE", data.get("session_workspace"))
+emit("HARNESS_AGENT_HOME", data.get("harness_agent_home"))
+emit("HARNESS_AGENT", data.get("harness_agent"))
+emit("CLAUDE_SESSION_UUID", data.get("claude_session_uuid"))
+emit("CLAUDE_RESUME", data.get("claude_resume", False))
+emit("CLAUDE_MODEL", data.get("claude_model", "sonnet"))
+emit("CLAUDE_OUTPUT_FORMAT", data.get("claude_output_format", "stream-json"))
+emit("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", data.get("claude_code_disable_nonessential_traffic", True))
+emit("ANTHROPIC_BASE_URL", data.get("anthropic_base_url"))
+emit("ANTHROPIC_API_KEY", data.get("anthropic_api_key"))
+emit("ANTHROPIC_AUTH_TOKEN", data.get("anthropic_auth_token"))
+PY
+  )"
+else
+  # shellcheck disable=SC1090
+  . "$CONTROL_FILE"
+fi
 
 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export PATH
 
-# Export Claude proxy env vars so the CLI picks them up. Under --bare,
-# Claude Code auth is driven by ANTHROPIC_API_KEY, not the host keychain.
-[ -n "${ANTHROPIC_BASE_URL:-}" ] && export ANTHROPIC_BASE_URL
-if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-  export ANTHROPIC_API_KEY
-elif [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
-  ANTHROPIC_API_KEY="$ANTHROPIC_AUTH_TOKEN"
-  export ANTHROPIC_API_KEY
-fi
-if [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
-  export ANTHROPIC_AUTH_TOKEN
-elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-  ANTHROPIC_AUTH_TOKEN="$ANTHROPIC_API_KEY"
-  export ANTHROPIC_AUTH_TOKEN
-fi
+: "${ANTHROPIC_BASE_URL:?ANTHROPIC_BASE_URL is required in control file}"
+: "${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY is required in control file}"
+: "${ANTHROPIC_AUTH_TOKEN:=$ANTHROPIC_API_KEY}"
+export ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
 [ -n "${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-}" ] && export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
 
 : "${SESSION_ID:?SESSION_ID is required in control file}"
@@ -40,9 +74,6 @@ fi
 SESSION_WORKSPACE="${SESSION_WORKSPACE:-/sessions/$SESSION_ID}"
 mkdir -p "$SESSION_WORKSPACE"
 
-AGENT_USER="${HARNESS_AGENT_USER:-harness}"
-AGENT_UID="${HARNESS_AGENT_UID:-65534}"
-AGENT_GID="${HARNESS_AGENT_GID:-65534}"
 # Keep the agent's writable HOME outside /workspace so Claude internals do not
 # appear in the user-visible file tree or artifact list.
 AGENT_HOME="${HARNESS_AGENT_HOME:-/agent-homes/$SESSION_ID}"

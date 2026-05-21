@@ -14,6 +14,7 @@ The current baseline uses:
 - Checkpoint/restore after idle time.
 - Same-origin Server-Sent Events for the browser event path.
 - Per-container `OutputHub` for multi-turn output routing.
+- PTY-backed shell sessions with interrupt support.
 
 ## Component Model
 
@@ -38,7 +39,7 @@ Go orchestrator
               v
         gVisor sandbox
           |-- harness-agent-entrypoint
-          |-- Claude Code / smoke agent
+          |-- Claude Code / PTY-backed shell agent
           |-- /workspace -> /var/lib/harness/sessions/<session_id>
           `-- /agent-homes/<session_id> -> /var/lib/harness/agent-homes/<session_id>
 ```
@@ -137,7 +138,9 @@ The stream parser marks a turn complete when it sees:
 - `{"type":"error",...}`
 - a non-success result subtype, which is reported as turn output while the session returns to `running_idle`
 
-For non-Claude agents, stdin is raw text. These agents are suitable for smoke tests but do not emit Claude result frames, so they are not equivalent to the full multi-turn Claude path.
+For shell sessions, the `harness-shell-agent` shim runs a PTY-backed shell and emits `harness.shell_output` frames for command output plus `harness.turn_done` when the prompt returns. The orchestrator persists shell output as assistant text, publishes it as `agent.output`, and exposes `POST /api/sessions/{id}/interrupt` for the running turn.
+
+For other future agent adapters, stdin is still the lower-level fallback. Those adapters need their own completion contract before they are first-class multi-turn citizens.
 
 ## Event Model
 
@@ -150,6 +153,8 @@ Runtime output becomes higher-level events:
 | Claude `stream_event` text delta | append to pending assistant text | `agent.delta` |
 | Claude `assistant` message | persist final assistant text | `agent.message` |
 | Claude `result` with text | persist result if not duplicate | `agent.message` |
+| Shell `harness.shell_output` | publish shell output and persist assistant text | `agent.output` / `agent.message` |
+| Shell `harness.turn_done` | mark the shell turn complete | completion |
 | Plain stdout | persist as assistant text | `agent.message` |
 | Artifact watcher | file create/write metadata | `artifact.updated` |
 
@@ -167,6 +172,7 @@ HTTP:
 - `DELETE /api/sessions/{id}`
 - `GET /api/sessions/{id}/messages`
 - `POST /api/sessions/{id}/messages`
+- `POST /api/sessions/{id}/interrupt`
 - `GET /api/sessions/{id}/artifacts`
 - `GET /artifacts/{session_id}/{path}`
 
@@ -195,6 +201,7 @@ Orchestrator:
 | `HARNESS_LAB_PASSWORD` | empty | Enables shared-password auth when set |
 | `HARNESS_COOKIE_NAME` | `harness_auth` | Auth cookie name |
 | `HARNESS_SESSION_TTL` | `2h` | Session expiry horizon |
+| `HARNESS_REPO_ROOT` | repo root | Repository root used to derive bundle paths |
 | `HARNESS_SESSIONS_ROOT` | `/var/lib/harness/sessions` | Host workspace root |
 | `HARNESS_AGENT_HOMES_ROOT` | `/var/lib/harness/agent-homes` | Host root for per-session agent HOME state, mounted outside `/workspace` |
 | `HARNESS_CHECKPOINTS_ROOT` | `/var/lib/harness/checkpoints` | Checkpoint image root |
@@ -203,18 +210,22 @@ Orchestrator:
 | `HARNESS_DEFAULT_AGENT` | `claude` | Default session agent |
 | `HARNESS_MAX_SESSIONS` | `30` | Active session cap |
 | `RUNSC_ROOT` | `/var/lib/harness/runsc` | runsc state root |
-| `RUNSC_NETWORK` | `host` | runsc network mode |
+| `RUNSC_NETWORK` | `sandbox` | runsc network mode |
 | `RUNSC_OVERLAY2` | `none` | runsc overlay2 mode |
 
-Claude control env:
+`HARNESS_RESTORE_SCRIPT` is still parsed by config for compatibility, but the current direct `runsc` path does not execute the script.
 
-| Variable | Purpose |
+Claude control manifest:
+
+| Field | Purpose |
 | --- | --- |
-| `HARNESS_CLAUDE_BASE_URL` / `HARNESS_ANTHROPIC_BASE_URL` | Preferred Anthropic-compatible proxy URL |
-| `HARNESS_CLAUDE_API_KEY` / `HARNESS_CLAUDE_AUTH_TOKEN` | Preferred local Claude proxy credential |
-| `HARNESS_CONTAINER_SESSIONS_ROOT` | In-container sessions mount, default `/sessions` |
-| `HARNESS_CONTAINER_AGENT_HOMES_ROOT` | In-container agent home mount, default `/agent-homes` |
-| `CLAUDE_MODEL` | Claude model alias, default `sonnet` |
+| `proxy_bind_url` | Explicit host bind URL for the local proxy, `http://0.0.0.0:8082` |
+| `anthropic_base_url` | Sandbox-visible proxy URL, `http://10.200.1.1:8082` in the current netns layout |
+| `anthropic_api_key` / `anthropic_auth_token` | Local proxy credential, fixed to `123` for the lab stack |
+| `claude_model` | Claude model alias, default `sonnet` |
+| `claude_code_disable_nonessential_traffic` | Keep Claude Code from making nonessential traffic during sandbox turns |
+| `session_workspace` | In-container sessions mount, default `/sessions/<session_id>` |
+| `harness_agent_home` | In-container agent home mount, default `/agent-homes/<session_id>` |
 
 Frontend:
 
@@ -228,11 +239,11 @@ Frontend:
 
 The target security model remains gVisor sandbox networking plus host-side egress controls for Doris and the local LLM proxy.
 
-The current Go runtime launches `runsc` with `-network host -overlay2 none` because the local LLM proxy is reachable on the host at `http://0.0.0.0:8082`. `HARNESS_CLAUDE_BASE_URL` / `HARNESS_ANTHROPIC_BASE_URL` still override the proxy URL when needed; otherwise the runtime derives a network-specific default proxy root. Host networking is not checkpointable on this host, so the idle monitor skips checkpointing in this mode.
+The current Go runtime launches `runsc` with `-network sandbox -overlay2 none`. It writes an explicit control manifest that fixes the host proxy bind URL at `http://0.0.0.0:8082`, the sandbox-visible Anthropic base URL at `http://10.200.1.1:8082`, and the lab proxy key at `123`. The template bundle uses the fixed `/var/run/netns/phase1-demo` network namespace on this host, so the idle monitor now uses the checkpointable sandbox path.
 
 ## Checkpointing
 
-`MonitorIdleSessions()` runs every 5 minutes. When `RUNSC_NETWORK=host`, it exits immediately because `runsc checkpoint` cannot handle `hostinet`. When a checkpointable network is enabled, a `running_idle` session whose `last_activity_at` is older than 30 minutes is checkpointed:
+`MonitorIdleSessions()` runs every 5 minutes. The default sandbox path checkpoints a `running_idle` session whose `last_activity_at` is older than 30 minutes. If host networking is forced explicitly for a compatibility run, that path remains non-checkpointable and is no longer the default runtime mode:
 
 ```text
 running_idle -> checkpointing -> checkpointed
@@ -242,7 +253,7 @@ running_idle -> checkpointing -> checkpointed
 
 ## Current Limitations
 
-- Non-Claude agents do not emit structured turn-completion frames.
+- Additional agent adapters beyond Claude Code and the shell shim need their own completion contract before they are first-class multi-turn citizens.
 - Artifact UX is still basic: metadata, preview, and download are present; richer live tree and file operations are future work.
 - Resource limits and egress policy are not yet documented as production-ready defaults.
 - The current output hub intentionally drops lines for slow subscribers; that is acceptable for UI logs but should be revisited before using the stream as an audit log.
@@ -252,6 +263,8 @@ running_idle -> checkpointing -> checkpointed
 ```text
 orchestrator/
 ├── cmd/orchestrator/main.go
+├── internal/agents/agents.go
+├── internal/artifacts/watcher.go
 ├── internal/events/hub.go
 ├── internal/runtime/runtime.go
 ├── internal/runtime/output_hub.go
@@ -267,5 +280,6 @@ frontend/
 └── lib/
 
 sandbox-image/files/usr/local/bin/
+├── harness-shell-agent
 └── harness-agent-entrypoint
 ```

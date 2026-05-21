@@ -1,7 +1,7 @@
 # Current Status
 
 > Last updated: 2026-05-21
-> Scope: current baseline after commits `e8b84f0` and `9b803b6`.
+> Scope: current baseline after commits `e8b84f0`, `9b803b6`, and `051f251`.
 
 ## Baseline
 
@@ -14,6 +14,7 @@ Harness Platform now has a working end-to-end lab stack:
 - Per-session workspace under `/var/lib/harness/sessions/<session_id>`.
 - Per-session Claude HOME under `/var/lib/harness/agent-homes/<session_id>`, mounted in gVisor as `/agent-homes/<session_id>` and kept outside `/workspace`.
 - Claude Code stream-json parsing into persisted assistant messages and live UI deltas.
+- PTY-backed shell sessions through `harness-shell-agent`, with shell output persisted as assistant messages and interrupt support for running turns.
 
 ## Recent Commits
 
@@ -44,6 +45,16 @@ Runtime output is now decoupled from a single callback:
 
 This fixes the previous multi-turn issue where only the first `Start()` callback could receive container output.
 
+### `051f251` - Interactive Shell Sessions
+
+The frontend now exposes `Shell` as a first-class session mode instead of a smoke-only shortcut:
+
+- `sh` sessions run through the PTY-backed `harness-shell-agent` shim.
+- Shell turns emit `harness.shell_output` and `harness.turn_done` frames.
+- Shell output is persisted as assistant messages and published as `agent.output`.
+- `POST /api/sessions/<id>/interrupt` interrupts a running shell turn.
+- The session picker offers `Shell` and `Agent`, where `Agent` maps to Claude Code.
+
 ## Current Flow
 
 ```text
@@ -61,10 +72,10 @@ POST /api/sessions/<id>/messages
   -> artifact watcher scans workspace
   -> status: running_idle
 
+Shell turns follow the same session lifecycle, but they complete on `harness.turn_done` and can be interrupted with `POST /api/sessions/<id>/interrupt`.
+
 Idle monitor
-  -> RUNSC_NETWORK=host:
-     -> checkpoint skipped
-  -> checkpointable network:
+  -> checkpointable sandbox network:
      -> after 30 minutes running_idle
      -> status: checkpointing
      -> runsc checkpoint -overlay2 none
@@ -95,6 +106,7 @@ HTTP:
 - `DELETE /api/sessions/<id>`
 - `GET /api/sessions/<id>/messages`
 - `POST /api/sessions/<id>/messages`
+- `POST /api/sessions/<id>/interrupt`
 - `GET /api/sessions/<id>/artifacts`
 - `GET /artifacts/<session_id>/<path>`
 
@@ -121,10 +133,10 @@ Common event types:
 
 ## Current Constraints
 
-- Claude Code is the primary supported agent in the long-lived multi-turn path.
-- `sh` is useful for smoke tests, but it does not have the same Claude `result` frame that marks turn completion.
+- Claude Code is the primary supported analysis path.
+- `Shell` is the supported interactive command path and has its own `turn_done`/`interrupt` contract; future adapters still need their own completion protocol before they are first-class multi-turn citizens.
 - The active Go runtime launches `runsc` directly. `bundle/restore-sandbox.sh` remains a useful Phase 2 smoke tool, not the main orchestrator runtime path.
-- The current Go runtime uses `runsc -network host -overlay2 none` because the local Claude proxy lives on the host. Host networking is not checkpointable on this host, so the idle monitor skips checkpointing in this mode. The target hardened design is still sandbox networking plus host-side egress policy.
+- The current Go runtime uses `runsc -network sandbox -overlay2 none` with the fixed `/var/run/netns/phase1-demo` network namespace for the checkpointable lab path. It writes an explicit control manifest with the host proxy bind URL `http://0.0.0.0:8082`, the sandbox-visible Anthropic base URL `http://10.200.1.1:8082`, and the local key `123`. The target hardened design is still sandbox networking plus host-side egress policy.
 - Artifact metadata is recorded by host-side scanning/watching. A richer live artifact tree and previews remain future work.
 - Auth is lab shared-password cookie auth when `HARNESS_LAB_PASSWORD` is set.
 

@@ -132,52 +132,12 @@ func TestWriteUserTurnRejectsUnsupportedAgent(t *testing.T) {
 	}
 }
 
-func TestBuildControlContentUsesHarnessClaudeKey(t *testing.T) {
-	t.Setenv("ANTHROPIC_API_KEY", "ikun")
-	t.Setenv("HARNESS_CLAUDE_API_KEY", "123")
-	t.Setenv("HARNESS_CLAUDE_BASE_URL", "")
-	t.Setenv("HARNESS_ANTHROPIC_BASE_URL", "")
-	t.Setenv("ANTHROPIC_BASE_URL", "")
-
-	content := buildControlContent(StartRequest{
-		SessionID:         "sess_1",
-		Agent:             "claude",
-		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
-	}, "host")
-
-	if !strings.Contains(content, "export ANTHROPIC_API_KEY='123'\n") {
-		t.Fatalf("expected harness Claude API key in control content, got:\n%s", content)
-	}
-	if strings.Contains(content, "ikun") {
-		t.Fatalf("control content must not inherit generic local ANTHROPIC_API_KEY:\n%s", content)
-	}
-}
-
-func TestBuildControlContentDefaultsToKey123(t *testing.T) {
-	t.Setenv("ANTHROPIC_API_KEY", "ikun")
-	t.Setenv("HARNESS_CLAUDE_API_KEY", "")
-	t.Setenv("HARNESS_CLAUDE_AUTH_TOKEN", "")
-	t.Setenv("HARNESS_ANTHROPIC_API_KEY", "")
-	t.Setenv("HARNESS_ANTHROPIC_AUTH_TOKEN", "")
-	t.Setenv("HARNESS_CLAUDE_BASE_URL", "")
-	t.Setenv("HARNESS_ANTHROPIC_BASE_URL", "")
-	t.Setenv("ANTHROPIC_BASE_URL", "")
-
-	content := buildControlContent(StartRequest{
-		SessionID:         "sess_1",
-		Agent:             "claude",
-		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
-	}, "host")
-
-	if !strings.Contains(content, "export ANTHROPIC_API_KEY='123'\n") {
-		t.Fatalf("expected default Claude API key 123 in control content, got:\n%s", content)
-	}
-}
-
-func TestBuildControlContentUsesContainerWorkspaceAndResumeFlag(t *testing.T) {
-	t.Setenv("HARNESS_CLAUDE_BASE_URL", "")
-	t.Setenv("HARNESS_ANTHROPIC_BASE_URL", "")
-	t.Setenv("ANTHROPIC_BASE_URL", "")
+func TestBuildControlContentUsesExplicitSandboxManifest(t *testing.T) {
+	t.Setenv("HARNESS_CLAUDE_BASE_URL", "http://bad.invalid")
+	t.Setenv("HARNESS_ANTHROPIC_BASE_URL", "http://bad.invalid")
+	t.Setenv("ANTHROPIC_BASE_URL", "http://bad.invalid")
+	t.Setenv("HARNESS_CLAUDE_API_KEY", "bad")
+	t.Setenv("HARNESS_ANTHROPIC_API_KEY", "bad")
 
 	content := buildControlContent(StartRequest{
 		SessionID:         "sess_1",
@@ -186,77 +146,51 @@ func TestBuildControlContentUsesContainerWorkspaceAndResumeFlag(t *testing.T) {
 		ResumeClaude:      true,
 	}, "sandbox")
 
-	if !strings.Contains(content, "export SESSION_WORKSPACE='/sessions/sess_1'\n") {
-		t.Fatalf("expected container workspace path in control content, got:\n%s", content)
+	var manifest controlManifest
+	if err := json.Unmarshal([]byte(content), &manifest); err != nil {
+		t.Fatalf("control content is not valid JSON: %v\n%s", err, content)
 	}
-	if strings.Contains(content, "/tmp/host-sessions") {
-		t.Fatalf("control content must not expose host session path as in-container workspace:\n%s", content)
+	if manifest.SessionID != "sess_1" {
+		t.Fatalf("unexpected session id: %+v", manifest)
 	}
-	if !strings.Contains(content, "export CLAUDE_RESUME='1'\n") {
-		t.Fatalf("expected Claude resume flag in control content, got:\n%s", content)
+	if manifest.SessionWorkspace != "/sessions/sess_1" {
+		t.Fatalf("unexpected session workspace: %+v", manifest)
+	}
+	if manifest.HarnessAgentHome != "/agent-homes/sess_1" {
+		t.Fatalf("unexpected agent home: %+v", manifest)
+	}
+	if !manifest.ClaudeResume {
+		t.Fatalf("expected resume flag to be set: %+v", manifest)
+	}
+	if manifest.ProxyBindURL != "http://0.0.0.0:8082" {
+		t.Fatalf("unexpected proxy bind URL: %+v", manifest)
+	}
+	if manifest.AnthropicBaseURL != "http://10.200.1.1:8082" {
+		t.Fatalf("unexpected sandbox base URL: %+v", manifest)
+	}
+	if manifest.AnthropicAPIKey != "123" || manifest.AnthropicAuthToken != "123" {
+		t.Fatalf("unexpected proxy credential: %+v", manifest)
+	}
+	if !manifest.ClaudeCodeDisableNonessentialTraffic {
+		t.Fatalf("expected nonessential traffic to be disabled: %+v", manifest)
+	}
+	if manifest.ClaudeModel != "sonnet" || manifest.ClaudeOutputFormat != "stream-json" {
+		t.Fatalf("unexpected Claude defaults: %+v", manifest)
 	}
 }
 
-func TestBuildControlContentUsesSessionAgentHome(t *testing.T) {
-	t.Setenv("HARNESS_AGENT_HOME", "")
-	t.Setenv("HARNESS_CLAUDE_BASE_URL", "")
-	t.Setenv("HARNESS_ANTHROPIC_BASE_URL", "")
-	t.Setenv("ANTHROPIC_BASE_URL", "")
-
+func TestBuildControlContentUsesExplicitHostProxyURL(t *testing.T) {
 	content := buildControlContent(StartRequest{
-		SessionID:         "sess_1",
-		Agent:             "claude",
-		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
-	}, "sandbox")
-
-	if !strings.Contains(content, "export HARNESS_AGENT_HOME='/agent-homes/sess_1'\n") {
-		t.Fatalf("expected per-session agent home outside workspace in control content, got:\n%s", content)
-	}
-	if strings.Contains(content, ".agent-home") || strings.Contains(content, "/sessions/sess_1/.") {
-		t.Fatalf("agent home must not be under the workspace, got:\n%s", content)
-	}
-}
-
-func TestBuildControlContentIgnoresUnsafeAgentHomeOverride(t *testing.T) {
-	t.Setenv("HARNESS_AGENT_HOME", "/sessions/sess_1/.home")
-	t.Setenv("HARNESS_CLAUDE_BASE_URL", "")
-	t.Setenv("HARNESS_ANTHROPIC_BASE_URL", "")
-	t.Setenv("ANTHROPIC_BASE_URL", "")
-
-	content := buildControlContent(StartRequest{
-		SessionID:         "sess_1",
-		Agent:             "claude",
-		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
-	}, "sandbox")
-
-	if !strings.Contains(content, "export HARNESS_AGENT_HOME='/agent-homes/sess_1'\n") {
-		t.Fatalf("expected canonical agent home path, got:\n%s", content)
-	}
-	if strings.Contains(content, "/sessions/sess_1/.home") {
-		t.Fatalf("unsafe workspace agent home override leaked into control content:\n%s", content)
-	}
-}
-
-func TestBuildControlContentUsesNetworkSpecificProxyRoot(t *testing.T) {
-	t.Setenv("HARNESS_CLAUDE_BASE_URL", "")
-	t.Setenv("HARNESS_ANTHROPIC_BASE_URL", "")
-	t.Setenv("ANTHROPIC_BASE_URL", "")
-
-	hostContent := buildControlContent(StartRequest{
 		SessionID:         "sess_1",
 		Agent:             "claude",
 		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
 	}, "host")
-	if !strings.Contains(hostContent, "export ANTHROPIC_BASE_URL='http://127.0.0.1:8082'\n") {
-		t.Fatalf("expected host proxy root in control content, got:\n%s", hostContent)
-	}
 
-	sandboxContent := buildControlContent(StartRequest{
-		SessionID:         "sess_1",
-		Agent:             "claude",
-		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
-	}, "sandbox")
-	if !strings.Contains(sandboxContent, "export ANTHROPIC_BASE_URL='http://10.0.0.1:8082'\n") {
-		t.Fatalf("expected sandbox proxy root in control content, got:\n%s", sandboxContent)
+	var manifest controlManifest
+	if err := json.Unmarshal([]byte(content), &manifest); err != nil {
+		t.Fatalf("control content is not valid JSON: %v\n%s", err, content)
+	}
+	if manifest.AnthropicBaseURL != "http://0.0.0.0:8082" {
+		t.Fatalf("expected host proxy URL, got %+v", manifest)
 	}
 }

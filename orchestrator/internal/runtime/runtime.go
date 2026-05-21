@@ -29,6 +29,20 @@ type Config struct {
 	DefaultAgent    string
 }
 
+const (
+	controlFileName                         = "session.json"
+	runscSandboxNetnsName                   = "phase1-demo"
+	runscSandboxNetnsInterface              = "gv-phase1"
+	runscSandboxNetnsCIDR                   = "10.200.1.2/24"
+	runscSandboxGatewayIP                   = "10.200.1.1"
+	controlProxyBindURL                     = "http://0.0.0.0:8082"
+	controlClaudeBaseURLSandbox             = "http://" + runscSandboxGatewayIP + ":8082"
+	controlClaudeAPIKey                     = "123"
+	controlClaudeModel                      = "sonnet"
+	controlClaudeOutputFormat               = "stream-json"
+	controlClaudeDisableNonessentialTraffic = true
+)
+
 type StartRequest struct {
 	SessionID         string
 	RestoreID         string
@@ -47,6 +61,22 @@ type Output struct {
 type Result struct {
 	RestoreMS *int64
 	Err       error
+}
+
+type controlManifest struct {
+	SessionID                            string `json:"session_id"`
+	SessionWorkspace                     string `json:"session_workspace"`
+	HarnessAgentHome                     string `json:"harness_agent_home"`
+	HarnessAgent                         string `json:"harness_agent"`
+	ClaudeSessionUUID                    string `json:"claude_session_uuid,omitempty"`
+	ClaudeResume                         bool   `json:"claude_resume"`
+	ProxyBindURL                         string `json:"proxy_bind_url"`
+	AnthropicBaseURL                     string `json:"anthropic_base_url"`
+	AnthropicAPIKey                      string `json:"anthropic_api_key"`
+	AnthropicAuthToken                   string `json:"anthropic_auth_token"`
+	ClaudeCodeDisableNonessentialTraffic bool   `json:"claude_code_disable_nonessential_traffic"`
+	ClaudeModel                          string `json:"claude_model"`
+	ClaudeOutputFormat                   string `json:"claude_output_format"`
 }
 
 type Runtime struct {
@@ -171,58 +201,29 @@ func (r *Runtime) readRestoreMS(sessionID string) *int64 {
 	return &value
 }
 
-func getenv(key, fallback string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return fallback
-}
-
 func buildControlContent(req StartRequest, runscNetwork string) string {
-	containerSessionsRoot := getenv("HARNESS_CONTAINER_SESSIONS_ROOT", "/sessions")
-	containerAgentHomesRoot := getenv("HARNESS_CONTAINER_AGENT_HOMES_ROOT", "/agent-homes")
-	sessionWorkspace := filepath.Join(containerSessionsRoot, req.SessionID)
-	agentHome := filepath.Join(containerAgentHomesRoot, req.SessionID)
-	claudeBaseURL := firstNonEmpty(
-		os.Getenv("HARNESS_CLAUDE_BASE_URL"),
-		os.Getenv("HARNESS_ANTHROPIC_BASE_URL"),
-		os.Getenv("ANTHROPIC_BASE_URL"),
-		defaultClaudeBaseURL(runscNetwork),
-	)
-	claudeAPIKey := firstNonEmpty(
-		os.Getenv("HARNESS_CLAUDE_API_KEY"),
-		os.Getenv("HARNESS_CLAUDE_AUTH_TOKEN"),
-		os.Getenv("HARNESS_ANTHROPIC_API_KEY"),
-		os.Getenv("HARNESS_ANTHROPIC_AUTH_TOKEN"),
-		"123",
-	)
-
-	lines := []struct {
-		key   string
-		value string
-	}{
-		{"SESSION_ID", req.SessionID},
-		{"HARNESS_AGENT", req.Agent},
-		{"CLAUDE_SESSION_UUID", req.ClaudeSessionUUID},
-		{"CLAUDE_RESUME", boolEnv(req.ResumeClaude)},
-		{"SESSION_WORKSPACE", sessionWorkspace},
-		{"HARNESS_AGENT_HOME", agentHome},
-		{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", getenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")},
-		{"CLAUDE_MODEL", getenv("CLAUDE_MODEL", "sonnet")},
-		{"ANTHROPIC_BASE_URL", claudeBaseURL},
-		{"ANTHROPIC_API_KEY", claudeAPIKey},
-		{"ANTHROPIC_AUTH_TOKEN", claudeAPIKey},
+	sessionWorkspace := filepath.Join("/sessions", req.SessionID)
+	agentHome := filepath.Join("/agent-homes", req.SessionID)
+	manifest := controlManifest{
+		SessionID:                            req.SessionID,
+		SessionWorkspace:                     sessionWorkspace,
+		HarnessAgentHome:                     agentHome,
+		HarnessAgent:                         req.Agent,
+		ClaudeSessionUUID:                    req.ClaudeSessionUUID,
+		ClaudeResume:                         req.ResumeClaude,
+		ProxyBindURL:                         controlProxyBindURL,
+		AnthropicBaseURL:                     defaultClaudeBaseURL(runscNetwork),
+		AnthropicAPIKey:                      controlClaudeAPIKey,
+		AnthropicAuthToken:                   controlClaudeAPIKey,
+		ClaudeCodeDisableNonessentialTraffic: controlClaudeDisableNonessentialTraffic,
+		ClaudeModel:                          controlClaudeModel,
+		ClaudeOutputFormat:                   controlClaudeOutputFormat,
 	}
-
-	var b strings.Builder
-	for _, line := range lines {
-		b.WriteString("export ")
-		b.WriteString(line.key)
-		b.WriteByte('=')
-		b.WriteString(shellQuote(line.value))
-		b.WriteByte('\n')
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return ""
 	}
-	return b.String()
+	return string(data) + "\n"
 }
 
 func (r *Runtime) prepareSessionDirs(sessionID string) error {
@@ -239,34 +240,31 @@ func (r *Runtime) prepareSessionDirs(sessionID string) error {
 	return nil
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
-}
-
-func boolEnv(value bool) string {
-	if value {
-		return "1"
-	}
-	return "0"
-}
-
 func defaultClaudeBaseURL(runscNetwork string) string {
 	if strings.EqualFold(strings.TrimSpace(runscNetwork), "host") {
-		return "http://127.0.0.1:8082"
+		return controlProxyBindURL
 	}
-	return "http://10.0.0.1:8082"
+	return controlClaudeBaseURLSandbox
 }
 
-func shellQuote(value string) string {
-	if value == "" {
-		return "''"
+func (r *Runtime) ensureSandboxNetwork(ctx context.Context) error {
+	if !strings.EqualFold(strings.TrimSpace(r.cfg.RunscNetwork), "sandbox") {
+		return nil
 	}
-	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+
+	commands := [][]string{
+		{"ip", "netns", "exec", runscSandboxNetnsName, "ip", "addr", "replace", runscSandboxNetnsCIDR, "dev", runscSandboxNetnsInterface},
+		{"ip", "netns", "exec", runscSandboxNetnsName, "ip", "link", "set", runscSandboxNetnsInterface, "up"},
+		{"ip", "netns", "exec", runscSandboxNetnsName, "ip", "route", "replace", "default", "via", runscSandboxGatewayIP, "dev", runscSandboxNetnsInterface},
+	}
+	for _, args := range commands {
+		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("configure sandbox network %q: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+		}
+	}
+	return nil
 }
 
 type claudeInputFrame struct {
@@ -429,6 +427,9 @@ func (r *Runtime) startFresh(ctx context.Context, req StartRequest, output func(
 	if err := r.prepareSessionDirs(req.SessionID); err != nil {
 		return Result{Err: err}
 	}
+	if err := r.ensureSandboxNetwork(ctx); err != nil {
+		return Result{Err: err}
+	}
 
 	// Create control file in the shared control directory
 	controlDir := "/var/lib/harness/control/phase2-template"
@@ -436,7 +437,7 @@ func (r *Runtime) startFresh(ctx context.Context, req StartRequest, output func(
 		return Result{Err: fmt.Errorf("create control dir: %w", err)}
 	}
 
-	controlFile := filepath.Join(controlDir, "session.env")
+	controlFile := filepath.Join(controlDir, controlFileName)
 	controlContent := buildControlContent(req, r.cfg.RunscNetwork)
 
 	if err := os.WriteFile(controlFile, []byte(controlContent), 0o644); err != nil {
@@ -540,6 +541,9 @@ func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, ou
 	hub.Publish(OutputEvent{Stream: "runtime", Line: "resuming from checkpoint"})
 
 	if err := r.prepareSessionDirs(req.SessionID); err != nil {
+		return Result{Err: err}
+	}
+	if err := r.ensureSandboxNetwork(ctx); err != nil {
 		return Result{Err: err}
 	}
 
