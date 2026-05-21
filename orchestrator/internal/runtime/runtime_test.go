@@ -25,14 +25,23 @@ func TestWriteUserTurnClaudeJSONLFraming(t *testing.T) {
 		Type    string `json:"type"`
 		Message struct {
 			Role    string `json:"role"`
-			Content string `json:"content"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
 		} `json:"message"`
 	}
 	if err := json.Unmarshal([]byte(strings.TrimSuffix(out, "\n")), &frame); err != nil {
 		t.Fatalf("invalid JSON frame %q: %v", out, err)
 	}
-	if frame.Type != "user" || frame.Message.Role != "user" || frame.Message.Content != "hello world" {
+	if frame.Type != "user" || frame.Message.Role != "user" {
 		t.Fatalf("unexpected frame: %+v", frame)
+	}
+	if len(frame.Message.Content) != 1 {
+		t.Fatalf("expected one content block, got %+v", frame.Message.Content)
+	}
+	if frame.Message.Content[0].Type != "text" || frame.Message.Content[0].Text != "hello world" {
+		t.Fatalf("unexpected content block: %+v", frame.Message.Content[0])
 	}
 }
 
@@ -44,6 +53,19 @@ func TestWriteUserTurnClaudeEscapesNewlines(t *testing.T) {
 	}
 	if strings.Count(buf.String(), "\n") != 1 {
 		t.Fatalf("multi-line input must produce one JSONL frame, got %q", buf.String())
+	}
+	var frame struct {
+		Message struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSuffix(buf.String(), "\n")), &frame); err != nil {
+		t.Fatalf("invalid JSON frame %q: %v", buf.String(), err)
+	}
+	if len(frame.Message.Content) != 1 || frame.Message.Content[0].Text != "line1\nline2" {
+		t.Fatalf("unexpected multi-line content: %+v", frame.Message.Content)
 	}
 }
 

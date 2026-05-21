@@ -209,6 +209,21 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
+type claudeInputFrame struct {
+	Type    string             `json:"type"`
+	Message claudeInputMessage `json:"message"`
+}
+
+type claudeInputMessage struct {
+	Role    string               `json:"role"`
+	Content []claudeContentBlock `json:"content"`
+}
+
+type claudeContentBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
 // writeUserTurn delivers a user message to the agent's stdin.
 //
 // The claude agent runs with `--input-format stream-json`, which expects one
@@ -217,11 +232,13 @@ func shellQuote(value string) string {
 // until the current turn's parser sees a completion event.
 func writeUserTurn(stdin io.Writer, agent, message string) error {
 	if agent == "claude" {
-		frame := map[string]any{
-			"type": "user",
-			"message": map[string]any{
-				"role":    "user",
-				"content": message,
+		frame := claudeInputFrame{
+			Type: "user",
+			Message: claudeInputMessage{
+				Role: "user",
+				Content: []claudeContentBlock{
+					{Type: "text", Text: message},
+				},
 			},
 		}
 		encoded, err := json.Marshal(frame)
