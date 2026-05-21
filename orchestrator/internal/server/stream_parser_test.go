@@ -113,3 +113,27 @@ func TestStreamParserDoesNotFailSessionOnClaudeExecutionError(t *testing.T) {
 		t.Fatalf("expected turn error message to be persisted, got %+v", messages)
 	}
 }
+
+func TestStreamParserPersistsNonSuccessResultText(t *testing.T) {
+	srv, st := newParserTestServer(t)
+	parser := newStreamParser(srv, "sess_1", "claude")
+
+	parser.handle(runtime.Output{Stream: "stdout", Line: `{"type":"result","subtype":"error_during_execution","result":"API Error: 400 {\"detail\":\"Erro\"}"}`})
+
+	select {
+	case <-parser.Done():
+	case <-time.After(time.Second):
+		t.Fatal("parser did not complete after error result event")
+	}
+	if err := parser.Err(); err != nil {
+		t.Fatalf("claude turn execution error should not fail the session: %v", err)
+	}
+
+	messages, err := st.ListMessages(context.Background(), "sess_1")
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	if len(messages) != 1 || messages[0].Content != `API Error: 400 {"detail":"Erro"}` {
+		t.Fatalf("expected result error text to be persisted, got %+v", messages)
+	}
+}
