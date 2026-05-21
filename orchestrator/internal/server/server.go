@@ -32,6 +32,13 @@ import (
 
 const labUserID = "lab"
 
+const (
+	idleCheckpointInterval  = 5 * time.Minute
+	idleCheckpointThreshold = 30 * time.Minute
+	checkpointTimeout       = 2 * time.Minute
+	autoCheckpointEnabled   = false
+)
+
 type Server struct {
 	cfg      config.Config
 	store    *store.Store
@@ -507,19 +514,36 @@ func (s *Server) MonitorIdleSessions(ctx context.Context) error {
 		return nil
 	}
 
-	ticker := time.NewTicker(5 * time.Minute)
+	if err := s.reconcileCheckpointingSessions(ctx); err != nil {
+		s.log.Warn("failed to reconcile checkpointing sessions", "error", err)
+	}
+	if err := s.reconcileCheckpointedSessions(ctx); err != nil {
+		s.log.Warn("failed to reconcile checkpointed sessions", "error", err)
+	}
+	if !autoCheckpointEnabled {
+		s.log.Info("idle checkpoint monitor disabled because runsc restore cannot reconnect agent stdin")
+		return nil
+	}
+
+	ticker := time.NewTicker(idleCheckpointInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ticker.C:
+			if err := s.reconcileCheckpointingSessions(ctx); err != nil {
+				s.log.Warn("failed to reconcile checkpointing sessions", "error", err)
+			}
+			if err := s.reconcileCheckpointedSessions(ctx); err != nil {
+				s.log.Warn("failed to reconcile checkpointed sessions", "error", err)
+			}
 			sessions, err := s.store.ListSessionsByStatus(ctx, string(sessionstate.RunningIdle))
 			if err != nil {
 				s.log.Warn("failed to list idle sessions", "error", err)
 				continue
 			}
 			for _, session := range sessions {
-				if session.LastActivityAt != nil && time.Since(*session.LastActivityAt) > 30*time.Minute {
+				if session.LastActivityAt != nil && time.Since(*session.LastActivityAt) > idleCheckpointThreshold {
 					go s.checkpointSession(ctx, session)
 				}
 			}
@@ -537,7 +561,9 @@ func (s *Server) checkpointSession(ctx context.Context, session store.Session) {
 		return
 	}
 
-	if err := s.runtime.Checkpoint(ctx, session.ID); err != nil {
+	checkpointCtx, cancel := context.WithTimeout(ctx, checkpointTimeout)
+	defer cancel()
+	if err := s.runtime.Checkpoint(checkpointCtx, session.ID); err != nil {
 		s.log.Warn("checkpoint failed", "session_id", session.ID, "error", err)
 		if updateErr := s.store.UpdateSessionStatus(ctx, session.ID, string(sessionstate.RunningIdle), nil); updateErr != nil {
 			s.log.Warn("failed to revert session status after checkpoint error", "session_id", session.ID, "error", updateErr)
@@ -553,4 +579,57 @@ func (s *Server) checkpointSession(ctx context.Context, session store.Session) {
 	}
 
 	s.hub.Publish(events.Event{Type: "session." + string(sessionstate.Checkpointed), SessionID: session.ID})
+}
+
+func (s *Server) reconcileCheckpointingSessions(ctx context.Context) error {
+	sessions, err := s.store.ListSessionsByStatus(ctx, string(sessionstate.Checkpointing))
+	if err != nil {
+		return err
+	}
+	for _, session := range sessions {
+		checkpointPath := filepath.Join(s.cfg.CheckpointsRoot, session.ID)
+		if hasCheckpointImage(checkpointPath) {
+			if err := s.store.UpdateSessionStatus(ctx, session.ID, string(sessionstate.Checkpointed), nil); err != nil {
+				s.log.Warn("failed to mark recovered checkpointed session", "session_id", session.ID, "error", err)
+				continue
+			}
+			s.hub.Publish(events.Event{Type: "session." + string(sessionstate.Checkpointed), SessionID: session.ID, Payload: map[string]string{"recovered": "true"}})
+			continue
+		}
+		if time.Since(session.UpdatedAt) < checkpointTimeout {
+			continue
+		}
+		if err := s.store.UpdateSessionStatus(ctx, session.ID, string(sessionstate.RunningIdle), nil); err != nil {
+			s.log.Warn("failed to revert stale checkpointing session", "session_id", session.ID, "error", err)
+			continue
+		}
+		s.hub.Publish(events.Event{Type: "session." + string(sessionstate.RunningIdle), SessionID: session.ID, Payload: map[string]string{"checkpoint_recovered": "false"}})
+	}
+	return nil
+}
+
+func (s *Server) reconcileCheckpointedSessions(ctx context.Context) error {
+	sessions, err := s.store.ListSessionsByStatus(ctx, string(sessionstate.Checkpointed))
+	if err != nil {
+		return err
+	}
+	for _, session := range sessions {
+		if err := s.store.UpdateSessionStatus(ctx, session.ID, string(sessionstate.RunningIdle), nil); err != nil {
+			s.log.Warn("failed to re-enable checkpointed session", "session_id", session.ID, "error", err)
+			continue
+		}
+		s.hub.Publish(events.Event{Type: "session." + string(sessionstate.RunningIdle), SessionID: session.ID, Payload: map[string]string{"checkpoint_recovered": "disabled"}})
+	}
+	return nil
+}
+
+func hasCheckpointImage(path string) bool {
+	required := []string{"checkpoint.img", "pages.img", "pages_meta.img"}
+	for _, name := range required {
+		info, err := os.Stat(filepath.Join(path, name))
+		if err != nil || info.IsDir() || info.Size() == 0 {
+			return false
+		}
+	}
+	return true
 }

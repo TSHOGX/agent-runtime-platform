@@ -22,6 +22,19 @@ func TestRuntimeStartRejectsUnsupportedAgent(t *testing.T) {
 	}
 }
 
+func TestCleanupExitedContainerDoesNotRemoveReplacement(t *testing.T) {
+	rt := New(Config{})
+	oldContainer := &Container{SessionID: "sess_1", RestoreID: "phase3-sess_1"}
+	newContainer := &Container{SessionID: "sess_1", RestoreID: "phase3-sess_1"}
+
+	rt.containers["sess_1"] = newContainer
+	rt.cleanupExitedContainer(oldContainer)
+
+	if got := rt.containers["sess_1"]; got != newContainer {
+		t.Fatalf("replacement container was removed: got %+v", got)
+	}
+}
+
 func TestWriteUserTurnClaudeJSONLFraming(t *testing.T) {
 	var buf bytes.Buffer
 	if err := writeUserTurn(&buf, "claude", "hello world"); err != nil {

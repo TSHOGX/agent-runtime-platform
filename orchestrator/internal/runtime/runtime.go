@@ -18,15 +18,16 @@ import (
 )
 
 type Config struct {
-	RestoreScript   string
-	RunscRoot       string
-	RunscNetwork    string
-	RunscOverlay2   string
-	SessionsRoot    string
-	AgentHomesRoot  string
-	CheckpointsRoot string
-	BundleRoot      string
-	DefaultAgent    string
+	RestoreScript         string
+	RunscRoot             string
+	RunscNetwork          string
+	RunscOverlay2         string
+	SessionsRoot          string
+	AgentHomesRoot        string
+	CheckpointsRoot       string
+	BundleRoot            string
+	DefaultAgent          string
+	RestoreFromCheckpoint bool
 }
 
 const (
@@ -121,10 +122,14 @@ func (r *Runtime) Start(ctx context.Context, req StartRequest, output func(Outpu
 		return r.sendMessage(ctx, container, req.FirstMessage, req.Done, output)
 	}
 
-	// Check if checkpoint exists (resume path)
+	// Check if checkpoint exists (resume path). This stays opt-in because
+	// runsc restore currently cannot reliably reconnect the long-lived stdin
+	// turn channel used by the agent entrypoint.
 	checkpointPath := filepath.Join(r.cfg.CheckpointsRoot, req.SessionID)
-	if _, err := os.Stat(checkpointPath); err == nil {
-		return r.resumeFromCheckpoint(ctx, req, output)
+	if r.cfg.RestoreFromCheckpoint {
+		if _, err := os.Stat(checkpointPath); err == nil {
+			return r.resumeFromCheckpoint(ctx, req, output)
+		}
 	}
 
 	// Fresh start (cold path)
@@ -181,6 +186,18 @@ func (r *Runtime) removeContainer(container *Container) {
 		delete(r.containers, container.SessionID)
 	}
 	r.mu.Unlock()
+}
+
+func (r *Runtime) cleanupExitedContainer(container *Container) {
+	r.mu.Lock()
+	current := r.containers[container.SessionID]
+	if current == container {
+		delete(r.containers, container.SessionID)
+	}
+	r.mu.Unlock()
+	if current == container {
+		r.cleanupRunscContainer(context.Background(), container.RestoreID)
+	}
 }
 
 func (r *Runtime) stopContainer(container *Container) {
@@ -509,11 +526,8 @@ func (r *Runtime) startFresh(ctx context.Context, req StartRequest, output func(
 	go func() {
 		wg.Wait()
 		_ = cmd.Wait()
-		r.cleanupRunscContainer(context.Background(), containerID)
 		hub.Close() // Close hub when container exits
-		r.mu.Lock()
-		delete(r.containers, req.SessionID)
-		r.mu.Unlock()
+		r.cleanupExitedContainer(container)
 	}()
 
 	// Send first message
@@ -610,11 +624,8 @@ func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, ou
 	go func() {
 		wg.Wait()
 		_ = cmd.Wait()
-		r.cleanupRunscContainer(context.Background(), containerID)
 		hub.Close() // Close hub when container exits
-		r.mu.Lock()
-		delete(r.containers, req.SessionID)
-		r.mu.Unlock()
+		r.cleanupExitedContainer(container)
 	}()
 
 	if req.FirstMessage != "" {
@@ -641,6 +652,9 @@ func (r *Runtime) Checkpoint(ctx context.Context, sessionID string) error {
 	if !exists {
 		return errors.New("container not found")
 	}
+	if err := r.ensureSandboxNetwork(ctx); err != nil {
+		return err
+	}
 
 	checkpointPath := filepath.Join(r.cfg.CheckpointsRoot, sessionID)
 	if err := os.MkdirAll(filepath.Dir(checkpointPath), 0o755); err != nil {
@@ -662,9 +676,9 @@ func (r *Runtime) Checkpoint(ctx context.Context, sessionID string) error {
 		container.RestoreID,
 	)
 
-	if err := cmd.Run(); err != nil {
+	if output, err := cmd.CombinedOutput(); err != nil {
 		_ = os.RemoveAll(checkpointPath)
-		return fmt.Errorf("runsc checkpoint: %w", err)
+		return fmt.Errorf("runsc checkpoint: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 
 	r.mu.Lock()
@@ -673,17 +687,10 @@ func (r *Runtime) Checkpoint(ctx context.Context, sessionID string) error {
 	}
 	r.mu.Unlock()
 
-	// Kill and delete container
+	// The checkpoint image is durable once runsc checkpoint returns. Do not wait
+	// synchronously for the attached runsc run process here; that teardown can
+	// block status finalization and leave the session stuck in checkpointing.
 	container.Cancel()
-	_ = container.Cmd.Wait()
-
-	deleteCmd := exec.CommandContext(ctx, "runsc",
-		"-root", r.cfg.RunscRoot,
-		"-overlay2", r.cfg.RunscOverlay2,
-		"delete",
-		container.RestoreID,
-	)
-	_ = deleteCmd.Run()
 
 	return nil
 }
