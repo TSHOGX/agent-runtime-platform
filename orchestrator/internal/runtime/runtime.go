@@ -167,6 +167,7 @@ func buildControlContent(req StartRequest, sessionsRoot string) string {
 		{"CLAUDE_SESSION_UUID", req.ClaudeSessionUUID},
 		{"CLAUDE_RESUME", boolEnv(req.ResumeClaude)},
 		{"SESSION_WORKSPACE", filepath.Join(containerSessionsRoot, req.SessionID)},
+		{"HARNESS_AGENT_HOME", getenv("HARNESS_AGENT_HOME", "/var/lib/harness-agent")},
 		{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", getenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")},
 		{"CLAUDE_MODEL", getenv("CLAUDE_MODEL", "sonnet")},
 		{"ANTHROPIC_BASE_URL", claudeBaseURL},

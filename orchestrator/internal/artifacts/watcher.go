@@ -26,6 +26,11 @@ func New(root string, store *store.Store, hub *events.Hub, log *slog.Logger) *Wa
 	return &Watcher{root: root, store: store, hub: hub, log: log}
 }
 
+func IsInternalArtifactPath(path string) bool {
+	path = filepath.ToSlash(path)
+	return path == ".home" || strings.HasPrefix(path, ".home/")
+}
+
 func (w *Watcher) Run(ctx context.Context) error {
 	if err := os.MkdirAll(w.root, 0o755); err != nil {
 		return err
@@ -95,6 +100,9 @@ func (w *Watcher) recordPath(ctx context.Context, path string) {
 	}
 	parts := strings.SplitN(rel, string(filepath.Separator), 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return
+	}
+	if IsInternalArtifactPath(parts[1]) {
 		return
 	}
 

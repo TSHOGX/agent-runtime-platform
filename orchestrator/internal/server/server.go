@@ -335,17 +335,28 @@ func (s *Server) destroySession(w http.ResponseWriter, r *http.Request, sessionI
 }
 
 func (s *Server) listArtifacts(w http.ResponseWriter, r *http.Request, sessionID string) {
-	artifacts, err := s.store.ListArtifacts(r.Context(), sessionID)
+	items, err := s.store.ListArtifacts(r.Context(), sessionID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"artifacts": artifacts})
+	filtered := make([]store.Artifact, 0, len(items))
+	for _, item := range items {
+		if artifacts.IsInternalArtifactPath(item.Path) {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"artifacts": filtered})
 }
 
 func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) {
 	parts := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/artifacts/"), "/", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || strings.Contains(parts[1], "..") {
+		writeError(w, http.StatusBadRequest, "invalid artifact path")
+		return
+	}
+	if artifacts.IsInternalArtifactPath(parts[1]) {
 		writeError(w, http.StatusBadRequest, "invalid artifact path")
 		return
 	}

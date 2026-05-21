@@ -43,7 +43,8 @@ mkdir -p "$SESSION_WORKSPACE"
 AGENT_USER="${HARNESS_AGENT_USER:-harness}"
 AGENT_UID="${HARNESS_AGENT_UID:-65534}"
 AGENT_GID="${HARNESS_AGENT_GID:-65534}"
-AGENT_HOME="${HARNESS_AGENT_HOME:-$SESSION_WORKSPACE/.home}"
+# Keep the agent's writable HOME outside the user-visible workspace.
+AGENT_HOME="${HARNESS_AGENT_HOME:-/var/lib/harness-agent}"
 
 ensure_agent_user() {
   mkdir -p "$AGENT_HOME"

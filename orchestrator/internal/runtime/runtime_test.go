@@ -111,3 +111,20 @@ func TestBuildControlContentUsesContainerWorkspaceAndResumeFlag(t *testing.T) {
 		t.Fatalf("expected Claude resume flag in control content, got:\n%s", content)
 	}
 }
+
+func TestBuildControlContentUsesPrivateAgentHome(t *testing.T) {
+	t.Setenv("HARNESS_AGENT_HOME", "")
+
+	content := buildControlContent(StartRequest{
+		SessionID:         "sess_1",
+		Agent:             "claude",
+		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
+	}, "/tmp/host-sessions")
+
+	if !strings.Contains(content, "export HARNESS_AGENT_HOME='/var/lib/harness-agent'\n") {
+		t.Fatalf("expected private agent home in control content, got:\n%s", content)
+	}
+	if strings.Contains(content, "/tmp/host-sessions/.home") {
+		t.Fatalf("control content must not place agent home under the workspace, got:\n%s", content)
+	}
+}
