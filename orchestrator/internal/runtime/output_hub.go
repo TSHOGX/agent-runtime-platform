@@ -4,6 +4,8 @@ import (
 	"sync"
 )
 
+const outputHubBufferSize = 64
+
 // OutputEvent represents a single line of output from a container stream.
 type OutputEvent struct {
 	Stream string // "stdout", "stderr", or "runtime"
@@ -15,14 +17,34 @@ type OutputEvent struct {
 // This decouples output producers (scanLines goroutines) from consumers (stream parsers).
 type OutputHub struct {
 	mu          sync.RWMutex
-	subscribers map[chan OutputEvent]struct{}
+	subscribers map[*outputSubscriber]struct{}
 	closed      bool
+	done        chan struct{}
+	closeOnce   sync.Once
+}
+
+type outputSubscriber struct {
+	ch   chan OutputEvent
+	done chan struct{}
+	once sync.Once
+}
+
+func newOutputSubscriber() *outputSubscriber {
+	return &outputSubscriber{
+		ch:   make(chan OutputEvent, outputHubBufferSize),
+		done: make(chan struct{}),
+	}
+}
+
+func (s *outputSubscriber) signalDone() {
+	s.once.Do(func() { close(s.done) })
 }
 
 // NewOutputHub creates a new OutputHub.
 func NewOutputHub() *OutputHub {
 	return &OutputHub{
-		subscribers: make(map[chan OutputEvent]struct{}),
+		subscribers: make(map[*outputSubscriber]struct{}),
+		done:        make(chan struct{}),
 	}
 }
 
@@ -30,33 +52,37 @@ func NewOutputHub() *OutputHub {
 // Returns a channel that will receive output events and a cancel function.
 // The caller MUST call the cancel function when done to avoid goroutine leaks.
 func (h *OutputHub) Subscribe() (<-chan OutputEvent, func()) {
-	ch := make(chan OutputEvent, 64) // buffered to avoid blocking publishers
+	sub := newOutputSubscriber()
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	if h.closed {
-		close(ch)
-		return ch, func() {}
+		sub.signalDone()
+		close(sub.ch)
+		return sub.ch, func() {}
 	}
 
-	h.subscribers[ch] = struct{}{}
+	h.subscribers[sub] = struct{}{}
 
 	cancel := func() {
+		sub.signalDone()
+
 		h.mu.Lock()
 		defer h.mu.Unlock()
-		if _, exists := h.subscribers[ch]; exists {
-			delete(h.subscribers, ch)
-			close(ch)
+		if _, exists := h.subscribers[sub]; exists {
+			delete(h.subscribers, sub)
+			close(sub.ch)
 		}
 	}
 
-	return ch, cancel
+	return sub.ch, cancel
 }
 
 // Publish sends an event to all subscribers.
-// Uses non-blocking send to avoid slow consumers blocking the publisher.
-// If a subscriber's channel is full, the event is dropped for that subscriber.
+// Publish applies backpressure when a subscriber falls behind. Runtime output is
+// part of the turn protocol, so silently dropping frames can prevent the parser
+// from seeing completion events.
 func (h *OutputHub) Publish(event OutputEvent) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -65,12 +91,12 @@ func (h *OutputHub) Publish(event OutputEvent) {
 		return
 	}
 
-	for ch := range h.subscribers {
+	for sub := range h.subscribers {
 		select {
-		case ch <- event:
-			// Event sent successfully
-		default:
-			// Channel full, drop event for this subscriber to avoid blocking
+		case sub.ch <- event:
+		case <-sub.done:
+		case <-h.done:
+			return
 		}
 	}
 }
@@ -78,16 +104,17 @@ func (h *OutputHub) Publish(event OutputEvent) {
 // Close closes the hub and all subscriber channels.
 // After Close, no more events can be published and Subscribe will return a closed channel.
 func (h *OutputHub) Close() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.closeOnce.Do(func() {
+		close(h.done)
 
-	if h.closed {
-		return
-	}
+		h.mu.Lock()
+		defer h.mu.Unlock()
 
-	h.closed = true
-	for ch := range h.subscribers {
-		close(ch)
-		delete(h.subscribers, ch)
-	}
+		h.closed = true
+		for sub := range h.subscribers {
+			sub.signalDone()
+			close(sub.ch)
+			delete(h.subscribers, sub)
+		}
+	})
 }

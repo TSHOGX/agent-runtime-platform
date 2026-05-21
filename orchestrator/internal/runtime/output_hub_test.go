@@ -119,45 +119,87 @@ func TestOutputHub_SubscribeAfterClose(t *testing.T) {
 	}
 }
 
-func TestOutputHub_NonBlockingPublish(t *testing.T) {
+func TestOutputHub_BackpressuresWhenSubscriberIsFull(t *testing.T) {
 	hub := NewOutputHub()
 	defer hub.Close()
 
 	ch, cancel := hub.Subscribe()
 	defer cancel()
 
-	// Fill the channel buffer (64 events)
-	for i := 0; i < 64; i++ {
+	// Fill the channel buffer.
+	for i := 0; i < outputHubBufferSize; i++ {
 		hub.Publish(OutputEvent{Stream: "stdout", Line: "fill"})
 	}
 
-	// Publish one more event - should not block even though channel is full
-	done := make(chan bool)
+	done := make(chan struct{})
 	go func() {
 		hub.Publish(OutputEvent{Stream: "stdout", Line: "overflow"})
-		done <- true
+		close(done)
 	}()
 
 	select {
 	case <-done:
-		// Success - publish did not block
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("publish blocked on full channel")
+		t.Fatal("publish returned before subscriber made room")
+	case <-time.After(20 * time.Millisecond):
+		// Expected: publish backpressures until a subscriber drains one event.
 	}
 
-	// Drain the channel
-	count := 0
-	for {
-		select {
-		case <-ch:
-			count++
-		case <-time.After(10 * time.Millisecond):
-			// No more events
-			if count != 64 {
-				t.Errorf("expected 64 events (overflow dropped), got %d", count)
-			}
-			return
+	<-ch
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("publish did not unblock after subscriber made room")
+	}
+
+	for i := 0; i < outputHubBufferSize-1; i++ {
+		event := <-ch
+		if event.Line != "fill" {
+			t.Fatalf("expected fill event, got %+v", event)
 		}
+	}
+	event := <-ch
+	if event.Line != "overflow" {
+		t.Fatalf("expected overflow event to be delivered, got %+v", event)
+	}
+}
+
+func TestOutputHub_CancelUnblocksBlockedPublish(t *testing.T) {
+	hub := NewOutputHub()
+	defer hub.Close()
+
+	_, cancel := hub.Subscribe()
+
+	for i := 0; i < outputHubBufferSize; i++ {
+		hub.Publish(OutputEvent{Stream: "stdout", Line: "fill"})
+	}
+
+	publishDone := make(chan struct{})
+	go func() {
+		hub.Publish(OutputEvent{Stream: "stdout", Line: "overflow"})
+		close(publishDone)
+	}()
+
+	select {
+	case <-publishDone:
+		t.Fatal("publish returned before subscriber made room")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	cancelDone := make(chan struct{})
+	go func() {
+		cancel()
+		close(cancelDone)
+	}()
+
+	select {
+	case <-publishDone:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("cancel did not unblock blocked publish")
+	}
+	select {
+	case <-cancelDone:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("cancel did not return")
 	}
 }
 
@@ -171,7 +213,7 @@ func TestOutputHub_ConcurrentPublish(t *testing.T) {
 	// Publish from multiple goroutines concurrently
 	var wg sync.WaitGroup
 	numPublishers := 10
-	eventsPerPublisher := 10 // Reduced to avoid overwhelming the buffer
+	eventsPerPublisher := 10
 
 	// Consume events in background with small delay to simulate processing
 	var receivedMu sync.Mutex
@@ -200,7 +242,6 @@ func TestOutputHub_ConcurrentPublish(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < eventsPerPublisher; j++ {
 				hub.Publish(OutputEvent{Stream: "stdout", Line: "test"})
-				// Small delay to avoid overwhelming the buffer
 				time.Sleep(time.Microsecond)
 			}
 		}(i)
@@ -210,17 +251,11 @@ func TestOutputHub_ConcurrentPublish(t *testing.T) {
 
 	select {
 	case <-done:
-		// Success - all events received
 	case <-time.After(1 * time.Second):
 		receivedMu.Lock()
 		finalReceived := received
 		receivedMu.Unlock()
-		// With non-blocking publish, some events may be dropped if buffer is full
-		// This is expected behavior, so we just verify we got most events
-		if finalReceived < numPublishers*eventsPerPublisher/2 {
-			t.Fatalf("too many events dropped: expected ~%d events, got %d", numPublishers*eventsPerPublisher, finalReceived)
-		}
-		t.Logf("received %d/%d events (some dropped due to non-blocking publish)", finalReceived, numPublishers*eventsPerPublisher)
+		t.Fatalf("expected %d events, got %d", numPublishers*eventsPerPublisher, finalReceived)
 	}
 }
 
