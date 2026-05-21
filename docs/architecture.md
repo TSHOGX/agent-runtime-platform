@@ -203,6 +203,8 @@ Orchestrator:
 | `HARNESS_DEFAULT_AGENT` | `claude` | Default session agent |
 | `HARNESS_MAX_SESSIONS` | `30` | Active session cap |
 | `RUNSC_ROOT` | `/var/lib/harness/runsc` | runsc state root |
+| `RUNSC_NETWORK` | `host` | runsc network mode |
+| `RUNSC_OVERLAY2` | `none` | runsc overlay2 mode |
 
 Claude control env:
 
@@ -226,17 +228,17 @@ Frontend:
 
 The target security model remains gVisor sandbox networking plus host-side egress controls for Doris and the local LLM proxy.
 
-The current Go runtime launches `runsc` with `-network host` in the lab path to simplify local proxy connectivity. This should be treated as an implementation shortcut, not the final hardening state. Phase 2 scripts still document and exercise `RUNSC_NETWORK=sandbox` for checkpoint/restore experiments.
+The current Go runtime launches `runsc` with `-network host -overlay2 none` because the local LLM proxy is reachable on the host at `http://0.0.0.0:8082`. `HARNESS_CLAUDE_BASE_URL` / `HARNESS_ANTHROPIC_BASE_URL` still override the proxy URL when needed; otherwise the runtime derives a network-specific default proxy root. Host networking is not checkpointable on this host, so the idle monitor skips checkpointing in this mode.
 
 ## Checkpointing
 
-`MonitorIdleSessions()` runs every 5 minutes. A `running_idle` session whose `last_activity_at` is older than 30 minutes is checkpointed:
+`MonitorIdleSessions()` runs every 5 minutes. When `RUNSC_NETWORK=host`, it exits immediately because `runsc checkpoint` cannot handle `hostinet`. When a checkpointable network is enabled, a `running_idle` session whose `last_activity_at` is older than 30 minutes is checkpointed:
 
 ```text
 running_idle -> checkpointing -> checkpointed
 ```
 
-`Runtime.Checkpoint()` removes the active container from the map, runs `runsc checkpoint -image-path`, then deletes the runtime container.
+`Runtime.Checkpoint()` keeps the active container in the map until `runsc checkpoint -overlay2 <mode> -image-path` succeeds, then deletes the runtime container. On failure the container stays live and the session falls back to `running_idle`, so a later idle pass can retry in a checkpointable mode.
 
 ## Current Limitations
 

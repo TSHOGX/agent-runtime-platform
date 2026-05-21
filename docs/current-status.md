@@ -62,10 +62,13 @@ POST /api/sessions/<id>/messages
   -> status: running_idle
 
 Idle monitor
-  -> after 30 minutes running_idle
-  -> status: checkpointing
-  -> runsc checkpoint
-  -> status: checkpointed
+  -> RUNSC_NETWORK=host:
+     -> checkpoint skipped
+  -> checkpointable network:
+     -> after 30 minutes running_idle
+     -> status: checkpointing
+     -> runsc checkpoint -overlay2 none
+     -> status: checkpointed
 ```
 
 Canonical session statuses:
@@ -121,7 +124,7 @@ Common event types:
 - Claude Code is the primary supported agent in the long-lived multi-turn path.
 - `sh` is useful for smoke tests, but it does not have the same Claude `result` frame that marks turn completion.
 - The active Go runtime launches `runsc` directly. `bundle/restore-sandbox.sh` remains a useful Phase 2 smoke tool, not the main orchestrator runtime path.
-- The current Go runtime uses `runsc -network host` for the lab path. The target hardened design is still sandbox networking plus host-side egress policy.
+- The current Go runtime uses `runsc -network host -overlay2 none` because the local Claude proxy lives on the host. Host networking is not checkpointable on this host, so the idle monitor skips checkpointing in this mode. The target hardened design is still sandbox networking plus host-side egress policy.
 - Artifact metadata is recorded by host-side scanning/watching. A richer live artifact tree and previews remain future work.
 - Auth is lab shared-password cookie auth when `HARNESS_LAB_PASSWORD` is set.
 

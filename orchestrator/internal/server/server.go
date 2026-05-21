@@ -502,6 +502,11 @@ func writeError(w http.ResponseWriter, status int, message string) {
 }
 
 func (s *Server) MonitorIdleSessions(ctx context.Context) error {
+	if strings.EqualFold(strings.TrimSpace(s.cfg.RunscNetwork), "host") {
+		s.log.Info("idle checkpoint monitor disabled because runsc host network is not checkpointable")
+		return nil
+	}
+
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 
@@ -534,7 +539,11 @@ func (s *Server) checkpointSession(ctx context.Context, session store.Session) {
 
 	if err := s.runtime.Checkpoint(ctx, session.ID); err != nil {
 		s.log.Warn("checkpoint failed", "session_id", session.ID, "error", err)
-		_ = s.store.UpdateSessionStatus(ctx, session.ID, string(sessionstate.Failed), nil)
+		if updateErr := s.store.UpdateSessionStatus(ctx, session.ID, string(sessionstate.RunningIdle), nil); updateErr != nil {
+			s.log.Warn("failed to revert session status after checkpoint error", "session_id", session.ID, "error", updateErr)
+		} else {
+			s.hub.Publish(events.Event{Type: "session." + string(sessionstate.RunningIdle), SessionID: session.ID, Payload: map[string]string{"checkpoint_error": err.Error()}})
+		}
 		return
 	}
 

@@ -52,3 +52,16 @@ func TestCreateSessionRejectsUnsupportedAgent(t *testing.T) {
 		t.Fatalf("expected unsupported agent error, got %s", rec.Body.String())
 	}
 }
+
+func TestMonitorIdleSessionsSkipsHostNetwork(t *testing.T) {
+	srv := &Server{
+		cfg: config.Config{
+			RunscNetwork: "host",
+		},
+		log: slog.Default(),
+	}
+
+	if err := srv.MonitorIdleSessions(context.Background()); err != nil {
+		t.Fatalf("expected idle monitor to exit cleanly in host mode, got %v", err)
+	}
+}

@@ -62,6 +62,8 @@ func main() {
 	rt := runtime.New(runtime.Config{
 		RestoreScript:   cfg.RestoreScript,
 		RunscRoot:       cfg.RunscRoot,
+		RunscNetwork:    cfg.RunscNetwork,
+		RunscOverlay2:   cfg.RunscOverlay2,
 		SessionsRoot:    cfg.SessionsRoot,
 		AgentHomesRoot:  cfg.AgentHomesRoot,
 		CheckpointsRoot: cfg.CheckpointsRoot,

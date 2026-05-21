@@ -135,12 +135,15 @@ func TestWriteUserTurnRejectsUnsupportedAgent(t *testing.T) {
 func TestBuildControlContentUsesHarnessClaudeKey(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "ikun")
 	t.Setenv("HARNESS_CLAUDE_API_KEY", "123")
+	t.Setenv("HARNESS_CLAUDE_BASE_URL", "")
+	t.Setenv("HARNESS_ANTHROPIC_BASE_URL", "")
+	t.Setenv("ANTHROPIC_BASE_URL", "")
 
 	content := buildControlContent(StartRequest{
 		SessionID:         "sess_1",
 		Agent:             "claude",
 		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
-	})
+	}, "host")
 
 	if !strings.Contains(content, "export ANTHROPIC_API_KEY='123'\n") {
 		t.Fatalf("expected harness Claude API key in control content, got:\n%s", content)
@@ -156,12 +159,15 @@ func TestBuildControlContentDefaultsToKey123(t *testing.T) {
 	t.Setenv("HARNESS_CLAUDE_AUTH_TOKEN", "")
 	t.Setenv("HARNESS_ANTHROPIC_API_KEY", "")
 	t.Setenv("HARNESS_ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("HARNESS_CLAUDE_BASE_URL", "")
+	t.Setenv("HARNESS_ANTHROPIC_BASE_URL", "")
+	t.Setenv("ANTHROPIC_BASE_URL", "")
 
 	content := buildControlContent(StartRequest{
 		SessionID:         "sess_1",
 		Agent:             "claude",
 		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
-	})
+	}, "host")
 
 	if !strings.Contains(content, "export ANTHROPIC_API_KEY='123'\n") {
 		t.Fatalf("expected default Claude API key 123 in control content, got:\n%s", content)
@@ -169,12 +175,16 @@ func TestBuildControlContentDefaultsToKey123(t *testing.T) {
 }
 
 func TestBuildControlContentUsesContainerWorkspaceAndResumeFlag(t *testing.T) {
+	t.Setenv("HARNESS_CLAUDE_BASE_URL", "")
+	t.Setenv("HARNESS_ANTHROPIC_BASE_URL", "")
+	t.Setenv("ANTHROPIC_BASE_URL", "")
+
 	content := buildControlContent(StartRequest{
 		SessionID:         "sess_1",
 		Agent:             "claude",
 		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
 		ResumeClaude:      true,
-	})
+	}, "sandbox")
 
 	if !strings.Contains(content, "export SESSION_WORKSPACE='/sessions/sess_1'\n") {
 		t.Fatalf("expected container workspace path in control content, got:\n%s", content)
@@ -189,12 +199,15 @@ func TestBuildControlContentUsesContainerWorkspaceAndResumeFlag(t *testing.T) {
 
 func TestBuildControlContentUsesSessionAgentHome(t *testing.T) {
 	t.Setenv("HARNESS_AGENT_HOME", "")
+	t.Setenv("HARNESS_CLAUDE_BASE_URL", "")
+	t.Setenv("HARNESS_ANTHROPIC_BASE_URL", "")
+	t.Setenv("ANTHROPIC_BASE_URL", "")
 
 	content := buildControlContent(StartRequest{
 		SessionID:         "sess_1",
 		Agent:             "claude",
 		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
-	})
+	}, "sandbox")
 
 	if !strings.Contains(content, "export HARNESS_AGENT_HOME='/agent-homes/sess_1'\n") {
 		t.Fatalf("expected per-session agent home outside workspace in control content, got:\n%s", content)
@@ -206,17 +219,44 @@ func TestBuildControlContentUsesSessionAgentHome(t *testing.T) {
 
 func TestBuildControlContentIgnoresUnsafeAgentHomeOverride(t *testing.T) {
 	t.Setenv("HARNESS_AGENT_HOME", "/sessions/sess_1/.home")
+	t.Setenv("HARNESS_CLAUDE_BASE_URL", "")
+	t.Setenv("HARNESS_ANTHROPIC_BASE_URL", "")
+	t.Setenv("ANTHROPIC_BASE_URL", "")
 
 	content := buildControlContent(StartRequest{
 		SessionID:         "sess_1",
 		Agent:             "claude",
 		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
-	})
+	}, "sandbox")
 
 	if !strings.Contains(content, "export HARNESS_AGENT_HOME='/agent-homes/sess_1'\n") {
 		t.Fatalf("expected canonical agent home path, got:\n%s", content)
 	}
 	if strings.Contains(content, "/sessions/sess_1/.home") {
 		t.Fatalf("unsafe workspace agent home override leaked into control content:\n%s", content)
+	}
+}
+
+func TestBuildControlContentUsesNetworkSpecificProxyRoot(t *testing.T) {
+	t.Setenv("HARNESS_CLAUDE_BASE_URL", "")
+	t.Setenv("HARNESS_ANTHROPIC_BASE_URL", "")
+	t.Setenv("ANTHROPIC_BASE_URL", "")
+
+	hostContent := buildControlContent(StartRequest{
+		SessionID:         "sess_1",
+		Agent:             "claude",
+		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
+	}, "host")
+	if !strings.Contains(hostContent, "export ANTHROPIC_BASE_URL='http://127.0.0.1:8082'\n") {
+		t.Fatalf("expected host proxy root in control content, got:\n%s", hostContent)
+	}
+
+	sandboxContent := buildControlContent(StartRequest{
+		SessionID:         "sess_1",
+		Agent:             "claude",
+		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
+	}, "sandbox")
+	if !strings.Contains(sandboxContent, "export ANTHROPIC_BASE_URL='http://10.0.0.1:8082'\n") {
+		t.Fatalf("expected sandbox proxy root in control content, got:\n%s", sandboxContent)
 	}
 }

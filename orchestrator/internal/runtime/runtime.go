@@ -20,6 +20,8 @@ import (
 type Config struct {
 	RestoreScript   string
 	RunscRoot       string
+	RunscNetwork    string
+	RunscOverlay2   string
 	SessionsRoot    string
 	AgentHomesRoot  string
 	CheckpointsRoot string
@@ -176,7 +178,7 @@ func getenv(key, fallback string) string {
 	return fallback
 }
 
-func buildControlContent(req StartRequest) string {
+func buildControlContent(req StartRequest, runscNetwork string) string {
 	containerSessionsRoot := getenv("HARNESS_CONTAINER_SESSIONS_ROOT", "/sessions")
 	containerAgentHomesRoot := getenv("HARNESS_CONTAINER_AGENT_HOMES_ROOT", "/agent-homes")
 	sessionWorkspace := filepath.Join(containerSessionsRoot, req.SessionID)
@@ -185,7 +187,7 @@ func buildControlContent(req StartRequest) string {
 		os.Getenv("HARNESS_CLAUDE_BASE_URL"),
 		os.Getenv("HARNESS_ANTHROPIC_BASE_URL"),
 		os.Getenv("ANTHROPIC_BASE_URL"),
-		"http://127.0.0.1:8082",
+		defaultClaudeBaseURL(runscNetwork),
 	)
 	claudeAPIKey := firstNonEmpty(
 		os.Getenv("HARNESS_CLAUDE_API_KEY"),
@@ -251,6 +253,13 @@ func boolEnv(value bool) string {
 		return "1"
 	}
 	return "0"
+}
+
+func defaultClaudeBaseURL(runscNetwork string) string {
+	if strings.EqualFold(strings.TrimSpace(runscNetwork), "host") {
+		return "http://127.0.0.1:8082"
+	}
+	return "http://10.0.0.1:8082"
 }
 
 func shellQuote(value string) string {
@@ -428,7 +437,7 @@ func (r *Runtime) startFresh(ctx context.Context, req StartRequest, output func(
 	}
 
 	controlFile := filepath.Join(controlDir, "session.env")
-	controlContent := buildControlContent(req)
+	controlContent := buildControlContent(req, r.cfg.RunscNetwork)
 
 	if err := os.WriteFile(controlFile, []byte(controlContent), 0o644); err != nil {
 		return Result{Err: fmt.Errorf("write control file: %w", err)}
@@ -443,7 +452,8 @@ func (r *Runtime) startFresh(ctx context.Context, req StartRequest, output func(
 	cmd := exec.CommandContext(cmdCtx, "runsc",
 		"-root", r.cfg.RunscRoot,
 		"-platform", "systrap",
-		"-network", "host",
+		"-overlay2", r.cfg.RunscOverlay2,
+		"-network", r.cfg.RunscNetwork,
 		"run",
 		"-bundle", bundlePath,
 		containerID,
@@ -543,7 +553,8 @@ func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, ou
 	cmd := exec.CommandContext(cmdCtx, "runsc",
 		"-root", r.cfg.RunscRoot,
 		"-platform", "systrap",
-		"-network", "host",
+		"-overlay2", r.cfg.RunscOverlay2,
+		"-network", r.cfg.RunscNetwork,
 		"restore",
 		"-bundle", bundlePath,
 		"-image-path", checkpointPath,
@@ -619,12 +630,9 @@ func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, ou
 }
 
 func (r *Runtime) Checkpoint(ctx context.Context, sessionID string) error {
-	r.mu.Lock()
+	r.mu.RLock()
 	container, exists := r.containers[sessionID]
-	if exists {
-		delete(r.containers, sessionID)
-	}
-	r.mu.Unlock()
+	r.mu.RUnlock()
 
 	if !exists {
 		return errors.New("container not found")
@@ -634,18 +642,32 @@ func (r *Runtime) Checkpoint(ctx context.Context, sessionID string) error {
 	if err := os.MkdirAll(filepath.Dir(checkpointPath), 0o755); err != nil {
 		return fmt.Errorf("create checkpoint dir: %w", err)
 	}
+	if err := os.RemoveAll(checkpointPath); err != nil {
+		return fmt.Errorf("clear checkpoint dir: %w", err)
+	}
+	if err := os.MkdirAll(checkpointPath, 0o755); err != nil {
+		return fmt.Errorf("create checkpoint image dir: %w", err)
+	}
 
 	// Create checkpoint
 	cmd := exec.CommandContext(ctx, "runsc",
 		"-root", r.cfg.RunscRoot,
+		"-overlay2", r.cfg.RunscOverlay2,
 		"checkpoint",
 		"-image-path", checkpointPath,
 		container.RestoreID,
 	)
 
 	if err := cmd.Run(); err != nil {
+		_ = os.RemoveAll(checkpointPath)
 		return fmt.Errorf("runsc checkpoint: %w", err)
 	}
+
+	r.mu.Lock()
+	if current := r.containers[sessionID]; current == container {
+		delete(r.containers, sessionID)
+	}
+	r.mu.Unlock()
 
 	// Kill and delete container
 	container.Cancel()
@@ -653,6 +675,7 @@ func (r *Runtime) Checkpoint(ctx context.Context, sessionID string) error {
 
 	deleteCmd := exec.CommandContext(ctx, "runsc",
 		"-root", r.cfg.RunscRoot,
+		"-overlay2", r.cfg.RunscOverlay2,
 		"delete",
 		container.RestoreID,
 	)

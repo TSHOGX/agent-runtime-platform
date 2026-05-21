@@ -77,7 +77,7 @@ The browser reads live events from SSE at `/api/events/stream`. The orchestrator
 
 ## Remaining Risks
 
-- `runsc -network host` is still a lab shortcut.
+- `runsc` network mode is now configurable, but the current deployment still needs host networking so the local Claude proxy stays reachable; idle checkpointing is disabled in this mode because `runsc checkpoint` cannot handle `hostinet`.
 - Non-Claude agents need their own completion contract before they are first-class multi-turn citizens.
 - Artifact browsing is still metadata-first, not file-explorer-first.
 - `OutputHub` drops lines for slow subscribers by design; that is fine for UI logs but not for a forensic audit stream.

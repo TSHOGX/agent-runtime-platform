@@ -46,8 +46,10 @@ Useful environment variables:
 - `HARNESS_DEFAULT_AGENT` defaults to `claude`.
 - `HARNESS_MAX_SESSIONS` defaults to `30`.
 - `RUNSC_ROOT` defaults to `/var/lib/harness/runsc`.
+- `RUNSC_NETWORK` defaults to `host`.
+- `RUNSC_OVERLAY2` defaults to `none`.
 
-The runtime currently launches `runsc` directly and keeps containers alive across turns. `bundle/restore-sandbox.sh` is still useful as a smoke-test boundary, but it is not the main request path anymore.
+The runtime currently launches `runsc` directly and keeps containers alive across turns. `RUNSC_NETWORK=host` is required today because the local Claude proxy lives on the host at `http://0.0.0.0:8082`; idle checkpointing is therefore disabled in host mode because `runsc checkpoint` cannot checkpoint `hostinet` containers. `bundle/restore-sandbox.sh` is still useful as a smoke-test boundary, but it is not the main request path anymore.
 
 ## Event Streams
 

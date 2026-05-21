@@ -22,6 +22,8 @@ type Config struct {
 	DBPath          string
 	DefaultAgent    string
 	MaxSessions     int
+	RunscNetwork    string
+	RunscOverlay2   string
 }
 
 func Load() (Config, error) {
@@ -49,6 +51,8 @@ func Load() (Config, error) {
 		DBPath:          getenv("HARNESS_DB_PATH", filepath.Join(sessionsRoot, "orchestrator.db")),
 		DefaultAgent:    getenv("HARNESS_DEFAULT_AGENT", "claude"),
 		MaxSessions:     intEnv("HARNESS_MAX_SESSIONS", 30),
+		RunscNetwork:    getenv("RUNSC_NETWORK", "host"),
+		RunscOverlay2:   getenv("RUNSC_OVERLAY2", "none"),
 	}
 	return cfg, nil
 }
