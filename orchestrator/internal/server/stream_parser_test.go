@@ -116,7 +116,7 @@ func TestStreamParserDoesNotFailSessionOnClaudeExecutionError(t *testing.T) {
 
 func TestStreamParserPersistsNonSuccessResultText(t *testing.T) {
 	srv, st := newParserTestServer(t)
-	parser := newStreamParser(srv, "sess_1", "claude")
+	parser := newStreamParser(srv, "sess_1")
 
 	parser.handle(runtime.Output{Stream: "stdout", Line: `{"type":"result","subtype":"error_during_execution","result":"API Error: 400 {\"detail\":\"Erro\"}"}`})
 
