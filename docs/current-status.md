@@ -119,8 +119,7 @@ Common event types:
 ## Current Constraints
 
 - Claude Code is the primary supported agent in the long-lived multi-turn path.
-- `sh` and `demo` are useful for smoke tests, but they do not have the same Claude `result` frame that marks turn completion.
-- OpenCode is locally verified as a harness candidate, but the sandbox entrypoint does not currently launch it.
+- `sh` is useful for smoke tests, but it does not have the same Claude `result` frame that marks turn completion.
 - The active Go runtime launches `runsc` directly. `bundle/restore-sandbox.sh` remains a useful Phase 2 smoke tool, not the main orchestrator runtime path.
 - The current Go runtime uses `runsc -network host` for the lab path. The target hardened design is still sandbox networking plus host-side egress policy.
 - Artifact metadata is recorded by host-side scanning/watching. A richer live artifact tree and previews remain future work.

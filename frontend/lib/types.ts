@@ -7,8 +7,6 @@ export type SessionStatus =
   | "failed"
   | "destroyed";
 
-export type AgentKind = "claude" | "opencode" | "sh";
-
 export type ApiSession = {
   id: string;
   user_id: string;

@@ -43,7 +43,7 @@ Useful environment variables:
 - `HARNESS_AGENT_HOMES_ROOT` defaults to `/var/lib/harness/agent-homes`.
 - `HARNESS_CHECKPOINTS_ROOT` defaults to `/var/lib/harness/checkpoints`.
 - `HARNESS_BUNDLE_ROOT` defaults to `<repo>/bundle/out`.
-- `HARNESS_DEFAULT_AGENT` defaults to `demo`.
+- `HARNESS_DEFAULT_AGENT` defaults to `claude`.
 - `HARNESS_MAX_SESSIONS` defaults to `30`.
 - `RUNSC_ROOT` defaults to `/var/lib/harness/runsc`.
 
@@ -101,4 +101,3 @@ curl -b /tmp/harness.cookies \
 
 - The current Claude path uses stream-json turns and a per-container output hub.
 - `sh` is still available as a smoke agent.
-- OpenCode is not launched by the entrypoint yet.

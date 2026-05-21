@@ -177,7 +177,7 @@ The current frontend baseline has moved beyond this round log:
 ### 本轮完成内容
 
 - 接通工作台创建 session 交互：
-  - agent selector 可选 `claude` / `opencode` / `sh`。
+  - agent selector 可选 `Shell` / `Agent`，其中 `Agent` 对应 Claude Code。
   - Real backend 模式通过 same-origin proxy 调用 `POST /api/sessions`。
   - Mock fallback 模式可创建本地 mock session。
 - 接通一次任务运行交互：

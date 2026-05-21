@@ -7,7 +7,8 @@ import { useConversation, useHarness, useSelectedSession } from "@/components/ha
 import { MessageBubble, StreamingBubble } from "./message-bubble";
 import { Composer } from "./composer";
 import { StatusDot, statusTone } from "@/components/ui/badge";
-import { agentLabel, isAcceptingInput, isTerminal, statusLabel } from "@/lib/format";
+import { agentLabel } from "@/lib/agents";
+import { isAcceptingInput, isTerminal, statusLabel } from "@/lib/format";
 
 function formatRuntimeLine(line: string) {
   const trimmed = line.trim();

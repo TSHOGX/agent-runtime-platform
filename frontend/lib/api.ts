@@ -1,3 +1,4 @@
+import type { RuntimeAgent } from "./agents";
 import type { ApiArtifact, ApiMessage, ApiSession, SessionStatus } from "./types";
 
 export type RequestResult<T> =
@@ -42,7 +43,7 @@ export async function fetchSession(sessionId: string) {
   return request<ApiSession>(`/api/sessions/${encodeURIComponent(sessionId)}`);
 }
 
-export async function createSession(agent: string) {
+export async function createSession(agent: RuntimeAgent) {
   return request<ApiSession>("/api/sessions", {
     method: "POST",
     headers: { "content-type": "application/json" },

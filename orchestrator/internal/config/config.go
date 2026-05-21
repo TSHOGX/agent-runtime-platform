@@ -47,7 +47,7 @@ func Load() (Config, error) {
 		CheckpointsRoot: getenv("HARNESS_CHECKPOINTS_ROOT", "/var/lib/harness/checkpoints"),
 		BundleRoot:      getenv("HARNESS_BUNDLE_ROOT", filepath.Join(repoRoot, "bundle", "out")),
 		DBPath:          getenv("HARNESS_DB_PATH", filepath.Join(sessionsRoot, "orchestrator.db")),
-		DefaultAgent:    getenv("HARNESS_DEFAULT_AGENT", "demo"),
+		DefaultAgent:    getenv("HARNESS_DEFAULT_AGENT", "claude"),
 		MaxSessions:     intEnv("HARNESS_MAX_SESSIONS", 30),
 	}
 	return cfg, nil

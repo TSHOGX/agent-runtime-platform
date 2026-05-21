@@ -46,7 +46,7 @@ func newParserTestServer(t *testing.T) (*Server, *store.Store) {
 
 func TestStreamParserCompletesOnClaudeResultWithoutDuplicate(t *testing.T) {
 	srv, st := newParserTestServer(t)
-	parser := newStreamParser(srv, "sess_1", "claude")
+	parser := newStreamParser(srv, "sess_1")
 
 	parser.handle(runtime.Output{Stream: "stdout", Line: `{"type":"assistant","message":{"id":"msg_1","role":"assistant","content":[{"type":"text","text":"hi"}]}}`})
 	parser.handle(runtime.Output{Stream: "stdout", Line: `{"type":"result","subtype":"success","result":"hi"}`})
@@ -71,7 +71,7 @@ func TestStreamParserCompletesOnClaudeResultWithoutDuplicate(t *testing.T) {
 
 func TestStreamParserPersistsResultWhenAssistantMessageIsMissing(t *testing.T) {
 	srv, st := newParserTestServer(t)
-	parser := newStreamParser(srv, "sess_1", "claude")
+	parser := newStreamParser(srv, "sess_1")
 
 	parser.handle(runtime.Output{Stream: "stdout", Line: `{"type":"result","subtype":"success","result":"hi"}`})
 
@@ -92,7 +92,7 @@ func TestStreamParserPersistsResultWhenAssistantMessageIsMissing(t *testing.T) {
 
 func TestStreamParserDoesNotFailSessionOnClaudeExecutionError(t *testing.T) {
 	srv, st := newParserTestServer(t)
-	parser := newStreamParser(srv, "sess_1", "claude")
+	parser := newStreamParser(srv, "sess_1")
 
 	parser.handle(runtime.Output{Stream: "stdout", Line: `{"type":"result","subtype":"error_during_execution"}`})
 
