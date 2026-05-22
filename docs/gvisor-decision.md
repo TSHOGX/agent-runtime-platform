@@ -3,6 +3,7 @@
 > 日期：2026-05-19
 > 决策人：项目主理 + 本机 Phase 0 排查
 > 状态：✅ 已生效，PLAN.md 已按此重写
+> 当前注记：gVisor 运行时选择仍然有效；checkpoint-safe 会话恢复的后续架构见 `checkpoint-safe-control-plane-architecture.md`。
 
 ## 1. 上下文
 

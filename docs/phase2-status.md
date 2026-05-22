@@ -2,6 +2,7 @@
 
 > Date: 2026-05-19
 > Scope: scripted rootfs build, OCI bundle baking, checkpoint/restore sandbox startup.
+> Current reading note: this is a Phase 2 restore smoke-test record. The active orchestrator keeps live containers across turns, and automatic idle checkpointing is disabled until the Phase 7 checkpoint-safe control plane is implemented.
 
 ## Completed
 
@@ -20,7 +21,7 @@
   - Records restore timing in `/var/lib/harness/sessions/<session_id>/restore_ms.txt`.
 - Added rootfs entrypoint source files under `sandbox-image/files/usr/local/bin/`.
   - `harness-agent-entrypoint` waits for control input, binds `/workspace` to `/sessions/<session_id>`, then runs the selected agent.
-  - `phase1_demo.py` is now versioned outside the ignored generated rootfs.
+  - Current tracked entrypoint assets are `harness-agent-entrypoint` and `harness-shell-agent`; older generated rootfs-only helpers remain historical.
 
 ## Verified
 
@@ -47,6 +48,7 @@ Result:
 - `runsc checkpoint` on this host does not support `--network=host`, so Phase 2 defaults to `RUNSC_NETWORK=sandbox`.
 - `runsc restore` failed with the default `overlay2=root:self`, so Phase 2 explicitly uses `RUNSC_OVERLAY2=none`.
 - The `<100 ms` warm restore gate should now be approached with pool-based reuse and restore tuning; the official release no longer has warm sentry, and current standard restore on this host is about `124 ms`.
+- A successful `runsc restore` smoke test does not by itself prove that the current stdin-based turn channel can resume safely after checkpoint/restore.
 
 ## Next Step
 

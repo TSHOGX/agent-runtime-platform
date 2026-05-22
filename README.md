@@ -8,18 +8,20 @@
 
 最新基线见 [docs/current-status.md](./docs/current-status.md)。
 
-- Orchestrator 已改为长生命周期容器：会话在消息之间保持运行，空闲后 checkpoint。
+- Orchestrator 目前使用长生命周期容器：会话在消息之间保持运行。自动空闲 checkpoint 已暂时关闭，直到 Phase 7 的 checkpoint-safe 控制面落地。
 - 多轮输出路由已通过 per-container `OutputHub` 修复；每次用户 turn 都会订阅当前容器输出。
 - 浏览器事件流走 frontend same-origin SSE：`GET /api/events/stream`，orchestrator 仍保留 WebSocket 兼容端点 `/api/events`。
 - 前端会在发送消息后轮询 messages/session/artifacts，作为 SSE 断线时的状态补偿。
-- Claude Code 是当前主路径；`Shell` 走 `sh` smoke 路径，`Agent` 直接映射到 Claude Code。
+- Claude Code 是当前主路径；`Shell` 是 PTY-backed 的交互式命令会话，`Agent` 直接映射到 Claude Code。
+- 本地 Claude proxy 配置显式写在 `config/harness.yaml`：宿主机监听 `http://0.0.0.0:8082`，sandbox 访问 `http://10.200.1.1:8082`，key 为 `123`。
 
 ## 文档
 
 ### 当前设计
 
-- [docs/current-status.md](./docs/current-status.md) - 当前可用能力、最近两次提交影响和约束
+- [docs/current-status.md](./docs/current-status.md) - 当前可用能力、近期提交影响和约束
 - [docs/architecture.md](./docs/architecture.md) - 当前架构、状态机、事件流和运行时设计
+- [docs/checkpoint-safe-control-plane-architecture.md](./docs/checkpoint-safe-control-plane-architecture.md) - checkpoint-safe 控制面与 Phase 7 重构目标
 - [docs/PLAN.md](./docs/PLAN.md) - 总体路线图和后续阶段
 
 ### 技术决策与研究
@@ -66,11 +68,11 @@ PORT=8000 npm run dev
 
 ```text
 harness-platform/
+├── config/             # 显式 lab runtime / Claude proxy 配置
 ├── docs/               # 当前设计、路线图、阶段记录和研究文档
 ├── orchestrator/       # Go：会话 API、runtime、事件流、artifact watcher
 ├── frontend/           # Next.js：三栏工作台和 same-origin proxy
 ├── sandbox-image/      # rootfs 构建脚本、OCI config.json 模板、entrypoint
 ├── bundle/             # runsc bundle/checkpoint 辅助脚本
-├── schema-pack/        # Doris 表 schema markdown
-└── infra/              # 后续系统配置与运行手册预留
+└── schema-pack/        # Doris 表 schema markdown
 ```

@@ -2,6 +2,7 @@
 
 > Date: 2026-05-20
 > Scope: `runsc` 新版本下 warm sentry / checkpoint restore 能力确认。
+> Current reading note: this document confirms `runsc` checkpoint/restore capability and the absence of warm sentry. It does not imply that the current stdin-based turn channel is safe to resume after restore; that gap is tracked in `checkpoint-safe-control-plane-architecture.md`.
 
 ## 背景
 

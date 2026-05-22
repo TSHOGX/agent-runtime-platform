@@ -68,7 +68,9 @@ Environment overrides:
 ## Current Agent Flow
 
 - Create a session through `POST /api/sessions`.
+- `Agent` maps to Claude Code; `Shell` maps to the PTY-backed shell session.
 - Send a task prompt through `POST /api/sessions/:id/messages`.
+- Interrupt a running shell session through `POST /api/sessions/:id/interrupt`.
 - The orchestrator currently keeps a session alive across turns once the sandbox is running.
-- The new session picker exposes `Shell` and `Agent`, where `Agent` maps to the agent runtime.
-- `sh` remains useful for smoke tests.
+- Automatic idle checkpointing is currently disabled; session recovery work is tracked in the Phase 7 checkpoint-safe control-plane design.
+- `sh` remains useful for smoke tests and shell-style debugging.

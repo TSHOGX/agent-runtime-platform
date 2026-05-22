@@ -2,12 +2,15 @@
 
 > 测试时间：2026-05-19
 > 目的：确认本机 Claude Code Proxy、Claude Code、OpenCode 能否通过 Anthropic-compatible 方式完成最小请求。
+> 当前实现注记：OpenCode 只保留为 Phase 0 候选验证记录；当前 agent registry 支持 Claude Code 和 PTY-backed Shell。
 
 ## 环境概览
 
 - Claude Code Proxy 路径：`/root/claude-code-proxy`
 - Proxy 运行方式：`uv run claude-code-proxy`
 - 本地 Anthropic-compatible 地址：`http://127.0.0.1:8082`
+- Harness sandbox-visible 地址：`http://10.200.1.1:8082`
+- Harness 当前本地 client key：`123`
 - Claude Messages endpoint：`/v1/messages`
 - 上游 OpenAI-compatible base URL：`https://api.modelarts-maas.com/openai/v1`
 - 上游模型映射：`deepseek-v4-pro`
@@ -95,5 +98,6 @@ opencode run --pure \
 ## 对项目的影响
 
 - Phase 0 的 LLM API / harness 连通性已验证：本机已有可用的 Anthropic-compatible proxy。
-- Phase 1 在 sandbox 内集成时，可以优先复用同一组约定：`ANTHROPIC_BASE_URL` 指向 proxy 的 `/v1` base URL，`ANTHROPIC_API_KEY` 使用本地 client key（通过 OCI `process.env` 注入，不烤进 rootfs）。
-- OpenCode 和 Claude Code 均可作为 harness 候选，但二者对配置来源和 base URL 拼接细节不同，后续 sandbox 启动时需要分别适配。
+- 当前 orchestrator 不依赖宿主机 Claude settings。它从 `config/harness.yaml` 显式读取 proxy 配置，并写入每个 session 的 `session.json`：宿主机 bind URL `http://0.0.0.0:8082`、sandbox base URL `http://10.200.1.1:8082`、本地 key `123`。
+- Phase 1 在 sandbox 内集成时，可以优先复用同一组约定：`ANTHROPIC_BASE_URL` 指向 proxy 的 `/v1` base URL，`ANTHROPIC_API_KEY` 使用本地 client key（通过 runtime control manifest 注入，不烤进 rootfs）。
+- OpenCode 当时验证为可行候选，但当前实现没有注册 OpenCode agent；现有主路径是 Claude Code，Shell 作为交互式命令会话。

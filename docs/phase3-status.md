@@ -2,6 +2,7 @@
 
 > Date: 2026-05-21
 > Scope: Go orchestrator MVP for session API, sandbox restore boundary, event publication, artifact metadata, and lab auth.
+> Current reading note: this is a historical Phase 3 record. The active runtime now drives `runsc` directly, uses explicit `config/harness.yaml` proxy settings, and has automatic idle checkpointing disabled until the Phase 7 checkpoint-safe control plane exists.
 
 ## Completed
 
@@ -63,6 +64,6 @@ If `HARNESS_LAB_PASSWORD` is set, first call `/api/login` and pass the returned 
 ## Important Notes
 
 - The MVP originally reused the Phase 2 shell script as the runtime boundary. That note is now historical; the active orchestrator path drives `runsc` directly.
-- For deterministic curl smoke tests, `sh` is still useful, but Claude is the supported multi-turn path.
-- The upgraded `runsc release-20260511.0` no longer reproduces the long-running service restore panic on this host, so the direct runtime path stays on restore instead of a cold fallback script.
+- The shell path is now an interactive PTY-backed session with `/api/sessions/<id>/interrupt`; Claude remains the primary long-form analysis path.
+- The upgraded `runsc release-20260511.0` no longer reproduces the earlier long-running service restore panic on this host, but checkpoint/restore is not the default orchestrator path because the stdin turn channel is not reconnectable enough after restore.
 - Multi-turn routing is now handled by the per-container `OutputHub` and stream parser completion logic.

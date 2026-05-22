@@ -2,6 +2,7 @@
 
 > Last updated: 2026-05-21 Asia/Shanghai
 > Scope guard: only frontend Phase 4 files and this status file were changed in this round.
+> Current reading note: this is a historical frontend round log. The active runtime has automatic idle checkpointing disabled, and Phase 7 will add checkpoint-safe recovery semantics behind the same frontend API surface.
 
 ## Current Note
 
@@ -12,7 +13,7 @@ The current frontend baseline has moved beyond this round log:
 - The UI no longer depends on a direct browser WebSocket connection to the orchestrator.
 - The current session lifecycle uses only canonical long-lived states: `created`, `running_active`, `running_idle`, `checkpointing`, `checkpointed`, `failed`, and `destroyed`.
 - The top-level "backend unreachable" state is the current non-healthy backend behavior; there is no separate mock workspace in the live path.
-- The `agent.selector` still exposes multiple values, but Claude Code is the primary supported multi-turn path.
+- The session picker exposes `Shell` and `Agent`; `Shell` is the interactive PTY-backed shell path, and `Agent` maps to Claude Code.
 
 ## Round 4/8
 

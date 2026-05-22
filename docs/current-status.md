@@ -1,7 +1,7 @@
 # Current Status
 
-> Last updated: 2026-05-21
-> Scope: current baseline after commits `e8b84f0`, `9b803b6`, and `051f251`.
+> Last updated: 2026-05-22
+> Scope: current baseline after the stream routing, explicit proxy config, sandbox network, and checkpoint-safety changes.
 
 ## Baseline
 
@@ -15,6 +15,8 @@ Harness Platform now has a working end-to-end lab stack:
 - Per-session Claude HOME under `/var/lib/harness/agent-homes/<session_id>`, mounted in gVisor as `/agent-homes/<session_id>` and kept outside `/workspace`.
 - Claude Code stream-json parsing into persisted assistant messages and live UI deltas.
 - PTY-backed shell sessions through `harness-shell-agent`, with shell output persisted as assistant messages and interrupt support for running turns.
+- Explicit local Claude proxy configuration in `config/harness.yaml`, with sandbox networking as the default runtime path.
+- Checkpoint/restore primitives remain in the codebase, but automatic idle checkpointing is disabled until the turn channel is checkpoint-safe.
 
 ## Recent Commits
 
@@ -55,6 +57,38 @@ The frontend now exposes `Shell` as a first-class session mode instead of a smok
 - `POST /api/sessions/<id>/interrupt` interrupts a running shell turn.
 - The session picker offers `Shell` and `Agent`, where `Agent` maps to Claude Code.
 
+### `a422e44` - Checkpoint Safety Recovery
+
+The orchestrator no longer treats automatic idle checkpoint/restore as the default path:
+
+- `MonitorIdleSessions()` reconciles `checkpointing` and `checkpointed` sessions on startup.
+- Automatic idle checkpointing is disabled because `runsc restore` cannot reliably reconnect the long-lived stdin turn channel.
+- `Runtime.Start()` only restores from checkpoint when `RestoreFromCheckpoint` is explicitly enabled.
+- Replacement container cleanup only removes the current container instance, avoiding stale cleanup races.
+
+The practical result is that active sessions stay on the live-container path, and stale checkpoint states are recovered back to usable session states instead of leaving the UI stuck.
+
+### Explicit Claude Proxy Config
+
+The current codebase loads `config/harness.yaml` for the lab runtime/proxy profile:
+
+```yaml
+runtime:
+  runsc_network: sandbox
+  runsc_overlay2: none
+
+claude:
+  proxy_bind_url: http://0.0.0.0:8082
+  sandbox_base_url: http://10.200.1.1:8082
+  api_key: "123"
+  auth_token: "123"
+  model: sonnet
+  output_format: stream-json
+  disable_nonessential_traffic: true
+```
+
+Those values are written into the per-session `session.json` control manifest. They should not be replaced with host-only Claude configuration or implicit environment variables.
+
 ## Current Flow
 
 ```text
@@ -66,7 +100,7 @@ POST /api/sessions/<id>/messages
   -> status: running_active
   -> Runtime.Start()
      -> hot path: existing container + stdin write
-     -> resume path: runsc restore from checkpoint
+     -> opt-in resume path: runsc restore from checkpoint only when explicitly enabled
      -> cold path: runsc run from OCI bundle
   -> stream parser persists assistant message
   -> artifact watcher scans workspace
@@ -75,11 +109,8 @@ POST /api/sessions/<id>/messages
 Shell turns follow the same session lifecycle, but they complete on `harness.turn_done` and can be interrupted with `POST /api/sessions/<id>/interrupt`.
 
 Idle monitor
-  -> checkpointable sandbox network:
-     -> after 30 minutes running_idle
-     -> status: checkpointing
-     -> runsc checkpoint -overlay2 none
-     -> status: checkpointed
+  -> reconcile stale checkpointing/checkpointed rows
+  -> exit because automatic checkpointing is disabled
 ```
 
 Canonical session statuses:
@@ -136,9 +167,15 @@ Common event types:
 - Claude Code is the primary supported analysis path.
 - `Shell` is the supported interactive command path and has its own `turn_done`/`interrupt` contract; future adapters still need their own completion protocol before they are first-class multi-turn citizens.
 - The active Go runtime launches `runsc` directly. `bundle/restore-sandbox.sh` remains a useful Phase 2 smoke tool, not the main orchestrator runtime path.
-- The current Go runtime uses `runsc -network sandbox -overlay2 none` with the fixed `/var/run/netns/phase1-demo` network namespace for the checkpointable lab path. It writes an explicit control manifest with the host proxy bind URL `http://0.0.0.0:8082`, the sandbox-visible Anthropic base URL `http://10.200.1.1:8082`, and the local key `123`. The target hardened design is still sandbox networking plus host-side egress policy.
+- The current Go runtime uses `runsc -network sandbox -overlay2 none` with the fixed `/var/run/netns/phase1-demo` network namespace for the lab path. It writes an explicit control manifest with the host proxy bind URL `http://0.0.0.0:8082`, the sandbox-visible Anthropic base URL `http://10.200.1.1:8082`, and the local key `123`. The target hardened design is still sandbox networking plus host-side egress policy.
+- Automatic idle checkpointing is disabled. Checkpoint/restore must move behind the Phase 7 checkpoint-safe control plane before it becomes the default resource-release path.
+- Current live multi-turn behavior still depends on a container-local stdin/PTY turn channel. It is reliable for active containers, but not enough for robust restore/reconnect semantics.
 - Artifact metadata is recorded by host-side scanning/watching. A richer live artifact tree and previews remain future work.
 - Auth is lab shared-password cookie auth when `HARNESS_LAB_PASSWORD` is set.
+
+## Next Architecture Target
+
+The next major architecture phase is [checkpoint-safe-control-plane-architecture.md](./checkpoint-safe-control-plane-architecture.md). The target is to add runtime generations, durable turns, durable events, explicit network profiles, and a reconnectable agent bridge so sessions can be added, checkpointed, restored, reconnected, and continued across multiple turns without depending on one live host pipe.
 
 ## Checks
 

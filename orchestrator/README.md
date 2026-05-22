@@ -50,11 +50,26 @@ Useful environment variables:
 - `HARNESS_DEFAULT_AGENT` defaults to `claude`.
 - `HARNESS_MAX_SESSIONS` defaults to `30`.
 - `RUNSC_ROOT` defaults to `/var/lib/harness/runsc`.
-- `RUNSC_NETWORK` defaults to `sandbox`.
-- `RUNSC_OVERLAY2` defaults to `none`.
 - `HARNESS_RESTORE_SCRIPT` is loaded for compatibility, but the current direct `runsc` path does not execute it.
 
-The runtime currently launches `runsc` directly in sandbox mode and keeps containers alive across turns. It uses the fixed `/var/run/netns/phase1-demo` network namespace so the local Claude proxy stays reachable at `http://10.200.1.1:8082`; idle checkpointing stays on the sandbox path because host networking is no longer the default runtime mode on this host. `Shell` sessions use the PTY-backed shell shim and can be interrupted with `POST /api/sessions/<id>/interrupt`. `bundle/restore-sandbox.sh` is still useful as a smoke-test boundary, but it is not the main request path anymore.
+Runtime network and Claude proxy settings are explicit in `config/harness.yaml`:
+
+```yaml
+runtime:
+  runsc_network: sandbox
+  runsc_overlay2: none
+
+claude:
+  proxy_bind_url: http://0.0.0.0:8082
+  sandbox_base_url: http://10.200.1.1:8082
+  api_key: "123"
+  auth_token: "123"
+  model: sonnet
+  output_format: stream-json
+  disable_nonessential_traffic: true
+```
+
+The runtime currently launches `runsc` directly in sandbox mode and keeps containers alive across turns. It uses the fixed `/var/run/netns/phase1-demo` network namespace so the local Claude proxy stays reachable at `http://10.200.1.1:8082`. Automatic idle checkpointing is disabled because `runsc restore` cannot reliably reconnect the current stdin-based turn channel. `Shell` sessions use the PTY-backed shell shim and can be interrupted with `POST /api/sessions/<id>/interrupt`. `bundle/restore-sandbox.sh` is still useful as a smoke-test boundary, but it is not the main request path anymore.
 
 ## Event Streams
 
@@ -112,3 +127,4 @@ curl -b /tmp/harness.cookies \
 
 - The current Claude path uses stream-json turns and a per-container output hub.
 - `sh` is the interactive shell session path; it is still useful for smoke tests and shell-style debugging.
+- Checkpoint/restore is present as experimental runtime plumbing, but automatic checkpointing should wait for the Phase 7 checkpoint-safe control plane.
