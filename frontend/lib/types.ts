@@ -52,6 +52,8 @@ export type StreamLine = {
 export type DeltaPayload = {
   message_id: string;
   text: string;
+  delta_type?: string;
+  index?: number;
 };
 
 export type HarnessEvent = {

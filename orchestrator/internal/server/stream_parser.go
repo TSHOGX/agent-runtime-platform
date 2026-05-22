@@ -28,6 +28,22 @@ type streamParser struct {
 	last    string
 }
 
+type claudeStreamDelta struct {
+	Type        string `json:"type"`
+	Text        string `json:"text,omitempty"`
+	Thinking    string `json:"thinking,omitempty"`
+	PartialJSON string `json:"partial_json,omitempty"`
+}
+
+type claudeStreamEvent struct {
+	Type    string            `json:"type"`
+	Index   int               `json:"index"`
+	Delta   claudeStreamDelta `json:"delta"`
+	Message struct {
+		ID string `json:"id"`
+	} `json:"message"`
+}
+
 func newStreamParser(srv *Server, sessionID, agent string) *streamParser {
 	return &streamParser{
 		srv:       srv,
@@ -130,21 +146,15 @@ func (p *streamParser) handleStreamEvent(raw json.RawMessage) {
 	if len(raw) == 0 {
 		return
 	}
-	var inner struct {
-		Type  string `json:"type"`
-		Index int    `json:"index"`
-		Delta struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"delta"`
-		Message struct {
-			ID string `json:"id"`
-		} `json:"message"`
-	}
+	var inner claudeStreamEvent
 	if err := json.Unmarshal(raw, &inner); err != nil {
 		return
 	}
-	if inner.Type != "content_block_delta" || inner.Delta.Type != "text_delta" || inner.Delta.Text == "" {
+	text := streamDeltaText(inner.Delta)
+	if inner.Type != "content_block_delta" || text == "" {
+		return
+	}
+	if inner.Delta.Type != "text_delta" {
 		return
 	}
 	// Claude stream_event doesn't always nest the message id; use a stable
@@ -156,12 +166,30 @@ func (p *streamParser) handleStreamEvent(raw json.RawMessage) {
 	if _, ok := p.pending[id]; !ok {
 		p.pending[id] = &strings.Builder{}
 	}
-	p.pending[id].WriteString(inner.Delta.Text)
+	p.pending[id].WriteString(text)
 	p.srv.hub.Publish(events.Event{
 		Type:      "agent.delta",
 		SessionID: p.sessionID,
-		Payload:   map[string]any{"message_id": id, "text": inner.Delta.Text},
+		Payload: map[string]any{
+			"message_id": id,
+			"text":       text,
+			"delta_type": inner.Delta.Type,
+			"index":      inner.Index,
+		},
 	})
+}
+
+func streamDeltaText(delta claudeStreamDelta) string {
+	switch delta.Type {
+	case "text_delta":
+		return delta.Text
+	case "thinking_delta":
+		return delta.Thinking
+	case "input_json_delta":
+		return delta.PartialJSON
+	default:
+		return ""
+	}
 }
 
 func (p *streamParser) handleAssistantMessage(raw json.RawMessage) {

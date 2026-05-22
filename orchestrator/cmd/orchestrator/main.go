@@ -69,6 +69,15 @@ func main() {
 		CheckpointsRoot: cfg.CheckpointsRoot,
 		BundleRoot:      cfg.BundleRoot,
 		DefaultAgent:    cfg.DefaultAgent,
+		Claude: runtime.ClaudeConfig{
+			ProxyBindURL:               cfg.Claude.ProxyBindURL,
+			SandboxBaseURL:             cfg.Claude.SandboxBaseURL,
+			APIKey:                     cfg.Claude.APIKey,
+			AuthToken:                  cfg.Claude.AuthToken,
+			Model:                      cfg.Claude.Model,
+			OutputFormat:               cfg.Claude.OutputFormat,
+			DisableNonessentialTraffic: cfg.Claude.DisableNonessentialTraffic,
+		},
 	})
 	app := server.New(cfg, db, rt, watcher, hub, log)
 

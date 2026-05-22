@@ -1,0 +1,12 @@
+runtime:
+  runsc_network: sandbox
+  runsc_overlay2: none
+
+claude:
+  proxy_bind_url: http://0.0.0.0:8082
+  sandbox_base_url: http://10.200.1.1:8082
+  api_key: "123"
+  auth_token: "123"
+  model: sonnet
+  output_format: stream-json
+  disable_nonessential_traffic: true

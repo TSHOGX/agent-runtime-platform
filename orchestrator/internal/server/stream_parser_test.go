@@ -90,6 +90,19 @@ func TestStreamParserPersistsResultWhenAssistantMessageIsMissing(t *testing.T) {
 	}
 }
 
+func TestStreamParserIgnoresClaudeThinkingAndToolDeltas(t *testing.T) {
+	srv, _ := newParserTestServer(t)
+	parser := newStreamParser(srv, "sess_1", "claude")
+	ch, cancel := srv.hub.Subscribe("sess_1")
+	defer cancel()
+
+	parser.handle(runtime.Output{Stream: "stdout", Line: `{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"checking files"},"message":{"id":"msg_1"}}}`})
+	assertNoParserEvent(t, ch)
+
+	parser.handle(runtime.Output{Stream: "stdout", Line: `{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\""},"message":{"id":"msg_1"}}}`})
+	assertNoParserEvent(t, ch)
+}
+
 func TestStreamParserDoesNotFailSessionOnClaudeExecutionError(t *testing.T) {
 	srv, st := newParserTestServer(t)
 	parser := newStreamParser(srv, "sess_1", "claude")
@@ -160,5 +173,14 @@ func TestStreamParserPersistsShellOutputAndCompletesOnTurnDone(t *testing.T) {
 	}
 	if messages[0].Role != "assistant" || messages[0].Content != "hello from shell\n" {
 		t.Fatalf("unexpected shell output message: %+v", messages[0])
+	}
+}
+
+func assertNoParserEvent(t *testing.T, ch <-chan events.Event) {
+	t.Helper()
+	select {
+	case event := <-ch:
+		t.Fatalf("expected no parser event, got %+v", event)
+	case <-time.After(20 * time.Millisecond):
 	}
 }

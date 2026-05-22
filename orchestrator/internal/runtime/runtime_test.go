@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestRuntimeStartRejectsUnsupportedAgent(t *testing.T) {
@@ -34,6 +37,59 @@ func TestCleanupExitedContainerDoesNotRemoveReplacement(t *testing.T) {
 		t.Fatalf("replacement container was removed: got %+v", got)
 	}
 }
+
+func TestSendMessageDoesNotReconfigureLiveSandboxNetwork(t *testing.T) {
+	rt := New(Config{
+		DefaultAgent: "claude",
+		RunscNetwork: "sandbox",
+	})
+	hub := NewOutputHub()
+	stdin := &recordingWriteCloser{}
+	container := &Container{
+		SessionID: "sess_1",
+		RestoreID: "phase3-sess_1",
+		Agent:     "claude",
+		Stdin:     stdin,
+		OutputHub: hub,
+	}
+
+	done := make(chan struct{})
+	go func() {
+		for {
+			stdin.mu.Lock()
+			written := stdin.buf.Len() > 0
+			stdin.mu.Unlock()
+			if written {
+				hub.Publish(OutputEvent{Stream: "stdout", Line: `{"type":"result","subtype":"success","result":"ok"}`})
+				close(done)
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	res := rt.sendMessage(context.Background(), container, "hello", done, nil)
+	if res.Err != nil {
+		t.Fatalf("sendMessage should not attempt live sandbox network reconfiguration: %v", res.Err)
+	}
+}
+
+type recordingWriteCloser struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (w *recordingWriteCloser) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+func (w *recordingWriteCloser) Close() error {
+	return nil
+}
+
+var _ io.WriteCloser = (*recordingWriteCloser)(nil)
 
 func TestWriteUserTurnClaudeJSONLFraming(t *testing.T) {
 	var buf bytes.Buffer
@@ -157,7 +213,7 @@ func TestBuildControlContentUsesExplicitSandboxManifest(t *testing.T) {
 		Agent:             "claude",
 		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
 		ResumeClaude:      true,
-	}, "sandbox")
+	}, "sandbox", ClaudeConfig{})
 
 	var manifest controlManifest
 	if err := json.Unmarshal([]byte(content), &manifest); err != nil {
@@ -197,7 +253,7 @@ func TestBuildControlContentUsesExplicitHostProxyURL(t *testing.T) {
 		SessionID:         "sess_1",
 		Agent:             "claude",
 		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
-	}, "host")
+	}, "host", ClaudeConfig{})
 
 	var manifest controlManifest
 	if err := json.Unmarshal([]byte(content), &manifest); err != nil {
@@ -205,5 +261,29 @@ func TestBuildControlContentUsesExplicitHostProxyURL(t *testing.T) {
 	}
 	if manifest.AnthropicBaseURL != "http://0.0.0.0:8082" {
 		t.Fatalf("expected host proxy URL, got %+v", manifest)
+	}
+}
+
+func TestBuildControlContentUsesProjectClaudeConfig(t *testing.T) {
+	content := buildControlContent(StartRequest{
+		SessionID:         "sess_1",
+		Agent:             "claude",
+		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
+	}, "sandbox", ClaudeConfig{
+		ProxyBindURL:               "http://0.0.0.0:8082",
+		SandboxBaseURL:             "http://10.200.1.1:8082",
+		APIKey:                     "123",
+		AuthToken:                  "123",
+		Model:                      "sonnet",
+		OutputFormat:               "stream-json",
+		DisableNonessentialTraffic: true,
+	})
+
+	var manifest controlManifest
+	if err := json.Unmarshal([]byte(content), &manifest); err != nil {
+		t.Fatalf("control content is not valid JSON: %v\n%s", err, content)
+	}
+	if manifest.AnthropicBaseURL != "http://10.200.1.1:8082" || manifest.AnthropicAPIKey != "123" {
+		t.Fatalf("unexpected Claude proxy config: %+v", manifest)
 	}
 }

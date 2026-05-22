@@ -36,7 +36,7 @@ import type {
 
 type ConversationState = {
   messages: ApiMessage[];
-  streaming: { id: string; text: string } | null;
+  streaming: Array<{ id: string; text: string; deltaType?: string }>;
   stream: StreamLine[];
   loading: boolean;
 };
@@ -109,7 +109,7 @@ function newId() {
 }
 
 function emptyConvo(): ConversationState {
-  return { messages: [], streaming: null, stream: [], loading: false };
+  return { messages: [], streaming: [], stream: [], loading: false };
 }
 
 function delay(ms: number) {
@@ -118,6 +118,42 @@ function delay(ms: number) {
 
 function isActiveStatus(status: SessionStatus) {
   return RUNNING_STATUSES.has(status);
+}
+
+function appendStreaming(
+  streaming: ConversationState["streaming"],
+  id: string,
+  text: string,
+  deltaType?: string
+): ConversationState["streaming"] {
+  const idx = streaming.findIndex((entry) => entry.id === id);
+  if (idx === -1) {
+    return [...streaming, { id, text, deltaType }];
+  }
+  return streaming.map((entry, entryIdx) =>
+    entryIdx === idx ? { ...entry, text: entry.text + text } : entry
+  );
+}
+
+function isCommittedStream(streamText: string, messageText: string) {
+  const stream = streamText.trim();
+  const message = messageText.trim();
+  return stream !== "" && message !== "" && (stream === message || message.startsWith(stream));
+}
+
+function pruneCommittedStreaming(
+  streaming: ConversationState["streaming"],
+  messages: ApiMessage[]
+): ConversationState["streaming"] {
+  let next = streaming;
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    const idx = next.findIndex((entry) => isCommittedStream(entry.text, message.content));
+    if (idx !== -1) {
+      next = [...next.slice(0, idx), ...next.slice(idx + 1)];
+    }
+  }
+  return next;
 }
 
 function readSessionStatusEvent(type: string): SessionStatus | null {
@@ -190,19 +226,6 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
           let sawAssistant = false;
           let active = true;
 
-          if (messagesRes.ok) {
-            const messages = messagesRes.data.messages ?? [];
-            sawAssistant = messages.some(
-              (m) => m.role === "assistant" && (afterMessageId === undefined || m.id > afterMessageId)
-            );
-            upsertConvo(id, (c) => ({
-              ...c,
-              loading: false,
-              streaming: sawAssistant ? null : c.streaming,
-              messages
-            }));
-          }
-
           if (sessionRes.ok) {
             const session = sessionRes.data;
             active = isActiveStatus(session.status);
@@ -214,8 +237,22 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
               conversations: ensureConvo(p.conversations, session.id)
             }));
             if (!active) {
-              upsertConvo(id, (c) => ({ ...c, streaming: null }));
+              upsertConvo(id, (c) => ({ ...c, streaming: [] }));
             }
+          }
+
+          if (messagesRes.ok) {
+            const messages = messagesRes.data.messages ?? [];
+            const committedAssistantMessages = messages.filter(
+              (m) => m.role === "assistant" && (afterMessageId === undefined || m.id > afterMessageId)
+            );
+            sawAssistant = committedAssistantMessages.length > 0;
+            upsertConvo(id, (c) => ({
+              ...c,
+              loading: false,
+              streaming: active ? pruneCommittedStreaming(c.streaming, committedAssistantMessages) : [],
+              messages
+            }));
           }
 
           if (artifactsRes.ok) {
@@ -262,7 +299,7 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
             sessions: p.sessions.map((s) => (s.id === sessionId ? { ...s, status, updated_at: time } : s))
           }));
           if (status !== "running_active") {
-            upsertConvo(sessionId, (c) => ({ ...c, streaming: null }));
+            upsertConvo(sessionId, (c) => ({ ...c, streaming: [] }));
           }
           return;
         }
@@ -282,7 +319,7 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
           if (!msg || typeof msg.id !== "number") return;
           upsertConvo(sessionId, (c) => ({
             ...c,
-            streaming: null,
+            streaming: pruneCommittedStreaming(c.streaming, [msg]),
             messages: c.messages.some((m) => m.id === msg.id) ? c.messages : [...c.messages, msg]
           }));
           return;
@@ -291,13 +328,10 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
           if (!sessionId || !isRecord(event.payload)) return;
           const text = typeof event.payload.text === "string" ? event.payload.text : "";
           const id = typeof event.payload.message_id === "string" ? event.payload.message_id : "assistant_pending";
+          const deltaType = typeof event.payload.delta_type === "string" ? event.payload.delta_type : "text_delta";
+          if (deltaType !== "text_delta") return;
           if (!text) return;
-          upsertConvo(sessionId, (c) => {
-            if (!c.streaming || c.streaming.id !== id) {
-              return { ...c, streaming: { id, text } };
-            }
-            return { ...c, streaming: { id, text: c.streaming.text + text } };
-          });
+          upsertConvo(sessionId, (c) => ({ ...c, streaming: appendStreaming(c.streaming, id, text, deltaType) }));
           return;
         }
         case "agent.output": {
@@ -339,7 +373,7 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
               ...p,
               sessions: p.sessions.map((s) => (s.id === sessionId ? { ...s, status: "failed", updated_at: time } : s))
             }));
-            upsertConvo(sessionId, (c) => ({ ...c, streaming: null }));
+            upsertConvo(sessionId, (c) => ({ ...c, streaming: [] }));
           }
           return;
         }

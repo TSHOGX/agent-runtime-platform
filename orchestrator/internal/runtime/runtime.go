@@ -27,22 +27,27 @@ type Config struct {
 	CheckpointsRoot       string
 	BundleRoot            string
 	DefaultAgent          string
+	Claude                ClaudeConfig
 	RestoreFromCheckpoint bool
 }
 
 const (
-	controlFileName                         = "session.json"
-	runscSandboxNetnsName                   = "phase1-demo"
-	runscSandboxNetnsInterface              = "gv-phase1"
-	runscSandboxNetnsCIDR                   = "10.200.1.2/24"
-	runscSandboxGatewayIP                   = "10.200.1.1"
-	controlProxyBindURL                     = "http://0.0.0.0:8082"
-	controlClaudeBaseURLSandbox             = "http://" + runscSandboxGatewayIP + ":8082"
-	controlClaudeAPIKey                     = "123"
-	controlClaudeModel                      = "sonnet"
-	controlClaudeOutputFormat               = "stream-json"
-	controlClaudeDisableNonessentialTraffic = true
+	controlFileName            = "session.json"
+	runscSandboxNetnsName      = "phase1-demo"
+	runscSandboxNetnsInterface = "gv-phase1"
+	runscSandboxNetnsCIDR      = "10.200.1.2/24"
+	runscSandboxGatewayIP      = "10.200.1.1"
 )
+
+type ClaudeConfig struct {
+	ProxyBindURL               string
+	SandboxBaseURL             string
+	APIKey                     string
+	AuthToken                  string
+	Model                      string
+	OutputFormat               string
+	DisableNonessentialTraffic bool
+}
 
 type StartRequest struct {
 	SessionID         string
@@ -100,6 +105,7 @@ type Container struct {
 }
 
 func New(cfg Config) *Runtime {
+	cfg.Claude = normalizeClaudeConfig(cfg.Claude)
 	return &Runtime{
 		cfg:        cfg,
 		containers: make(map[string]*Container),
@@ -218,7 +224,8 @@ func (r *Runtime) readRestoreMS(sessionID string) *int64 {
 	return &value
 }
 
-func buildControlContent(req StartRequest, runscNetwork string) string {
+func buildControlContent(req StartRequest, runscNetwork string, claudeCfg ClaudeConfig) string {
+	claudeCfg = normalizeClaudeConfig(claudeCfg)
 	sessionWorkspace := filepath.Join("/sessions", req.SessionID)
 	agentHome := filepath.Join("/agent-homes", req.SessionID)
 	manifest := controlManifest{
@@ -228,19 +235,40 @@ func buildControlContent(req StartRequest, runscNetwork string) string {
 		HarnessAgent:                         req.Agent,
 		ClaudeSessionUUID:                    req.ClaudeSessionUUID,
 		ClaudeResume:                         req.ResumeClaude,
-		ProxyBindURL:                         controlProxyBindURL,
-		AnthropicBaseURL:                     defaultClaudeBaseURL(runscNetwork),
-		AnthropicAPIKey:                      controlClaudeAPIKey,
-		AnthropicAuthToken:                   controlClaudeAPIKey,
-		ClaudeCodeDisableNonessentialTraffic: controlClaudeDisableNonessentialTraffic,
-		ClaudeModel:                          controlClaudeModel,
-		ClaudeOutputFormat:                   controlClaudeOutputFormat,
+		ProxyBindURL:                         claudeCfg.ProxyBindURL,
+		AnthropicBaseURL:                     defaultClaudeBaseURL(runscNetwork, claudeCfg),
+		AnthropicAPIKey:                      claudeCfg.APIKey,
+		AnthropicAuthToken:                   claudeCfg.AuthToken,
+		ClaudeCodeDisableNonessentialTraffic: claudeCfg.DisableNonessentialTraffic,
+		ClaudeModel:                          claudeCfg.Model,
+		ClaudeOutputFormat:                   claudeCfg.OutputFormat,
 	}
 	data, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return ""
 	}
 	return string(data) + "\n"
+}
+
+func normalizeClaudeConfig(cfg ClaudeConfig) ClaudeConfig {
+	empty := cfg == ClaudeConfig{}
+	cfg.ProxyBindURL = defaultString(cfg.ProxyBindURL, "http://0.0.0.0:8082")
+	cfg.SandboxBaseURL = defaultString(cfg.SandboxBaseURL, "http://"+runscSandboxGatewayIP+":8082")
+	cfg.APIKey = defaultString(cfg.APIKey, "123")
+	cfg.AuthToken = defaultString(cfg.AuthToken, cfg.APIKey)
+	cfg.Model = defaultString(cfg.Model, "sonnet")
+	cfg.OutputFormat = defaultString(cfg.OutputFormat, "stream-json")
+	if empty {
+		cfg.DisableNonessentialTraffic = true
+	}
+	return cfg
+}
+
+func defaultString(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return strings.TrimSpace(value)
 }
 
 func (r *Runtime) prepareSessionDirs(sessionID string) error {
@@ -257,11 +285,11 @@ func (r *Runtime) prepareSessionDirs(sessionID string) error {
 	return nil
 }
 
-func defaultClaudeBaseURL(runscNetwork string) string {
+func defaultClaudeBaseURL(runscNetwork string, claudeCfg ClaudeConfig) string {
 	if strings.EqualFold(strings.TrimSpace(runscNetwork), "host") {
-		return controlProxyBindURL
+		return claudeCfg.ProxyBindURL
 	}
-	return controlClaudeBaseURLSandbox
+	return claudeCfg.SandboxBaseURL
 }
 
 func (r *Runtime) ensureSandboxNetwork(ctx context.Context) error {
@@ -420,6 +448,10 @@ func (r *Runtime) sendMessage(ctx context.Context, container *Container, message
 	outputCh, cancel := container.OutputHub.Subscribe()
 	defer cancel()
 
+	// The sandbox network namespace must not be reconfigured while a gVisor
+	// sandbox is attached to it. Replacing the address or default route on a
+	// live netns breaks the sentry netstack and subsequent TCP writes fail with
+	// ECONNRESET before requests reach the local proxy.
 	if err := r.writeContainerInput(container, func(stdin io.Writer) error {
 		return writeUserTurn(stdin, container.Agent, message)
 	}); err != nil {
@@ -455,7 +487,7 @@ func (r *Runtime) startFresh(ctx context.Context, req StartRequest, output func(
 	}
 
 	controlFile := filepath.Join(controlDir, controlFileName)
-	controlContent := buildControlContent(req, r.cfg.RunscNetwork)
+	controlContent := buildControlContent(req, r.cfg.RunscNetwork, r.cfg.Claude)
 
 	if err := os.WriteFile(controlFile, []byte(controlContent), 0o644); err != nil {
 		return Result{Err: fmt.Errorf("write control file: %w", err)}
@@ -651,9 +683,6 @@ func (r *Runtime) Checkpoint(ctx context.Context, sessionID string) error {
 
 	if !exists {
 		return errors.New("container not found")
-	}
-	if err := r.ensureSandboxNetwork(ctx); err != nil {
-		return err
 	}
 
 	checkpointPath := filepath.Join(r.cfg.CheckpointsRoot, sessionID)

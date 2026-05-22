@@ -42,7 +42,7 @@ function ChatConversation() {
     const el = scrollRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [convo.messages.length, convo.streaming?.text, convo.stream.length]);
+  }, [convo.messages.length, convo.streaming, convo.stream.length]);
 
   if (!session) {
     return (
@@ -85,7 +85,7 @@ function ChatConversation() {
       <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto">
         {convo.loading && convo.messages.length === 0 ? (
           <p className="px-6 py-8 text-xs text-[var(--color-foreground-muted)]">Loading conversation…</p>
-        ) : convo.messages.length === 0 && !convo.streaming ? (
+        ) : convo.messages.length === 0 && convo.streaming.length === 0 ? (
           <div className="flex h-full items-center justify-center px-6 text-center">
             <div className="max-w-md">
               <h3 className="text-base font-semibold">Ready when you are.</h3>
@@ -100,7 +100,9 @@ function ChatConversation() {
             {convo.messages.map((m) => (
               <MessageBubble key={m.id} message={m} />
             ))}
-            {convo.streaming ? <StreamingBubble text={convo.streaming.text} /> : null}
+            {convo.streaming.map((stream) => (
+              <StreamingBubble key={stream.id} text={stream.text} />
+            ))}
           </div>
         )}
       </div>
