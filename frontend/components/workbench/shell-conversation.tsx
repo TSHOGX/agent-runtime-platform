@@ -50,8 +50,12 @@ function ShellComposer({
 
   useEffect(() => {
     if (!ref.current) return;
+    if (!value) {
+      ref.current.style.height = "32px";
+      return;
+    }
     ref.current.style.height = "auto";
-    ref.current.style.height = `${Math.min(ref.current.scrollHeight, 240)}px`;
+    ref.current.style.height = `${Math.max(32, Math.min(ref.current.scrollHeight, 240))}px`;
   }, [value]);
 
   const submit = async () => {
@@ -88,7 +92,7 @@ function ShellComposer({
 
   return (
     <div className="border-t border-[var(--color-border)] bg-[var(--color-background)] px-6 py-3">
-      <div className="flex items-end gap-2 rounded-[var(--radius)] border border-[var(--color-border-strong)] bg-[var(--color-surface)] px-3 py-2">
+      <div className="flex items-center gap-2 rounded-[var(--radius)] border border-[var(--color-border-strong)] bg-[var(--color-surface)] px-3 py-2">
         <span className="shrink-0 font-mono text-sm text-[var(--color-foreground-muted)]">$</span>
         <Textarea
           ref={ref}
@@ -98,7 +102,7 @@ function ShellComposer({
           placeholder={placeholder}
           rows={1}
           disabled={disabled || sending || busy}
-          className="min-h-[28px] border-0 bg-transparent p-0 font-mono text-sm focus:border-0"
+          className="h-8 min-h-8 border-0 bg-transparent px-0 py-1 font-mono text-sm leading-6 focus:border-0 focus:outline-none focus-visible:outline-none"
         />
         {busy ? (
           <Button

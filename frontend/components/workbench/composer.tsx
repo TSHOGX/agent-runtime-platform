@@ -20,8 +20,12 @@ export function Composer({ disabled, placeholder, onSend }: ComposerProps) {
 
   useEffect(() => {
     if (!ref.current) return;
+    if (!value) {
+      ref.current.style.height = "32px";
+      return;
+    }
     ref.current.style.height = "auto";
-    ref.current.style.height = `${Math.min(ref.current.scrollHeight, 240)}px`;
+    ref.current.style.height = `${Math.max(32, Math.min(ref.current.scrollHeight, 240))}px`;
   }, [value]);
 
   const submit = async () => {
@@ -47,7 +51,7 @@ export function Composer({ disabled, placeholder, onSend }: ComposerProps) {
 
   return (
     <div className="border-t border-[var(--color-border)] bg-[var(--color-background)] px-6 py-3">
-      <div className="relative flex items-end gap-2 rounded-[var(--radius-lg)] border border-[var(--color-border-strong)] bg-[var(--color-surface)] px-3 py-2 focus-within:border-[var(--color-accent)]">
+      <div className="relative flex items-center gap-2 rounded-[var(--radius-lg)] border border-[var(--color-border-strong)] bg-[var(--color-surface)] px-3 py-2">
         <Textarea
           ref={ref}
           value={value}
@@ -56,7 +60,7 @@ export function Composer({ disabled, placeholder, onSend }: ComposerProps) {
           placeholder={placeholder ?? "Send a message…"}
           rows={1}
           disabled={disabled || sending}
-          className="border-0 bg-transparent p-0 focus:border-0 min-h-[28px]"
+          className="h-8 min-h-8 border-0 bg-transparent px-0 py-1 leading-6 focus:border-0 focus:outline-none focus-visible:outline-none"
         />
         <Button
           variant="primary"
