@@ -33,7 +33,7 @@ export function ArtifactPane() {
 
   if (!session) {
     return (
-      <aside className="flex h-full min-w-0 flex-col border-l border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 text-xs text-[var(--color-foreground-muted)]">
+      <aside className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden border-l border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 text-xs text-[var(--color-foreground-muted)]">
         <span>Files will appear here once a session is running.</span>
       </aside>
     );
@@ -99,8 +99,8 @@ function ArtifactPaneInner({
   };
 
   return (
-    <aside className="flex h-full min-h-0 flex-col border-l border-[var(--color-border)] bg-[var(--color-surface)]">
-      <div className="border-b border-[var(--color-border)] px-4 py-3">
+    <aside className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden border-l border-[var(--color-border)] bg-[var(--color-surface)]">
+      <div className="shrink-0 border-b border-[var(--color-border)] px-4 py-3">
         <div className="flex items-center justify-between gap-3">
           <span className="text-xs uppercase tracking-wider text-[var(--color-foreground-muted)]">
             Files {artifacts.length > 0 ? `(${artifacts.length})` : ""}
@@ -124,7 +124,7 @@ function ArtifactPaneInner({
         ) : null}
       </div>
 
-      <div className="max-h-[42%] min-h-[144px] overflow-y-auto border-b border-[var(--color-border)]">
+      <div className="min-h-[144px] max-h-[42%] shrink-0 overflow-y-auto border-b border-[var(--color-border)]">
         {artifacts.length === 0 ? (
           <p className="px-4 py-4 text-xs text-[var(--color-foreground-muted)]">
             No artifacts yet. The agent writes files to <code className="font-mono">/workspace</code>.

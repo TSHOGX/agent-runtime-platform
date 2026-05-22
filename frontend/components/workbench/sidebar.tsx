@@ -26,8 +26,8 @@ export function Sidebar() {
   };
 
   return (
-    <aside className="flex h-full w-[280px] min-w-0 flex-col border-r border-[var(--color-border)] bg-[var(--color-surface)]">
-      <div className="flex items-center justify-between px-4 py-3">
+    <aside className="flex h-full min-h-0 w-[280px] min-w-0 flex-col overflow-hidden border-r border-[var(--color-border)] bg-[var(--color-surface)]">
+      <div className="flex shrink-0 items-center justify-between px-4 py-3">
         <div className="flex flex-col">
           <span className="text-sm font-semibold tracking-tight">Harness</span>
           <span className="text-[11px] text-[var(--color-foreground-muted)]">Workbench</span>
@@ -43,7 +43,7 @@ export function Sidebar() {
         </Button>
       </div>
 
-      <div className="px-3 pb-2 relative">
+      <div className="relative shrink-0 px-3 pb-2">
         <Button
           variant="primary"
           size="lg"
@@ -74,12 +74,12 @@ export function Sidebar() {
         ) : null}
       </div>
 
-      <div className="flex items-center justify-between px-4 pt-3 pb-2">
+      <div className="flex shrink-0 items-center justify-between px-4 pt-3 pb-2">
         <span className="text-[11px] uppercase tracking-wider text-[var(--color-foreground-muted)]">Sessions</span>
         <span className="text-[11px] text-[var(--color-foreground-muted)]">{state.sessions.length}</span>
       </div>
 
-      <div className="flex-1 overflow-y-auto">
+      <div className="min-h-0 flex-1 overflow-y-auto">
         {state.sessions.length === 0 ? (
           <p className="px-4 py-6 text-center text-xs text-[var(--color-foreground-muted)]">
             {state.ready || state.connection === "live" ? "No sessions yet. Create one to get started." : "Loading…"}
@@ -121,7 +121,7 @@ export function Sidebar() {
       </div>
 
       {state.connection !== "live" && state.connection !== "idle" ? (
-        <div className="border-t border-[var(--color-border)] bg-[var(--color-surface-muted)] px-3 py-2 text-[11px] text-[var(--color-foreground-muted)]">
+        <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-surface-muted)] px-3 py-2 text-[11px] text-[var(--color-foreground-muted)]">
           {state.connection === "connecting"
             ? "Connecting to event stream…"
             : state.connection === "reconnecting"
