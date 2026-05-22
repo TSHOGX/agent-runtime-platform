@@ -75,6 +75,7 @@ The runtime currently launches `runsc` directly in sandbox mode and keeps contai
 
 - `GET /api/events` - WebSocket compatibility endpoint
 - `GET /api/events/stream?session_id=<id>` - SSE endpoint used by the frontend
+- Artifact watcher events include `artifact.updated` for file create/write metadata and `artifact.deleted` for remove/rename cleanup.
 
 ## Session Control
 
@@ -122,6 +123,15 @@ List artifacts:
 curl -b /tmp/harness.cookies \
   http://127.0.0.1:8090/api/sessions/<session_id>/artifacts
 ```
+
+Download artifacts:
+
+```bash
+curl -b /tmp/harness.cookies \
+  http://127.0.0.1:8090/artifacts/<session_id>/<path>
+```
+
+Artifact downloads are read-only and limited to regular files under the session workspace. The server rejects traversal, symlink components, symlink escape, directories, and non-regular files.
 
 ## Notes
 

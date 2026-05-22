@@ -159,6 +159,7 @@ Runtime output becomes higher-level events:
 | Shell `harness.turn_done` | mark the shell turn complete | completion |
 | Plain stdout | persist as assistant text | `agent.message` |
 | Artifact watcher | file create/write metadata | `artifact.updated` |
+| Artifact watcher | file/directory remove or rename metadata cleanup | `artifact.deleted` |
 
 The frontend keeps an SSE connection open and also polls session/messages/artifacts after sending a message to recover from transient stream issues.
 
@@ -192,6 +193,21 @@ Session lifecycle event names use the canonical status values:
 - `session.checkpointed`
 - `session.failed`
 - `session.destroyed`
+- `artifact.updated`
+- `artifact.deleted`
+
+## Artifact Browser
+
+Artifact metadata is still persisted as a flat SQLite list keyed by session and path. The frontend derives a live file tree from that list, so the API stays simple while users get a folder-oriented browser with search, tabs, file sizes, update times, and per-file download actions.
+
+Artifact serving is intentionally read-only and constrained to regular files under the session workspace. Download requests reject path traversal, symlink components, symlink escape, directories, and non-regular files. The watcher also skips symlink artifacts during scans.
+
+The artifact watcher publishes:
+
+- `artifact.updated` for create/write metadata upserts.
+- `artifact.deleted` for remove/rename cleanup, including directory-prefix metadata deletion.
+
+The current preview set covers Markdown, code, text, images, JSON, CSV/TSV, and PDF. Unknown binary files remain downloadable but are not rendered inline.
 
 ## Configuration
 
@@ -296,7 +312,7 @@ Until that control plane exists, checkpoint/restore should be treated as experim
 ## Current Limitations
 
 - Additional agent adapters beyond Claude Code and the shell shim need their own completion contract before they are first-class multi-turn citizens.
-- Artifact UX is still basic: metadata, preview, and download are present; richer live tree and file operations are future work.
+- Artifact browsing is read-only. File creation, renaming, and deletion should still happen through the sandbox agent or shell session, with the UI reflecting those changes through metadata events.
 - Resource limits and egress policy are not yet documented as production-ready defaults.
 - The current output hub intentionally drops lines for slow subscribers; that is acceptable for UI logs but should be revisited before using the stream as an audit log.
 - Automatic checkpoint/restore is not a default resource-release path until the Phase 7 checkpoint-safe control plane is implemented.
@@ -320,6 +336,7 @@ frontend/
 ├── app/api/[...path]/route.ts
 ├── components/harness-provider.tsx
 ├── components/workbench/
+├── lib/artifact-tree.ts
 └── lib/
 
 sandbox-image/files/usr/local/bin/

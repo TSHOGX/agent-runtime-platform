@@ -13,6 +13,7 @@
 - 浏览器事件流走 frontend same-origin SSE：`GET /api/events/stream`，orchestrator 仍保留 WebSocket 兼容端点 `/api/events`。
 - 前端会在发送消息后轮询 messages/session/artifacts，作为 SSE 断线时的状态补偿。
 - Claude Code 是当前主路径；`Shell` 是 PTY-backed 的交互式命令会话，`Agent` 直接映射到 Claude Code。
+- Artifact 浏览已完成 Phase 6：右栏是实时文件树，支持搜索、下载和 Markdown/code/text/image/JSON/CSV/TSV/PDF 预览；下载路径会拒绝 traversal、symlink escape 和非 regular file。
 - 本地 Claude proxy 配置显式写在 `config/harness.yaml`：宿主机监听 `http://0.0.0.0:8082`，sandbox 访问 `http://10.200.1.1:8082`，key 为 `123`。
 
 ## 文档

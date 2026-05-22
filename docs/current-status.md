@@ -1,7 +1,7 @@
 # Current Status
 
 > Last updated: 2026-05-22
-> Scope: current baseline after the stream routing, explicit proxy config, sandbox network, and checkpoint-safety changes.
+> Scope: current baseline after the stream routing, explicit proxy config, sandbox network, checkpoint-safety changes, and Phase 6 artifact browser hardening.
 
 ## Baseline
 
@@ -17,6 +17,7 @@ Harness Platform now has a working end-to-end lab stack:
 - PTY-backed shell sessions through `harness-shell-agent`, with shell output persisted as assistant messages and interrupt support for running turns.
 - Explicit local Claude proxy configuration in `config/harness.yaml`, with sandbox networking as the default runtime path.
 - Checkpoint/restore primitives remain in the codebase, but automatic idle checkpointing is disabled until the turn channel is checkpoint-safe.
+- Artifact browsing is a metadata-backed live file tree with search, safe downloads, delete/rename event handling, and richer previews for Markdown, code, text, images, JSON, CSV/TSV, and PDF.
 
 ## Recent Commits
 
@@ -67,6 +68,16 @@ The orchestrator no longer treats automatic idle checkpoint/restore as the defau
 - Replacement container cleanup only removes the current container instance, avoiding stale cleanup races.
 
 The practical result is that active sessions stay on the live-container path, and stale checkpoint states are recovered back to usable session states instead of leaving the UI stuck.
+
+### `90a5f32` - Phase 6 Artifact Browser
+
+Artifact handling moved from a flat metadata list to a read-only file browser:
+
+- Artifact downloads reject traversal, symlink escape, directories, and non-regular files.
+- Host-side artifact scanning skips symlink artifacts.
+- File/directory remove and rename events delete stored metadata and publish `artifact.deleted`.
+- The frontend derives a live folder tree from artifact metadata and keeps open tabs in sync when files disappear.
+- Artifact previews now cover Markdown, code, text, images, JSON, CSV/TSV, and PDF.
 
 ### Explicit Claude Proxy Config
 
@@ -161,6 +172,7 @@ Common event types:
 - `agent.output`
 - `system.status`
 - `artifact.updated`
+- `artifact.deleted`
 
 ## Current Constraints
 
@@ -170,7 +182,7 @@ Common event types:
 - The current Go runtime uses `runsc -network sandbox -overlay2 none` with the fixed `/var/run/netns/phase1-demo` network namespace for the lab path. It writes an explicit control manifest with the host proxy bind URL `http://0.0.0.0:8082`, the sandbox-visible Anthropic base URL `http://10.200.1.1:8082`, and the local key `123`. The target hardened design is still sandbox networking plus host-side egress policy.
 - Automatic idle checkpointing is disabled. Checkpoint/restore must move behind the Phase 7 checkpoint-safe control plane before it becomes the default resource-release path.
 - Current live multi-turn behavior still depends on a container-local stdin/PTY turn channel. It is reliable for active containers, but not enough for robust restore/reconnect semantics.
-- Artifact metadata is recorded by host-side scanning/watching. A richer live artifact tree and previews remain future work.
+- Artifact metadata is recorded by host-side scanning/watching and rendered as a read-only live file tree. Direct file mutation operations remain outside the UI; use the sandbox agent or shell path to create, rename, or delete files.
 - Auth is lab shared-password cookie auth when `HARNESS_LAB_PASSWORD` is set.
 
 ## Next Architecture Target

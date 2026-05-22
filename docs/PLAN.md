@@ -10,7 +10,7 @@
 - [x] **Phase 3**: Go orchestrator MVP with session API, checkpoint/restore, artifact metadata, and event hub
 - [x] **Phase 4**: Next.js workbench with same-origin proxy, SSE event stream, and fallback/refresh behavior
 - [x] **Phase 5**: per-container `OutputHub`, stream-parser turn completion routing, and interactive shell sessions
-- [ ] **Phase 6**: artifact UX hardening, live file tree, and richer previews
+- [x] **Phase 6**: artifact UX hardening, live file tree, and richer previews
 - [ ] **Phase 7**: checkpoint-safe control plane, runtime generations, durable turns, and verified sandbox networking
 - [ ] **Phase 8**: multi-user auth, egress policy, cgroup limits, observability, and later additional harness adapters
 
@@ -21,7 +21,7 @@ The project is now past the "prove the runtime" stage. The immediate goals are:
 1. Keep the current Claude Code and shell session paths stable.
 2. Make session recovery independent of a single live `stdin` / PTY pipe.
 3. Introduce the Phase 7 control-plane shape: runtime generations, durable turn state, explicit network profiles, and cold resume fallback.
-4. Expand artifact handling from metadata listing to a more interactive file browser.
+4. Keep artifact browsing stable while the runtime control plane changes underneath it.
 5. Defer the second harness adapter until the runtime control plane is stable.
 
 ## Current Architecture
@@ -80,6 +80,13 @@ The current runtime keeps active containers alive across turns and writes turns 
 - Added same-origin SSE on the frontend side.
 - Added the PTY-backed shell session path and shell interrupt support.
 
+### Phase 6
+
+- Hardened artifact serving so downloads reject traversal, symlink escape, directories, and non-regular files.
+- Changed artifact watching/scanning to ignore symlink artifacts and publish `artifact.deleted` when files or directories are removed or renamed.
+- Added a live frontend file tree derived from artifact metadata, with search, folder expand/collapse, tab cleanup when files disappear, and per-file download actions.
+- Added richer previews for Markdown, code, text, images, JSON, CSV/TSV, and PDF artifacts.
+
 ## Phase 7 Target
 
 Phase 7 is the new architecture phase for checkpoint-safe session recovery. It is intentionally before the "second harness adapter" work because additional adapters should not be built on the current stdin-coupled runtime boundary.
@@ -108,7 +115,7 @@ Suggested delivery order:
 - `runsc` network mode is sandbox by default, and the template bundle uses the fixed `/var/run/netns/phase1-demo` namespace so the local Claude proxy stays reachable at `http://10.200.1.1:8082`. The host-visible proxy URL is `http://0.0.0.0:8082`, and the lab proxy key is explicitly `123`.
 - Automatic idle checkpointing is disabled in the current code because `runsc restore` cannot reliably reconnect the long-lived stdin turn channel. Checkpoint/restore must move behind the Phase 7 control plane before it is treated as the default resource-release path.
 - Additional agent adapters beyond Claude Code and the shell shim need their own completion contract before they are first-class multi-turn citizens.
-- Artifact browsing is still metadata-first, not file-explorer-first.
+- Artifact browsing is now a metadata-backed live tree, but it is intentionally read-only; file mutation operations are still left to the sandbox agent or shell.
 - `OutputHub` drops lines for slow subscribers by design; that is fine for UI logs but not for a forensic audit stream.
 
 ## Notes on Prior Docs
