@@ -390,6 +390,19 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
           });
           return;
         }
+        case "artifact.deleted": {
+          if (!isRecord(event.payload)) return;
+          const deletedSessionId =
+            typeof event.payload.session_id === "string" ? event.payload.session_id : sessionId;
+          const path = typeof event.payload.path === "string" ? event.payload.path : null;
+          if (!deletedSessionId || !path) return;
+          setState((p) => {
+            const list = p.artifacts[deletedSessionId] ?? [];
+            const next = list.filter((a) => a.path !== path && !a.path.startsWith(`${path}/`));
+            return { ...p, artifacts: { ...p.artifacts, [deletedSessionId]: next } };
+          });
+          return;
+        }
         default:
           return;
       }

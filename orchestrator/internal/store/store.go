@@ -293,6 +293,16 @@ FROM artifacts WHERE session_id = ? ORDER BY path`, sessionID)
 	return artifacts, rows.Err()
 }
 
+func (s *Store) DeleteArtifactPath(ctx context.Context, sessionID, artifactPath string) error {
+	_, err := s.db.ExecContext(ctx, `
+DELETE FROM artifacts
+WHERE session_id = ?
+  AND (path = ? OR path LIKE ? ESCAPE '\')`,
+		sessionID, artifactPath, escapeLike(artifactPath)+"/%",
+	)
+	return err
+}
+
 type scanner interface {
 	Scan(dest ...any) error
 }
@@ -412,4 +422,11 @@ func sqlStringList(values []string) string {
 		quoted[i] = fmt.Sprintf("'%s'", strings.ReplaceAll(value, "'", "''"))
 	}
 	return strings.Join(quoted, ",")
+}
+
+func escapeLike(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `%`, `\%`)
+	value = strings.ReplaceAll(value, `_`, `\_`)
+	return value
 }

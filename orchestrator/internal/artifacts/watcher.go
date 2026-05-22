@@ -50,13 +50,16 @@ func (w *Watcher) Run(ctx context.Context) error {
 			}
 		case event := <-watcher.Events:
 			if event.Has(fsnotify.Create) {
-				if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
+				if info, err := os.Lstat(event.Name); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
 					_ = w.addRecursive(watcher, event.Name)
 					continue
 				}
 			}
-			if event.Has(fsnotify.Create) || event.Has(fsnotify.Write) || event.Has(fsnotify.Rename) {
+			if event.Has(fsnotify.Create) || event.Has(fsnotify.Write) {
 				w.recordPath(ctx, event.Name)
+			}
+			if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
+				w.deletePath(ctx, event.Name)
 			}
 		}
 	}
@@ -64,7 +67,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 
 func (w *Watcher) ScanSession(ctx context.Context, sessionID string) error {
 	return filepath.WalkDir(filepath.Join(w.root, sessionID), func(path string, entry fs.DirEntry, err error) error {
-		if err != nil || entry.IsDir() {
+		if err != nil || entry.IsDir() || entry.Type()&fs.ModeSymlink != 0 {
 			return nil
 		}
 		w.recordPath(ctx, path)
@@ -85,8 +88,8 @@ func (w *Watcher) addRecursive(watcher *fsnotify.Watcher, root string) error {
 }
 
 func (w *Watcher) recordPath(ctx context.Context, path string) {
-	info, err := os.Stat(path)
-	if err != nil || info.IsDir() {
+	info, err := os.Lstat(path)
+	if err != nil || info.IsDir() || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return
 	}
 	rel, err := filepath.Rel(w.root, path)
@@ -109,4 +112,28 @@ func (w *Watcher) recordPath(ctx context.Context, path string) {
 		return
 	}
 	w.hub.Publish(events.Event{Type: "artifact.updated", SessionID: artifact.SessionID, Payload: artifact})
+}
+
+func (w *Watcher) deletePath(ctx context.Context, path string) {
+	rel, err := filepath.Rel(w.root, path)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return
+	}
+	parts := strings.SplitN(rel, string(filepath.Separator), 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return
+	}
+	artifactPath := filepath.ToSlash(parts[1])
+	if err := w.store.DeleteArtifactPath(ctx, parts[0], artifactPath); err != nil {
+		w.log.Warn("failed to delete artifact metadata", "path", path, "error", err)
+		return
+	}
+	w.hub.Publish(events.Event{
+		Type:      "artifact.deleted",
+		SessionID: parts[0],
+		Payload: map[string]string{
+			"session_id": parts[0],
+			"path":       artifactPath,
+		},
+	})
 }

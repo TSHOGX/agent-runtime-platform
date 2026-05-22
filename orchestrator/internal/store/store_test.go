@@ -282,3 +282,67 @@ func TestCountActiveSessionsUsesCanonicalStatuses(t *testing.T) {
 		t.Fatalf("want 5 active sessions, got %d", count)
 	}
 }
+
+func TestDeleteArtifactPathDeletesFileAndDescendants(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	ctx := context.Background()
+	st, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	now := time.Now().UTC()
+	session := Session{
+		ID:        "sess_artifacts",
+		UserID:    "lab",
+		Status:    string(sessionstate.Created),
+		Agent:     "claude",
+		Workspace: dir,
+		RestoreID: "phase3-sess_artifacts",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := st.CreateSession(ctx, session); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	for _, path := range []string{"keep.txt", "dir/a.txt", "dir/nested/b.txt", "dir2/a.txt"} {
+		if err := st.UpsertArtifact(ctx, Artifact{
+			SessionID: session.ID,
+			Path:      path,
+			Size:      int64(len(path)),
+			ModTime:   now,
+		}); err != nil {
+			t.Fatalf("upsert %s: %v", path, err)
+		}
+	}
+
+	if err := st.DeleteArtifactPath(ctx, session.ID, "dir"); err != nil {
+		t.Fatalf("delete dir: %v", err)
+	}
+
+	got, err := st.ListArtifacts(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("list artifacts: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 artifacts after prefix delete, got %+v", got)
+	}
+	if got[0].Path != "dir2/a.txt" || got[1].Path != "keep.txt" {
+		t.Fatalf("unexpected artifacts after prefix delete: %+v", got)
+	}
+
+	if err := st.DeleteArtifactPath(ctx, session.ID, "keep.txt"); err != nil {
+		t.Fatalf("delete file: %v", err)
+	}
+	got, err = st.ListArtifacts(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("list artifacts after file delete: %v", err)
+	}
+	if len(got) != 1 || got[0].Path != "dir2/a.txt" {
+		t.Fatalf("unexpected artifacts after file delete: %+v", got)
+	}
+}

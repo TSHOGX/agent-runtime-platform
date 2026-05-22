@@ -20,7 +20,7 @@ export function CodeView({ code, language }: { code: string; language?: string }
     ref.current.innerHTML = auto.value;
   }, [code, language]);
   return (
-    <pre className="overflow-auto px-6 py-4 font-mono text-xs leading-relaxed">
+    <pre className="h-full overflow-auto px-6 py-4 font-mono text-xs leading-relaxed">
       <code ref={ref} className={language ? `language-${language}` : undefined}>{code}</code>
     </pre>
   );

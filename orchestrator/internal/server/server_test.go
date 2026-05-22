@@ -237,3 +237,93 @@ func TestReconcileCheckpointingSessionsRevertsIncompleteCheckpoint(t *testing.T)
 		t.Fatalf("want running_idle, got %s", got.Status)
 	}
 }
+
+func TestDownloadArtifactAllowsNestedRegularFile(t *testing.T) {
+	dir := t.TempDir()
+	sessionDir := filepath.Join(dir, "sess_1", "reports")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionDir, "summary.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+
+	srv := &Server{cfg: config.Config{SessionsRoot: dir}}
+	req := httptest.NewRequest(http.MethodGet, "/artifacts/sess_1/reports/summary.txt", nil)
+	rec := httptest.NewRecorder()
+
+	srv.downloadArtifact(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body %s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != "hello" {
+		t.Fatalf("unexpected body %q", rec.Body.String())
+	}
+}
+
+func TestDownloadArtifactRejectsSymlinkEscape(t *testing.T) {
+	dir := t.TempDir()
+	sessionDir := filepath.Join(dir, "sess_1")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("mkdir session: %v", err)
+	}
+	outside := filepath.Join(dir, "outside.txt")
+	if err := os.WriteFile(outside, []byte("secret"), 0o644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(sessionDir, "outside.txt")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	srv := &Server{cfg: config.Config{SessionsRoot: dir}}
+	req := httptest.NewRequest(http.MethodGet, "/artifacts/sess_1/outside.txt", nil)
+	rec := httptest.NewRecorder()
+
+	srv.downloadArtifact(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected status 403, got %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDownloadArtifactRejectsSymlinkDirectory(t *testing.T) {
+	dir := t.TempDir()
+	sessionDir := filepath.Join(dir, "sess_1")
+	outsideDir := filepath.Join(dir, "outside")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("mkdir session: %v", err)
+	}
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outsideDir, "secret.txt"), []byte("secret"), 0o644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	if err := os.Symlink(outsideDir, filepath.Join(sessionDir, "linked")); err != nil {
+		t.Fatalf("symlink dir: %v", err)
+	}
+
+	srv := &Server{cfg: config.Config{SessionsRoot: dir}}
+	req := httptest.NewRequest(http.MethodGet, "/artifacts/sess_1/linked/secret.txt", nil)
+	rec := httptest.NewRecorder()
+
+	srv.downloadArtifact(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected status 403, got %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDownloadArtifactRejectsTraversal(t *testing.T) {
+	dir := t.TempDir()
+	srv := &Server{cfg: config.Config{SessionsRoot: dir}}
+	req := httptest.NewRequest(http.MethodGet, "/artifacts/sess_1/../outside.txt", nil)
+	rec := httptest.NewRecorder()
+
+	srv.downloadArtifact(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d body %s", rec.Code, rec.Body.String())
+	}
+}
