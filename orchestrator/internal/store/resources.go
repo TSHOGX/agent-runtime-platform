@@ -1,0 +1,995 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/netip"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+const RuntimeManagerRoleTag = "runtime_manager"
+
+var ErrPoolExhausted = errors.New("pool exhausted")
+
+type ResourceAllocatorConfig struct {
+	RunDir                     string
+	CIDRPool                   netip.Prefix
+	EgressDorisFEHosts         []string
+	EgressDorisBEHosts         []string
+	EgressDorisPorts           []int
+	EgressDNSPolicy            string
+	HostProxyBindURL           string
+	ProxyPort                  int
+	Agent                      string
+	AgentModel                 string
+	AgentOutputFormat          string
+	DisableNonessentialTraffic bool
+}
+
+type AllocateGenerationParams struct {
+	SessionID string
+	Owner     string
+	LeaseTTL  time.Duration
+	Now       time.Time
+	Config    ResourceAllocatorConfig
+}
+
+type GenerationAllocation struct {
+	GenerationID          string
+	NetworkProfileID      string
+	AgentRuntimeProfileID string
+	Owner                 string
+	LeaseExpiresAt        time.Time
+}
+
+type ReaperParams struct {
+	OwnerUUID       string
+	FailedRetention time.Duration
+	Now             time.Time
+}
+
+type ReaperResult struct {
+	FailedMarkedReclaimable int64
+	DestroyedAllocations    int64
+}
+
+type StartupRecoveryParams struct {
+	OwnerUUID      string
+	Now            time.Time
+	LeaseTTL       time.Duration
+	ReconnectGrace time.Duration
+}
+
+type StartupRecoveryResult struct {
+	ExpiredLifecycleFailed int64
+	ReconnectGraceFailed   int64
+}
+
+type RenewLiveGenerationsParams struct {
+	Owner    string
+	LeaseTTL time.Duration
+	Now      time.Time
+}
+
+func GenerationLeaseOwner(ownerUUID string) string {
+	return strings.TrimSpace(ownerUUID) + ":" + RuntimeManagerRoleTag
+}
+
+func (s *Store) AllocateGeneration(ctx context.Context, p AllocateGenerationParams) (GenerationAllocation, error) {
+	if p.Now.IsZero() {
+		p.Now = time.Now().UTC()
+	}
+	if strings.TrimSpace(p.SessionID) == "" {
+		return GenerationAllocation{}, fmt.Errorf("session id is required")
+	}
+	if strings.TrimSpace(p.Owner) == "" {
+		return GenerationAllocation{}, fmt.Errorf("owner is required")
+	}
+	if p.LeaseTTL <= 0 {
+		return GenerationAllocation{}, fmt.Errorf("lease ttl must be > 0")
+	}
+	if !p.Config.CIDRPool.IsValid() || !p.Config.CIDRPool.Addr().Is4() || p.Config.CIDRPool.Bits() > 30 {
+		return GenerationAllocation{}, fmt.Errorf("valid IPv4 /30-capable CIDR pool is required")
+	}
+	if strings.TrimSpace(p.Config.RunDir) == "" {
+		return GenerationAllocation{}, fmt.Errorf("run dir is required")
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return GenerationAllocation{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := assertOwnerTx(ctx, tx, ownerUUIDFromLeaseOwner(p.Owner)); err != nil {
+		return GenerationAllocation{}, err
+	}
+	slot, err := nextFreeSlot(ctx, tx, p.Config.CIDRPool)
+	if err != nil {
+		return GenerationAllocation{}, err
+	}
+	generationID := "gen_" + uuid.NewString()
+	network, err := buildNetworkAllocation(p.Config, slot, generationID)
+	if err != nil {
+		return GenerationAllocation{}, err
+	}
+	networkProfileID := "net_" + generationID
+	agentRuntimeProfileID := agentRuntimeProfileID(p.SessionID, p.Config)
+	resources := buildResourcePaths(p.Config.RunDir, generationID)
+	egressPolicyID := egressPolicyID(p.Config)
+	allowedRules := allowedEgressRules(network.HostGatewayIP, p.Config)
+	allowedRulesJSON, err := json.Marshal(allowedRules)
+	if err != nil {
+		return GenerationAllocation{}, err
+	}
+	feHostsJSON, err := json.Marshal(p.Config.EgressDorisFEHosts)
+	if err != nil {
+		return GenerationAllocation{}, err
+	}
+	beHostsJSON, err := json.Marshal(p.Config.EgressDorisBEHosts)
+	if err != nil {
+		return GenerationAllocation{}, err
+	}
+	portsJSON, err := json.Marshal(p.Config.EgressDorisPorts)
+	if err != nil {
+		return GenerationAllocation{}, err
+	}
+	now := formatTime(p.Now)
+	leaseExpires := p.Now.Add(p.LeaseTTL)
+
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO agent_runtime_profiles (
+  agent_runtime_profile_id, agent, model, output_format,
+  disable_nonessential_traffic, requires_secret_drop,
+  manifest_anthropic_base_url, anthropic_api_key_secret_id,
+  anthropic_auth_token_secret_id, secret_version, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?)
+ON CONFLICT(agent, model, output_format, disable_nonessential_traffic,
+  requires_secret_drop, manifest_anthropic_base_url,
+  anthropic_api_key_secret_id, anthropic_auth_token_secret_id, secret_version
+) DO NOTHING`,
+		agentRuntimeProfileID, p.Config.agent(), nullableString(p.Config.AgentModel), p.Config.outputFormat(),
+		boolInt(p.Config.DisableNonessentialTraffic), boolInt(p.Config.requiresSecretDrop()),
+		network.SandboxBaseURL, now); err != nil {
+		return GenerationAllocation{}, err
+	}
+	if err := tx.QueryRowContext(ctx, `
+SELECT agent_runtime_profile_id
+FROM agent_runtime_profiles
+WHERE agent = ?
+  AND COALESCE(model, '') = COALESCE(?, '')
+  AND output_format = ?
+  AND disable_nonessential_traffic = ?
+  AND requires_secret_drop = ?
+  AND COALESCE(manifest_anthropic_base_url, '') = COALESCE(?, '')
+  AND anthropic_api_key_secret_id IS NULL
+  AND anthropic_auth_token_secret_id IS NULL
+  AND secret_version IS NULL`,
+		p.Config.agent(), nullableString(p.Config.AgentModel), p.Config.outputFormat(),
+		boolInt(p.Config.DisableNonessentialTraffic), boolInt(p.Config.requiresSecretDrop()), network.SandboxBaseURL).Scan(&agentRuntimeProfileID); err != nil {
+		return GenerationAllocation{}, err
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO egress_policies (
+  egress_policy_id, policy_digest, allowed_egress_rules,
+  doris_fe_hosts, doris_be_hosts, doris_ports, dns_policy, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(egress_policy_id) DO NOTHING`,
+		egressPolicyID, egressPolicyID, string(allowedRulesJSON), string(feHostsJSON),
+		string(beHostsJSON), string(portsJSON), p.Config.EgressDNSPolicy, now); err != nil {
+		return GenerationAllocation{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO runtime_generations (
+  generation_id, session_id, status, network_profile_id,
+  agent_runtime_profile_id, runsc_platform, lease_owner,
+  lease_expires_at, last_seen_at
+) VALUES (?, ?, 'allocating', ?, ?, 'systrap', ?, ?, ?)`,
+		generationID, p.SessionID, networkProfileID, agentRuntimeProfileID, p.Owner, formatTime(leaseExpires), now); err != nil {
+		return GenerationAllocation{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO network_profiles (
+  network_profile_id, session_id, generation_id,
+  runsc_network, runsc_overlay2, host_proxy_bind_url, proxy_port,
+  host_gateway_ip, sandbox_base_url, probe_url, netns_name, netns_path,
+  host_veth, sandbox_veth, sandbox_ip_cidr, egress_policy_id,
+  allowed_egress_rules, doris_fe_hosts, doris_be_hosts, doris_ports,
+  dns_policy, host_side_cidr, allocation_state, created_at
+) VALUES (?, ?, ?, 'sandbox', 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'allocating', ?)`,
+		networkProfileID, p.SessionID, generationID, p.Config.hostProxyBindURL(), p.Config.proxyPort(),
+		network.HostGatewayIP, network.SandboxBaseURL, network.ProbeURL, network.NetnsName, network.NetnsPath,
+		network.HostVeth, network.SandboxVeth, network.SandboxIPCIDR, egressPolicyID,
+		string(allowedRulesJSON), string(feHostsJSON), string(beHostsJSON), string(portsJSON),
+		p.Config.EgressDNSPolicy, network.HostSideCIDR, now); err != nil {
+		return GenerationAllocation{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO runtime_generation_resources (
+  generation_id, network_profile_id, agent_runtime_profile_id,
+  control_dir_path, control_manifest_path, bundle_dir_path, spec_path,
+  checkpoint_path, secrets_dir_path, bridge_dir_path, log_dir_path,
+  resource_state, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'allocating', ?)`,
+		generationID, networkProfileID, agentRuntimeProfileID,
+		resources.ControlDirPath, resources.ControlManifestPath, resources.BundleDirPath, resources.SpecPath,
+		nullableString(resources.CheckpointPath), nullableString(resources.SecretsDirPath), resources.BridgeDirPath, resources.LogDirPath, now); err != nil {
+		return GenerationAllocation{}, err
+	}
+	if err := updateSessionActiveGenerationTx(ctx, tx, SessionActiveGenerationCASParams{
+		SessionID:        p.SessionID,
+		NextGenerationID: generationID,
+	}); err != nil {
+		return GenerationAllocation{}, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return GenerationAllocation{}, err
+	}
+	return GenerationAllocation{
+		GenerationID:          generationID,
+		NetworkProfileID:      networkProfileID,
+		AgentRuntimeProfileID: agentRuntimeProfileID,
+		Owner:                 p.Owner,
+		LeaseExpiresAt:        leaseExpires,
+	}, nil
+}
+
+func (s *Store) MarkGenerationResourcesLive(ctx context.Context, sessionID, generationID, owner string, now time.Time) error {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `
+UPDATE runtime_generations
+SET status = 'idle',
+    last_seen_at = ?
+WHERE generation_id = ?
+  AND session_id = ?
+  AND status = 'allocating'
+  AND lease_owner = ?
+  AND lease_expires_at > ?
+  AND EXISTS (
+    SELECT 1 FROM sessions
+    WHERE id = ?
+      AND active_generation_id = ?
+      AND status NOT IN ('failed', 'destroyed')
+  )`, formatTime(now), generationID, sessionID, owner, formatTime(now), sessionID, generationID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return fmt.Errorf("generation live CAS failed")
+	}
+	res, err = tx.ExecContext(ctx, `
+UPDATE network_profiles
+SET allocation_state = 'live'
+WHERE generation_id = ?
+  AND session_id = ?
+  AND allocation_state IN ('allocating','ready')`, generationID, sessionID)
+	if err != nil {
+		return err
+	}
+	affected, err = res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return fmt.Errorf("network allocation live CAS failed")
+	}
+	res, err = tx.ExecContext(ctx, `
+UPDATE runtime_generation_resources
+SET resource_state = 'live'
+WHERE generation_id = ?
+  AND resource_state IN ('allocating','ready')`, generationID)
+	if err != nil {
+		return err
+	}
+	affected, err = res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return fmt.Errorf("generation resource live CAS failed")
+	}
+	return tx.Commit()
+}
+
+func (s *Store) SweepExpiredSessions(ctx context.Context, now time.Time) (int64, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	expiredSessionIDs, err := queryStringColumnTx(ctx, tx, `
+SELECT id
+FROM sessions
+WHERE expires_at IS NOT NULL
+  AND expires_at <= ?
+  AND status NOT IN ('failed', 'destroyed')`, formatTime(now))
+	if err != nil {
+		return 0, err
+	}
+	if len(expiredSessionIDs) == 0 {
+		return 0, tx.Commit()
+	}
+
+	nowString := formatTime(now)
+	args := []any{nowString, nowString}
+	args = appendStringIDs(args, expiredSessionIDs)
+	res, err := tx.ExecContext(ctx, `
+UPDATE sessions
+SET status = 'destroyed',
+    updated_at = ?,
+    ended_at = COALESCE(ended_at, ?),
+    error_class = COALESCE(error_class, 'session_expired'),
+    failure_reason = COALESCE(failure_reason, 'session_expired')
+WHERE id IN (`+sqlPlaceholders(len(expiredSessionIDs))+`)`, args...)
+	if err != nil {
+		return 0, err
+	}
+	changed, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+
+	args = []any{nowString}
+	args = appendStringIDs(args, expiredSessionIDs)
+	if _, err := tx.ExecContext(ctx, `
+UPDATE turns
+SET status = 'canceled',
+    completed_at = ?,
+    error_class = 'session_expired',
+    error = 'session_expired'
+WHERE session_id IN (`+sqlPlaceholders(len(expiredSessionIDs))+`)
+  AND status IN ('queued', 'leased')
+  AND ack_started_at IS NULL`, args...); err != nil {
+		return 0, err
+	}
+
+	args = appendStringIDs(nil, expiredSessionIDs)
+	args = append(args, nowString)
+	expiredGenerationIDs, err := queryStringColumnTx(ctx, tx, `
+SELECT generation_id
+FROM runtime_generations
+WHERE session_id IN (`+sqlPlaceholders(len(expiredSessionIDs))+`)
+  AND status NOT IN ('failed', 'destroyed')
+  AND NOT EXISTS (
+    SELECT 1 FROM turns
+    WHERE turns.generation_id = runtime_generations.generation_id
+      AND turns.status IN ('leased', 'running')
+      AND turns.ack_started_at IS NOT NULL
+      AND turns.lease_expires_at > ?
+  )`, args...)
+	if err != nil {
+		return 0, err
+	}
+	if len(expiredGenerationIDs) > 0 {
+		args = []any{nowString}
+		args = appendStringIDs(args, expiredGenerationIDs)
+		if _, err := tx.ExecContext(ctx, `
+UPDATE runtime_generations
+SET status = 'failed',
+    error_class = 'session_expired',
+    failure_reason = 'session_expired',
+    ended_at = ?,
+    lease_owner = NULL
+WHERE generation_id IN (`+sqlPlaceholders(len(expiredGenerationIDs))+`)`, args...); err != nil {
+			return 0, err
+		}
+		if err := markAllocationsReclaimableTx(ctx, tx, expiredGenerationIDs); err != nil {
+			return 0, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return changed, nil
+}
+
+func (s *Store) ReapResources(ctx context.Context, p ReaperParams) (ReaperResult, error) {
+	if p.Now.IsZero() {
+		p.Now = time.Now().UTC()
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ReaperResult{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := assertOwnerTx(ctx, tx, p.OwnerUUID); err != nil {
+		return ReaperResult{}, err
+	}
+
+	cutoff := p.Now.Add(-p.FailedRetention)
+	res, err := tx.ExecContext(ctx, `
+UPDATE network_profiles
+SET allocation_state = 'destroyed',
+    destroyed_at = COALESCE(destroyed_at, ?)
+WHERE allocation_state = 'reclaimable'
+  AND netns_name LIKE 'harness-gen-%'
+  AND EXISTS (
+    SELECT 1 FROM runtime_generation_resources r
+    WHERE r.generation_id = network_profiles.generation_id
+      AND r.resource_state IN ('reclaimable', 'destroyed')
+  )
+  AND EXISTS (
+    SELECT 1 FROM runtime_generations g
+    WHERE g.generation_id = network_profiles.generation_id
+      AND (
+        g.status != 'failed'
+        OR (g.ended_at IS NOT NULL AND g.ended_at <= ?)
+      )
+  )`, formatTime(p.Now), formatTime(cutoff))
+	if err != nil {
+		return ReaperResult{}, err
+	}
+	destroyed, err := res.RowsAffected()
+	if err != nil {
+		return ReaperResult{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE runtime_generation_resources
+SET resource_state = 'destroyed',
+    destroyed_at = COALESCE(destroyed_at, ?)
+WHERE resource_state = 'reclaimable'
+  AND generation_id IN (
+    SELECT generation_id FROM network_profiles
+    WHERE allocation_state = 'destroyed'
+  )`, formatTime(p.Now)); err != nil {
+		return ReaperResult{}, err
+	}
+
+	res, err = tx.ExecContext(ctx, `
+UPDATE network_profiles
+SET allocation_state = 'reclaimable'
+WHERE allocation_state IN ('allocating','ready','live','reserved_checkpointed','recreating')
+  AND generation_id IN (
+    SELECT generation_id FROM runtime_generations
+    WHERE status = 'failed'
+      AND ended_at IS NOT NULL
+      AND ended_at <= ?
+  )`, formatTime(cutoff))
+	if err != nil {
+		return ReaperResult{}, err
+	}
+	failedMarked, err := res.RowsAffected()
+	if err != nil {
+		return ReaperResult{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE runtime_generation_resources
+SET resource_state = 'reclaimable'
+WHERE resource_state IN ('allocating','ready','live','reserved_checkpointed','recreating')
+  AND generation_id IN (
+    SELECT generation_id FROM runtime_generations
+    WHERE status = 'failed'
+      AND ended_at IS NOT NULL
+      AND ended_at <= ?
+  )`, formatTime(cutoff)); err != nil {
+		return ReaperResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ReaperResult{}, err
+	}
+	return ReaperResult{FailedMarkedReclaimable: failedMarked, DestroyedAllocations: destroyed}, nil
+}
+
+func (s *Store) RecoverAllocations(ctx context.Context, p StartupRecoveryParams) (StartupRecoveryResult, error) {
+	if p.Now.IsZero() {
+		p.Now = time.Now().UTC()
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return StartupRecoveryResult{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := assertOwnerTx(ctx, tx, p.OwnerUUID); err != nil {
+		return StartupRecoveryResult{}, err
+	}
+	now := formatTime(p.Now)
+	lifecycleIDs, err := queryStringColumnTx(ctx, tx, `
+SELECT generation_id
+FROM runtime_generations
+WHERE status IN ('allocating','starting','probing','restoring','checkpointing')
+  AND lease_expires_at IS NOT NULL
+  AND lease_expires_at <= ?`, now)
+	if err != nil {
+		return StartupRecoveryResult{}, err
+	}
+	if len(lifecycleIDs) > 0 {
+		args := []any{now}
+		args = appendStringIDs(args, lifecycleIDs)
+		if _, err := tx.ExecContext(ctx, `
+UPDATE runtime_generations
+SET status = 'failed',
+    error_class = 'orchestrator_restart_during_' || status,
+    failure_reason = 'orchestrator_restart_during_' || status,
+    ended_at = ?,
+    lease_owner = NULL
+WHERE generation_id IN (`+sqlPlaceholders(len(lifecycleIDs))+`)`, args...); err != nil {
+			return StartupRecoveryResult{}, err
+		}
+		if err := markAllocationsReclaimableTx(ctx, tx, lifecycleIDs); err != nil {
+			return StartupRecoveryResult{}, err
+		}
+	}
+
+	cutoff := p.Now.Add(-p.ReconnectGrace)
+	reconnectIDs, err := queryStringColumnTx(ctx, tx, `
+SELECT generation_id
+FROM runtime_generations
+WHERE status IN ('active','idle')
+  AND lease_expires_at IS NOT NULL
+  AND lease_expires_at <= ?
+  AND NOT EXISTS (
+    SELECT 1 FROM turns
+    WHERE turns.generation_id = runtime_generations.generation_id
+      AND turns.status = 'running'
+      AND turns.ack_started_at IS NOT NULL
+  )`, formatTime(cutoff))
+	if err != nil {
+		return StartupRecoveryResult{}, err
+	}
+	if len(reconnectIDs) > 0 {
+		args := []any{now}
+		args = appendStringIDs(args, reconnectIDs)
+		if _, err := tx.ExecContext(ctx, `
+UPDATE runtime_generations
+SET status = 'failed',
+    error_class = 'orchestrator_restart_reconnect_grace_expired',
+    failure_reason = 'orchestrator_restart_reconnect_grace_expired',
+    ended_at = ?,
+    lease_owner = NULL
+WHERE generation_id IN (`+sqlPlaceholders(len(reconnectIDs))+`)`, args...); err != nil {
+			return StartupRecoveryResult{}, err
+		}
+		if err := markAllocationsReclaimableTx(ctx, tx, reconnectIDs); err != nil {
+			return StartupRecoveryResult{}, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM active_model_request_contexts
+WHERE lease_owner NOT LIKE ?`, p.OwnerUUID+":%"); err != nil {
+		return StartupRecoveryResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return StartupRecoveryResult{}, err
+	}
+	return StartupRecoveryResult{ExpiredLifecycleFailed: int64(len(lifecycleIDs)), ReconnectGraceFailed: int64(len(reconnectIDs))}, nil
+}
+
+func (s *Store) RenewLiveGenerationLeases(ctx context.Context, p RenewLiveGenerationsParams) (int64, error) {
+	if p.Now.IsZero() {
+		p.Now = time.Now().UTC()
+	}
+	if strings.TrimSpace(p.Owner) == "" {
+		return 0, fmt.Errorf("owner is required")
+	}
+	if p.LeaseTTL <= 0 {
+		return 0, fmt.Errorf("lease ttl must be > 0")
+	}
+	expiresAt := p.Now.Add(p.LeaseTTL)
+	res, err := s.db.ExecContext(ctx, `
+UPDATE runtime_generations
+SET lease_expires_at = ?,
+    last_seen_at = ?
+WHERE status IN ('starting','probing','active','idle','checkpointing','restoring')
+  AND lease_owner = ?
+  AND lease_expires_at > ?
+  AND EXISTS (
+    SELECT 1 FROM sessions
+    WHERE id = runtime_generations.session_id
+      AND active_generation_id = runtime_generations.generation_id
+      AND status NOT IN ('failed', 'destroyed')
+  )`, formatTime(expiresAt), formatTime(p.Now), p.Owner, formatTime(p.Now))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func (s *Store) Start7ATurn(ctx context.Context, sessionID, generationID, owner, content string, now time.Time) (int64, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	next, err := nextTurnSequence(ctx, tx, sessionID)
+	if err != nil {
+		return 0, err
+	}
+	res, err := tx.ExecContext(ctx, `
+INSERT INTO turns (
+  session_id, sequence, role, content, status, generation_id,
+  lease_owner, lease_expires_at, claim_granted_at, attempt, ack_started_at,
+  started_at, created_at
+) VALUES (?, ?, 'user', ?, 'running', ?, ?, ?, ?, 0, ?, ?, ?)`,
+		sessionID, next, content, generationID, owner, formatTime(now.Add(24*time.Hour)),
+		formatTime(now), formatTime(now), formatTime(now), formatTime(now))
+	if err != nil {
+		return 0, err
+	}
+	turnID, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	res, err = tx.ExecContext(ctx, `
+UPDATE runtime_generations
+SET status = 'active',
+    last_seen_at = ?
+WHERE generation_id = ?
+  AND session_id = ?
+  AND status IN ('idle','active')
+  AND lease_owner = ?
+  AND lease_expires_at > ?
+  AND EXISTS (
+    SELECT 1 FROM sessions
+    WHERE id = ?
+      AND active_generation_id = ?
+      AND status NOT IN ('failed', 'destroyed')
+  )`, formatTime(now), generationID, sessionID, owner, formatTime(now), sessionID, generationID)
+	if err != nil {
+		return 0, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if affected != 1 {
+		return 0, fmt.Errorf("7a generation start CAS failed")
+	}
+	return turnID, tx.Commit()
+}
+
+func (s *Store) Finish7ATurn(ctx context.Context, sessionID, generationID, owner string, turnID int64, terminalStatus, errorText string, now time.Time) error {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	if terminalStatus != "completed" && terminalStatus != "failed" {
+		return fmt.Errorf("invalid 7a terminal turn status %q", terminalStatus)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `
+UPDATE turns
+SET status = ?,
+    completed_at = ?,
+    completed_by_generation = ?,
+    error = ?
+WHERE id = ?
+  AND session_id = ?
+  AND generation_id = ?
+  AND status = 'running'`,
+		terminalStatus, formatTime(now), generationID, nullableString(errorText), turnID, sessionID, generationID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return fmt.Errorf("7a turn completion CAS failed")
+	}
+	if err := markGenerationIdleIfNoInflight(ctx, tx, sessionID, generationID, owner, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+type networkAllocation struct {
+	HostGatewayIP  string
+	SandboxBaseURL string
+	ProbeURL       string
+	NetnsName      string
+	NetnsPath      string
+	HostVeth       string
+	SandboxVeth    string
+	SandboxIPCIDR  string
+	HostSideCIDR   string
+}
+
+type resourcePaths struct {
+	ControlDirPath      string
+	ControlManifestPath string
+	BundleDirPath       string
+	SpecPath            string
+	CheckpointPath      string
+	SecretsDirPath      string
+	BridgeDirPath       string
+	LogDirPath          string
+}
+
+func assertOwnerTx(ctx context.Context, tx *sql.Tx, ownerUUID string) error {
+	if strings.TrimSpace(ownerUUID) == "" {
+		return fmt.Errorf("owner uuid is required")
+	}
+	var got string
+	if err := tx.QueryRowContext(ctx, `SELECT uuid FROM orchestrator_owner WHERE singleton = 1`).Scan(&got); err != nil {
+		return err
+	}
+	if got != ownerUUID {
+		return fmt.Errorf("orchestrator owner uuid mismatch: db=%s process=%s", got, ownerUUID)
+	}
+	return nil
+}
+
+func queryStringColumnTx(ctx context.Context, tx *sql.Tx, query string, args ...any) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var values []string
+	for rows.Next() {
+		var value string
+		if err := rows.Scan(&value); err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	return values, rows.Err()
+}
+
+func appendStringIDs(args []any, ids []string) []any {
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	return args
+}
+
+func markAllocationsReclaimableTx(ctx context.Context, tx *sql.Tx, generationIDs []string) error {
+	if len(generationIDs) == 0 {
+		return nil
+	}
+	args := appendStringIDs(nil, generationIDs)
+	if _, err := tx.ExecContext(ctx, `
+UPDATE network_profiles
+SET allocation_state = 'reclaimable'
+WHERE allocation_state IN ('allocating','ready','live','reserved_checkpointed','recreating')
+  AND generation_id IN (`+sqlPlaceholders(len(generationIDs))+`)`, args...); err != nil {
+		return err
+	}
+	args = appendStringIDs(nil, generationIDs)
+	if _, err := tx.ExecContext(ctx, `
+UPDATE runtime_generation_resources
+SET resource_state = 'reclaimable'
+WHERE resource_state IN ('allocating','ready','live','reserved_checkpointed','recreating')
+  AND generation_id IN (`+sqlPlaceholders(len(generationIDs))+`)`, args...); err != nil {
+		return err
+	}
+	return nil
+}
+
+func updateSessionActiveGenerationTx(ctx context.Context, tx *sql.Tx, p SessionActiveGenerationCASParams) error {
+	args := []any{p.NextGenerationID, p.SessionID}
+	where := "active_generation_id IS NULL"
+	if p.ExpectedGenerationID.Valid {
+		where = "active_generation_id = ?"
+		args = append(args, p.ExpectedGenerationID.String)
+	}
+	res, err := tx.ExecContext(ctx, `
+UPDATE sessions
+SET active_generation_id = ?
+WHERE id = ?
+  AND `+where, args...)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return fmt.Errorf("session active generation CAS failed")
+	}
+	return nil
+}
+
+func nextFreeSlot(ctx context.Context, tx *sql.Tx, pool netip.Prefix) (uint64, error) {
+	rows, err := tx.QueryContext(ctx, `
+SELECT host_side_cidr
+FROM network_profiles
+WHERE allocation_state != 'destroyed'`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	used := map[uint64]struct{}{}
+	for rows.Next() {
+		var cidr string
+		if err := rows.Scan(&cidr); err != nil {
+			return 0, err
+		}
+		prefix, err := netip.ParsePrefix(cidr)
+		if err != nil || prefix.Bits() != 30 {
+			continue
+		}
+		if slot, ok := slotForPrefix(pool, prefix); ok {
+			used[slot] = struct{}{}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	capacity := uint64(1) << uint(30-pool.Bits())
+	for slot := uint64(0); slot < capacity; slot++ {
+		if _, ok := used[slot]; !ok {
+			return slot, nil
+		}
+	}
+	return 0, ErrPoolExhausted
+}
+
+func slotForPrefix(pool, prefix netip.Prefix) (uint64, bool) {
+	if !pool.Contains(prefix.Addr()) {
+		return 0, false
+	}
+	base := ip4ToUint32(pool.Addr())
+	addr := ip4ToUint32(prefix.Addr())
+	if addr < base {
+		return 0, false
+	}
+	return uint64(addr-base) / 4, true
+}
+
+func buildNetworkAllocation(cfg ResourceAllocatorConfig, slot uint64, generationID string) (networkAllocation, error) {
+	base := ip4ToUint32(cfg.CIDRPool.Addr())
+	networkIP := base + uint32(slot*4)
+	gatewayIP := uint32ToIP4(networkIP + 1)
+	sandboxIP := uint32ToIP4(networkIP + 2)
+	generationToken := shortGenerationToken(generationID)
+	proxyPort := cfg.proxyPort()
+	sandboxBaseURL := fmt.Sprintf("http://%s:%d", gatewayIP, proxyPort)
+	return networkAllocation{
+		HostGatewayIP:  gatewayIP.String(),
+		SandboxBaseURL: sandboxBaseURL,
+		ProbeURL:       sandboxBaseURL,
+		NetnsName:      "harness-gen-" + generationToken,
+		NetnsPath:      filepath.Join("/var/run/netns", "harness-gen-"+generationToken),
+		HostVeth:       "hgen" + generationToken[:6] + "h",
+		SandboxVeth:    "hgen" + generationToken[:6] + "s",
+		SandboxIPCIDR:  sandboxIP.String() + "/30",
+		HostSideCIDR:   netip.PrefixFrom(uint32ToIP4(networkIP), 30).String(),
+	}, nil
+}
+
+func shortGenerationToken(generationID string) string {
+	token := strings.NewReplacer("gen_", "", "-", "").Replace(generationID)
+	if len(token) < 8 {
+		return fmt.Sprintf("%08s", token)
+	}
+	return token[:8]
+}
+
+func buildResourcePaths(runDir, generationID string) resourcePaths {
+	base := filepath.Join(runDir, "gen-"+generationID)
+	controlDir := filepath.Join(runDir, "control", "gen-"+generationID)
+	bundleDir := filepath.Join(runDir, "runtime", "gen-"+generationID)
+	bridgeDir := filepath.Join(runDir, "bridge", "gen-"+generationID)
+	return resourcePaths{
+		ControlDirPath:      controlDir,
+		ControlManifestPath: filepath.Join(controlDir, "session.json"),
+		BundleDirPath:       bundleDir,
+		SpecPath:            filepath.Join(bundleDir, "config.json"),
+		CheckpointPath:      filepath.Join(base, "checkpoint"),
+		SecretsDirPath:      filepath.Join(controlDir, "secrets"),
+		BridgeDirPath:       bridgeDir,
+		LogDirPath:          filepath.Join(runDir, "logs", "gen-"+generationID),
+	}
+}
+
+func allowedEgressRules(hostGatewayIP string, cfg ResourceAllocatorConfig) []string {
+	rules := []string{fmt.Sprintf("tcp:%s:%d", hostGatewayIP, cfg.proxyPort())}
+	for _, host := range cfg.EgressDorisFEHosts {
+		for _, port := range cfg.EgressDorisPorts {
+			rules = append(rules, fmt.Sprintf("tcp:%s:%d", host, port))
+		}
+	}
+	for _, host := range cfg.EgressDorisBEHosts {
+		for _, port := range cfg.EgressDorisPorts {
+			rules = append(rules, fmt.Sprintf("tcp:%s:%d", host, port))
+		}
+	}
+	if cfg.EgressDNSPolicy != "" && cfg.EgressDNSPolicy != "off" {
+		rules = append(rules, "udp:53", "tcp:53")
+	}
+	return rules
+}
+
+func egressPolicyID(cfg ResourceAllocatorConfig) string {
+	payload := strings.Join(cfg.EgressDorisFEHosts, ",") + "|" +
+		strings.Join(cfg.EgressDorisBEHosts, ",") + "|" +
+		fmt.Sprint(cfg.EgressDorisPorts) + "|" + cfg.EgressDNSPolicy
+	return "egress_" + strings.ReplaceAll(payload, " ", "_")
+}
+
+func agentRuntimeProfileID(sessionID string, cfg ResourceAllocatorConfig) string {
+	return "arp_" + sessionID
+}
+
+func (c ResourceAllocatorConfig) agent() string {
+	if strings.TrimSpace(c.Agent) != "" {
+		return strings.TrimSpace(c.Agent)
+	}
+	if strings.TrimSpace(c.AgentOutputFormat) == "shell_pty" {
+		return "sh"
+	}
+	return "claude"
+}
+
+func (c ResourceAllocatorConfig) outputFormat() string {
+	if strings.TrimSpace(c.AgentOutputFormat) == "" {
+		return "stream-json"
+	}
+	return strings.TrimSpace(c.AgentOutputFormat)
+}
+
+func (c ResourceAllocatorConfig) requiresSecretDrop() bool {
+	return c.agent() == "claude"
+}
+
+func (c ResourceAllocatorConfig) hostProxyBindURL() string {
+	if strings.TrimSpace(c.HostProxyBindURL) == "" {
+		return "http://0.0.0.0:8082"
+	}
+	return strings.TrimSpace(c.HostProxyBindURL)
+}
+
+func (c ResourceAllocatorConfig) proxyPort() int {
+	if c.ProxyPort <= 0 {
+		return 8082
+	}
+	return c.ProxyPort
+}
+
+func ip4ToUint32(addr netip.Addr) uint32 {
+	a := addr.As4()
+	return uint32(a[0])<<24 | uint32(a[1])<<16 | uint32(a[2])<<8 | uint32(a[3])
+}
+
+func uint32ToIP4(value uint32) netip.Addr {
+	return netip.AddrFrom4([4]byte{byte(value >> 24), byte(value >> 16), byte(value >> 8), byte(value)})
+}
+
+func ownerUUIDFromLeaseOwner(owner string) string {
+	before, _, ok := strings.Cut(owner, ":")
+	if !ok {
+		return owner
+	}
+	return before
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}

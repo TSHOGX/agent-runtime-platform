@@ -41,19 +41,27 @@ const (
 )
 
 type Server struct {
-	cfg      config.Config
-	store    *store.Store
-	runtime  *runtime.Runtime
-	watcher  *artifacts.Watcher
-	hub      *events.Hub
-	log      *slog.Logger
-	upgrader websocket.Upgrader
+	cfg       config.Config
+	store     *store.Store
+	runtime   runtimeDriver
+	watcher   *artifacts.Watcher
+	hub       *events.Hub
+	log       *slog.Logger
+	upgrader  websocket.Upgrader
+	ownerUUID string
+}
+
+type runtimeDriver interface {
+	Start(context.Context, runtime.StartRequest, func(runtime.Output)) runtime.Result
+	Destroy(context.Context, string) error
+	Interrupt(string) error
+	Checkpoint(context.Context, string) error
 }
 
 func New(
 	cfg config.Config,
 	store *store.Store,
-	runtime *runtime.Runtime,
+	runtime runtimeDriver,
 	watcher *artifacts.Watcher,
 	hub *events.Hub,
 	log *slog.Logger,
@@ -69,6 +77,10 @@ func New(
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
 	}
+}
+
+func (s *Server) SetOwnerUUID(ownerUUID string) {
+	s.ownerUUID = strings.TrimSpace(ownerUUID)
 }
 
 func (s *Server) Routes() http.Handler {
@@ -239,6 +251,10 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, sessionID s
 		writeError(w, http.StatusBadRequest, "content is required")
 		return
 	}
+	if _, err := s.store.SweepExpiredSessions(r.Context(), time.Now().UTC()); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	session, err := s.store.GetSession(r.Context(), sessionID)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "session not found")
@@ -256,6 +272,21 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, sessionID s
 		writeError(w, http.StatusConflict, "session is "+session.Status)
 		return
 	}
+	leaseOwner := store.GenerationLeaseOwner(s.ownerUUID)
+	allocation, err := s.ensureActiveGeneration(r.Context(), session, leaseOwner)
+	if errors.Is(err, store.ErrPoolExhausted) {
+		writeErrorClass(w, http.StatusServiceUnavailable, "pool_exhausted", "resource pool exhausted")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	turnID, err := s.store.Start7ATurn(r.Context(), sessionID, allocation.GenerationID, allocation.Owner, req.Content, time.Now().UTC())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 
 	msg, err := s.store.AddMessage(r.Context(), sessionID, "user", req.Content)
 	if err != nil {
@@ -270,8 +301,52 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, sessionID s
 
 	s.hub.Publish(events.Event{Type: "message.created", SessionID: sessionID, Payload: msg})
 	s.hub.Publish(events.Event{Type: "session." + runningStatus, SessionID: sessionID})
-	go s.runSession(context.Background(), session, req.Content)
+	go s.runSession(context.Background(), session, req.Content, allocation.GenerationID, allocation.Owner, turnID)
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": runningStatus, "session_id": sessionID, "message": msg})
+}
+
+func (s *Server) ensureActiveGeneration(ctx context.Context, session store.Session, owner string) (store.GenerationAllocation, error) {
+	if strings.TrimSpace(session.ActiveGenerationID) != "" {
+		return store.GenerationAllocation{
+			GenerationID: session.ActiveGenerationID,
+			Owner:        owner,
+		}, nil
+	}
+	allocation, err := s.store.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     owner,
+		LeaseTTL:  s.cfg.Phase7.Bridge.LeaseTTL.Duration,
+		Now:       time.Now().UTC(),
+		Config:    s.resourceAllocatorConfig(session.Agent),
+	})
+	if err != nil {
+		return store.GenerationAllocation{}, err
+	}
+	if err := s.store.MarkGenerationResourcesLive(ctx, session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
+		return store.GenerationAllocation{}, err
+	}
+	return allocation, nil
+}
+
+func (s *Server) resourceAllocatorConfig(agent string) store.ResourceAllocatorConfig {
+	outputFormat := s.cfg.Claude.OutputFormat
+	if agent == string(agents.Shell) {
+		outputFormat = "shell_pty"
+	}
+	return store.ResourceAllocatorConfig{
+		RunDir:                     s.cfg.Phase7.RunDir,
+		CIDRPool:                   s.cfg.Phase7.Network.CIDRPool.Prefix,
+		EgressDorisFEHosts:         s.cfg.Phase7.Network.Egress.DorisFEHosts,
+		EgressDorisBEHosts:         s.cfg.Phase7.Network.Egress.DorisBEHosts,
+		EgressDorisPorts:           s.cfg.Phase7.Network.Egress.DorisPorts,
+		EgressDNSPolicy:            string(s.cfg.Phase7.Network.Egress.DNSPolicy),
+		HostProxyBindURL:           s.cfg.Claude.ProxyBindURL,
+		ProxyPort:                  8082,
+		Agent:                      agent,
+		AgentModel:                 s.cfg.Claude.Model,
+		AgentOutputFormat:          outputFormat,
+		DisableNonessentialTraffic: s.cfg.Claude.DisableNonessentialTraffic,
+	}
 }
 
 func (s *Server) listMessages(w http.ResponseWriter, r *http.Request, sessionID string) {
@@ -290,8 +365,14 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request, sessionID 
 	writeJSON(w, http.StatusOK, map[string]any{"messages": messages})
 }
 
-func (s *Server) runSession(ctx context.Context, session store.Session, message string) {
+func (s *Server) runSession(ctx context.Context, session store.Session, message, generationID, leaseOwner string, turnID int64) {
 	parser := newStreamParser(s, session.ID, session.Agent)
+	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
+	heartbeatDone := s.startRuntimeManagerHeartbeat(heartbeatCtx, session.ID, generationID, leaseOwner)
+	defer func() {
+		stopHeartbeat()
+		<-heartbeatDone
+	}()
 
 	result := s.runtime.Start(ctx, runtime.StartRequest{
 		SessionID:         session.ID,
@@ -318,6 +399,21 @@ func (s *Server) runSession(ctx context.Context, session store.Session, message 
 		s.log.Warn("runtime stream failed", "session_id", session.ID, "error", err)
 		s.hub.Publish(events.Event{Type: "session.error", SessionID: session.ID, Payload: map[string]string{"error": err.Error()}})
 	}
+	turnStatus := "completed"
+	turnError := ""
+	if status == string(sessionstate.Failed) {
+		turnStatus = "failed"
+		if result.Err != nil {
+			turnError = result.Err.Error()
+		} else if err := parser.Err(); err != nil {
+			turnError = err.Error()
+		}
+	}
+	if generationID != "" {
+		if err := s.store.Finish7ATurn(ctx, session.ID, generationID, leaseOwner, turnID, turnStatus, turnError, now.UTC()); err != nil {
+			s.log.Warn("failed to update 7a turn ledger", "session_id", session.ID, "generation_id", generationID, "error", err)
+		}
+	}
 	if err := s.store.UpdateSessionStatusAndActivity(ctx, session.ID, status, result.RestoreMS, now); err != nil {
 		s.log.Warn("failed to update session status", "session_id", session.ID, "error", err)
 	}
@@ -325,6 +421,86 @@ func (s *Server) runSession(ctx context.Context, session store.Session, message 
 		s.log.Warn("failed to scan session artifacts", "session_id", session.ID, "error", err)
 	}
 	s.hub.Publish(events.Event{Type: "session." + status, SessionID: session.ID, Payload: map[string]any{"restore_ms": result.RestoreMS}})
+}
+
+func (s *Server) startRuntimeManagerHeartbeat(ctx context.Context, sessionID, generationID, leaseOwner string) <-chan struct{} {
+	done := make(chan struct{})
+	if strings.TrimSpace(generationID) == "" || strings.TrimSpace(leaseOwner) == "" {
+		close(done)
+		return done
+	}
+	interval := s.cfg.Phase7.Bridge.HeartbeatInterval.Duration
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	leaseTTL := s.cfg.Phase7.Bridge.LeaseTTL.Duration
+	if leaseTTL <= 0 {
+		leaseTTL = time.Minute
+	}
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-ticker.C:
+				if err := s.store.RenewGenerationHeartbeat(ctx, store.RenewHeartbeatParams{
+					SessionID:    sessionID,
+					GenerationID: generationID,
+					Owner:        leaseOwner,
+					LeaseTTL:     leaseTTL,
+					Now:          now.UTC(),
+				}); err != nil && !errors.Is(err, context.Canceled) {
+					s.log.Warn("runtime-manager heartbeat failed", "session_id", sessionID, "generation_id", generationID, "error", err)
+				}
+			}
+		}
+	}()
+	return done
+}
+
+func (s *Server) RunPhase7Maintenance(ctx context.Context) error {
+	if strings.TrimSpace(s.ownerUUID) == "" {
+		return fmt.Errorf("phase7 maintenance requires owner uuid")
+	}
+	interval := s.cfg.Phase7.Bridge.HeartbeatInterval.Duration
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+
+	runOnce := func(now time.Time) {
+		if _, err := s.store.SweepExpiredSessions(ctx, now); err != nil && !errors.Is(err, context.Canceled) {
+			s.log.Warn("phase7 expired-session sweep failed", "error", err)
+		}
+		if _, err := s.store.RenewLiveGenerationLeases(ctx, store.RenewLiveGenerationsParams{
+			Owner:    store.GenerationLeaseOwner(s.ownerUUID),
+			LeaseTTL: s.cfg.Phase7.Bridge.LeaseTTL.Duration,
+			Now:      now,
+		}); err != nil && !errors.Is(err, context.Canceled) {
+			s.log.Warn("phase7 generation lease renewal failed", "error", err)
+		}
+		if _, err := s.store.ReapResources(ctx, store.ReaperParams{
+			OwnerUUID:       s.ownerUUID,
+			FailedRetention: s.cfg.Phase7.Reaper.FailedRetention.Duration,
+			Now:             now,
+		}); err != nil && !errors.Is(err, context.Canceled) {
+			s.log.Warn("phase7 resource reaper failed", "error", err)
+		}
+	}
+
+	runOnce(time.Now().UTC())
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case now := <-ticker.C:
+			runOnce(now.UTC())
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 func (s *Server) interruptSession(w http.ResponseWriter, r *http.Request, sessionID string) {
@@ -603,6 +779,10 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+func writeErrorClass(w http.ResponseWriter, status int, class, message string) {
+	writeJSON(w, status, map[string]string{"error_class": class, "error": message})
 }
 
 func (s *Server) MonitorIdleSessions(ctx context.Context) error {

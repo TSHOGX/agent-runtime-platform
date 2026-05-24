@@ -56,6 +56,23 @@ func main() {
 		log.Error("failed to write orchestrator owner", "error", err)
 		os.Exit(1)
 	}
+	if _, err := db.RecoverAllocations(ctx, store.StartupRecoveryParams{
+		OwnerUUID:      owner.UUID,
+		Now:            time.Now().UTC(),
+		LeaseTTL:       cfg.Phase7.Bridge.LeaseTTL.Duration,
+		ReconnectGrace: cfg.Phase7.Bridge.ReconnectGrace.Duration,
+	}); err != nil {
+		log.Error("failed to recover phase7 allocations", "error", err)
+		os.Exit(1)
+	}
+	if _, err := db.ReapResources(ctx, store.ReaperParams{
+		OwnerUUID:       owner.UUID,
+		FailedRetention: cfg.Phase7.Reaper.FailedRetention.Duration,
+		Now:             time.Now().UTC(),
+	}); err != nil {
+		log.Error("failed to reap phase7 resources", "error", err)
+		os.Exit(1)
+	}
 	ownerHeartbeatErr := db.StartOwnerHeartbeat(ctx, owner)
 	if err := db.EnsureUser(ctx, "lab", "Lab User"); err != nil {
 		log.Error("failed to ensure lab user", "error", err)
@@ -102,11 +119,17 @@ func main() {
 		},
 	})
 	app := server.New(cfg, db, rt, watcher, hub, log)
+	app.SetOwnerUUID(owner.UUID)
 
 	// Start idle session monitoring
 	go func() {
 		if err := app.MonitorIdleSessions(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Error("idle session monitor stopped", "error", err)
+		}
+	}()
+	go func() {
+		if err := app.RunPhase7Maintenance(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error("phase7 maintenance stopped", "error", err)
 		}
 	}()
 

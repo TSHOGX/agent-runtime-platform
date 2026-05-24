@@ -2,9 +2,11 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -238,6 +240,85 @@ func TestReconcileCheckpointingSessionsRevertsIncompleteCheckpoint(t *testing.T)
 	}
 }
 
+func TestSendMessageAllocatesGenerationAndWrites7ALedger(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_turn", string(sessionstate.Created), time.Now().UTC(), nil)
+
+	srv := &Server{
+		cfg:     testServerConfig(dir),
+		store:   st,
+		runtime: instantRuntime{},
+		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(`{"content":"hello"}`))
+	rec := httptest.NewRecorder()
+	srv.sendMessage(rec, req, session.ID)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status 202, got %d body %s", rec.Code, rec.Body.String())
+	}
+	waitForSessionStatus(t, ctx, st, session.ID, string(sessionstate.RunningIdle))
+
+	var generations, networkRows, resourceRows, completedTurns int
+	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_generations WHERE session_id = ?`, session.ID).Scan(&generations); err != nil {
+		t.Fatalf("count generations: %v", err)
+	}
+	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM network_profiles WHERE session_id = ? AND allocation_state = 'live'`, session.ID).Scan(&networkRows); err != nil {
+		t.Fatalf("count network rows: %v", err)
+	}
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM runtime_generation_resources r
+JOIN runtime_generations g ON g.generation_id = r.generation_id
+WHERE g.session_id = ? AND r.resource_state = 'live'`, session.ID).Scan(&resourceRows); err != nil {
+		t.Fatalf("count resource rows: %v", err)
+	}
+	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM turns WHERE session_id = ? AND status = 'completed'`, session.ID).Scan(&completedTurns); err != nil {
+		t.Fatalf("count turns: %v", err)
+	}
+	if generations != 1 || networkRows != 1 || resourceRows != 1 || completedTurns != 1 {
+		t.Fatalf("unexpected ledger rows: generations=%d network=%d resources=%d turns=%d", generations, networkRows, resourceRows, completedTurns)
+	}
+}
+
+func TestSendMessageRejectsExpiredSessionBeforeAllocation(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	expired := time.Now().UTC().Add(-time.Second)
+	session := createServerTestSession(t, ctx, st, dir, "sess_expired", string(sessionstate.Created), time.Now().UTC(), &expired)
+	srv := &Server{
+		cfg:     testServerConfig(dir),
+		store:   st,
+		runtime: instantRuntime{},
+		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(`{"content":"hello"}`))
+	rec := httptest.NewRecorder()
+	srv.sendMessage(rec, req, session.ID)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected status 409, got %d body %s", rec.Code, rec.Body.String())
+	}
+	var generations int
+	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_generations`).Scan(&generations); err != nil {
+		t.Fatalf("count generations: %v", err)
+	}
+	if generations != 0 {
+		t.Fatalf("expired session should not allocate generation, got %d", generations)
+	}
+}
+
 func TestDownloadArtifactAllowsNestedRegularFile(t *testing.T) {
 	dir := t.TempDir()
 	sessionDir := filepath.Join(dir, "sess_1", "reports")
@@ -260,6 +341,123 @@ func TestDownloadArtifactAllowsNestedRegularFile(t *testing.T) {
 	if rec.Body.String() != "hello" {
 		t.Fatalf("unexpected body %q", rec.Body.String())
 	}
+}
+
+type instantRuntime struct{}
+
+func (instantRuntime) Start(ctx context.Context, req runtime.StartRequest, output func(runtime.Output)) runtime.Result {
+	if output != nil {
+		output(runtime.Output{Stream: "stdout", Line: `{"type":"result","subtype":"success","result":"ok"}`})
+	}
+	return runtime.Result{}
+}
+
+func (instantRuntime) Destroy(context.Context, string) error {
+	return nil
+}
+
+func (instantRuntime) Interrupt(string) error {
+	return nil
+}
+
+func (instantRuntime) Checkpoint(context.Context, string) error {
+	return nil
+}
+
+func openServerOwnedStore(t *testing.T, ctx context.Context, dir string) (*store.Store, *store.OwnerLock) {
+	t.Helper()
+	st, err := store.Open(ctx, filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	owner, err := store.AcquireOwnerLock(filepath.Join(dir, "run"))
+	if err != nil {
+		t.Fatalf("acquire owner: %v", err)
+	}
+	t.Cleanup(func() { _ = owner.Close() })
+	if err := st.WriteOwner(ctx, owner); err != nil {
+		t.Fatalf("write owner: %v", err)
+	}
+	return st, owner
+}
+
+func createServerTestSession(t *testing.T, ctx context.Context, st *store.Store, dir, id, status string, now time.Time, expiresAt *time.Time) store.Session {
+	t.Helper()
+	session := store.Session{
+		ID:                id,
+		UserID:            labUserID,
+		Status:            status,
+		Agent:             "claude",
+		Workspace:         filepath.Join(dir, "sessions", id),
+		RestoreID:         "phase3-" + id,
+		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
+		CreatedAt:         now,
+		UpdatedAt:         now,
+		ExpiresAt:         expiresAt,
+	}
+	if err := os.MkdirAll(session.Workspace, 0o755); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	if err := st.CreateSession(ctx, session); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	return session
+}
+
+func testServerConfig(dir string) config.Config {
+	return config.Config{
+		SessionsRoot: filepath.Join(dir, "sessions"),
+		SessionTTL:   time.Hour,
+		MaxSessions:  10,
+		DefaultAgent: "claude",
+		Claude: config.ClaudeConfig{
+			ProxyBindURL:               "http://0.0.0.0:8082",
+			Model:                      "sonnet",
+			OutputFormat:               "stream-json",
+			DisableNonessentialTraffic: true,
+		},
+		Phase7: config.Phase7Config{
+			RunDir: filepath.Join(dir, "run"),
+			Network: config.NetworkConfig{
+				CIDRPool: config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/29")},
+				Egress: config.EgressConfig{
+					DorisFEHosts: []string{"172.16.0.138"},
+					DorisBEHosts: []string{"172.16.0.139"},
+					DorisPorts:   []int{9030},
+					DNSPolicy:    config.DNSPolicyHostnamesOnly,
+				},
+			},
+			Bridge: config.BridgeConfig{
+				LeaseTTL:          config.Duration{Duration: time.Minute},
+				HeartbeatInterval: config.Duration{Duration: 10 * time.Millisecond},
+			},
+			Reaper: config.ReaperConfig{
+				FailedRetention: config.Duration{Duration: 0},
+			},
+		},
+	}
+}
+
+func waitForSessionStatus(t *testing.T, ctx context.Context, st *store.Store, sessionID, want string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		got, err := st.GetSession(ctx, sessionID)
+		if err != nil {
+			t.Fatalf("get session: %v", err)
+		}
+		if got.Status == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	got, err := st.GetSession(ctx, sessionID)
+	if err != nil {
+		t.Fatalf("get final session: %v", err)
+	}
+	data, _ := json.Marshal(got)
+	t.Fatalf("session did not reach %s: %s", want, data)
 }
 
 func TestDownloadArtifactRejectsSymlinkEscape(t *testing.T) {

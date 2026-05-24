@@ -97,6 +97,10 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+func (s *Store) DBForTest() *sql.DB {
+	return s.db
+}
+
 func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `
 PRAGMA busy_timeout=5000;
@@ -185,10 +189,15 @@ func (s *Store) UpdateSessionStatus(ctx context.Context, id, status string, rest
 	if sessionstate.IsTerminal(status) {
 		terminalAt = formatTime(now)
 	}
-	_, err := s.db.ExecContext(ctx, `
+	query := `
 UPDATE sessions
 SET status = ?, restore_ms = COALESCE(?, restore_ms), updated_at = ?, ended_at = COALESCE(?, ended_at)
-WHERE id = ?`, status, restoreMS, formatTime(now), terminalAt, id)
+WHERE id = ?`
+	args := []any{status, restoreMS, formatTime(now), terminalAt, id}
+	if !sessionstate.IsTerminal(status) {
+		query += ` AND status NOT IN ('failed', 'destroyed')`
+	}
+	_, err := s.db.ExecContext(ctx, query, args...)
 	return err
 }
 
@@ -409,10 +418,15 @@ func (s *Store) UpdateSessionStatusAndActivity(ctx context.Context, id, status s
 	if sessionstate.IsTerminal(status) {
 		terminalAt = formatTime(now)
 	}
-	_, err := s.db.ExecContext(ctx, `
+	query := `
 UPDATE sessions
 SET status = ?, restore_ms = COALESCE(?, restore_ms), updated_at = ?, ended_at = COALESCE(?, ended_at), last_activity_at = ?
-WHERE id = ?`, status, restoreMS, formatTime(now), terminalAt, formatTime(lastActivity), id)
+WHERE id = ?`
+	args := []any{status, restoreMS, formatTime(now), terminalAt, formatTime(lastActivity), id}
+	if !sessionstate.IsTerminal(status) {
+		query += ` AND status NOT IN ('failed', 'destroyed')`
+	}
+	_, err := s.db.ExecContext(ctx, query, args...)
 	return err
 }
 
