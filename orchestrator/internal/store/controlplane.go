@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -26,6 +27,26 @@ type TurnGrant struct {
 	ExpiresAt time.Time
 }
 
+type BridgeHelloAck struct {
+	LastOutputSequenceByTurn map[int64]int64
+	LeasedTurnID             *int64
+	ServerTime               time.Time
+}
+
+type AppendEventParams struct {
+	SessionID      string
+	TurnID         *int64
+	GenerationID   string
+	Owner          string
+	OutputSequence *int64
+	DedupeKey      string
+	Stream         string
+	Severity       string
+	Type           string
+	Payload        any
+	Now            time.Time
+}
+
 type AckStartedParams struct {
 	SessionID       string
 	GenerationID    string
@@ -33,6 +54,9 @@ type AckStartedParams struct {
 	Owner           string
 	SandboxSourceIP string
 	LeaseTTL        time.Duration
+	EventType       string
+	EventDedupeKey  string
+	EventPayload    any
 	Now             time.Time
 }
 
@@ -44,6 +68,9 @@ type CompleteTurnParams struct {
 	TerminalStatus string
 	ErrorClass     string
 	Error          string
+	EventType      string
+	EventDedupeKey string
+	EventPayload   any
 	Now            time.Time
 }
 
@@ -86,6 +113,149 @@ VALUES (?, ?, 'user', ?, 'queued', 0, ?)`, sessionID, next, content, formatTime(
 		return 0, err
 	}
 	return id, tx.Commit()
+}
+
+func (s *Store) BridgeHelloAck(ctx context.Context, sessionID, generationID, owner string, now time.Time) (BridgeHelloAck, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return BridgeHelloAck{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var exists int
+	if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM runtime_generations g
+JOIN sessions s ON s.id = g.session_id
+WHERE g.session_id = ?
+  AND g.generation_id = ?
+  AND g.lease_owner = ?
+  AND g.status IN ('idle','active','probing','restoring','starting')
+  AND g.lease_expires_at > ?
+  AND s.active_generation_id = ?`, sessionID, generationID, owner, formatTime(now), generationID).Scan(&exists); err != nil {
+		return BridgeHelloAck{}, err
+	}
+	if exists != 1 {
+		return BridgeHelloAck{}, fmt.Errorf("bridge hello generation CAS failed")
+	}
+	ack := BridgeHelloAck{
+		LastOutputSequenceByTurn: map[int64]int64{},
+		ServerTime:               now,
+	}
+	rows, err := tx.QueryContext(ctx, `
+SELECT t.id, COALESCE(MAX(e.output_sequence), 0)
+FROM turns t
+LEFT JOIN events e ON e.turn_id = t.id
+  AND e.generation_id = t.generation_id
+  AND e.output_sequence IS NOT NULL
+WHERE t.session_id = ?
+  AND t.generation_id = ?
+  AND t.status IN ('leased','running')
+GROUP BY t.id
+ORDER BY t.id`, sessionID, generationID)
+	if err != nil {
+		return BridgeHelloAck{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var turnID int64
+		var lastSequence int64
+		if err := rows.Scan(&turnID, &lastSequence); err != nil {
+			return BridgeHelloAck{}, err
+		}
+		ack.LastOutputSequenceByTurn[turnID] = lastSequence
+		if ack.LeasedTurnID == nil {
+			id := turnID
+			ack.LeasedTurnID = &id
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return BridgeHelloAck{}, err
+	}
+	return ack, tx.Commit()
+}
+
+func (s *Store) AppendEvent(ctx context.Context, p AppendEventParams) (int64, error) {
+	if p.Now.IsZero() {
+		p.Now = time.Now().UTC()
+	}
+	if p.Type == "" {
+		return 0, fmt.Errorf("event type is required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if p.OutputSequence != nil {
+		if err := assertOutputEventTurnTx(ctx, tx, p); err != nil {
+			return 0, err
+		}
+	}
+	eventID, err := appendEventTx(ctx, tx, p)
+	if err != nil {
+		return 0, err
+	}
+	return eventID, tx.Commit()
+}
+
+func appendEventTx(ctx context.Context, tx *sql.Tx, p AppendEventParams) (int64, error) {
+	payload, err := json.Marshal(p.Payload)
+	if err != nil {
+		return 0, err
+	}
+	res, err := tx.ExecContext(ctx, `
+INSERT OR IGNORE INTO events (
+  session_id, turn_id, generation_id, output_sequence, dedupe_key,
+  stream, severity, type, payload, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		nullableString(p.SessionID), nullableInt64Ptr(p.TurnID), nullableString(p.GenerationID),
+		nullableInt64Ptr(p.OutputSequence), nullableString(p.DedupeKey), nullableString(p.Stream),
+		nullableString(p.Severity), p.Type, string(payload), formatTime(p.Now))
+	if err != nil {
+		return 0, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if affected == 0 {
+		return 0, nil
+	}
+	return res.LastInsertId()
+}
+
+func assertOutputEventTurnTx(ctx context.Context, tx *sql.Tx, p AppendEventParams) error {
+	if p.TurnID == nil {
+		return fmt.Errorf("output event requires turn id")
+	}
+	var exists int
+	if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM turns t
+JOIN runtime_generations g ON g.generation_id = t.generation_id
+JOIN sessions s ON s.id = t.session_id
+WHERE t.id = ?
+  AND t.session_id = ?
+  AND t.generation_id = ?
+  AND t.status = 'running'
+  AND t.lease_owner = ?
+  AND t.lease_expires_at > ?
+  AND g.generation_id = ?
+  AND g.session_id = ?
+  AND g.lease_owner = ?
+  AND g.lease_expires_at > ?
+  AND s.active_generation_id = ?`,
+		*p.TurnID, p.SessionID, p.GenerationID, p.Owner, formatTime(p.Now),
+		p.GenerationID, p.SessionID, p.Owner, formatTime(p.Now), p.GenerationID).Scan(&exists); err != nil {
+		return err
+	}
+	if exists != 1 {
+		return fmt.Errorf("output event turn CAS failed")
+	}
+	return nil
 }
 
 func (s *Store) ClaimNextTurn(ctx context.Context, p ClaimNextTurnParams) (TurnGrant, bool, error) {
@@ -202,6 +372,20 @@ func (s *Store) AckTurnStarted(ctx context.Context, p AckStartedParams) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 	expiresAt := p.Now.Add(p.LeaseTTL)
+	var alreadyRunning int
+	if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM turns
+WHERE id = ?
+  AND status = 'running'
+  AND ack_started_at IS NOT NULL
+  AND session_id = ?
+  AND generation_id = ?
+  AND lease_owner = ?
+  AND lease_expires_at > ?`,
+		p.TurnID, p.SessionID, p.GenerationID, p.Owner, formatTime(p.Now)).Scan(&alreadyRunning); err != nil {
+		return err
+	}
 	res, err := tx.ExecContext(ctx, `
 UPDATE turns
 SET status = 'running',
@@ -219,9 +403,10 @@ WHERE id = ?
 	}
 	if affected, err := res.RowsAffected(); err != nil {
 		return err
-	} else if affected != 1 {
+	} else if affected != 1 && alreadyRunning != 1 {
 		return fmt.Errorf("turn ack_started CAS failed")
 	}
+	startedNow := alreadyRunning != 1
 	res, err = tx.ExecContext(ctx, `
 UPDATE runtime_generations
 SET last_seen_at = ?
@@ -243,7 +428,8 @@ WHERE generation_id = ?
 	} else if affected != 1 {
 		return fmt.Errorf("generation ack_started CAS failed")
 	}
-	_, err = tx.ExecContext(ctx, `
+	if startedNow {
+		_, err = tx.ExecContext(ctx, `
 INSERT INTO active_model_request_contexts (
   sandbox_source_ip, session_id, generation_id, turn_id,
   lease_owner, expires_at, next_request_sequence, registered_at, updated_at
@@ -256,9 +442,23 @@ INSERT INTO active_model_request_contexts (
   next_request_sequence = excluded.next_request_sequence,
   registered_at = excluded.registered_at,
   updated_at = excluded.updated_at`,
-		p.SandboxSourceIP, p.SessionID, p.GenerationID, p.TurnID, p.Owner, formatTime(expiresAt), formatTime(p.Now), formatTime(p.Now))
-	if err != nil {
-		return err
+			p.SandboxSourceIP, p.SessionID, p.GenerationID, p.TurnID, p.Owner, formatTime(expiresAt), formatTime(p.Now), formatTime(p.Now))
+		if err != nil {
+			return err
+		}
+	}
+	if p.EventType != "" {
+		if _, err := appendEventTx(ctx, tx, AppendEventParams{
+			SessionID:    p.SessionID,
+			TurnID:       &p.TurnID,
+			GenerationID: p.GenerationID,
+			DedupeKey:    p.EventDedupeKey,
+			Type:         p.EventType,
+			Payload:      p.EventPayload,
+			Now:          p.Now,
+		}); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -277,6 +477,18 @@ func (s *Store) CompleteTurn(ctx context.Context, p CompleteTurnParams) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	var alreadyTerminal int
+	if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM turns
+WHERE id = ?
+  AND status = ?
+  AND session_id = ?
+  AND generation_id = ?
+  AND completed_by_generation = ?`,
+		p.TurnID, p.TerminalStatus, p.SessionID, p.GenerationID, p.GenerationID).Scan(&alreadyTerminal); err != nil {
+		return err
+	}
 	res, err := tx.ExecContext(ctx, `
 UPDATE turns
 SET status = ?,
@@ -297,11 +509,13 @@ WHERE id = ?
 	}
 	if affected, err := res.RowsAffected(); err != nil {
 		return err
-	} else if affected != 1 {
+	} else if affected != 1 && alreadyTerminal != 1 {
 		return fmt.Errorf("turn completion CAS failed")
 	}
-	if err := markGenerationIdleIfNoInflight(ctx, tx, p.SessionID, p.GenerationID, p.Owner, p.Now); err != nil {
-		return err
+	if alreadyTerminal != 1 {
+		if err := markGenerationIdleIfNoInflight(ctx, tx, p.SessionID, p.GenerationID, p.Owner, p.Now); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `
 DELETE FROM active_model_request_contexts
@@ -309,6 +523,19 @@ WHERE session_id = ?
   AND generation_id = ?
   AND turn_id = ?`, p.SessionID, p.GenerationID, p.TurnID); err != nil {
 		return err
+	}
+	if p.EventType != "" {
+		if _, err := appendEventTx(ctx, tx, AppendEventParams{
+			SessionID:    p.SessionID,
+			TurnID:       &p.TurnID,
+			GenerationID: p.GenerationID,
+			DedupeKey:    p.EventDedupeKey,
+			Type:         p.EventType,
+			Payload:      p.EventPayload,
+			Now:          p.Now,
+		}); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -479,6 +706,13 @@ WHERE session_id = ?
 	}
 	grant.ExpiresAt = parseTime(leaseExpires)
 	return grant, true, nil
+}
+
+func nullableInt64Ptr(value *int64) any {
+	if value == nil {
+		return nil
+	}
+	return *value
 }
 
 func nextTurnSequence(ctx context.Context, tx *sql.Tx, sessionID string) (int64, error) {
