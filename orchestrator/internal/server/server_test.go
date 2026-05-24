@@ -508,6 +508,20 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &er
 	}
 }
 
+func TestRuntimeFailureClassDetectsPostStartProbeFailure(t *testing.T) {
+	cases := []string{
+		"harness-bridge-client probe exited with status 1",
+		"bridge probe starting failed",
+		"probe GET /healthz returned 503, want one of [200]",
+		"probe POST /v1/messages returned 502, want one of [400]",
+	}
+	for _, message := range cases {
+		if got := runtimeFailureClass(message); got != "probe_failed_post_start" {
+			t.Fatalf("runtimeFailureClass(%q)=%s want probe_failed_post_start", message, got)
+		}
+	}
+}
+
 func TestSendMessagePrepareFailureMarksGenerationFailedAndReclaimable(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

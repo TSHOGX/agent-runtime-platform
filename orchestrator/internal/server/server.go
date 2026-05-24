@@ -561,6 +561,12 @@ func runtimeFailureClass(message string) string {
 	if strings.Contains(message, "pre-start sandbox network probe") {
 		return "probe_failed_pre_start"
 	}
+	if strings.Contains(message, "harness-bridge-client probe") ||
+		strings.Contains(message, "bridge probe") ||
+		strings.Contains(message, "probe GET /healthz") ||
+		strings.Contains(message, "probe POST /v1/messages") {
+		return "probe_failed_post_start"
+	}
 	if strings.Contains(message, "configure sandbox network") {
 		return "network_setup_failed"
 	}
