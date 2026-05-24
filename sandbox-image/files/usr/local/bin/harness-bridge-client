@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import subprocess
+import time
+import urllib.error
+import urllib.request
+import uuid
+from pathlib import Path
+
+
+INBOX = "inbox"
+OUTBOX = "outbox"
+TMP = "tmp"
+
+
+def seq_name(seq):
+    return f"{seq:020d}.json"
+
+
+def parse_seq_name(name):
+    if len(name) != len("00000000000000000001.json") or not name.endswith(".json"):
+        return None
+    raw = name[:-5]
+    if not raw.isdigit():
+        return None
+    seq = int(raw, 10)
+    if seq <= 0 or seq_name(seq) != name:
+        return None
+    return seq
+
+
+def fsync_dir(path):
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+class Queue:
+    def __init__(self, root, name):
+        self.root = Path(root)
+        self.name = name
+        self.dir = self.root / name
+        self.tmp = self.root / TMP
+        self.tmp.mkdir(parents=True, exist_ok=True)
+        self.dir.mkdir(parents=True, exist_ok=True)
+
+    def next_seq(self):
+        max_seq = 0
+        for entry in self.dir.iterdir():
+            seq = parse_seq_name(entry.name)
+            if seq is not None and seq > max_seq:
+                max_seq = seq
+        return max_seq + 1
+
+    def write(self, envelope):
+        envelope = dict(envelope)
+        envelope.setdefault("message_id", str(uuid.uuid4()))
+        payload = (json.dumps(envelope, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        tmp_path = self.tmp / f"{uuid.uuid4()}.json"
+        with open(tmp_path, "xb") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            while True:
+                target = self.dir / seq_name(self.next_seq())
+                try:
+                    os.link(tmp_path, target)
+                    fsync_dir(self.dir)
+                    return envelope["message_id"]
+                except FileExistsError:
+                    continue
+        finally:
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
+
+    def read_all(self):
+        files = []
+        for entry in self.dir.iterdir():
+            seq = parse_seq_name(entry.name)
+            if seq is None:
+                continue
+            with open(entry, "r", encoding="utf-8") as f:
+                files.append((seq, entry, json.load(f)))
+        return sorted(files, key=lambda item: item[0])
+
+    def unlink(self, path):
+        try:
+            Path(path).unlink()
+            fsync_dir(self.dir)
+        except FileNotFoundError:
+            pass
+
+
+class BridgeClient:
+    def __init__(self, root, session_id, generation_id, agent, poll_interval=0.05):
+        self.root = Path(root)
+        self.session_id = session_id
+        self.generation_id = generation_id
+        self.agent = agent
+        self.poll_interval = poll_interval
+        self.inbox = Queue(root, INBOX)
+        self.outbox = Queue(root, OUTBOX)
+        self.last_output_sequence_by_turn = {}
+        self.leased_turn_id = None
+
+    def envelope(self, message_type, request_id=None, turn_id=None, payload=None):
+        envelope = {
+            "message_id": str(uuid.uuid4()),
+            "request_id": request_id or str(uuid.uuid4()),
+            "type": message_type,
+            "session_id": self.session_id,
+            "generation_id": self.generation_id,
+        }
+        if turn_id is not None:
+            envelope["turn_id"] = turn_id
+        if payload is not None:
+            envelope["payload"] = payload
+        return envelope
+
+    def send(self, message_type, request_id=None, turn_id=None, payload=None):
+        envelope = self.envelope(message_type, request_id=request_id, turn_id=turn_id, payload=payload)
+        self.outbox.write(envelope)
+        return envelope
+
+    def wait_response(self, request_id, timeout=None):
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            for _, path, envelope in self.inbox.read_all():
+                if envelope.get("request_id") != request_id:
+                    continue
+                self.inbox.unlink(path)
+                if envelope.get("type") == "error":
+                    payload = envelope.get("payload") or {}
+                    raise RuntimeError(payload.get("error") or "bridge error")
+                return envelope
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError(f"timed out waiting for {request_id}")
+            time.sleep(self.poll_interval)
+
+    def hello(self, timeout=None):
+        request_id = str(uuid.uuid4())
+        self.send("hello", request_id=request_id, payload={"agent": self.agent, "protocol_version": 1})
+        response = self.wait_response(request_id, timeout=timeout)
+        payload = response.get("payload") or {}
+        self.last_output_sequence_by_turn = {
+            int(turn_id): int(sequence)
+            for turn_id, sequence in (payload.get("last_output_sequence_by_turn") or {}).items()
+        }
+        self.leased_turn_id = payload.get("leased_turn_id")
+        return payload
+
+    def probe_network(self, timeout=None):
+        request_id = str(uuid.uuid4())
+        self.send("probe_network", request_id=request_id)
+        return self.wait_response(request_id, timeout=timeout).get("payload") or {}
+
+    def heartbeat(self):
+        self.send("heartbeat")
+
+    def claim_next_turn(self, timeout=None):
+        request_id = str(uuid.uuid4())
+        self.send("claim_next_turn", request_id=request_id)
+        response = self.wait_response(request_id, timeout=timeout)
+        if response.get("type") != "grant":
+            return None
+        return response.get("payload") or {}
+
+    def ack_turn_started(self, turn_id, sandbox_source_ip):
+        self.send("ack_turn_started", turn_id=turn_id, payload={"sandbox_source_ip": sandbox_source_ip})
+
+    def emit_output(self, turn_id, output_sequence, payload, stream="stdout"):
+        self.send(
+            "emit_output",
+            turn_id=turn_id,
+            payload={"output_sequence": output_sequence, "stream": stream, "payload": payload},
+        )
+
+    def ack_turn_completed(self, turn_id, status="completed", error_class="", error=""):
+        payload = {"status": status}
+        if error_class:
+            payload["error_class"] = error_class
+        if error:
+            payload["error"] = error
+        self.send("ack_turn_completed", turn_id=turn_id, payload=payload)
+
+
+def sandbox_source_ip():
+    try:
+        output = subprocess.check_output(["ip", "-j", "addr", "show"], text=True)
+        for link in json.loads(output):
+            if link.get("ifname") == "lo":
+                continue
+            for addr in link.get("addr_info", []):
+                if addr.get("family") == "inet" and addr.get("local"):
+                    return addr["local"]
+    except Exception:
+        pass
+    return "127.0.0.1"
+
+
+def parse_statuses(value, default):
+    if value is None or str(value).strip() == "":
+        return set(default)
+    statuses = set()
+    for raw in str(value).split(","):
+        raw = raw.strip()
+        if raw:
+            statuses.add(int(raw))
+    return statuses
+
+
+def configured_secret(env_name, secret_id_env):
+    value = os.environ.get(env_name)
+    if value:
+        return value
+    mount_path = os.environ.get("SECRET_MOUNT_PATH")
+    secret_id = os.environ.get(secret_id_env)
+    secret_version = os.environ.get("SECRET_VERSION")
+    if not mount_path or not secret_id or not secret_version:
+        return ""
+    path = Path(mount_path) / secret_id / secret_version
+    return path.read_text(encoding="utf-8").strip()
+
+
+def http_status(url, method="GET", headers=None, body=None, timeout=3.0):
+    request = urllib.request.Request(url, data=body, method=method, headers=headers or {})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status
+    except urllib.error.HTTPError as err:
+        return err.code
+
+
+def run_network_probe(base_url, healthz_statuses, message_statuses, timeout, api_key, auth_token=""):
+    if not base_url:
+        raise RuntimeError("ANTHROPIC_BASE_URL is required for probe")
+    base_url = base_url.rstrip("/")
+    healthz_status = http_status(f"{base_url}/healthz", timeout=timeout)
+    if healthz_status not in healthz_statuses:
+        raise RuntimeError(f"probe GET /healthz returned {healthz_status}, want one of {sorted(healthz_statuses)}")
+
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY is required for probe")
+    headers = {
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+        "x-api-key": api_key,
+    }
+    if auth_token:
+        headers["authorization"] = f"Bearer {auth_token}"
+    message_status = http_status(
+        f"{base_url}/v1/messages",
+        method="POST",
+        headers=headers,
+        body=b"",
+        timeout=timeout,
+    )
+    if message_status not in message_statuses:
+        raise RuntimeError(
+            f"probe POST /v1/messages returned {message_status}, want one of {sorted(message_statuses)}"
+        )
+
+
+def run_probe(args):
+    client = BridgeClient(args.bridge_dir, args.session_id, args.generation_id, args.agent, args.poll_interval)
+    client.hello(timeout=args.timeout)
+    run_network_probe(
+        args.base_url,
+        parse_statuses(args.healthz_statuses, {200}),
+        parse_statuses(args.message_statuses, {400}),
+        args.http_timeout,
+        configured_secret("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_SECRET_ID"),
+        configured_secret("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN_SECRET_ID"),
+    )
+    client.probe_network(timeout=args.timeout)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--bridge-dir", default=os.environ.get("HARNESS_BRIDGE_DIR", "/harness-control/bridge"))
+    parser.add_argument("--session-id", default=os.environ.get("SESSION_ID"))
+    parser.add_argument("--generation-id", default=os.environ.get("GENERATION_ID"))
+    parser.add_argument("--agent", default=os.environ.get("HARNESS_AGENT", "claude"))
+    parser.add_argument("--poll-interval", type=float, default=float(os.environ.get("HARNESS_BRIDGE_POLL_INTERVAL", "0.05")))
+    parser.add_argument("--timeout", type=float, default=10.0)
+    parser.add_argument("--base-url", default=os.environ.get("ANTHROPIC_BASE_URL", ""))
+    parser.add_argument("--healthz-statuses", default=os.environ.get("HARNESS_PROBE_HEALTHZ_STATUSES", "200"))
+    parser.add_argument("--message-statuses", default=os.environ.get("HARNESS_PROBE_MESSAGE_STATUSES", "400"))
+    parser.add_argument("--http-timeout", type=float, default=float(os.environ.get("HARNESS_PROBE_HTTP_TIMEOUT", "3")))
+    subcommands = parser.add_subparsers(dest="command", required=True)
+    subcommands.add_parser("probe")
+    args = parser.parse_args(argv)
+    if not args.session_id or not args.generation_id:
+        parser.error("--session-id and --generation-id are required")
+    if args.command == "probe":
+        run_probe(args)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
