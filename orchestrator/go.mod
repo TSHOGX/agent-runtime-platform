@@ -4,13 +4,14 @@ go 1.22
 
 require (
 	github.com/fsnotify/fsnotify v1.8.0
+	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
+	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.34.2
 )
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect

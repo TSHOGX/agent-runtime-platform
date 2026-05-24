@@ -35,6 +35,9 @@ func main() {
 		log.Error("failed to load config", "error", err)
 		os.Exit(1)
 	}
+	for _, warning := range cfg.Warnings {
+		log.Warn("config warning", "warning", warning)
+	}
 
 	db, err := store.Open(ctx, cfg.DBPath)
 	if err != nil {

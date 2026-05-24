@@ -1,12 +1,49 @@
-runtime:
-  runsc_network: sandbox
-  runsc_overlay2: none
+harness:
+  run_dir: /var/lib/harness/run
+  session_ttl: 2h
+  max_sessions: 30
 
-claude:
-  proxy_bind_url: http://0.0.0.0:8082
-  sandbox_base_url: http://10.200.1.1:8082
-  api_key: "123"
-  auth_token: "123"
-  model: sonnet
-  output_format: stream-json
-  disable_nonessential_traffic: true
+  network:
+    cidr_pool: 10.200.0.0/16
+    egress:
+      doris_fe_hosts:
+        - 172.16.0.138
+      doris_be_hosts:
+        - 172.16.0.138
+      doris_ports:
+        - 9030
+      dns_policy: hostnames_only
+
+  events:
+    retention_window: 24h
+    retention_rows: 1000000
+    emit_output_batch_max_rows: 64
+    emit_output_batch_max_age: 100ms
+
+  probe:
+    accept_status:
+      get_healthz:
+        - 200
+      post_v1_messages:
+        unauthorized:
+          - 401
+        malformed_authenticated:
+          - 400
+    pre_start_attempts: 3
+    pre_start_interval: 500ms
+    post_start_attempts: 5
+    post_start_interval: 1s
+
+  bridge:
+    lease_ttl: 60s
+    heartbeat_interval: 30s
+    poll_interval: 10ms
+    ack_started_grace: 90s
+    reconnect_grace: 30s
+
+  reaper:
+    failed_retention: 10m
+
+  secrets:
+    root: /var/lib/harness/secrets
+    readers_gid: 65501

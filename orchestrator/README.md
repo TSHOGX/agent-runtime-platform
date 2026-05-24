@@ -55,19 +55,46 @@ Useful environment variables:
 Runtime network and Claude proxy settings are explicit in `config/harness.yaml`:
 
 ```yaml
-runtime:
-  runsc_network: sandbox
-  runsc_overlay2: none
-
-claude:
-  proxy_bind_url: http://0.0.0.0:8082
-  sandbox_base_url: http://10.200.1.1:8082
-  api_key: "123"
-  auth_token: "123"
-  model: sonnet
-  output_format: stream-json
-  disable_nonessential_traffic: true
+harness:
+  run_dir: /var/lib/harness/run
+  session_ttl: 2h
+  max_sessions: 30
+  network:
+    cidr_pool: 10.200.0.0/16
+    egress:
+      doris_fe_hosts: [172.16.0.138]
+      doris_be_hosts: [172.16.0.138]
+      doris_ports: [9030]
+      dns_policy: hostnames_only
+  events:
+    retention_window: 24h
+    retention_rows: 1000000
+    emit_output_batch_max_rows: 64
+    emit_output_batch_max_age: 100ms
+  probe:
+    accept_status:
+      get_healthz: [200]
+      post_v1_messages:
+        unauthorized: [401]
+        malformed_authenticated: [400]
+    pre_start_attempts: 3
+    pre_start_interval: 500ms
+    post_start_attempts: 5
+    post_start_interval: 1s
+  bridge:
+    lease_ttl: 60s
+    heartbeat_interval: 30s
+    poll_interval: 10ms
+    ack_started_grace: 90s
+    reconnect_grace: 30s
+  reaper:
+    failed_retention: 10m
+  secrets:
+    root: /var/lib/harness/secrets
+    readers_gid: 65501
 ```
+
+The loader uses strict YAML decoding for the Phase 7 `harness:` schema. Legacy files containing only top-level `runtime:` / `claude:` sections still load during the cutover, but mixing them with `harness:` is rejected.
 
 The runtime currently launches `runsc` directly in sandbox mode and keeps containers alive across turns. It uses the fixed `/var/run/netns/phase1-demo` network namespace so the local Claude proxy stays reachable at `http://10.200.1.1:8082`. Automatic idle checkpointing is disabled because `runsc restore` cannot reliably reconnect the current stdin-based turn channel. `Shell` sessions use the PTY-backed shell shim and can be interrupted with `POST /api/sessions/<id>/interrupt`. `bundle/restore-sandbox.sh` is still useful as a smoke-test boundary, but it is not the main request path anymore.
 

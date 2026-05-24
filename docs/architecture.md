@@ -223,7 +223,7 @@ Orchestrator:
 | `HARNESS_ORCHESTRATOR_ADDR` | `:8090` | HTTP bind address |
 | `HARNESS_LAB_PASSWORD` | empty | Enables shared-password auth when set |
 | `HARNESS_COOKIE_NAME` | `harness_auth` | Auth cookie name |
-| `HARNESS_SESSION_TTL` | `2h` | Session expiry horizon |
+| `HARNESS_SESSION_TTL` | `harness.session_ttl` (`2h`) | Session expiry horizon |
 | `HARNESS_REPO_ROOT` | repo root | Repository root used to derive bundle paths |
 | `HARNESS_SESSIONS_ROOT` | `/var/lib/harness/sessions` | Host workspace root |
 | `HARNESS_AGENT_HOMES_ROOT` | `/var/lib/harness/agent-homes` | Host root for per-session agent HOME state, mounted outside `/workspace` |
@@ -231,7 +231,7 @@ Orchestrator:
 | `HARNESS_BUNDLE_ROOT` | `<repo>/bundle/out` | OCI bundle root |
 | `HARNESS_DB_PATH` | `<sessions_root>/orchestrator.db` | SQLite DB path |
 | `HARNESS_DEFAULT_AGENT` | `claude` | Default session agent |
-| `HARNESS_MAX_SESSIONS` | `30` | Active session cap |
+| `HARNESS_MAX_SESSIONS` | `harness.max_sessions` (`30`) | Active session cap |
 | `RUNSC_ROOT` | `/var/lib/harness/runsc` | runsc state root |
 
 `HARNESS_RESTORE_SCRIPT` is still parsed by config for compatibility, but the current direct `runsc` path does not execute the script.
@@ -240,25 +240,52 @@ Project config:
 
 | File | Purpose |
 | --- | --- |
-| `config/harness.yaml` | Explicit lab runtime and Claude proxy profile. |
+| `config/harness.yaml` | Phase 7 typed control-plane schema and explicit lab runtime profile. |
 
-The current config loader reads `config/harness.yaml` first for runtime network and Claude proxy values, then applies hardcoded safe defaults. General orchestrator paths such as session roots and DB path still use the environment variables above.
+The config loader reads `config/harness.yaml` through a strict `gopkg.in/yaml.v3` decoder. The primary shape is the Phase 7 `harness:` schema: `run_dir`, `session_ttl`, `max_sessions`, nested network egress, event retention, probe status, bridge lease, reaper, and secret-root settings are decoded into typed config and validated before startup. Legacy files containing only top-level `runtime:` / `claude:` sections still load during the cutover, but mixing legacy sections with `harness:` is rejected.
+
+General orchestrator paths such as session roots and DB path still use the environment variables above. `HARNESS_SESSION_TTL` and `HARNESS_MAX_SESSIONS` remain compatibility overrides and are revalidated against the Phase 7 CIDR pool.
 
 Current `config/harness.yaml` values:
 
 ```yaml
-runtime:
-  runsc_network: sandbox
-  runsc_overlay2: none
-
-claude:
-  proxy_bind_url: http://0.0.0.0:8082
-  sandbox_base_url: http://10.200.1.1:8082
-  api_key: "123"
-  auth_token: "123"
-  model: sonnet
-  output_format: stream-json
-  disable_nonessential_traffic: true
+harness:
+  run_dir: /var/lib/harness/run
+  session_ttl: 2h
+  max_sessions: 30
+  network:
+    cidr_pool: 10.200.0.0/16
+    egress:
+      doris_fe_hosts: [172.16.0.138]
+      doris_be_hosts: [172.16.0.138]
+      doris_ports: [9030]
+      dns_policy: hostnames_only
+  events:
+    retention_window: 24h
+    retention_rows: 1000000
+    emit_output_batch_max_rows: 64
+    emit_output_batch_max_age: 100ms
+  probe:
+    accept_status:
+      get_healthz: [200]
+      post_v1_messages:
+        unauthorized: [401]
+        malformed_authenticated: [400]
+    pre_start_attempts: 3
+    pre_start_interval: 500ms
+    post_start_attempts: 5
+    post_start_interval: 1s
+  bridge:
+    lease_ttl: 60s
+    heartbeat_interval: 30s
+    poll_interval: 10ms
+    ack_started_grace: 90s
+    reconnect_grace: 30s
+  reaper:
+    failed_retention: 10m
+  secrets:
+    root: /var/lib/harness/secrets
+    readers_gid: 65501
 ```
 
 Claude control manifest:

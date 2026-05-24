@@ -15,7 +15,7 @@ Harness Platform now has a working end-to-end lab stack:
 - Per-session Claude HOME under `/var/lib/harness/agent-homes/<session_id>`, mounted in gVisor as `/agent-homes/<session_id>` and kept outside `/workspace`.
 - Claude Code stream-json parsing into persisted assistant messages and live UI deltas.
 - PTY-backed shell sessions through `harness-shell-agent`, with shell output persisted as assistant messages and interrupt support for running turns.
-- Explicit local Claude proxy configuration in `config/harness.yaml`, with sandbox networking as the default runtime path.
+- Phase 7 typed `config/harness.yaml` is loaded with strict YAML validation; the current runtime still uses the local Claude proxy defaults with sandbox networking as the default path.
 - Checkpoint/restore primitives remain in the codebase, but automatic idle checkpointing is disabled until the turn channel is checkpoint-safe.
 - Artifact browsing is a metadata-backed live file tree with search, safe downloads, delete/rename event handling, and richer previews for Markdown, code, text, images, JSON, CSV/TSV, and PDF.
 
@@ -79,9 +79,9 @@ Artifact handling moved from a flat metadata list to a read-only file browser:
 - The frontend derives a live folder tree from artifact metadata and keeps open tabs in sync when files disappear.
 - Artifact previews now cover Markdown, code, text, images, JSON, CSV/TSV, and PDF.
 
-### Explicit Claude Proxy Config
+### Phase 7 Config Loader
 
-The current codebase loads `config/harness.yaml` for the lab runtime/proxy profile. The full file shape and per-field semantics live in [architecture.md → Configuration](./architecture.md#configuration); the values flow into the per-session `session.json` control manifest and must not be replaced with host-only Claude configuration or implicit environment variables.
+The current codebase loads `config/harness.yaml` through the Phase 7 typed `harness:` schema. The full file shape and per-field semantics live in [architecture.md → Configuration](./architecture.md#configuration). Legacy `runtime:` / `claude:`-only files still parse during the cutover, but cannot be mixed with `harness:`.
 
 ## Current Flow
 
