@@ -179,6 +179,11 @@ HTTP:
 - `GET /api/sessions/{id}/artifacts`
 - `GET /artifacts/{session_id}/{path}`
 
+Phase 7 adds:
+
+- `GET /api/quota`
+- JSON envelope `{"error_class":"...","error":"..."}` for new typed failures; existing handlers still return `{"error":"..."}` until that cutover lands.
+
 Events:
 
 - `GET /api/events/stream?session_id=<id>` - SSE

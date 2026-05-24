@@ -26,6 +26,11 @@ CAS predicates do not protect host-level resource creation (netns/veth/control d
    The row is upserted under a fixed primary key so it is unique by
    construction.
 
+   `boot_id` is the host-reboot discriminator for startup recovery: if
+   it changes, the orchestrator treats every expired lease as a hard
+   fence immediately, because no pre-reboot process, mount, or socket
+   can still be alive to reconnect through a grace window.
+
 3. Every recovery sweep, allocator commit, and reaper pass reads
    orchestrator_owner.uuid and asserts it equals the in-process value.
    A mismatch (which can only happen if the flock was bypassed by an
@@ -75,14 +80,14 @@ Every turn claim and completion update is guarded by the active lease
 The invariants above split cleanly along the 7a/7b boundary:
 
 ```text
-Phase 7a (Steps 1–4) — must hold from the first 7a deploy:
+Phase 7a (Steps 1–4) — must hold in the first 7a-complete deploy (after Step 4):
   - Per-generation netns / veth / IP / gateway / CIDR.
   - Per-generation control dir + control manifest path + runtime spec
     path.
   - Per-generation bundle dir.
   - No reuse of non-destroyed allocation identity.
   - No plaintext upstream credentials in the on-disk manifest; secrets
-    read from ${SECRET_DIR}/<secret_id>.
+    read from ${SECRET_DIR}/<secret_id>/<secret_version>.
   - Single-orchestrator flock + orchestrator_owner heartbeat (Step 1).
   - Schema present for the 7b invariants (turns, leases, events tables
     and their indexes), but the helper that performs the turn-state
@@ -99,7 +104,9 @@ Phase 7b (Steps 5–10) — first effective when bridge claim/ack lands:
     (Step 10).
 ```
 
-7a deliberately keeps the existing stdin/PTY turn path running on top of the new per-generation resources. The turn ledger and `runtime_generations.status` rows are written by the existing turn-execution code in 7a as a *thin record-keeping shim* (turn row inserted at user-message submit, marked `completed`/`failed` when the stream parser observes turn completion); this is correct enough that 7b's bridge can take over without a schema migration. The four-call-site CAS protocol (claim, ack_started, completion, generation-failure) is not on the hot path until Step 6 lands the bridge as the executor — see Steps 1 and 6 in [implementation-plan.md](./implementation-plan.md) for what the 7a helper writes and the cutover.
+7a deliberately keeps the existing stdin/PTY turn path running on top of the new per-generation resources. Step 1 lands the schema and helper only; Step 2 is the first step that can write generation rows. From Step 2 onward, the turn ledger and `runtime_generations.status` rows are written by the existing turn-execution code as a *thin record-keeping shim* (turn row inserted at user-message submit, marked `completed`/`failed` when the stream parser observes turn completion); this is correct enough that 7b's bridge can take over without a schema migration. The claim/heartbeat/ack/completion/failure protocol is not on the hot path until Step 6 lands the bridge as the executor — see Steps 1 and 6 in [implementation-plan.md](./implementation-plan.md) for what the 7a helper writes and the cutover.
+
+During 7a the runtime-manager goroutine itself remains the lease renewer on the half-life cadence; the bridge is not yet part of the renewal path. Step 6 is where bridge heartbeat takes over the same renewal contract.
 
 The one consequence worth calling out: a 7a deploy that crashes mid-turn cannot recover the in-flight turn from the ledger — the existing stdin path owns it. This is unchanged from the pre-Phase-7 behavior; restart recovery on the 7a ledger only reconciles `queued` rows and timestamps. 7b is what makes turn recovery durable.
 
@@ -132,7 +139,7 @@ where id = :turn_id
   and lease_expires_at > :now;
 ```
 
-An implementation can collapse this into one `queued -> running` CAS, but it must still claim from `lease_owner is null`, set the owner/expiry in the same statement, and check `lease_expires_at` on subsequent updates. The same pattern applies to generation activation, turn completion, failure marking, checkpoint state transitions, and event writes. In-memory locks can reduce local contention, but they are not a correctness mechanism. The canonical four-call-site SQL lives in [schema.md](./schema.md#single-helper-contract).
+An implementation can collapse this into one `queued -> running` CAS, but it must still claim from `lease_owner is null`, set the owner/expiry in the same statement, and check `lease_expires_at` on subsequent updates. The same pattern applies to generation activation, turn completion, failure marking, checkpoint state transitions, and event writes. In-memory locks can reduce local contention, but they are not a correctness mechanism. The canonical SQL lives in [schema.md](./schema.md#single-helper-contract).
 
 ## Generation Lease
 
@@ -164,19 +171,28 @@ Renewed at half lease_ttl by any execution point in the runtime_manager
       and lease_owner = :owner
       and lease_expires_at > :now;
 
+  The same bridge heartbeat also renews the current `turns` lease and
+  the active proxy context for a leased/running turn. A turn lease is an
+  execution lease, not a start-only deadline; completion is accepted
+  only while heartbeat has kept that lease current.
+
 Released by setting lease_owner = null in the same transaction that
-  moves the row to a terminal state (failed, reclaimable, destroyed) or
+  moves the generation row to a terminal state (failed, destroyed) or
   to generation status `checkpointed` (no live process owns the lease
   while checkpointed; the underlying allocation_state moves to
-  `reserved_checkpointed` in the same transaction).
+  `reserved_checkpointed` in the same transaction, and the allocation
+  row may later advance through `reclaimable` to `destroyed`).
 
 Expired (lease_expires_at <= now) means the previous orchestrator
-  process crashed or stalled. Because lease_owner is keyed on
+  process crashed, stalled, or stopped receiving bridge heartbeat.
+  Because lease_owner is keyed on
   orchestrator_owner.uuid (a fresh UUID per process start), a restarted
   orchestrator never matches the prior owner string under CAS, even if
   it reuses the same role_tag. The startup-recovery sweep (see
   [runtime-resources.md](./runtime-resources.md#allocation-recovery-on-startup))
-  is the only caller allowed to fence an expired lease.
+  is the only caller allowed to handle an expired lease: it may renew
+  the same `ack_started_at` running turn inside `ack_started_grace`, or
+  fence after the relevant grace deadline.
 ```
 
 `lease_ttl` defaults to 60 s; renewal cadence is 30 s. Both are config (see [implementation-plan.md](./implementation-plan.md#phase-7-configuration-schema)), not architecture, and are reported on the generation row for debuggability.

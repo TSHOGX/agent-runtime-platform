@@ -27,9 +27,37 @@ Concurrent with everything above:
 
 `probe_network()` is the post-start / post-restore in-sandbox probe and must pass before `claim_next_turn()`. The host can run only the pre-start netns probe on its own; it cannot prove agent-visible config inside the sandbox. See [network-and-probes.md](./network-and-probes.md#probes).
 
+`heartbeat()` renews both leases owned by the live bridge path: the generation lease and, when a turn is leased/running, that turn's lease plus its proxy active-context TTL. Long Claude turns therefore remain completable past the default 60 s lease as long as bridge heartbeat is healthy.
+
+## Message Envelope
+
+Every queued JSON file carries one envelope:
+
+```text
+message_id     -- unique per file write
+request_id     -- stable RPC correlation id; responses echo the request's value
+type           -- hello | hello_ack | probe_network | claim_next_turn | grant | no_work | error | ...
+session_id
+generation_id
+turn_id        -- optional; present when the message is turn-scoped
+payload
+```
+
+Request files set a fresh `message_id`. Response files echo the caller's `request_id` and use a response `type`. `claim_next_turn` returns one of three responses:
+
+- `grant`: includes the leased `turn_id` and the lease metadata needed to start work.
+- `no_work`: there is no eligible turn, or the generation is fenced/busy.
+- `error`: includes `error_class` and `error`.
+
+A duplicate `grant` for the same `request_id` is idempotent: the host must not advance the lease twice, and the bridge treats repeated delivery as a no-op.
+
+The host persists `claim_request_id` on the leased turn before writing the `grant`. If the host crashes after the DB claim but before reliable grant delivery, replaying the same `claim_next_turn` request_id returns the original `grant`; it must not return `no_work` for that already-leased turn.
+
 ## Transport Layout
 
-The transport is a per-generation directory shared between host and sandbox: `<bridge_root>/<generation_id>/{inbox,outbox,heartbeat}`. Queue names are written from the bridge's perspective: `inbox/` is what the bridge receives (host writes here, bridge reads), `outbox/` is what the bridge sends (bridge writes here, host reads). Both queues use `tmp/<uuid> -> <queue>/<seq>.json` atomic rename plus `fsync` on the destination directory, identical to the control-manifest contract. The reader on each queue processes files in `seq` order and unlinks after the message is persisted or applied — bridge unlinks `inbox/` files; host unlinks `outbox/` files.
+The transport is a per-generation directory shared between host and sandbox: `<bridge_root>/<generation_id>/{inbox,outbox,heartbeat}`. `bridge_root` is the derived `<run_dir>/bridge` root from [implementation-plan.md](./implementation-plan.md#phase-7-configuration-schema); it is not a separate config key. Queue names are written from the bridge's perspective: `inbox/` is what the bridge receives (host writes here, bridge reads), `outbox/` is what the bridge sends (bridge writes here, host reads). Both queues use `tmp/<uuid> -> <queue>/<seq>.json` atomic rename plus `fsync` on the destination directory, identical to the control-manifest contract. The reader on each queue processes files in `seq` order and unlinks after the message is persisted or applied — bridge unlinks `inbox/` files; host unlinks `outbox/` files.
+
+`seq` is a 20-digit zero-padded unsigned decimal (`00000000000000000001.json`). Readers sort by parsed numeric value, not by filesystem iteration order; zero padding makes lexical order match numeric order for diagnostics. Each queue has exactly one writer: host for `inbox/`, bridge for `outbox/`. On writer start/restart, scan existing `*.json`, parse valid decimal basenames, and set `next_seq = max(existing_seq) + 1` or `1` when the queue is empty. A writer must never overwrite an existing target; use `renameat2(RENAME_NOREPLACE)` or an equivalent no-replace reservation. If the target already exists, rescan and retry with `max + 1`. Invalid filenames are ignored by the protocol reader and surfaced as a health error for the owning generation.
 
 Concretely:
 
@@ -79,7 +107,7 @@ Bridge-side write ordering is the mirror image: write under `tmp/`, fsync the fi
 
 `hello_ack`'s `last_output_sequence_by_turn` is computed by the host as `MAX(output_sequence)` over the durable event log filtered by `(session_id, generation_id, turn_id)` for every non-terminal turn this generation owns. Only **committed** event-log rows are visible; in-flight `emit_output` batch transactions are not. The committed boundary therefore lags the bridge's locally-observed last-emitted sequence by up to one batch window — this is by construction (see Idempotency And Sequence Recovery for why this lag is the protocol's primary reconnect path, not an edge case). The bridge's local view is discarded on reconnect; it must trust the host-returned `last_output_sequence_by_turn` and re-emit anything past it.
 
-End-to-end turn-start latency budget (claim observed in `inbox/` to `ack_turn_started` durable in events): under 50 ms at lab load. This bounds how aggressively the bridge can poll and how the host batches `emit_output` writes.
+End-to-end turn-start latency budget (claim observed in `inbox/` to `ack_turn_started` durable in events): under 50 ms at lab load. The default `harness.bridge.poll_interval` is sized to leave room for the host's durable write path and `emit_output` batching; if that interval is raised, this budget must be remeasured, not assumed.
 
 ## Idempotency And Sequence Recovery
 
@@ -128,13 +156,13 @@ Step 8 promotes the existing global SSE endpoint at `/api/events/stream` from `d
 
 ### Why a global stream
 
-The orchestrator already exposes a single global SSE endpoint that the frontend opens once per browser session and demultiplexes client-side; the endpoint accepts an optional `?session_id=` filter for views that only want one session's frames (`orchestrator/internal/server/server.go:523`, `frontend/components/harness-provider.tsx:455`). Phase 7 keeps this shape rather than switching to a per-session endpoint, because the workbench has a sidebar that needs to show status changes for sessions other than the currently-selected one (created/idle/failed transitions, expiry, completion) and a per-session SSE would force either N parallel `EventSource`s or a cumbersome reconnect on every selection change.
+The orchestrator exposes one global SSE endpoint that the frontend opens once per browser session and demultiplexes client-side. The optional `?session_id=` filter is for narrow views only; it is not a portable cursor namespace (`orchestrator/internal/server/server.go:523`, `frontend/components/harness-provider.tsx:459`). The workbench keeps the global stream open so sidebar updates for other sessions do not require reconnecting or re-seeding cursor state.
 
-For this to work, **`event_id` must be globally monotonic per orchestrator process**, not per session. The host event store assigns `event_id` from a single sequence; the SQL is `INSERT INTO events (...) RETURNING event_id` against an `INTEGER PRIMARY KEY AUTOINCREMENT` column under the orchestrator's single-writer SQLite. The cursor a client sends in `Last-Event-ID` is therefore one integer that is meaningful across every session the client has open or will open; reconnecting with `Last-Event-ID: 482917` on the global stream, then later switching the filter to `?session_id=X`, both replay the correct slice of the same monotonic sequence.
+For the global stream to work, **`event_id` must be globally monotonic per orchestrator process**, not per session. The host event store assigns `event_id` from a single sequence; the SQL is `INSERT INTO events (...) RETURNING event_id` against an `INTEGER PRIMARY KEY AUTOINCREMENT` column under the orchestrator's single-writer SQLite. `Last-Event-ID` on the global stream is therefore one cursor that survives session selection changes. A cursor captured under one `?session_id=` filter may only be reused with the same filter; widening to a different filter, or to the global stream, starts from a fresh cursor.
 
 ### Phase 7a vs 7b scoping
 
-Phase 7a lands the `events` table and indexes only (Step 1) and continues to use the existing `data:`-only SSE writer in `orchestrator/internal/server/server.go` and the existing `EventSource(url)` consumer in `frontend/components/harness-provider.tsx`. The typed `id:`/`event:` wire format, `Last-Event-ID` handling, the `?last_event_id=` query-string fallback, and the `replay_gap` synthetic event all land at **Step 8 (Phase 7b)** together with the replay support and retention enforcement on the existing global `/api/events/stream` endpoint, since they require the bridge to be the executor and the host event store to be the source of truth for `event_id`. The contract below is the Step 8 deliverable; it appears in the architecture documents up-front because the schema in Step 1 must allocate `event_id` as the cursor (host-assigned, monotonic globally per orchestrator) so that the Step 8 wire format can use it without a second migration.
+Phase 7a lands the `events` table and indexes only (Step 1) and continues to use the existing `data:`-only SSE writer in `orchestrator/internal/server/server.go` and the existing `EventSource(url)` consumer in `frontend/components/harness-provider.tsx`. The typed `id:`/`event:` wire format, `Last-Event-ID` handling, the `?last_event_id=` query-string fallback, and the `replay_gap` synthetic event all land at **Step 8 (Phase 7b)** together with the replay support and retention enforcement on the existing global `/api/events/stream` endpoint, since they require the bridge to be the executor and the host event store to be the source of truth for `event_id`. The contract below is the Step 8 deliverable; it is written up front because Step 1 must already allocate `event_id` as the cursor.
 
 ### Wire format
 
@@ -154,7 +182,7 @@ Every `data:` JSON payload carries `session_id` so client-side demultiplexing on
 
 ### Resume on reconnect
 
-The browser's native `EventSource` automatically sends `Last-Event-ID: <event_id>` on reconnect, so the server treats `Last-Event-ID` as the authoritative cursor against the global sequence. Some intermediaries (corporate proxies, the user's edge proxy fronting the orchestrator) strip the header; for those the client also accepts `?last_event_id=<event_id>` as a query-string fallback, used by the `harness-provider` frontend code path that is not the raw `EventSource`. When both header and query are present, header wins. The `?session_id=` filter is orthogonal to the cursor — it narrows which frames the client receives, not which frames count toward the cursor.
+The browser's native `EventSource` automatically sends `Last-Event-ID: <event_id>` on reconnect, so the server treats `Last-Event-ID` as the authoritative cursor against the global sequence. Some intermediaries (corporate proxies, the user's edge proxy fronting the orchestrator) strip the header; for those the client also accepts `?last_event_id=<event_id>` as a query-string fallback, used by the `harness-provider` frontend code path that is not the raw `EventSource`. When both header and query are present, header wins. The `?session_id=` filter narrows which frames the client receives, but its cursor is only valid for the same filter value that produced it.
 
 ```text
 GET /api/events/stream
@@ -166,13 +194,14 @@ Last-Event-ID: 482917
 
 GET /api/events/stream?session_id={id}
 Last-Event-ID: 482917
-  (replay only this session's events with id > 482917, then continue live)
+  (replay only this session's events with id > 482917, then continue live;
+   safe only if 482917 came from the same `session_id` filter)
 
 GET /api/events/stream?last_event_id=482917
   (header-stripped fallback, same semantics)
 ```
 
-The cursor is global per orchestrator: one integer survives across session selection changes and across reconnects without coordination.
+The global cursor is one integer per orchestrator; filtered cursors stay scoped to their original `session_id` filter.
 
 ### Retention gap
 
@@ -186,7 +215,7 @@ data: {"requested_last_event_id": 482917, "oldest_available": 600000,
        "reason": "retention_window_exceeded"}
 ```
 
-`session_id_filter` echoes the active `?session_id=` filter (or null if no filter is in effect). Then the server resumes from the oldest retained event matching the filter. The frontend treats `replay_gap` as a directive to drop its in-memory hub state and refetch via `/api/sessions` (and per-session `/api/sessions/{id}` for the currently-selected session) and the polling endpoint, then re-attach the SSE stream from the gap event's id forward. This is also the contract for the rare case where a client's first event is older than retention because of an unusually long-lived idle session — the gap event still fires.
+`session_id_filter` echoes the active `?session_id=` filter (or null if no filter is in effect). The server resumes from the oldest retained event matching the filter; it never reuses a filtered cursor across a different filter scope. The frontend treats `replay_gap` as a directive to drop its in-memory hub state and refetch via `/api/sessions` (and per-session `/api/sessions/{id}` for the currently-selected session) and the polling endpoint, then re-attach the SSE stream from the gap event's id forward. This is also the contract for the rare case where a client's first event is older than retention because of an unusually long-lived idle session — the gap event still fires.
 
 ### Frontend implementation note (Step 8)
 
