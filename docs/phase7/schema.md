@@ -235,10 +235,10 @@ spec_path                  -- absolute path to bundle config.json
 secrets_dir_path           -- per-generation secrets dir under control_dir, or NULL
                              (NULL for shell-agent generations; see Secret Materialization)
 
-bridge_dir_path           -- per-generation file-backed bridge transport
-                             root: <bridge_root>/<generation_id>/
-                             with inbox/, outbox/, heartbeat/ subdirs
-                             (Agent Bridge Protocol)
+bridge_dir_path            -- per-generation file-backed bridge transport
+                              root: <bridge_root>/<generation_id>/
+                              with inbox/, outbox/, heartbeat/ subdirs
+                              (Agent Bridge Protocol)
 log_dir_path               -- per-generation log dir
 
 runsc_pid                  -- sandbox PID at last observed start; nullable
