@@ -34,6 +34,7 @@ const (
 	TypeHeartbeat        = "heartbeat"
 	TypeProbeNetwork     = "probe_network"
 	TypeClaimNextTurn    = "claim_next_turn"
+	TypeResumeTurn       = "resume_turn"
 	TypeGrant            = "grant"
 	TypeNoWork           = "no_work"
 	TypeAckTurnStarted   = "ack_turn_started"

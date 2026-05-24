@@ -202,6 +202,14 @@ class BridgeClient:
             return None
         return response.get("payload") or {}
 
+    def resume_turn(self, turn_id, timeout=None):
+        request_id = str(uuid.uuid4())
+        self.send("resume_turn", request_id=request_id, turn_id=turn_id)
+        response = self.wait_response(request_id, timeout=timeout)
+        if response.get("type") != "grant":
+            return None
+        return response.get("payload") or {}
+
     def ack_turn_started(self, turn_id, sandbox_source_ip):
         self.send("ack_turn_started", turn_id=turn_id, payload={"sandbox_source_ip": sandbox_source_ip})
 

@@ -90,6 +90,36 @@ class BridgeClientTest(unittest.TestCase):
             )
             self.assertEqual(messages[-2]["payload"]["output_sequence"], 1)
 
+    def test_resume_turn_returns_grant_payload(self):
+        with tempfile.TemporaryDirectory() as root:
+            client = bridge.BridgeClient(root, "sess", "gen", "claude", poll_interval=0.001)
+
+            sent_request_id = None
+            original_send = client.send
+
+            def record_send(message_type, request_id=None, turn_id=None, payload=None):
+                nonlocal sent_request_id
+                envelope = original_send(message_type, request_id=request_id, turn_id=turn_id, payload=payload)
+                if message_type == "resume_turn":
+                    sent_request_id = envelope["request_id"]
+                return envelope
+
+            client.send = record_send
+            with mock.patch.object(client, "wait_response") as wait_response:
+                wait_response.return_value = {
+                    "type": "grant",
+                    "payload": {"turn_id": 9, "sequence": 1, "content": "resume", "replayed": True},
+                }
+                grant = client.resume_turn(9, timeout=0.1)
+            self.assertEqual(grant["turn_id"], 9)
+            self.assertTrue(grant["replayed"])
+            self.assertIsNotNone(sent_request_id)
+            wait_response.assert_called_once_with(sent_request_id, timeout=0.1)
+            outbox = bridge.Queue(root, bridge.OUTBOX)
+            messages = [envelope for _, _, envelope in outbox.read_all()]
+            self.assertEqual(messages[-1]["type"], "resume_turn")
+            self.assertEqual(messages[-1]["turn_id"], 9)
+
     def test_heartbeat_writes_bridge_mtime_file_and_message(self):
         with tempfile.TemporaryDirectory() as root:
             client = bridge.BridgeClient(root, "sess", "gen", "claude", poll_interval=0.001)

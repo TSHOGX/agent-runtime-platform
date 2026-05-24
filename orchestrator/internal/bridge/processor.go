@@ -15,6 +15,7 @@ type Store interface {
 	BridgeHelloAck(context.Context, string, string, string, time.Time) (store.BridgeHelloAck, error)
 	RenewGenerationHeartbeat(context.Context, store.RenewHeartbeatParams) error
 	ClaimNextTurn(context.Context, store.ClaimNextTurnParams) (store.TurnGrant, bool, error)
+	ResumeTurn(context.Context, store.ResumeTurnParams) (store.TurnGrant, bool, error)
 	AckTurnStarted(context.Context, store.AckStartedParams) error
 	CompleteTurn(context.Context, store.CompleteTurnParams) error
 	AppendEvent(context.Context, store.AppendEventParams) (int64, error)
@@ -166,6 +167,37 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 		if !ok {
 			return p.writeResponse(ctx, inbox, envelope, TypeNoWork, map[string]string{"reason": "no_eligible_turn"})
 		}
+		return p.writeResponse(ctx, inbox, envelope, TypeGrant, grantPayload{
+			TurnID:    grant.TurnID,
+			Sequence:  grant.Sequence,
+			Content:   grant.Content,
+			Attempt:   grant.Attempt,
+			Replayed:  grant.Replayed,
+			ExpiresAt: grant.ExpiresAt,
+		})
+	case TypeResumeTurn:
+		state := p.state(key)
+		if !state.helloSeen || !state.probed {
+			return p.writeResponse(ctx, inbox, envelope, TypeNoWork, map[string]string{"reason": "bridge_not_ready"})
+		}
+		if envelope.TurnID == nil {
+			return protocolErrorf("resume_turn requires turn_id")
+		}
+		grant, ok, err := p.Store.ResumeTurn(ctx, store.ResumeTurnParams{
+			SessionID:    envelope.SessionID,
+			GenerationID: envelope.GenerationID,
+			TurnID:       *envelope.TurnID,
+			Owner:        p.Owner,
+			LeaseTTL:     p.leaseTTL(),
+			Now:          now,
+		})
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return p.writeResponse(ctx, inbox, envelope, TypeNoWork, map[string]string{"reason": "no_resumable_turn"})
+		}
+		grant.Replayed = true
 		return p.writeResponse(ctx, inbox, envelope, TypeGrant, grantPayload{
 			TurnID:    grant.TurnID,
 			Sequence:  grant.Sequence,

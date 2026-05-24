@@ -223,6 +223,79 @@ WHERE session_id = ?
 	}
 }
 
+func TestProcessorResumeTurnRequiresReadyBridgeAndExistingLease(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openBridgeStore(t, ctx)
+	sessionID := "sess_resume"
+	createBridgeSession(t, ctx, st, sessionID)
+	allocation, details := allocateBridgeGeneration(t, ctx, st, owner, sessionID)
+	turnID, err := st.EnqueueTurn(ctx, sessionID, "resume me", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("enqueue turn: %v", err)
+	}
+	grant, ok, err := st.ClaimNextTurn(ctx, store.ClaimNextTurnParams{
+		SessionID:    sessionID,
+		GenerationID: allocation.GenerationID,
+		Owner:        allocation.Owner,
+		RequestID:    "direct_claim",
+		LeaseTTL:     time.Minute,
+		Now:          time.Now().UTC(),
+	})
+	if err != nil || !ok || grant.TurnID != turnID {
+		t.Fatalf("claim setup: ok=%v grant=%+v err=%v", ok, grant, err)
+	}
+	now := time.Now().UTC()
+	processor := &Processor{
+		Store:    st,
+		Owner:    allocation.Owner,
+		LeaseTTL: time.Minute,
+		Now: func() time.Time {
+			return now
+		},
+	}
+	resume := Envelope{
+		MessageID:    "msg_resume_early",
+		RequestID:    "req_resume_early",
+		Type:         TypeResumeTurn,
+		SessionID:    sessionID,
+		GenerationID: allocation.GenerationID,
+		TurnID:       &turnID,
+	}
+	writeOutbox(t, ctx, details.BridgeDirPath, resume)
+	if err := processor.ProcessOnce(ctx, details.BridgeDirPath); err != nil {
+		t.Fatalf("process early resume: %v", err)
+	}
+	assertSingleInboxResponse(t, details.BridgeDirPath, TypeNoWork, "req_resume_early")
+
+	processor.setState(stateKey(sessionID, allocation.GenerationID), func(state bridgeState) bridgeState {
+		state.helloSeen = true
+		state.probed = true
+		return state
+	})
+	resume.MessageID = "msg_resume_ready"
+	resume.RequestID = "req_resume_ready"
+	writeOutbox(t, ctx, details.BridgeDirPath, resume)
+	if err := processor.ProcessOnce(ctx, details.BridgeDirPath); err != nil {
+		t.Fatalf("process ready resume: %v", err)
+	}
+	response := assertSingleInboxResponse(t, details.BridgeDirPath, TypeGrant, "req_resume_ready")
+	var resumed grantPayload
+	if err := json.Unmarshal(response.Payload, &resumed); err != nil {
+		t.Fatalf("decode resume grant: %v", err)
+	}
+	if resumed.TurnID != turnID || resumed.Content != "resume me" || !resumed.Replayed {
+		t.Fatalf("unexpected resume grant: %+v", resumed)
+	}
+
+	var turnStatus string
+	if err := st.DBForTest().QueryRowContext(ctx, `SELECT status FROM turns WHERE id = ?`, turnID).Scan(&turnStatus); err != nil {
+		t.Fatalf("turn status: %v", err)
+	}
+	if turnStatus != "leased" {
+		t.Fatalf("resume changed turn status=%s want leased", turnStatus)
+	}
+}
+
 func TestProcessorRetainsOutboxMessageWhenStoreApplyFails(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -448,6 +521,10 @@ func (s storeFailure) RenewGenerationHeartbeat(context.Context, store.RenewHeart
 
 func (s storeFailure) ClaimNextTurn(context.Context, store.ClaimNextTurnParams) (store.TurnGrant, bool, error) {
 	return store.TurnGrant{}, false, s.claimErr
+}
+
+func (s storeFailure) ResumeTurn(context.Context, store.ResumeTurnParams) (store.TurnGrant, bool, error) {
+	return store.TurnGrant{}, false, errors.New("unexpected ResumeTurn")
 }
 
 func (s storeFailure) AckTurnStarted(context.Context, store.AckStartedParams) error {

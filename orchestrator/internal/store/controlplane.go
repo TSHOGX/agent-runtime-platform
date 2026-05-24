@@ -18,6 +18,15 @@ type ClaimNextTurnParams struct {
 	Now          time.Time
 }
 
+type ResumeTurnParams struct {
+	SessionID    string
+	GenerationID string
+	TurnID       int64
+	Owner        string
+	LeaseTTL     time.Duration
+	Now          time.Time
+}
+
 type TurnGrant struct {
 	TurnID    int64
 	Sequence  int64
@@ -362,6 +371,95 @@ WHERE generation_id = ?
 	return grant, true, tx.Commit()
 }
 
+func (s *Store) ResumeTurn(ctx context.Context, p ResumeTurnParams) (TurnGrant, bool, error) {
+	if p.Now.IsZero() {
+		p.Now = time.Now().UTC()
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return TurnGrant{}, false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	expiresAt := p.Now.Add(p.LeaseTTL)
+	res, err := tx.ExecContext(ctx, `
+UPDATE turns
+SET lease_expires_at = ?
+WHERE id = ?
+  AND session_id = ?
+  AND generation_id = ?
+  AND status IN ('leased', 'running')
+  AND lease_owner = ?
+  AND EXISTS (
+    SELECT 1 FROM runtime_generations g
+    JOIN sessions s ON s.id = g.session_id
+    WHERE g.generation_id = ?
+      AND g.session_id = ?
+      AND g.status IN ('active', 'idle')
+      AND g.lease_owner = ?
+      AND g.lease_expires_at > ?
+      AND s.active_generation_id = ?
+  )`, formatTime(expiresAt), p.TurnID, p.SessionID, p.GenerationID, p.Owner,
+		p.GenerationID, p.SessionID, p.Owner, formatTime(p.Now), p.GenerationID)
+	if err != nil {
+		return TurnGrant{}, false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return TurnGrant{}, false, err
+	}
+	if affected != 1 {
+		return TurnGrant{}, false, tx.Commit()
+	}
+	res, err = tx.ExecContext(ctx, `
+UPDATE runtime_generations
+SET status = 'active',
+    lease_expires_at = ?,
+    last_seen_at = ?
+WHERE generation_id = ?
+  AND session_id = ?
+  AND status IN ('active', 'idle')
+  AND lease_owner = ?
+  AND lease_expires_at > ?
+  AND EXISTS (
+    SELECT 1 FROM sessions
+    WHERE id = ?
+      AND active_generation_id = ?
+  )`, formatTime(expiresAt), formatTime(p.Now), p.GenerationID, p.SessionID, p.Owner, formatTime(p.Now), p.SessionID, p.GenerationID)
+	if err != nil {
+		return TurnGrant{}, false, err
+	}
+	affected, err = res.RowsAffected()
+	if err != nil {
+		return TurnGrant{}, false, err
+	}
+	if affected != 1 {
+		return TurnGrant{}, false, fmt.Errorf("generation CAS failed after turn resume")
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE active_model_request_contexts
+SET expires_at = ?,
+    lease_owner = ?,
+    updated_at = ?
+WHERE session_id = ?
+  AND generation_id = ?
+  AND turn_id = ?
+  AND turn_id IN (
+    SELECT id FROM turns
+    WHERE session_id = ?
+      AND generation_id = ?
+      AND lease_owner = ?
+      AND status = 'running'
+  )`, formatTime(expiresAt), p.Owner, formatTime(p.Now), p.SessionID, p.GenerationID, p.TurnID, p.SessionID, p.GenerationID, p.Owner); err != nil {
+		return TurnGrant{}, false, err
+	}
+	grant, err := turnGrantByID(ctx, tx, p.SessionID, p.GenerationID, p.TurnID, p.Owner, p.Now)
+	if err != nil {
+		return TurnGrant{}, false, err
+	}
+	grant.ExpiresAt = expiresAt
+	return grant, true, tx.Commit()
+}
+
 func (s *Store) AckTurnStarted(ctx context.Context, p AckStartedParams) error {
 	if p.Now.IsZero() {
 		p.Now = time.Now().UTC()
@@ -686,7 +784,7 @@ WHERE session_id = ?
 
 func claimReplay(ctx context.Context, tx *sql.Tx, p ClaimNextTurnParams) (TurnGrant, bool, error) {
 	row := tx.QueryRowContext(ctx, `
-SELECT id, sequence, content, attempt, lease_expires_at
+SELECT id
 FROM turns
 WHERE session_id = ?
   AND generation_id = ?
@@ -695,17 +793,40 @@ WHERE session_id = ?
   AND lease_owner = ?
   AND lease_expires_at > ?`,
 		p.SessionID, p.GenerationID, p.RequestID, p.Owner, formatTime(p.Now))
-	var grant TurnGrant
-	var leaseExpires string
-	err := row.Scan(&grant.TurnID, &grant.Sequence, &grant.Content, &grant.Attempt, &leaseExpires)
+	var turnID int64
+	err := row.Scan(&turnID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return TurnGrant{}, false, nil
 	}
 	if err != nil {
 		return TurnGrant{}, false, err
 	}
-	grant.ExpiresAt = parseTime(leaseExpires)
+	grant, err := turnGrantByID(ctx, tx, p.SessionID, p.GenerationID, turnID, p.Owner, p.Now)
+	if err != nil {
+		return TurnGrant{}, false, err
+	}
 	return grant, true, nil
+}
+
+func turnGrantByID(ctx context.Context, tx *sql.Tx, sessionID, generationID string, turnID int64, owner string, now time.Time) (TurnGrant, error) {
+	row := tx.QueryRowContext(ctx, `
+SELECT id, sequence, content, attempt, lease_expires_at
+FROM turns
+WHERE id = ?
+  AND session_id = ?
+  AND generation_id = ?
+  AND status IN ('leased', 'running')
+  AND lease_owner = ?
+  AND lease_expires_at > ?`,
+		turnID, sessionID, generationID, owner, formatTime(now))
+	var grant TurnGrant
+	var leaseExpires string
+	err := row.Scan(&grant.TurnID, &grant.Sequence, &grant.Content, &grant.Attempt, &leaseExpires)
+	if err != nil {
+		return TurnGrant{}, err
+	}
+	grant.ExpiresAt = parseTime(leaseExpires)
+	return grant, nil
 }
 
 func nullableInt64Ptr(value *int64) any {

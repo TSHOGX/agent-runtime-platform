@@ -249,6 +249,64 @@ func TestTurnHelperClaimAckComplete(t *testing.T) {
 	}
 }
 
+func TestResumeTurnRenewsOnlyActiveGenerationLease(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	createStoreSession(t, ctx, st, "sess_resume")
+	createActiveGeneration(t, ctx, st, "sess_resume", "gen_resume", "owner")
+	turnID, err := st.EnqueueTurn(ctx, "sess_resume", "resume", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	now := time.Now().UTC()
+	grant, ok, err := st.ClaimNextTurn(ctx, ClaimNextTurnParams{
+		SessionID:    "sess_resume",
+		GenerationID: "gen_resume",
+		Owner:        "owner",
+		RequestID:    "req-1",
+		LeaseTTL:     time.Minute,
+		Now:          now,
+	})
+	if err != nil || !ok || grant.TurnID != turnID {
+		t.Fatalf("claim setup: ok=%v grant=%+v err=%v", ok, grant, err)
+	}
+	resumed, ok, err := st.ResumeTurn(ctx, ResumeTurnParams{
+		SessionID:    "sess_resume",
+		GenerationID: "gen_resume",
+		TurnID:       turnID,
+		Owner:        "owner",
+		LeaseTTL:     2 * time.Minute,
+		Now:          now.Add(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if !ok || resumed.TurnID != turnID || resumed.Content != "resume" {
+		t.Fatalf("unexpected resume grant: ok=%v grant=%+v", ok, resumed)
+	}
+	if !resumed.ExpiresAt.Equal(now.Add(time.Second).Add(2 * time.Minute)) {
+		t.Fatalf("resume expires_at=%s want %s", resumed.ExpiresAt, now.Add(time.Second).Add(2*time.Minute))
+	}
+	_, ok, err = st.ResumeTurn(ctx, ResumeTurnParams{
+		SessionID:    "sess_resume",
+		GenerationID: "gen_wrong",
+		TurnID:       turnID,
+		Owner:        "owner",
+		LeaseTTL:     time.Minute,
+		Now:          now.Add(2 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("resume wrong generation: %v", err)
+	}
+	if ok {
+		t.Fatalf("resume with wrong generation must return no work")
+	}
+}
+
 func TestTurnHelperRejectsWrongSessionGenerationBinding(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
