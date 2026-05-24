@@ -25,6 +25,7 @@ import (
 
 	"harness-platform/orchestrator/internal/agents"
 	"harness-platform/orchestrator/internal/artifacts"
+	"harness-platform/orchestrator/internal/bridge"
 	"harness-platform/orchestrator/internal/config"
 	"harness-platform/orchestrator/internal/events"
 	"harness-platform/orchestrator/internal/runtime"
@@ -58,6 +59,11 @@ type runtimeDriver interface {
 	Destroy(context.Context, string) error
 	Interrupt(string) error
 	Checkpoint(context.Context, string) error
+}
+
+type bridgeStore interface {
+	bridge.Store
+	ListBridgePollGenerations(context.Context, string, time.Time) ([]store.BridgePollGeneration, error)
 }
 
 func New(
@@ -614,17 +620,27 @@ func (s *Server) RunPhase7Maintenance(ctx context.Context) error {
 	if strings.TrimSpace(s.ownerUUID) == "" {
 		return fmt.Errorf("phase7 maintenance requires owner uuid")
 	}
-	interval := s.cfg.Phase7.Bridge.HeartbeatInterval.Duration
-	if interval <= 0 {
-		interval = 30 * time.Second
+	heartbeatInterval := s.cfg.Phase7.Bridge.HeartbeatInterval.Duration
+	if heartbeatInterval <= 0 {
+		heartbeatInterval = 30 * time.Second
+	}
+	pollInterval := s.cfg.Phase7.Bridge.PollInterval.Duration
+	if pollInterval <= 0 {
+		pollInterval = 10 * time.Millisecond
+	}
+	owner := store.GenerationLeaseOwner(s.ownerUUID)
+	processor := &bridge.Processor{
+		Store:    bridgeStore(s.store),
+		Owner:    owner,
+		LeaseTTL: s.cfg.Phase7.Bridge.LeaseTTL.Duration,
 	}
 
-	runOnce := func(now time.Time) {
+	runMaintenance := func(now time.Time) {
 		if _, err := s.store.SweepExpiredSessions(ctx, now); err != nil && !errors.Is(err, context.Canceled) {
 			s.log.Warn("phase7 expired-session sweep failed", "error", err)
 		}
 		if _, err := s.store.RenewLiveGenerationLeases(ctx, store.RenewLiveGenerationsParams{
-			Owner:    store.GenerationLeaseOwner(s.ownerUUID),
+			Owner:    owner,
 			LeaseTTL: s.cfg.Phase7.Bridge.LeaseTTL.Duration,
 			Now:      now,
 		}); err != nil && !errors.Is(err, context.Canceled) {
@@ -638,14 +654,36 @@ func (s *Server) RunPhase7Maintenance(ctx context.Context) error {
 			s.log.Warn("phase7 resource reaper failed", "error", err)
 		}
 	}
+	pollBridge := func(now time.Time) {
+		generations, err := s.store.ListBridgePollGenerations(ctx, owner, now)
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				s.log.Warn("phase7 bridge generation list failed", "error", err)
+			}
+			return
+		}
+		for _, generation := range generations {
+			if err := processor.ProcessOnce(ctx, generation.BridgeDirPath); err != nil {
+				if errors.Is(err, context.Canceled) {
+					return
+				}
+				s.log.Warn("phase7 bridge poll failed", "session_id", generation.SessionID, "generation_id", generation.GenerationID, "error", err)
+			}
+		}
+	}
 
-	runOnce(time.Now().UTC())
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	runMaintenance(time.Now().UTC())
+	pollBridge(time.Now().UTC())
+	maintenanceTicker := time.NewTicker(heartbeatInterval)
+	defer maintenanceTicker.Stop()
+	bridgeTicker := time.NewTicker(pollInterval)
+	defer bridgeTicker.Stop()
 	for {
 		select {
-		case now := <-ticker.C:
-			runOnce(now.UTC())
+		case now := <-maintenanceTicker.C:
+			runMaintenance(now.UTC())
+		case now := <-bridgeTicker.C:
+			pollBridge(now.UTC())
 		case <-ctx.Done():
 			return ctx.Err()
 		}

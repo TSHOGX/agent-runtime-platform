@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"harness-platform/orchestrator/internal/artifacts"
+	"harness-platform/orchestrator/internal/bridge"
 	"harness-platform/orchestrator/internal/config"
 	"harness-platform/orchestrator/internal/events"
 	"harness-platform/orchestrator/internal/runtime"
@@ -558,6 +559,83 @@ WHERE g.session_id = ?`, session.ID).Scan(&generationStatus, &errorClass, &netwo
 	}
 }
 
+func TestRunPhase7MaintenancePollsBridgeOutbox(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_bridge_poll", string(sessionstate.Created), time.Now().UTC(), nil)
+	cfg := testServerConfig(dir)
+	cfg.Phase7.Bridge.PollInterval = config.Duration{Duration: 10 * time.Millisecond}
+	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     store.GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config: store.ResourceAllocatorConfig{
+			RunDir:             cfg.Phase7.RunDir,
+			CIDRPool:           cfg.Phase7.Network.CIDRPool.Prefix,
+			EgressDorisFEHosts: cfg.Phase7.Network.Egress.DorisFEHosts,
+			EgressDorisBEHosts: cfg.Phase7.Network.Egress.DorisBEHosts,
+			EgressDorisPorts:   cfg.Phase7.Network.Egress.DorisPorts,
+			EgressDNSPolicy:    string(cfg.Phase7.Network.Egress.DNSPolicy),
+			HostProxyBindURL:   cfg.Claude.ProxyBindURL,
+			ProxyPort:          8082,
+			Agent:              "claude",
+			AgentModel:         cfg.Claude.Model,
+			AgentOutputFormat:  cfg.Claude.OutputFormat,
+		},
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
+		t.Fatalf("mark generation live: %v", err)
+	}
+	details, err := st.GetRuntimeGenerationDetails(ctx, session.ID, allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get generation details: %v", err)
+	}
+	outbox, err := bridge.OpenQueue(details.BridgeDirPath, bridge.OutboxDir)
+	if err != nil {
+		t.Fatalf("open outbox: %v", err)
+	}
+	if _, err := outbox.Write(ctx, bridge.Envelope{
+		MessageID:    "msg_hello",
+		RequestID:    "req_hello",
+		Type:         bridge.TypeHello,
+		SessionID:    session.ID,
+		GenerationID: allocation.GenerationID,
+	}); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: instantRuntime{},
+		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+	done := make(chan error, 1)
+	go func() {
+		done <- srv.RunPhase7Maintenance(runCtx)
+	}()
+
+	response := waitForBridgeInboxResponse(t, runCtx, details.BridgeDirPath, bridge.TypeHelloAck, "req_hello")
+	if response.GenerationID != allocation.GenerationID || response.SessionID != session.ID {
+		t.Fatalf("unexpected bridge response identity: %+v", response)
+	}
+	cancel()
+	err = <-done
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("maintenance exit err=%v, want context canceled", err)
+	}
+}
+
 func TestSendMessageRejectsExpiredSessionBeforeAllocation(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -588,6 +666,36 @@ func TestSendMessageRejectsExpiredSessionBeforeAllocation(t *testing.T) {
 	if generations != 0 {
 		t.Fatalf("expired session should not allocate generation, got %d", generations)
 	}
+}
+
+func waitForBridgeInboxResponse(t *testing.T, ctx context.Context, root, responseType, requestID string) bridge.Envelope {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		queue, err := bridge.OpenQueue(root, bridge.InboxDir)
+		if err != nil {
+			t.Fatalf("open inbox: %v", err)
+		}
+		files, err := queue.ReadAll()
+		if err != nil {
+			t.Fatalf("read inbox: %v", err)
+		}
+		for _, file := range files {
+			if file.Envelope.Type == responseType && file.Envelope.RequestID == requestID {
+				if err := file.Unlink(); err != nil {
+					t.Fatalf("unlink response: %v", err)
+				}
+				return file.Envelope
+			}
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("context canceled before bridge response")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	t.Fatalf("timed out waiting for bridge response %s/%s", responseType, requestID)
+	return bridge.Envelope{}
 }
 
 func TestDownloadArtifactAllowsNestedRegularFile(t *testing.T) {

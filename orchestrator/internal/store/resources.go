@@ -100,6 +100,12 @@ type RuntimeGenerationDetails struct {
 	SecretVersion              string
 }
 
+type BridgePollGeneration struct {
+	SessionID     string
+	GenerationID  string
+	BridgeDirPath string
+}
+
 type ReaperParams struct {
 	OwnerUUID       string
 	FailedRetention time.Duration
@@ -670,6 +676,40 @@ WHERE status IN ('starting','probing','active','idle','checkpointing','restoring
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+func (s *Store) ListBridgePollGenerations(ctx context.Context, owner string, now time.Time) ([]BridgePollGeneration, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	if strings.TrimSpace(owner) == "" {
+		return nil, fmt.Errorf("owner is required")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT g.session_id, g.generation_id, r.bridge_dir_path
+FROM runtime_generations g
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+JOIN sessions s ON s.id = g.session_id
+WHERE g.status IN ('active','idle','probing','restoring','starting')
+  AND g.lease_owner = ?
+  AND g.lease_expires_at > ?
+  AND s.active_generation_id = g.generation_id
+  AND s.status NOT IN ('failed', 'destroyed')
+  AND r.resource_state IN ('ready','live','recreating')
+ORDER BY g.session_id, g.generation_id`, owner, formatTime(now))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var generations []BridgePollGeneration
+	for rows.Next() {
+		var generation BridgePollGeneration
+		if err := rows.Scan(&generation.SessionID, &generation.GenerationID, &generation.BridgeDirPath); err != nil {
+			return nil, err
+		}
+		generations = append(generations, generation)
+	}
+	return generations, rows.Err()
 }
 
 func (s *Store) GetResourceQuota(ctx context.Context) (ResourceQuota, error) {

@@ -372,6 +372,62 @@ func TestRenewLiveGenerationLeasesKeepsIdle7AGenerationAlive(t *testing.T) {
 	}
 }
 
+func TestListBridgePollGenerationsFiltersCurrentOwnerLiveResources(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	cfg := testAllocatorConfig(t)
+	now := time.Now().UTC()
+
+	createStoreSession(t, ctx, st, "sess_poll")
+	pollAllocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_poll",
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       now,
+		Config:    cfg,
+	})
+	if err != nil {
+		t.Fatalf("allocate poll generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, "sess_poll", pollAllocation.GenerationID, pollAllocation.Owner, now.Add(time.Second)); err != nil {
+		t.Fatalf("mark poll generation live: %v", err)
+	}
+
+	createStoreSession(t, ctx, st, "sess_other")
+	otherAllocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_other",
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       now,
+		Config:    cfg,
+	})
+	if err != nil {
+		t.Fatalf("allocate other generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, "sess_other", otherAllocation.GenerationID, otherAllocation.Owner, now.Add(time.Second)); err != nil {
+		t.Fatalf("mark other generation live: %v", err)
+	}
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE runtime_generations
+SET lease_owner = ?
+WHERE generation_id = ?`, GenerationLeaseOwner("other-owner"), otherAllocation.GenerationID); err != nil {
+		t.Fatalf("move other generation to another owner: %v", err)
+	}
+
+	generations, err := st.ListBridgePollGenerations(ctx, pollAllocation.Owner, now.Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("list bridge poll generations: %v", err)
+	}
+	if len(generations) != 1 {
+		t.Fatalf("generations=%+v, want one current-owner live generation", generations)
+	}
+	if generations[0].SessionID != "sess_poll" ||
+		generations[0].GenerationID != pollAllocation.GenerationID ||
+		generations[0].BridgeDirPath == "" {
+		t.Fatalf("unexpected poll generation: %+v", generations[0])
+	}
+}
+
 func TestSweepExpiredSessionsDestroysAndRejectsInputState(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
