@@ -9,6 +9,8 @@ POLL_INTERVAL="0.05"
 AGENT_USER="harness"
 AGENT_UID="65534"
 AGENT_GID="65534"
+export HARNESS_AGENT_UID="$AGENT_UID"
+export HARNESS_AGENT_GID="$AGENT_GID"
 
 echo "[entrypoint] waiting for control file: $CONTROL_JSON_FILE or $CONTROL_ENV_FILE" >&2
 while [ ! -f "$CONTROL_JSON_FILE" ] && [ ! -f "$CONTROL_ENV_FILE" ]; do
@@ -122,15 +124,6 @@ if [ "${HARNESS_BRIDGE_MODE:-}" = "probe" ]; then
   echo "[entrypoint] bridge probe starting" >&2
   exec /usr/local/bin/harness-bridge-client probe
 fi
-if [ "${HARNESS_BRIDGE_MODE:-}" = "claim-loop" ]; then
-  echo "[entrypoint] bridge claim loop starting" >&2
-  exec /usr/local/bin/harness-bridge-client claim-loop
-fi
-if [ "${HARNESS_BRIDGE_MODE:-auto}" = "auto" ]; then
-  echo "[entrypoint] bridge probe starting" >&2
-  /usr/local/bin/harness-bridge-client probe
-  /usr/local/bin/harness-bridge-client heartbeat-loop &
-fi
 
 SESSION_WORKSPACE="${SESSION_WORKSPACE:-/sessions/$SESSION_ID}"
 mkdir -p "$SESSION_WORKSPACE"
@@ -151,12 +144,25 @@ ln -sfn "$SESSION_WORKSPACE" /workspace
 
 cd /workspace
 
+if [ "${HARNESS_AGENT:-claude}" = "claude" ]; then
+  : "${CLAUDE_SESSION_UUID:?CLAUDE_SESSION_UUID is required for claude agent}"
+  ensure_agent_user
+fi
+
+if [ "${HARNESS_BRIDGE_MODE:-}" = "claim-loop" ]; then
+  echo "[entrypoint] bridge claim loop starting" >&2
+  exec /usr/local/bin/harness-bridge-client claim-loop
+fi
+if [ "${HARNESS_BRIDGE_MODE:-auto}" = "auto" ]; then
+  echo "[entrypoint] bridge probe starting" >&2
+  /usr/local/bin/harness-bridge-client probe
+  /usr/local/bin/harness-bridge-client heartbeat-loop &
+fi
+
 echo "[entrypoint] agent: ${HARNESS_AGENT:-claude}" >&2
 case "${HARNESS_AGENT:-claude}" in
   claude)
     echo "[entrypoint] claude turn loop starting" >&2
-    : "${CLAUDE_SESSION_UUID:?CLAUDE_SESSION_UUID is required for claude agent}"
-    ensure_agent_user
 
     first_turn=1
     while IFS= read -r turn; do

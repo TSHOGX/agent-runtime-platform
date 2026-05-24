@@ -329,9 +329,8 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, sessionID s
 	}
 	isNewGeneration := strings.TrimSpace(session.ActiveGenerationID) == ""
 	preparedArtifacts := runtimeArtifactsFromDetails(generationDetails)
-	recordRuntimeArtifacts := strings.TrimSpace(preparedArtifacts.ManifestDigest) == ""
 	if isNewGeneration {
-		preparedArtifacts, err = s.runtime.PrepareGeneration(r.Context(), s.runtimeStartRequest(session, req.Content, allocation.GenerationID, generationDetails, runtime.GenerationArtifacts{}))
+		preparedArtifacts, err = s.runtime.PrepareGeneration(r.Context(), s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, runtime.GenerationArtifacts{}))
 		if err != nil {
 			s.failGenerationBeforeTurn(session.ID, allocation.GenerationID, allocation.Owner, err)
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -347,32 +346,32 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, sessionID s
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		recordRuntimeArtifacts = true
 	}
-	turnID, err := s.store.Start7ATurn(r.Context(), sessionID, allocation.GenerationID, allocation.Owner, req.Content, time.Now().UTC())
+	startReq := s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, preparedArtifacts)
+	result := s.runtime.Start(r.Context(), startReq, nil)
+	if result.Err != nil {
+		s.failGenerationBeforeTurn(session.ID, allocation.GenerationID, allocation.Owner, result.Err)
+		writeError(w, http.StatusInternalServerError, result.Err.Error())
+		return
+	}
+	runningStatus := string(sessionstate.RunningActive)
+	enqueue, err := s.store.EnqueueTurnMessage(r.Context(), store.EnqueueTurnMessageParams{
+		SessionID: sessionID,
+		Content:   req.Content,
+		Now:       time.Now().UTC(),
+	})
 	if err != nil {
-		if isNewGeneration {
-			s.failGenerationBeforeTurn(session.ID, allocation.GenerationID, allocation.Owner, err)
+		if strings.Contains(err.Error(), "session cannot accept input") {
+			writeError(w, http.StatusConflict, "session is busy")
+			return
 		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	msg, err := s.store.AddMessage(r.Context(), sessionID, "user", req.Content)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	runningStatus := string(sessionstate.RunningActive)
-	if err := s.store.UpdateSessionStatus(r.Context(), sessionID, runningStatus, nil); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	s.hub.Publish(events.Event{Type: "message.created", SessionID: sessionID, Payload: msg})
+	s.hub.Publish(events.Event{Type: "message.created", SessionID: sessionID, Payload: enqueue.Message})
 	s.hub.Publish(events.Event{Type: "session." + runningStatus, SessionID: sessionID})
-	go s.runSession(context.Background(), session, req.Content, allocation.GenerationID, allocation.Owner, turnID, generationDetails, preparedArtifacts, recordRuntimeArtifacts)
-	writeJSON(w, http.StatusAccepted, map[string]any{"status": runningStatus, "session_id": sessionID, "message": msg})
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": runningStatus, "session_id": sessionID, "message": enqueue.Message})
 }
 
 func (s *Server) failGenerationBeforeTurn(sessionID, generationID, owner string, failure error) {
@@ -464,13 +463,13 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request, sessionID 
 	writeJSON(w, http.StatusOK, map[string]any{"messages": messages})
 }
 
-func (s *Server) runtimeStartRequest(session store.Session, message, generationID string, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts) runtime.StartRequest {
+func (s *Server) runtimeStartRequest(session store.Session, generationID string, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts) runtime.StartRequest {
 	return runtime.StartRequest{
 		SessionID:         session.ID,
 		RestoreID:         session.RestoreID,
 		GenerationID:      generationID,
 		Agent:             session.Agent,
-		FirstMessage:      message,
+		WaitForTurn:       false,
 		ClaudeSessionUUID: session.ClaudeSessionUUID,
 		ResumeClaude:      session.Status != string(sessionstate.Created),
 		Generation:        details,
@@ -486,75 +485,6 @@ func runtimeArtifactsFromDetails(details store.RuntimeGenerationDetails) runtime
 		ManifestDigest: details.ControlManifestDigest,
 		RunscVersion:   details.RunscVersion,
 	}
-}
-
-func (s *Server) runSession(ctx context.Context, session store.Session, message, generationID, leaseOwner string, turnID int64, generationDetails store.RuntimeGenerationDetails, preparedArtifacts runtime.GenerationArtifacts, recordRuntimeArtifacts bool) {
-	parser := newStreamParser(s, session.ID, session.Agent)
-	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
-	heartbeatDone := s.startRuntimeManagerHeartbeat(heartbeatCtx, session.ID, generationID, leaseOwner)
-	defer func() {
-		stopHeartbeat()
-		<-heartbeatDone
-	}()
-
-	startReq := s.runtimeStartRequest(session, message, generationID, generationDetails, preparedArtifacts)
-	startReq.Done = parser.Done()
-	result := s.runtime.Start(ctx, startReq, func(output runtime.Output) {
-		s.log.Debug("runtime output", "session_id", session.ID, "stream", output.Stream, "line", output.Line)
-		parser.handle(output)
-	})
-	parser.flush()
-
-	now := time.Now()
-	status := string(sessionstate.RunningIdle)
-	if result.Err != nil {
-		status = string(sessionstate.Failed)
-		s.log.Warn("runtime failed", "session_id", session.ID, "error", result.Err)
-		s.hub.Publish(events.Event{Type: "session.error", SessionID: session.ID, Payload: map[string]string{"error": result.Err.Error()}})
-	} else if err := parser.Err(); err != nil {
-		status = string(sessionstate.Failed)
-		s.log.Warn("runtime stream failed", "session_id", session.ID, "error", err)
-		s.hub.Publish(events.Event{Type: "session.error", SessionID: session.ID, Payload: map[string]string{"error": err.Error()}})
-	}
-	turnStatus := "completed"
-	turnError := ""
-	if status == string(sessionstate.Failed) {
-		turnStatus = "failed"
-		if result.Err != nil {
-			turnError = result.Err.Error()
-		} else if err := parser.Err(); err != nil {
-			turnError = err.Error()
-		}
-	}
-	if generationID != "" {
-		if recordRuntimeArtifacts && result.ControlManifestDigest != "" {
-			if err := s.store.RecordGenerationRuntimeArtifacts(ctx, generationID, result.ControlManifestDigest, result.RunscVersion); err != nil {
-				s.log.Warn("failed to record runtime artifact metadata", "session_id", session.ID, "generation_id", generationID, "error", err)
-			}
-		}
-		if status == string(sessionstate.Failed) {
-			if err := s.store.FailGeneration(ctx, store.FailGenerationParams{
-				SessionID:    session.ID,
-				GenerationID: generationID,
-				TurnID:       turnID,
-				Owner:        leaseOwner,
-				ErrorClass:   runtimeFailureClass(turnError),
-				Reason:       turnError,
-				Now:          now.UTC(),
-			}); err != nil {
-				s.log.Warn("failed to fail runtime generation", "session_id", session.ID, "generation_id", generationID, "error", err)
-			}
-		} else if err := s.store.Finish7ATurn(ctx, session.ID, generationID, leaseOwner, turnID, turnStatus, turnError, now.UTC()); err != nil {
-			s.log.Warn("failed to update 7a turn ledger", "session_id", session.ID, "generation_id", generationID, "error", err)
-		}
-	}
-	if err := s.store.UpdateSessionStatusAndActivity(ctx, session.ID, status, result.RestoreMS, now); err != nil {
-		s.log.Warn("failed to update session status", "session_id", session.ID, "error", err)
-	}
-	if err := s.watcher.ScanSession(ctx, session.ID); err != nil {
-		s.log.Warn("failed to scan session artifacts", "session_id", session.ID, "error", err)
-	}
-	s.hub.Publish(events.Event{Type: "session." + status, SessionID: session.ID, Payload: map[string]any{"restore_ms": result.RestoreMS}})
 }
 
 func runtimeFailureClass(message string) string {
@@ -582,44 +512,6 @@ func (s *Server) runtimeGenerationDetails(ctx context.Context, sessionID, genera
 		return store.RuntimeGenerationDetails{}, err
 	}
 	return details, nil
-}
-
-func (s *Server) startRuntimeManagerHeartbeat(ctx context.Context, sessionID, generationID, leaseOwner string) <-chan struct{} {
-	done := make(chan struct{})
-	if strings.TrimSpace(generationID) == "" || strings.TrimSpace(leaseOwner) == "" {
-		close(done)
-		return done
-	}
-	interval := s.cfg.Phase7.Bridge.HeartbeatInterval.Duration
-	if interval <= 0 {
-		interval = 30 * time.Second
-	}
-	leaseTTL := s.cfg.Phase7.Bridge.LeaseTTL.Duration
-	if leaseTTL <= 0 {
-		leaseTTL = time.Minute
-	}
-	go func() {
-		defer close(done)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case now := <-ticker.C:
-				if err := s.store.RenewGenerationHeartbeat(ctx, store.RenewHeartbeatParams{
-					SessionID:    sessionID,
-					GenerationID: generationID,
-					Owner:        leaseOwner,
-					LeaseTTL:     leaseTTL,
-					Now:          now.UTC(),
-				}); err != nil && !errors.Is(err, context.Canceled) {
-					s.log.Warn("runtime-manager heartbeat failed", "session_id", sessionID, "generation_id", generationID, "error", err)
-				}
-			}
-		}
-	}()
-	return done
 }
 
 func (s *Server) RunPhase7Maintenance(ctx context.Context) error {

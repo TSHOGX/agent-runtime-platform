@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -118,6 +119,114 @@ func TestUpdateSessionStatusAndActivity(t *testing.T) {
 	}
 	if got.LastActivityAt.Sub(activityTime).Abs() > time.Second {
 		t.Errorf("last_activity_at: want %v, got %v", activityTime, *got.LastActivityAt)
+	}
+}
+
+func TestEnqueueTurnMessageCreatesQueuedTurnMessageAndActivatesSession(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	ctx := context.Background()
+	st, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	now := time.Now().UTC()
+	session := Session{
+		ID:        "sess_enqueue",
+		UserID:    "lab",
+		Status:    string(sessionstate.Created),
+		Agent:     "claude",
+		Workspace: dir,
+		RestoreID: "phase3-sess_enqueue",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := st.CreateSession(ctx, session); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	result, err := st.EnqueueTurnMessage(ctx, EnqueueTurnMessageParams{
+		SessionID: session.ID,
+		Content:   "hello",
+		Now:       now.Add(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("enqueue turn message: %v", err)
+	}
+	if result.TurnID == 0 || result.Message.ID == 0 {
+		t.Fatalf("expected ids to be assigned: %+v", result)
+	}
+	if result.Message.Role != "user" || result.Message.Content != "hello" {
+		t.Fatalf("unexpected message: %+v", result.Message)
+	}
+
+	var turnStatus, turnContent string
+	var turnSequence int64
+	if err := st.db.QueryRowContext(ctx, `
+SELECT sequence, content, status
+FROM turns
+WHERE id = ?`, result.TurnID).Scan(&turnSequence, &turnContent, &turnStatus); err != nil {
+		t.Fatalf("query turn: %v", err)
+	}
+	if turnSequence != 1 || turnContent != "hello" || turnStatus != "queued" {
+		t.Fatalf("unexpected queued turn: sequence=%d content=%q status=%q", turnSequence, turnContent, turnStatus)
+	}
+	got, err := st.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if got.Status != string(sessionstate.RunningActive) || got.LastActivityAt == nil {
+		t.Fatalf("session not marked active: %+v", got)
+	}
+}
+
+func TestEnqueueTurnMessageRejectsBusySessionWithoutWrites(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	ctx := context.Background()
+	st, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	now := time.Now().UTC()
+	session := Session{
+		ID:        "sess_busy_enqueue",
+		UserID:    "lab",
+		Status:    string(sessionstate.RunningActive),
+		Agent:     "claude",
+		Workspace: dir,
+		RestoreID: "phase3-sess_busy_enqueue",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := st.CreateSession(ctx, session); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	_, err = st.EnqueueTurnMessage(ctx, EnqueueTurnMessageParams{
+		SessionID: session.ID,
+		Content:   "hello",
+		Now:       now.Add(time.Second),
+	})
+	if err == nil || !strings.Contains(err.Error(), "session cannot accept input") {
+		t.Fatalf("expected session cannot accept input, got %v", err)
+	}
+
+	var turns, messages int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM turns WHERE session_id = ?`, session.ID).Scan(&turns); err != nil {
+		t.Fatalf("count turns: %v", err)
+	}
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE session_id = ?`, session.ID).Scan(&messages); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if turns != 0 || messages != 0 {
+		t.Fatalf("busy enqueue should roll back writes: turns=%d messages=%d", turns, messages)
 	}
 }
 

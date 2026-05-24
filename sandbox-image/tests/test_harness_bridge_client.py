@@ -369,6 +369,65 @@ class BridgeClientTest(unittest.TestCase):
                     "test-key",
                 )
 
+    def test_claude_runner_drops_privileges_before_reading_secrets(self):
+        class FakeStdin:
+            def __init__(self):
+                self.writes = []
+                self.closed = False
+
+            def write(self, value):
+                self.writes.append(value)
+
+            def close(self):
+                self.closed = True
+
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = FakeStdin()
+                self.stdout = iter(['{"type":"result","result":"ok"}\n'])
+
+            def wait(self):
+                return 0
+
+        captured = {}
+
+        def popen(command, **kwargs):
+            captured["command"] = command
+            captured["env"] = kwargs.get("env") or {}
+            captured["process"] = FakeProcess()
+            return captured["process"]
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "CLAUDE_SESSION_UUID": "11111111-2222-3333-4444-555555555555",
+                "SESSION_ID": "sess",
+                "HARNESS_AGENT_HOME": "/agent-homes/sess",
+                "HARNESS_AGENT_UID": "65534",
+                "HARNESS_AGENT_GID": "65534",
+                "HARNESS_SECRET_READERS_GID": "12345",
+                "ANTHROPIC_BASE_URL": "http://10.240.0.1:8082",
+                "SECRET_MOUNT_PATH": "/harness-secrets",
+                "ANTHROPIC_API_KEY_SECRET_ID": "anthropic_api_key",
+                "ANTHROPIC_AUTH_TOKEN_SECRET_ID": "anthropic_auth_token",
+                "SECRET_VERSION": "local",
+            },
+            clear=True,
+        ):
+            with mock.patch.object(bridge.subprocess, "Popen", side_effect=popen):
+                runner = bridge.ClaudeTurnRunner()
+                status, error_class, error = runner.run_turn("hello", lambda stream, line: None)
+
+        self.assertEqual((status, error_class, error), ("completed", "", ""))
+        command = captured["command"]
+        self.assertEqual(command[:7], ["setpriv", "--reuid", "65534", "--regid", "65534", "--groups", "12345"])
+        self.assertIn("SECRET_MOUNT_PATH=/harness-secrets", command)
+        shell_script = command[command.index("-c") + 1]
+        self.assertIn('ANTHROPIC_API_KEY="$(cat "$SECRET_MOUNT_PATH/$ANTHROPIC_API_KEY_SECRET_ID/$SECRET_VERSION")"', shell_script)
+        self.assertIn("/usr/local/bin/claude", command)
+        self.assertNotIn("ANTHROPIC_API_KEY", captured["env"])
+        self.assertIn('"text":"hello"', captured["process"].stdin.writes[0])
+
 
 class EntrypointStaticTest(unittest.TestCase):
     def test_entrypoint_has_probe_mode(self):
@@ -381,6 +440,16 @@ class EntrypointStaticTest(unittest.TestCase):
         self.assertIn('HARNESS_BRIDGE_MODE:-auto}" = "auto"', text)
         self.assertIn("/usr/local/bin/harness-bridge-client probe", text)
         self.assertIn("/usr/local/bin/harness-bridge-client heartbeat-loop &", text)
+
+    def test_claim_loop_starts_after_workspace_and_agent_home_setup(self):
+        entrypoint = SCRIPT.with_name("harness-agent-entrypoint")
+        text = entrypoint.read_text(encoding="utf-8")
+        claim_loop = text.index('HARNESS_BRIDGE_MODE:-}" = "claim-loop"')
+        cd_workspace = text.index("cd /workspace")
+        self.assertLess(text.index('SESSION_WORKSPACE="${SESSION_WORKSPACE:-/sessions/$SESSION_ID}"'), claim_loop)
+        self.assertLess(text.index("ln -sfn \"$SESSION_WORKSPACE\" /workspace"), claim_loop)
+        self.assertLess(cd_workspace, claim_loop)
+        self.assertLess(text.index("  ensure_agent_user", cd_workspace), claim_loop)
 
 
 def argparse_namespace(**kwargs):

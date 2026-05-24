@@ -283,7 +283,7 @@ func TestReconcileCheckpointingSessionsRevertsIncompleteCheckpoint(t *testing.T)
 	}
 }
 
-func TestSendMessageAllocatesGenerationAndWrites7ALedger(t *testing.T) {
+func TestSendMessageAllocatesGenerationAndQueuesBridgeTurn(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	st, owner := openServerOwnedStore(t, ctx, dir)
@@ -306,9 +306,9 @@ func TestSendMessageAllocatesGenerationAndWrites7ALedger(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("expected status 202, got %d body %s", rec.Code, rec.Body.String())
 	}
-	waitForSessionStatus(t, ctx, st, session.ID, string(sessionstate.RunningIdle))
+	waitForSessionStatus(t, ctx, st, session.ID, string(sessionstate.RunningActive))
 
-	var generations, networkRows, resourceRows, completedTurns int
+	var generations, networkRows, resourceRows, queuedTurns, userMessages int
 	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_generations WHERE session_id = ?`, session.ID).Scan(&generations); err != nil {
 		t.Fatalf("count generations: %v", err)
 	}
@@ -322,11 +322,14 @@ JOIN runtime_generations g ON g.generation_id = r.generation_id
 WHERE g.session_id = ? AND r.resource_state = 'live'`, session.ID).Scan(&resourceRows); err != nil {
 		t.Fatalf("count resource rows: %v", err)
 	}
-	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM turns WHERE session_id = ? AND status = 'completed'`, session.ID).Scan(&completedTurns); err != nil {
+	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM turns WHERE session_id = ? AND status = 'queued' AND generation_id IS NULL`, session.ID).Scan(&queuedTurns); err != nil {
 		t.Fatalf("count turns: %v", err)
 	}
-	if generations != 1 || networkRows != 1 || resourceRows != 1 || completedTurns != 1 {
-		t.Fatalf("unexpected ledger rows: generations=%d network=%d resources=%d turns=%d", generations, networkRows, resourceRows, completedTurns)
+	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE session_id = ? AND role = 'user' AND content = 'hello'`, session.ID).Scan(&userMessages); err != nil {
+		t.Fatalf("count user messages: %v", err)
+	}
+	if generations != 1 || networkRows != 1 || resourceRows != 1 || queuedTurns != 1 || userMessages != 1 {
+		t.Fatalf("unexpected bridge enqueue rows: generations=%d network=%d resources=%d queued_turns=%d user_messages=%d", generations, networkRows, resourceRows, queuedTurns, userMessages)
 	}
 }
 
@@ -352,9 +355,55 @@ func TestSendMessageReusesActiveGenerationArtifacts(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("expected first status 202, got %d body %s", rec.Code, rec.Body.String())
 	}
-	waitForSessionStatus(t, ctx, st, session.ID, string(sessionstate.RunningIdle))
+	waitForSessionStatus(t, ctx, st, session.ID, string(sessionstate.RunningActive))
 	if got := atomic.LoadInt64(&instantRuntimePrepareCalls); got != 1 {
 		t.Fatalf("first turn prepare calls=%d want 1", got)
+	}
+	var generationID string
+	var firstTurnID int64
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT g.generation_id, t.id
+FROM runtime_generations g
+JOIN turns t ON t.session_id = g.session_id
+WHERE g.session_id = ?
+  AND t.status = 'queued'
+  AND t.content = 'first'`, session.ID).Scan(&generationID, &firstTurnID); err != nil {
+		t.Fatalf("query first queued turn: %v", err)
+	}
+	leaseOwner := store.GenerationLeaseOwner(owner.UUID)
+	if grant, ok, err := st.ClaimNextTurn(ctx, store.ClaimNextTurnParams{
+		SessionID:    session.ID,
+		GenerationID: generationID,
+		Owner:        leaseOwner,
+		RequestID:    "req_first",
+		LeaseTTL:     time.Minute,
+		Now:          time.Now().UTC(),
+	}); err != nil || !ok || grant.TurnID != firstTurnID {
+		t.Fatalf("claim first turn: ok=%v grant=%+v err=%v", ok, grant, err)
+	}
+	if err := st.AckTurnStarted(ctx, store.AckStartedParams{
+		SessionID:       session.ID,
+		GenerationID:    generationID,
+		TurnID:          firstTurnID,
+		Owner:           leaseOwner,
+		SandboxSourceIP: "10.241.0.2",
+		LeaseTTL:        time.Minute,
+		Now:             time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("ack first turn started: %v", err)
+	}
+	if err := st.CompleteTurn(ctx, store.CompleteTurnParams{
+		SessionID:      session.ID,
+		GenerationID:   generationID,
+		TurnID:         firstTurnID,
+		Owner:          leaseOwner,
+		TerminalStatus: "completed",
+		Now:            time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("complete first turn: %v", err)
+	}
+	if err := st.UpdateSessionStatusAndActivity(ctx, session.ID, string(sessionstate.RunningIdle), nil, time.Now().UTC()); err != nil {
+		t.Fatalf("mark session idle: %v", err)
 	}
 
 	req = httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(`{"content":"second"}`))
@@ -363,16 +412,19 @@ func TestSendMessageReusesActiveGenerationArtifacts(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("expected second status 202, got %d body %s", rec.Code, rec.Body.String())
 	}
-	waitForSessionStatus(t, ctx, st, session.ID, string(sessionstate.RunningIdle))
+	waitForSessionStatus(t, ctx, st, session.ID, string(sessionstate.RunningActive))
 	if got := atomic.LoadInt64(&instantRuntimePrepareCalls); got != 1 {
 		t.Fatalf("active generation should reuse prepared artifacts, prepare calls=%d", got)
 	}
-	var turns int
-	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM turns WHERE session_id = ? AND status = 'completed'`, session.ID).Scan(&turns); err != nil {
+	var completedTurns, queuedTurns int
+	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM turns WHERE session_id = ? AND status = 'completed'`, session.ID).Scan(&completedTurns); err != nil {
 		t.Fatalf("count turns: %v", err)
 	}
-	if turns != 2 {
-		t.Fatalf("completed turns=%d want 2", turns)
+	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM turns WHERE session_id = ? AND status = 'queued' AND content = 'second'`, session.ID).Scan(&queuedTurns); err != nil {
+		t.Fatalf("count queued turns: %v", err)
+	}
+	if completedTurns != 1 || queuedTurns != 1 {
+		t.Fatalf("unexpected turn statuses after reuse: completed=%d queued=%d", completedTurns, queuedTurns)
 	}
 }
 
@@ -437,45 +489,12 @@ func TestGetQuotaReportsSessionAndPoolCeilings(t *testing.T) {
 	}
 }
 
-func TestRunSessionFailureMarksGenerationFailedAndReclaimable(t *testing.T) {
+func TestSendMessageRuntimeStartFailureMarksGenerationFailedAndReclaimable(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	st, owner := openServerOwnedStore(t, ctx, dir)
 	session := createServerTestSession(t, ctx, st, dir, "sess_runtime_fail", string(sessionstate.Created), time.Now().UTC(), nil)
 	cfg := testServerConfig(dir)
-	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
-		SessionID: session.ID,
-		Owner:     store.GenerationLeaseOwner(owner.UUID),
-		LeaseTTL:  time.Minute,
-		Now:       time.Now().UTC(),
-		Config: store.ResourceAllocatorConfig{
-			RunDir:             cfg.Phase7.RunDir,
-			CIDRPool:           cfg.Phase7.Network.CIDRPool.Prefix,
-			EgressDorisFEHosts: cfg.Phase7.Network.Egress.DorisFEHosts,
-			EgressDorisBEHosts: cfg.Phase7.Network.Egress.DorisBEHosts,
-			EgressDorisPorts:   cfg.Phase7.Network.Egress.DorisPorts,
-			EgressDNSPolicy:    string(cfg.Phase7.Network.Egress.DNSPolicy),
-			HostProxyBindURL:   cfg.Claude.ProxyBindURL,
-			ProxyPort:          8082,
-			Agent:              "claude",
-			AgentModel:         cfg.Claude.Model,
-			AgentOutputFormat:  cfg.Claude.OutputFormat,
-		},
-	})
-	if err != nil {
-		t.Fatalf("allocate generation: %v", err)
-	}
-	if err := st.MarkGenerationResourcesLive(ctx, session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
-		t.Fatalf("mark generation live: %v", err)
-	}
-	turnID, err := st.Start7ATurn(ctx, session.ID, allocation.GenerationID, allocation.Owner, "hello", time.Now().UTC())
-	if err != nil {
-		t.Fatalf("start turn: %v", err)
-	}
-	details, err := st.GetRuntimeGenerationDetails(ctx, session.ID, allocation.GenerationID)
-	if err != nil {
-		t.Fatalf("get generation details: %v", err)
-	}
 	srv := &Server{
 		cfg:   cfg,
 		store: st,
@@ -486,25 +505,38 @@ func TestRunSessionFailureMarksGenerationFailedAndReclaimable(t *testing.T) {
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
+	srv.SetOwnerUUID(owner.UUID)
 
-	srv.runSession(ctx, session, "hello", allocation.GenerationID, allocation.Owner, turnID, details, runtime.GenerationArtifacts{}, false)
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(`{"content":"hello"}`))
+	rec := httptest.NewRecorder()
+	srv.sendMessage(rec, req, session.ID)
 
-	var generationStatus, errorClass, networkState, resourceState, turnStatus string
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d body %s", rec.Code, rec.Body.String())
+	}
+	var generationStatus, errorClass, networkState, resourceState, sessionStatus string
 	if err := st.DBForTest().QueryRowContext(ctx, `
-SELECT g.status, COALESCE(g.error_class, ''), n.allocation_state, r.resource_state, t.status
+SELECT g.status, COALESCE(g.error_class, ''), n.allocation_state, r.resource_state, s.status
 FROM runtime_generations g
 JOIN network_profiles n ON n.generation_id = g.generation_id
 JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
-JOIN turns t ON t.generation_id = g.generation_id
-WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &errorClass, &networkState, &resourceState, &turnStatus); err != nil {
+JOIN sessions s ON s.active_generation_id = g.generation_id
+WHERE g.session_id = ?`, session.ID).Scan(&generationStatus, &errorClass, &networkState, &resourceState, &sessionStatus); err != nil {
 		t.Fatalf("query generation state: %v", err)
 	}
 	if generationStatus != "failed" ||
 		errorClass != "probe_failed_pre_start" ||
 		networkState != "reclaimable" ||
 		resourceState != "reclaimable" ||
-		turnStatus != "failed" {
-		t.Fatalf("unexpected failed generation state: generation=%s class=%s network=%s resource=%s turn=%s", generationStatus, errorClass, networkState, resourceState, turnStatus)
+		sessionStatus != string(sessionstate.Failed) {
+		t.Fatalf("unexpected failed generation state: generation=%s class=%s network=%s resource=%s session=%s", generationStatus, errorClass, networkState, resourceState, sessionStatus)
+	}
+	var turns int
+	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM turns WHERE session_id = ?`, session.ID).Scan(&turns); err != nil {
+		t.Fatalf("count turns: %v", err)
+	}
+	if turns != 0 {
+		t.Fatalf("runtime start failure should happen before turn creation, got %d turns", turns)
 	}
 }
 

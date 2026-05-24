@@ -523,6 +523,7 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndSecrets(t *testing.T
 	}
 	env := specEnv(spec.Process.Env)
 	if env["HARNESS_BRIDGE_DIR"] != "/harness-control/bridge" ||
+		env["HARNESS_BRIDGE_MODE"] != "claim-loop" ||
 		env["HARNESS_BRIDGE_HEARTBEAT_INTERVAL"] != "20" ||
 		env["HARNESS_PROBE_HEALTHZ_STATUSES"] != "200" ||
 		env["HARNESS_PROBE_MESSAGE_STATUSES"] != "400" {

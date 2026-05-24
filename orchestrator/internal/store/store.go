@@ -44,6 +44,17 @@ type Message struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+type EnqueueTurnMessageParams struct {
+	SessionID string
+	Content   string
+	Now       time.Time
+}
+
+type EnqueueTurnMessageResult struct {
+	TurnID  int64
+	Message Message
+}
+
 type Artifact struct {
 	SessionID string    `json:"session_id"`
 	Path      string    `json:"path"`
@@ -246,6 +257,73 @@ VALUES (?, ?, ?, ?)`, sessionID, role, content, formatTime(now))
 		return Message{}, err
 	}
 	return Message{ID: id, SessionID: sessionID, Role: role, Content: content, CreatedAt: now}, nil
+}
+
+func (s *Store) EnqueueTurnMessage(ctx context.Context, p EnqueueTurnMessageParams) (EnqueueTurnMessageResult, error) {
+	if p.Now.IsZero() {
+		p.Now = time.Now().UTC()
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return EnqueueTurnMessageResult{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	next, err := nextTurnSequence(ctx, tx, p.SessionID)
+	if err != nil {
+		return EnqueueTurnMessageResult{}, err
+	}
+	turnRes, err := tx.ExecContext(ctx, `
+INSERT INTO turns (session_id, sequence, role, content, status, attempt, created_at)
+VALUES (?, ?, 'user', ?, 'queued', 0, ?)`, p.SessionID, next, p.Content, formatTime(p.Now))
+	if err != nil {
+		return EnqueueTurnMessageResult{}, err
+	}
+	turnID, err := turnRes.LastInsertId()
+	if err != nil {
+		return EnqueueTurnMessageResult{}, err
+	}
+	msgRes, err := tx.ExecContext(ctx, `
+INSERT INTO messages (session_id, role, content, created_at)
+VALUES (?, 'user', ?, ?)`, p.SessionID, p.Content, formatTime(p.Now))
+	if err != nil {
+		return EnqueueTurnMessageResult{}, err
+	}
+	messageID, err := msgRes.LastInsertId()
+	if err != nil {
+		return EnqueueTurnMessageResult{}, err
+	}
+	res, err := tx.ExecContext(ctx, `
+UPDATE sessions
+SET status = ?,
+    updated_at = ?,
+    last_activity_at = ?
+WHERE id = ?
+  AND status IN (?, ?, ?)`,
+		string(sessionstate.RunningActive), formatTime(p.Now), formatTime(p.Now), p.SessionID,
+		string(sessionstate.Created), string(sessionstate.RunningIdle), string(sessionstate.Checkpointed))
+	if err != nil {
+		return EnqueueTurnMessageResult{}, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return EnqueueTurnMessageResult{}, err
+	}
+	if affected != 1 {
+		return EnqueueTurnMessageResult{}, fmt.Errorf("session cannot accept input")
+	}
+	if err := tx.Commit(); err != nil {
+		return EnqueueTurnMessageResult{}, err
+	}
+	return EnqueueTurnMessageResult{
+		TurnID: turnID,
+		Message: Message{
+			ID:        messageID,
+			SessionID: p.SessionID,
+			Role:      "user",
+			Content:   p.Content,
+			CreatedAt: p.Now,
+		},
+	}, nil
 }
 
 func (s *Store) ListMessages(ctx context.Context, sessionID string) ([]Message, error) {

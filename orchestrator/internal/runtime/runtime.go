@@ -44,6 +44,7 @@ type Config struct {
 	ProbeHealthzStatuses  []int
 	ProbeMessageStatuses  []int
 	BridgeHeartbeat       time.Duration
+	BridgeMode            string
 	CommandRunner         CommandRunner
 }
 
@@ -74,6 +75,7 @@ type StartRequest struct {
 	GenerationID      string
 	Agent             string
 	FirstMessage      string
+	WaitForTurn       bool
 	ClaudeSessionUUID string
 	ResumeClaude      bool
 	Done              <-chan struct{}
@@ -223,6 +225,9 @@ func (r *Runtime) Start(ctx context.Context, req StartRequest, output func(Outpu
 	r.mu.RUnlock()
 
 	if exists {
+		if !req.WaitForTurn {
+			return Result{}
+		}
 		return r.sendMessage(ctx, container, req.FirstMessage, req.Done, output)
 	}
 
@@ -752,6 +757,7 @@ func (r *Runtime) renderRuntimeSpec(req StartRequest) (runtimeSpec, string, erro
 		"HARNESS_EXPECTED_SECRET_VERSION="+details.SecretVersion,
 		fmt.Sprintf("HARNESS_SECRET_READERS_GID=%d", r.cfg.SecretReadersGID),
 		"HARNESS_BRIDGE_DIR="+bridge.BridgeMountDestination,
+		"HARNESS_BRIDGE_MODE="+defaultString(r.cfg.BridgeMode, "claim-loop"),
 		"HARNESS_BRIDGE_HEARTBEAT_INTERVAL="+formatSeconds(defaultDuration(r.cfg.BridgeHeartbeat, 30*time.Second)),
 		"HARNESS_PROBE_HEALTHZ_STATUSES="+joinInts(defaultIntSlice(r.cfg.ProbeHealthzStatuses, []int{200})),
 		"HARNESS_PROBE_MESSAGE_STATUSES="+joinInts(defaultIntSlice(r.cfg.ProbeMessageStatuses, []int{400})),
@@ -1561,6 +1567,13 @@ func (r *Runtime) startFresh(ctx context.Context, req StartRequest, output func(
 		r.cleanupExitedContainer(container)
 	}()
 
+	if !req.WaitForTurn {
+		return Result{
+			ControlManifestDigest: req.PreparedArtifacts.ManifestDigest,
+			RunscVersion:          req.PreparedArtifacts.RunscVersion,
+		}
+	}
+
 	// Send first message
 	if req.FirstMessage != "" {
 		if err := r.writeContainerInput(container, func(stdin io.Writer) error {
@@ -1667,6 +1680,13 @@ func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, ou
 		hub.Close() // Close hub when container exits
 		r.cleanupExitedContainer(container)
 	}()
+
+	if !req.WaitForTurn {
+		return Result{
+			ControlManifestDigest: req.PreparedArtifacts.ManifestDigest,
+			RunscVersion:          req.PreparedArtifacts.RunscVersion,
+		}
+	}
 
 	if req.FirstMessage != "" {
 		if err := r.writeContainerInput(container, func(stdin io.Writer) error {

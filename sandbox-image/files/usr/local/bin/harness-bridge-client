@@ -283,7 +283,7 @@ class ClaudeTurnRunner:
         session_uuid = os.environ.get("CLAUDE_SESSION_UUID", "")
         if not session_uuid:
             raise RuntimeError("CLAUDE_SESSION_UUID is required for claude agent")
-        command = [
+        claude_command = [
             "/usr/local/bin/claude",
             "--bare",
             "--permission-mode",
@@ -300,17 +300,49 @@ class ClaudeTurnRunner:
             "--verbose",
         ]
         if self.first_turn and os.environ.get("CLAUDE_RESUME", "0") != "1":
-            command.extend(["--session-id", session_uuid])
+            claude_command.extend(["--session-id", session_uuid])
         else:
-            command.extend(["--resume", session_uuid])
+            claude_command.extend(["--resume", session_uuid])
         self.first_turn = False
 
+        agent_home = os.environ.get("HARNESS_AGENT_HOME", f"/agent-homes/{os.environ.get('SESSION_ID', '')}")
+        secret_readers_gid = os.environ.get("HARNESS_SECRET_READERS_GID", "")
+        if not secret_readers_gid:
+            raise RuntimeError("HARNESS_SECRET_READERS_GID is required for claude agent")
         env = os.environ.copy()
-        env["HOME"] = os.environ.get("HARNESS_AGENT_HOME", f"/agent-homes/{os.environ.get('SESSION_ID', '')}")
+        env["HOME"] = agent_home
         env["USER"] = "harness"
         env["LOGNAME"] = "harness"
-        env["ANTHROPIC_API_KEY"] = configured_secret("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_SECRET_ID")
-        env["ANTHROPIC_AUTH_TOKEN"] = configured_secret("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN_SECRET_ID")
+        env.pop("ANTHROPIC_API_KEY", None)
+        env.pop("ANTHROPIC_AUTH_TOKEN", None)
+        command = [
+            "setpriv",
+            "--reuid",
+            os.environ.get("HARNESS_AGENT_UID", "65534"),
+            "--regid",
+            os.environ.get("HARNESS_AGENT_GID", "65534"),
+            "--groups",
+            secret_readers_gid,
+            "env",
+            f"HOME={agent_home}",
+            "USER=harness",
+            "LOGNAME=harness",
+            f"ANTHROPIC_BASE_URL={os.environ.get('ANTHROPIC_BASE_URL', '')}",
+            f"SECRET_MOUNT_PATH={os.environ.get('SECRET_MOUNT_PATH', '')}",
+            f"ANTHROPIC_API_KEY_SECRET_ID={os.environ.get('ANTHROPIC_API_KEY_SECRET_ID', '')}",
+            f"ANTHROPIC_AUTH_TOKEN_SECRET_ID={os.environ.get('ANTHROPIC_AUTH_TOKEN_SECRET_ID', '')}",
+            f"SECRET_VERSION={os.environ.get('SECRET_VERSION', '')}",
+            "sh",
+            "-c",
+            (
+                'ANTHROPIC_API_KEY="$(cat "$SECRET_MOUNT_PATH/$ANTHROPIC_API_KEY_SECRET_ID/$SECRET_VERSION")"\n'
+                'ANTHROPIC_AUTH_TOKEN="$(cat "$SECRET_MOUNT_PATH/$ANTHROPIC_AUTH_TOKEN_SECRET_ID/$SECRET_VERSION")"\n'
+                "export ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN\n"
+                'exec "$@"'
+            ),
+            "sh",
+            *claude_command,
+        ]
         frame = json.dumps(
             {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": content}]}},
             ensure_ascii=False,
