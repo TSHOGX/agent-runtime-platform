@@ -520,6 +520,12 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndSecrets(t *testing.T
 		bridgeMount.Annotations["dev.gvisor.spec.mount./harness-control/bridge.type"] != "bind" {
 		t.Fatalf("bridge mount missing exclusive annotation: %+v", bridgeMount.Annotations)
 	}
+	env := specEnv(spec.Process.Env)
+	if env["HARNESS_BRIDGE_DIR"] != "/harness-control/bridge" ||
+		env["HARNESS_PROBE_HEALTHZ_STATUSES"] != "200" ||
+		env["HARNESS_PROBE_MESSAGE_STATUSES"] != "400" {
+		t.Fatalf("runtime spec missing bridge/probe env: %+v", env)
+	}
 	for _, name := range []string{"inbox", "outbox", "heartbeat", "tmp"} {
 		if info, err := os.Stat(filepath.Join(details.BridgeDirPath, name)); err != nil || !info.IsDir() {
 			t.Fatalf("bridge dir %s not initialized: info=%v err=%v", name, info, err)
@@ -691,6 +697,17 @@ func mountByDestination(mounts []specMount, destination string) *specMount {
 		}
 	}
 	return nil
+}
+
+func specEnv(values []string) map[string]string {
+	env := map[string]string{}
+	for _, value := range values {
+		key, raw, ok := strings.Cut(value, "=")
+		if ok {
+			env[key] = raw
+		}
+	}
+	return env
 }
 
 func mustReadFile(t *testing.T, path string) []byte {

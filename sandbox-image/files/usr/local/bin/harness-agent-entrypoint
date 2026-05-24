@@ -118,6 +118,11 @@ if [ "${HARNESS_AGENT:-claude}" = "claude" ]; then
   export ANTHROPIC_BASE_URL SECRET_MOUNT_PATH ANTHROPIC_API_KEY_SECRET_ID ANTHROPIC_AUTH_TOKEN_SECRET_ID SECRET_VERSION
 fi
 
+if [ "${HARNESS_BRIDGE_MODE:-}" = "probe" ]; then
+  echo "[entrypoint] bridge probe starting" >&2
+  exec /usr/local/bin/harness-bridge-client probe
+fi
+
 SESSION_WORKSPACE="${SESSION_WORKSPACE:-/sessions/$SESSION_ID}"
 mkdir -p "$SESSION_WORKSPACE"
 

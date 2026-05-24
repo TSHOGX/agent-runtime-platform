@@ -751,6 +751,8 @@ func (r *Runtime) renderRuntimeSpec(req StartRequest) (runtimeSpec, string, erro
 		"HARNESS_EXPECTED_SECRET_VERSION="+details.SecretVersion,
 		fmt.Sprintf("HARNESS_SECRET_READERS_GID=%d", r.cfg.SecretReadersGID),
 		"HARNESS_BRIDGE_DIR="+bridge.BridgeMountDestination,
+		"HARNESS_PROBE_HEALTHZ_STATUSES="+joinInts(defaultIntSlice(r.cfg.ProbeHealthzStatuses, []int{200})),
+		"HARNESS_PROBE_MESSAGE_STATUSES="+joinInts(defaultIntSlice(r.cfg.ProbeMessageStatuses, []int{400})),
 	)
 	spec.Mounts = []specMount{
 		{Destination: "/proc", Type: "proc", Source: "proc"},
@@ -914,6 +916,14 @@ func shortID(id string) string {
 		return "unknown"
 	}
 	return token
+}
+
+func joinInts(values []int) string {
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, strconv.Itoa(value))
+	}
+	return strings.Join(parts, ",")
 }
 
 func (r *Runtime) runscVersion(ctx context.Context) string {

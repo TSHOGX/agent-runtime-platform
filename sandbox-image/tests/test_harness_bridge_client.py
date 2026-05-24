@@ -128,5 +128,13 @@ class BridgeClientTest(unittest.TestCase):
                 )
 
 
+class EntrypointStaticTest(unittest.TestCase):
+    def test_entrypoint_has_probe_mode(self):
+        entrypoint = SCRIPT.with_name("harness-agent-entrypoint")
+        text = entrypoint.read_text(encoding="utf-8")
+        self.assertIn('HARNESS_BRIDGE_MODE:-}" = "probe"', text)
+        self.assertIn("exec /usr/local/bin/harness-bridge-client probe", text)
+
+
 if __name__ == "__main__":
     unittest.main()
