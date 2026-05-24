@@ -93,11 +93,11 @@ payload
 created_at
 ```
 
-`event_id` is allocated only by the host event store. Sandbox bridge messages must not supply a global event ID. Bridge output messages use a per-turn sequence, and the host deduplicates bridge output by `(turn_id, generation_id, output_sequence)`.
+`event_id` is allocated only by the host event store as `INTEGER PRIMARY KEY AUTOINCREMENT` under the orchestrator's single-writer SQLite, making it monotonic globally per orchestrator process (not per session). This is what makes the global SSE stream's `Last-Event-ID` cursor meaningful across session-filter changes — see [bridge-protocol.md](./bridge-protocol.md#sse-wire-protocol-step-8). Sandbox bridge messages must not supply a global event ID. Bridge output messages use a per-turn sequence; the host deduplicates bridge output by `(turn_id, generation_id, output_sequence)` and rejects re-emits silently (see [bridge-protocol.md](./bridge-protocol.md#idempotency-and-sequence-recovery)). `(session_id, sequence)` is the per-session ordering key used by replay consumers.
+
+`dedupe_key` is an optional bridge-supplied idempotency token for non-output messages whose `(turn_id, generation_id, output_sequence)` triple does not apply (e.g. lifecycle re-emits after a transport replay). When set, the host enforces uniqueness over `(session_id, dedupe_key)` and a duplicate insert is dropped silently — same semantics as the output dedup. Lifecycle messages typically rely on the turn-state CAS for idempotency and leave `dedupe_key` NULL; future bridge messages that need transport-level dedup without a CAS guard set it explicitly.
 
 Proxy metrics are stored as typed event payloads, usually `proxy.request.started`, `proxy.request.completed`, or `proxy.request.failed`. The correlation fields `proxy_request_id`, `turn_id`, and `generation_id` are first-class columns; latency, retry, timeout, and upstream details can remain in `payload` or be promoted to generated/query columns if needed for dashboards.
-
-`event_id` is monotonic globally per orchestrator process, not per session; this is what makes the global SSE stream's `Last-Event-ID` cursor meaningful across session-filter changes — see [bridge-protocol.md](./bridge-protocol.md#sse-wire-protocol-step-8). `(session_id, sequence)` (or `(turn_id, generation_id, output_sequence)` for output) remains the per-session/per-turn ordering keys used by replay consumers and dedupe paths.
 
 Event durability is a hard invariant, but the transaction boundary is per message kind, not per turn:
 
@@ -235,13 +235,17 @@ spec_path                  -- absolute path to bundle config.json
 secrets_dir_path           -- per-generation secrets dir under control_dir, or NULL
                              (NULL for shell-agent generations; see Secret Materialization)
 
-bridge_socket_path         -- file-backed bridge transport (Agent Bridge Protocol)
+bridge_dir_path           -- per-generation file-backed bridge transport
+                             root: <bridge_root>/<generation_id>/
+                             with inbox/, outbox/, heartbeat/ subdirs
+                             (Agent Bridge Protocol)
 log_dir_path               -- per-generation log dir
 
 runsc_pid                  -- sandbox PID at last observed start; nullable
 runsc_version              -- exact version string at start; immutable after first write
 
-resource_state             -- allocating | ready | live | recreating |
+resource_state             -- allocating | ready | live |
+                             reserved_checkpointed | recreating |
                              reclaimable | destroyed
                              (mirrors network_profile.allocation_state for fast lookup;
                               the network profile remains the source of truth for
@@ -250,7 +254,7 @@ created_at
 destroyed_at
 ```
 
-**Relationship to `network_profiles`.** `network_profiles` owns the *network* allocation lifecycle (CIDR slot, netns, veth, gateway, egress) — that table's `allocation_state` continues to be the authoritative state machine for releasing the `/30` and netns. `runtime_generation_resources` owns the *non-network* host artifacts (control/bundle/log dirs, secret dir, bridge socket, runsc bundle paths) and mirrors `allocation_state` into `resource_state` so that the reaper and recovery sweeps can answer "is everything for this generation reclaimable yet?" in one query without joining three tables. Both rows are written in the same allocation transaction and both rows are deleted (or moved to `destroyed`) in the same reclaim transaction; the partial unique index that constrains "one non-terminal generation per session" sits on `runtime_generations`, not on either resource table, so resource-row uniqueness is enforced by the FK alone.
+**Relationship to `network_profiles`.** `network_profiles` owns the *network* allocation lifecycle (CIDR slot, netns, veth, gateway, egress) — that table's `allocation_state` continues to be the authoritative state machine for releasing the `/30` and netns. `runtime_generation_resources` owns the *non-network* host artifacts (control/bundle/log dirs, secret dir, bridge dir, runsc bundle paths) and mirrors `allocation_state` into `resource_state` so that the reaper and recovery sweeps can answer "is everything for this generation reclaimable yet?" in one query without joining three tables. Both rows are written in the same allocation transaction and both rows are deleted (or moved to `destroyed`) in the same reclaim transaction; the partial unique index that constrains "one non-terminal generation per session" sits on `runtime_generations`, not on either resource table, so resource-row uniqueness is enforced by the FK alone.
 
 **Relationship to `runtime_generations`.** `runtime_generations` is the fencing row (status, lease_owner, generation_id identity); it does not store paths or PIDs. Implementations that want to grow new per-generation host artifacts (e.g. a checkpoint payload directory at Step 9) add a column to `runtime_generation_resources`, not to `runtime_generations`, so that the fencing row stays narrow and the resource row carries everything the reaper needs to delete from disk.
 
@@ -472,8 +476,8 @@ v5  phase7_indexes
 
 v6  phase7_legacy_session_backfill
       For every legacy session row that the existing code path would
-      treat as still-running (status in the live set per
-      sessionstate.AllStatuses, ended_at IS NULL):
+      treat as still-running (status in sessionstate.ActiveStatuses,
+      ended_at IS NULL):
         - Mark status = 'failed' with a typed reason
           ('legacy_pre_phase7_no_generation') and set ended_at = now.
         - DO NOT synthesize a runtime_generations row. The legacy

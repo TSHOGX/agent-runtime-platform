@@ -10,6 +10,7 @@ Each generation gets an isolated control directory and manifest. The manifest mu
 session_id
 generation_id
 network_profile_id
+agent_runtime_profile_id
 agent
 claude_session_uuid
 resume_claude

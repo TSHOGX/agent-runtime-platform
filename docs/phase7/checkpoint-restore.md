@@ -124,7 +124,7 @@ regenerable (excluded from manifest digest projection):
   - manifest.created_at         (regenerated from current wall clock)
   - manifest.attempt_id          (regenerated per restore attempt)
   - manifest.host_hostname       (regenerated from current host)
-  - manifest.bridge_socket_paths (regenerated from allocation row)
+  - manifest.bridge_dir_paths   (regenerated from allocation row)
   - manifest.heartbeat_paths     (regenerated from allocation row)
   - manifest.netns_name          (regenerated from allocation row)
   - manifest.host_gateway_ip     (regenerated from allocation row)
