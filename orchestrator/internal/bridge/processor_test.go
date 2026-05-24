@@ -296,6 +296,85 @@ func TestProcessorResumeTurnRequiresReadyBridgeAndExistingLease(t *testing.T) {
 	}
 }
 
+func TestProcessorReplayAfterCommitBeforeUnlinkIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openBridgeStore(t, ctx)
+	sessionID := "sess_unlink_replay"
+	createBridgeSession(t, ctx, st, sessionID)
+	allocation, details := allocateBridgeGeneration(t, ctx, st, owner, sessionID)
+	turnID, err := st.EnqueueTurn(ctx, sessionID, "run", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("enqueue turn: %v", err)
+	}
+	if _, ok, err := st.ClaimNextTurn(ctx, store.ClaimNextTurnParams{
+		SessionID:    sessionID,
+		GenerationID: allocation.GenerationID,
+		Owner:        allocation.Owner,
+		RequestID:    "direct_claim",
+		LeaseTTL:     time.Minute,
+		Now:          time.Now().UTC(),
+	}); err != nil || !ok {
+		t.Fatalf("claim setup: ok=%v err=%v", ok, err)
+	}
+	processor := &Processor{
+		Store:    st,
+		Owner:    allocation.Owner,
+		LeaseTTL: time.Minute,
+	}
+	started := Envelope{
+		MessageID:    "msg_started",
+		RequestID:    "req_started",
+		Type:         TypeAckTurnStarted,
+		SessionID:    sessionID,
+		GenerationID: allocation.GenerationID,
+		TurnID:       &turnID,
+		Payload:      json.RawMessage(`{"sandbox_source_ip":"10.240.0.2"}`),
+	}
+	output := Envelope{
+		MessageID:    "msg_output",
+		RequestID:    "req_output",
+		Type:         TypeEmitOutput,
+		SessionID:    sessionID,
+		GenerationID: allocation.GenerationID,
+		TurnID:       &turnID,
+		Payload:      json.RawMessage(`{"output_sequence":1,"stream":"stdout","payload":{"line":"ok"}}`),
+	}
+	writeOutbox(t, ctx, details.BridgeDirPath, started)
+	writeOutbox(t, ctx, details.BridgeDirPath, output)
+	if err := processor.ProcessOnce(ctx, details.BridgeDirPath); err != nil {
+		t.Fatalf("process first delivery: %v", err)
+	}
+	writeOutbox(t, ctx, details.BridgeDirPath, started)
+	writeOutbox(t, ctx, details.BridgeDirPath, output)
+	if err := processor.ProcessOnce(ctx, details.BridgeDirPath); err != nil {
+		t.Fatalf("process replay delivery: %v", err)
+	}
+
+	var eventCount int
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM events
+WHERE session_id = ?
+  AND generation_id = ?
+  AND turn_id = ?`, sessionID, allocation.GenerationID, turnID).Scan(&eventCount); err != nil {
+		t.Fatalf("event count: %v", err)
+	}
+	if eventCount != 2 {
+		t.Fatalf("event count after replay=%d want 2", eventCount)
+	}
+	outbox, err := OpenQueue(details.BridgeDirPath, OutboxDir)
+	if err != nil {
+		t.Fatalf("open outbox: %v", err)
+	}
+	files, err := outbox.ReadAll()
+	if err != nil {
+		t.Fatalf("read outbox: %v", err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("outbox files after replay=%d want 0", len(files))
+	}
+}
+
 func TestProcessorRetainsOutboxMessageWhenStoreApplyFails(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
