@@ -122,6 +122,10 @@ if [ "${HARNESS_BRIDGE_MODE:-}" = "probe" ]; then
   echo "[entrypoint] bridge probe starting" >&2
   exec /usr/local/bin/harness-bridge-client probe
 fi
+if [ "${HARNESS_BRIDGE_MODE:-auto}" = "auto" ]; then
+  echo "[entrypoint] bridge probe starting" >&2
+  /usr/local/bin/harness-bridge-client probe
+fi
 
 SESSION_WORKSPACE="${SESSION_WORKSPACE:-/sessions/$SESSION_ID}"
 mkdir -p "$SESSION_WORKSPACE"

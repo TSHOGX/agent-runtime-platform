@@ -108,6 +108,49 @@ class BridgeClientTest(unittest.TestCase):
         self.assertEqual(message_call.kwargs["headers"]["x-api-key"], "test-key")
         self.assertEqual(message_call.kwargs["headers"]["authorization"], "Bearer test-token")
 
+    def test_shell_probe_skips_proxy_http_probe(self):
+        with tempfile.TemporaryDirectory() as root:
+            args = argparse_namespace(
+                bridge_dir=root,
+                session_id="sess",
+                generation_id="gen",
+                agent="sh",
+                poll_interval=0.001,
+                timeout=0.1,
+                base_url="",
+                healthz_statuses="200",
+                message_statuses="400",
+                http_timeout=0.1,
+            )
+            inbox = bridge.Queue(root, bridge.INBOX)
+
+            with mock.patch.object(bridge, "run_network_probe") as run_network_probe:
+                sent = []
+                original_write = bridge.Queue.write
+
+                def write_and_respond(queue, envelope):
+                    sent.append(dict(envelope))
+                    message_type = envelope.get("type")
+                    request_id = envelope.get("request_id")
+                    if queue.name == bridge.OUTBOX and message_type in {"hello", "probe_network"}:
+                        inbox.write(
+                            {
+                                "message_id": f"host_{message_type}",
+                                "request_id": request_id,
+                                "type": "hello_ack" if message_type == "hello" else "no_work",
+                                "session_id": "sess",
+                                "generation_id": "gen",
+                                "payload": {"last_output_sequence_by_turn": {}} if message_type == "hello" else {},
+                            }
+                        )
+                    return original_write(queue, envelope)
+
+                with mock.patch.object(bridge.Queue, "write", write_and_respond):
+                    bridge.run_probe(args)
+
+            run_network_probe.assert_not_called()
+            self.assertEqual([message["type"] for message in sent if message["type"] in {"hello", "probe_network"}], ["hello", "probe_network"])
+
     def test_configured_secret_reads_materialized_secret(self):
         with tempfile.TemporaryDirectory() as root:
             secret_path = Path(root) / "api-key" / "v1"
@@ -134,6 +177,12 @@ class EntrypointStaticTest(unittest.TestCase):
         text = entrypoint.read_text(encoding="utf-8")
         self.assertIn('HARNESS_BRIDGE_MODE:-}" = "probe"', text)
         self.assertIn("exec /usr/local/bin/harness-bridge-client probe", text)
+        self.assertIn('HARNESS_BRIDGE_MODE:-auto}" = "auto"', text)
+        self.assertIn("/usr/local/bin/harness-bridge-client probe", text)
+
+
+def argparse_namespace(**kwargs):
+    return type("Args", (), kwargs)()
 
 
 if __name__ == "__main__":

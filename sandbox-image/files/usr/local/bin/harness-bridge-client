@@ -271,14 +271,15 @@ def run_network_probe(base_url, healthz_statuses, message_statuses, timeout, api
 def run_probe(args):
     client = BridgeClient(args.bridge_dir, args.session_id, args.generation_id, args.agent, args.poll_interval)
     client.hello(timeout=args.timeout)
-    run_network_probe(
-        args.base_url,
-        parse_statuses(args.healthz_statuses, {200}),
-        parse_statuses(args.message_statuses, {400}),
-        args.http_timeout,
-        configured_secret("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_SECRET_ID"),
-        configured_secret("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN_SECRET_ID"),
-    )
+    if args.agent == "claude":
+        run_network_probe(
+            args.base_url,
+            parse_statuses(args.healthz_statuses, {200}),
+            parse_statuses(args.message_statuses, {400}),
+            args.http_timeout,
+            configured_secret("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_SECRET_ID"),
+            configured_secret("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN_SECRET_ID"),
+        )
     client.probe_network(timeout=args.timeout)
 
 
