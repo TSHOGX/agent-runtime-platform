@@ -19,12 +19,13 @@ type ClaimNextTurnParams struct {
 }
 
 type ResumeTurnParams struct {
-	SessionID    string
-	GenerationID string
-	TurnID       int64
-	Owner        string
-	LeaseTTL     time.Duration
-	Now          time.Time
+	SessionID       string
+	GenerationID    string
+	TurnID          int64
+	Owner           string
+	LeaseTTL        time.Duration
+	AckStartedGrace time.Duration
+	Now             time.Time
 }
 
 type TurnGrant struct {
@@ -124,7 +125,7 @@ VALUES (?, ?, 'user', ?, 'queued', 0, ?)`, sessionID, next, content, formatTime(
 	return id, tx.Commit()
 }
 
-func (s *Store) BridgeHelloAck(ctx context.Context, sessionID, generationID, owner string, now time.Time) (BridgeHelloAck, error) {
+func (s *Store) BridgeHelloAck(ctx context.Context, sessionID, generationID, owner string, now time.Time, ackStartedGrace time.Duration) (BridgeHelloAck, error) {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
@@ -134,7 +135,7 @@ func (s *Store) BridgeHelloAck(ctx context.Context, sessionID, generationID, own
 	}
 	defer func() { _ = tx.Rollback() }()
 	var exists int
-	if err := tx.QueryRowContext(ctx, `
+	activeLeaseQuery := `
 SELECT COUNT(*)
 FROM runtime_generations g
 JOIN sessions s ON s.id = g.session_id
@@ -143,11 +144,42 @@ WHERE g.session_id = ?
   AND g.lease_owner = ?
   AND g.status IN ('idle','active','probing','restoring','starting')
   AND g.lease_expires_at > ?
-  AND s.active_generation_id = ?`, sessionID, generationID, owner, formatTime(now), generationID).Scan(&exists); err != nil {
+  AND s.active_generation_id = ?`
+	if err := tx.QueryRowContext(ctx, activeLeaseQuery, sessionID, generationID, owner, formatTime(now), generationID).Scan(&exists); err != nil {
 		return BridgeHelloAck{}, err
 	}
 	if exists != 1 {
-		return BridgeHelloAck{}, fmt.Errorf("bridge hello generation CAS failed")
+		if ackStartedGrace <= 0 {
+			return BridgeHelloAck{}, fmt.Errorf("bridge hello generation CAS failed")
+		}
+		cutoff := now.Add(-ackStartedGrace)
+		if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM runtime_generations g
+JOIN sessions s ON s.id = g.session_id
+WHERE g.session_id = ?
+  AND g.generation_id = ?
+  AND g.status IN ('active', 'idle')
+  AND g.lease_expires_at IS NOT NULL
+  AND g.lease_expires_at <= ?
+  AND g.lease_expires_at > ?
+  AND s.active_generation_id = ?
+  AND s.status NOT IN ('failed', 'destroyed')
+  AND EXISTS (
+    SELECT 1 FROM turns t
+    WHERE t.session_id = g.session_id
+      AND t.generation_id = g.generation_id
+      AND t.status = 'running'
+      AND t.ack_started_at IS NOT NULL
+      AND t.lease_expires_at IS NOT NULL
+      AND t.lease_expires_at <= ?
+      AND t.lease_expires_at > ?
+  )`, sessionID, generationID, formatTime(now), formatTime(cutoff), generationID, formatTime(now), formatTime(cutoff)).Scan(&exists); err != nil {
+			return BridgeHelloAck{}, err
+		}
+		if exists != 1 {
+			return BridgeHelloAck{}, fmt.Errorf("bridge hello generation CAS failed")
+		}
 	}
 	ack := BridgeHelloAck{
 		LastOutputSequenceByTurn: map[int64]int64{},
@@ -407,10 +439,81 @@ WHERE id = ?
 	if err != nil {
 		return TurnGrant{}, false, err
 	}
+	recoveringExpired := false
 	if affected != 1 {
-		return TurnGrant{}, false, tx.Commit()
+		if p.AckStartedGrace <= 0 {
+			return TurnGrant{}, false, tx.Commit()
+		}
+		if err := assertOwnerTx(ctx, tx, ownerUUIDFromLeaseOwner(p.Owner)); err != nil {
+			return TurnGrant{}, false, err
+		}
+		cutoff := p.Now.Add(-p.AckStartedGrace)
+		res, err = tx.ExecContext(ctx, `
+UPDATE turns
+SET lease_owner = ?,
+    lease_expires_at = ?
+WHERE id = ?
+  AND session_id = ?
+  AND generation_id = ?
+  AND status = 'running'
+  AND ack_started_at IS NOT NULL
+  AND lease_expires_at IS NOT NULL
+  AND lease_expires_at <= ?
+  AND lease_expires_at > ?
+  AND EXISTS (
+    SELECT 1 FROM runtime_generations g
+    JOIN sessions s ON s.id = g.session_id
+    WHERE g.generation_id = ?
+      AND g.session_id = ?
+      AND g.status IN ('active', 'idle')
+      AND g.lease_expires_at IS NOT NULL
+      AND g.lease_expires_at <= ?
+      AND g.lease_expires_at > ?
+      AND s.active_generation_id = ?
+      AND s.status NOT IN ('failed', 'destroyed')
+  )`, p.Owner, formatTime(expiresAt), p.TurnID, p.SessionID, p.GenerationID,
+			formatTime(p.Now), formatTime(cutoff), p.GenerationID, p.SessionID,
+			formatTime(p.Now), formatTime(cutoff), p.GenerationID)
+		if err != nil {
+			return TurnGrant{}, false, err
+		}
+		affected, err = res.RowsAffected()
+		if err != nil {
+			return TurnGrant{}, false, err
+		}
+		if affected != 1 {
+			return TurnGrant{}, false, tx.Commit()
+		}
+		recoveringExpired = true
 	}
-	res, err = tx.ExecContext(ctx, `
+	var generationUpdate string
+	var generationArgs []any
+	if recoveringExpired {
+		cutoff := p.Now.Add(-p.AckStartedGrace)
+		generationUpdate = `
+UPDATE runtime_generations
+SET status = 'active',
+    lease_owner = ?,
+    lease_expires_at = ?,
+    last_seen_at = ?
+WHERE generation_id = ?
+  AND session_id = ?
+  AND status IN ('active', 'idle')
+  AND lease_expires_at IS NOT NULL
+  AND lease_expires_at <= ?
+  AND lease_expires_at > ?
+  AND EXISTS (
+    SELECT 1 FROM sessions
+    WHERE id = ?
+      AND active_generation_id = ?
+      AND status NOT IN ('failed', 'destroyed')
+  )`
+		generationArgs = []any{
+			p.Owner, formatTime(expiresAt), formatTime(p.Now), p.GenerationID, p.SessionID,
+			formatTime(p.Now), formatTime(cutoff), p.SessionID, p.GenerationID,
+		}
+	} else {
+		generationUpdate = `
 UPDATE runtime_generations
 SET status = 'active',
     lease_expires_at = ?,
@@ -424,7 +527,13 @@ WHERE generation_id = ?
     SELECT 1 FROM sessions
     WHERE id = ?
       AND active_generation_id = ?
-  )`, formatTime(expiresAt), formatTime(p.Now), p.GenerationID, p.SessionID, p.Owner, formatTime(p.Now), p.SessionID, p.GenerationID)
+  )`
+		generationArgs = []any{
+			formatTime(expiresAt), formatTime(p.Now), p.GenerationID, p.SessionID,
+			p.Owner, formatTime(p.Now), p.SessionID, p.GenerationID,
+		}
+	}
+	res, err = tx.ExecContext(ctx, generationUpdate, generationArgs...)
 	if err != nil {
 		return TurnGrant{}, false, err
 	}

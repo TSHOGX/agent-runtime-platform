@@ -12,7 +12,7 @@ import (
 )
 
 type Store interface {
-	BridgeHelloAck(context.Context, string, string, string, time.Time) (store.BridgeHelloAck, error)
+	BridgeHelloAck(context.Context, string, string, string, time.Time, time.Duration) (store.BridgeHelloAck, error)
 	RenewGenerationHeartbeat(context.Context, store.RenewHeartbeatParams) error
 	ClaimNextTurn(context.Context, store.ClaimNextTurnParams) (store.TurnGrant, bool, error)
 	ResumeTurn(context.Context, store.ResumeTurnParams) (store.TurnGrant, bool, error)
@@ -22,13 +22,14 @@ type Store interface {
 }
 
 type Processor struct {
-	Store        Store
-	Owner        string
-	LeaseTTL     time.Duration
-	Now          func() time.Time
-	ProbeHandler func(context.Context, Envelope) error
-	AfterCommit  func(context.Context, Envelope)
-	connected    map[string]bridgeState
+	Store           Store
+	Owner           string
+	LeaseTTL        time.Duration
+	AckStartedGrace time.Duration
+	Now             func() time.Time
+	ProbeHandler    func(context.Context, Envelope) error
+	AfterCommit     func(context.Context, Envelope)
+	connected       map[string]bridgeState
 }
 
 var errProtocol = errors.New("bridge protocol error")
@@ -110,7 +111,7 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 	key := stateKey(envelope.SessionID, envelope.GenerationID)
 	switch envelope.Type {
 	case TypeHello:
-		ack, err := p.Store.BridgeHelloAck(ctx, envelope.SessionID, envelope.GenerationID, p.Owner, now)
+		ack, err := p.Store.BridgeHelloAck(ctx, envelope.SessionID, envelope.GenerationID, p.Owner, now, p.AckStartedGrace)
 		if err != nil {
 			return err
 		}
@@ -185,12 +186,13 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 			return protocolErrorf("resume_turn requires turn_id")
 		}
 		grant, ok, err := p.Store.ResumeTurn(ctx, store.ResumeTurnParams{
-			SessionID:    envelope.SessionID,
-			GenerationID: envelope.GenerationID,
-			TurnID:       *envelope.TurnID,
-			Owner:        p.Owner,
-			LeaseTTL:     p.leaseTTL(),
-			Now:          now,
+			SessionID:       envelope.SessionID,
+			GenerationID:    envelope.GenerationID,
+			TurnID:          *envelope.TurnID,
+			Owner:           p.Owner,
+			LeaseTTL:        p.leaseTTL(),
+			AckStartedGrace: p.AckStartedGrace,
+			Now:             now,
 		})
 		if err != nil {
 			return err

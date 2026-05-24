@@ -757,7 +757,7 @@ WHERE generation_id = ?`, GenerationLeaseOwner("other-owner"), otherAllocation.G
 		t.Fatalf("move other generation to another owner: %v", err)
 	}
 
-	generations, err := st.ListBridgePollGenerations(ctx, pollAllocation.Owner, now.Add(2*time.Second))
+	generations, err := st.ListBridgePollGenerations(ctx, pollAllocation.Owner, now.Add(2*time.Second), 0)
 	if err != nil {
 		t.Fatalf("list bridge poll generations: %v", err)
 	}
@@ -768,6 +768,55 @@ WHERE generation_id = ?`, GenerationLeaseOwner("other-owner"), otherAllocation.G
 		generations[0].GenerationID != pollAllocation.GenerationID ||
 		generations[0].BridgeDirPath == "" {
 		t.Fatalf("unexpected poll generation: %+v", generations[0])
+	}
+}
+
+func TestListBridgePollGenerationsIncludesAckStartedExpiredLeaseDuringGrace(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	cfg := testAllocatorConfig(t)
+	now := time.Now().UTC()
+
+	createStoreSession(t, ctx, st, "sess_poll_recover")
+	recoverable, recoverableTurnID := createExpiredAckStartedTurn(t, ctx, st, owner.UUID, cfg, "sess_poll_recover", now, 30*time.Second)
+	previousOwner := GenerationLeaseOwner("previous-owner")
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_generations
+SET lease_owner = ?
+WHERE generation_id = ?`, previousOwner, recoverable.GenerationID); err != nil {
+		t.Fatalf("move recoverable generation owner: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE turns
+SET lease_owner = ?
+WHERE id = ?`, previousOwner, recoverableTurnID); err != nil {
+		t.Fatalf("move recoverable turn owner: %v", err)
+	}
+
+	createStoreSession(t, ctx, st, "sess_poll_expired")
+	expired, _ := createExpiredAckStartedTurn(t, ctx, st, owner.UUID, cfg, "sess_poll_expired", now, 2*time.Minute)
+
+	generations, err := st.ListBridgePollGenerations(ctx, recoverable.Owner, now, time.Minute)
+	if err != nil {
+		t.Fatalf("list bridge poll generations: %v", err)
+	}
+	if len(generations) != 1 {
+		t.Fatalf("generations=%+v, want only recoverable ack-started generation", generations)
+	}
+	if generations[0].SessionID != "sess_poll_recover" ||
+		generations[0].GenerationID != recoverable.GenerationID ||
+		generations[0].BridgeDirPath == "" {
+		t.Fatalf("unexpected recoverable generation: %+v", generations[0])
+	}
+
+	generations, err = st.ListBridgePollGenerations(ctx, recoverable.Owner, now, 0)
+	if err != nil {
+		t.Fatalf("list bridge poll generations without grace: %v", err)
+	}
+	for _, generation := range generations {
+		if generation.GenerationID == recoverable.GenerationID || generation.GenerationID == expired.GenerationID {
+			t.Fatalf("expired ack-started generation listed without grace: %+v", generations)
+		}
 	}
 }
 

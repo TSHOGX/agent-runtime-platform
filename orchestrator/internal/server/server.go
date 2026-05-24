@@ -63,7 +63,7 @@ type runtimeDriver interface {
 
 type bridgeStore interface {
 	bridge.Store
-	ListBridgePollGenerations(context.Context, string, time.Time) ([]store.BridgePollGeneration, error)
+	ListBridgePollGenerations(context.Context, string, time.Time, time.Duration) ([]store.BridgePollGeneration, error)
 }
 
 type ensuredGeneration struct {
@@ -597,10 +597,11 @@ func (s *Server) RunPhase7Maintenance(ctx context.Context) error {
 	}
 	owner := store.GenerationLeaseOwner(s.ownerUUID)
 	processor := &bridge.Processor{
-		Store:       bridgeStore(s.store),
-		Owner:       owner,
-		LeaseTTL:    s.cfg.Phase7.Bridge.LeaseTTL.Duration,
-		AfterCommit: s.handleBridgeCommittedEnvelope,
+		Store:           bridgeStore(s.store),
+		Owner:           owner,
+		LeaseTTL:        s.cfg.Phase7.Bridge.LeaseTTL.Duration,
+		AckStartedGrace: s.cfg.Phase7.Bridge.AckStartedGrace.Duration,
+		AfterCommit:     s.handleBridgeCommittedEnvelope,
 	}
 	touchHostHeartbeat := func(generation store.BridgePollGeneration, now time.Time) {
 		if err := bridge.TouchHeartbeat(generation.BridgeDirPath, bridge.HostHeartbeatFile, now); err != nil && !errors.Is(err, context.Canceled) {
@@ -620,7 +621,7 @@ func (s *Server) RunPhase7Maintenance(ctx context.Context) error {
 			s.log.Warn("phase7 generation lease renewal failed", "error", err)
 		}
 		s.startColdFallbackSessions(ctx, owner)
-		generations, err := s.store.ListBridgePollGenerations(ctx, owner, now)
+		generations, err := s.store.ListBridgePollGenerations(ctx, owner, now, s.cfg.Phase7.Bridge.AckStartedGrace.Duration)
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
 				s.log.Warn("phase7 bridge heartbeat generation list failed", "error", err)
@@ -639,7 +640,7 @@ func (s *Server) RunPhase7Maintenance(ctx context.Context) error {
 		}
 	}
 	pollBridge := func(now time.Time) {
-		generations, err := s.store.ListBridgePollGenerations(ctx, owner, now)
+		generations, err := s.store.ListBridgePollGenerations(ctx, owner, now, s.cfg.Phase7.Bridge.AckStartedGrace.Duration)
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
 				s.log.Warn("phase7 bridge generation list failed", "error", err)

@@ -769,12 +769,35 @@ WHERE status IN ('starting','probing','active','idle','checkpointing','restoring
 	return res.RowsAffected()
 }
 
-func (s *Store) ListBridgePollGenerations(ctx context.Context, owner string, now time.Time) ([]BridgePollGeneration, error) {
+func (s *Store) ListBridgePollGenerations(ctx context.Context, owner string, now time.Time, ackStartedGrace time.Duration) ([]BridgePollGeneration, error) {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
 	if strings.TrimSpace(owner) == "" {
 		return nil, fmt.Errorf("owner is required")
+	}
+	args := []any{owner, formatTime(now)}
+	recoverableWhere := ""
+	if ackStartedGrace > 0 {
+		cutoff := now.Add(-ackStartedGrace)
+		recoverableWhere = `
+  OR (
+    g.status IN ('active','idle')
+    AND g.lease_expires_at IS NOT NULL
+    AND g.lease_expires_at <= ?
+    AND g.lease_expires_at > ?
+    AND EXISTS (
+      SELECT 1 FROM turns t
+      WHERE t.session_id = g.session_id
+        AND t.generation_id = g.generation_id
+        AND t.status = 'running'
+        AND t.ack_started_at IS NOT NULL
+        AND t.lease_expires_at IS NOT NULL
+        AND t.lease_expires_at <= ?
+        AND t.lease_expires_at > ?
+    )
+  )`
+		args = append(args, formatTime(now), formatTime(cutoff), formatTime(now), formatTime(cutoff))
 	}
 	rows, err := s.db.QueryContext(ctx, `
 SELECT g.session_id, g.generation_id, r.bridge_dir_path
@@ -782,12 +805,14 @@ FROM runtime_generations g
 JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
 JOIN sessions s ON s.id = g.session_id
 WHERE g.status IN ('active','idle','probing','restoring','starting')
-  AND g.lease_owner = ?
-  AND g.lease_expires_at > ?
+  AND (
+    (g.lease_owner = ? AND g.lease_expires_at > ?)
+`+recoverableWhere+`
+  )
   AND s.active_generation_id = g.generation_id
   AND s.status NOT IN ('failed', 'destroyed')
   AND r.resource_state IN ('ready','live','recreating')
-ORDER BY g.session_id, g.generation_id`, owner, formatTime(now))
+ORDER BY g.session_id, g.generation_id`, args...)
 	if err != nil {
 		return nil, err
 	}
