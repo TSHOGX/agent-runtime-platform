@@ -122,6 +122,10 @@ if [ "${HARNESS_BRIDGE_MODE:-}" = "probe" ]; then
   echo "[entrypoint] bridge probe starting" >&2
   exec /usr/local/bin/harness-bridge-client probe
 fi
+if [ "${HARNESS_BRIDGE_MODE:-}" = "claim-loop" ]; then
+  echo "[entrypoint] bridge claim loop starting" >&2
+  exec /usr/local/bin/harness-bridge-client claim-loop
+fi
 if [ "${HARNESS_BRIDGE_MODE:-auto}" = "auto" ]; then
   echo "[entrypoint] bridge probe starting" >&2
   /usr/local/bin/harness-bridge-client probe

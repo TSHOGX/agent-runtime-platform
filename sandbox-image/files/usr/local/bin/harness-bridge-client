@@ -3,6 +3,8 @@ import argparse
 import json
 import os
 import subprocess
+import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -229,6 +231,136 @@ class BridgeClient:
         self.send("ack_turn_completed", turn_id=turn_id, payload=payload)
 
 
+class ShellTurnRunner:
+    def __init__(self):
+        self.proc = None
+
+    def _start(self):
+        if self.proc is not None and self.proc.poll() is None:
+            return
+        self.proc = subprocess.Popen(
+            ["/usr/local/bin/harness-shell-agent"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+
+    def run_turn(self, content, emit):
+        self._start()
+        frame = json.dumps({"type": "turn", "content": content}, ensure_ascii=False, separators=(",", ":"))
+        self.proc.stdin.write(frame + "\n")
+        self.proc.stdin.flush()
+        while True:
+            line = self.proc.stdout.readline()
+            if line == "":
+                raise RuntimeError("shell agent exited before turn completed")
+            stripped = line.rstrip("\n")
+            try:
+                payload = json.loads(stripped)
+            except json.JSONDecodeError:
+                emit("stdout", stripped)
+                continue
+            if payload.get("type") == "harness.turn_done":
+                return "completed", "", ""
+            emit("stdout", stripped)
+
+    def close(self):
+        if self.proc is None:
+            return
+        try:
+            self.proc.terminate()
+        except OSError:
+            pass
+
+
+class ClaudeTurnRunner:
+    def __init__(self):
+        self.first_turn = True
+
+    def run_turn(self, content, emit):
+        session_uuid = os.environ.get("CLAUDE_SESSION_UUID", "")
+        if not session_uuid:
+            raise RuntimeError("CLAUDE_SESSION_UUID is required for claude agent")
+        command = [
+            "/usr/local/bin/claude",
+            "--bare",
+            "--permission-mode",
+            "bypassPermissions",
+            "-p",
+            "--model",
+            os.environ.get("CLAUDE_MODEL", "sonnet"),
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            os.environ.get("CLAUDE_OUTPUT_FORMAT", "stream-json"),
+            "--include-partial-messages",
+            "--replay-user-messages",
+            "--verbose",
+        ]
+        if self.first_turn and os.environ.get("CLAUDE_RESUME", "0") != "1":
+            command.extend(["--session-id", session_uuid])
+        else:
+            command.extend(["--resume", session_uuid])
+        self.first_turn = False
+
+        env = os.environ.copy()
+        env["HOME"] = os.environ.get("HARNESS_AGENT_HOME", f"/agent-homes/{os.environ.get('SESSION_ID', '')}")
+        env["USER"] = "harness"
+        env["LOGNAME"] = "harness"
+        env["ANTHROPIC_API_KEY"] = configured_secret("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_SECRET_ID")
+        env["ANTHROPIC_AUTH_TOKEN"] = configured_secret("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN_SECRET_ID")
+        frame = json.dumps(
+            {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": content}]}},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        proc = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+        proc.stdin.write(frame + "\n")
+        proc.stdin.close()
+        status = "completed"
+        error_class = ""
+        error = ""
+        for line in proc.stdout:
+            stripped = line.rstrip("\n")
+            if stripped:
+                emit("stdout", stripped)
+                try:
+                    payload = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                if payload.get("type") == "error":
+                    status = "failed"
+                    error_class = "agent_execution_failed"
+                    error = payload.get("message") or payload.get("error") or "claude stream error"
+        rc = proc.wait()
+        if rc != 0 and status == "completed":
+            status = "failed"
+            error_class = "agent_exit_nonzero"
+            error = f"claude exited with status {rc}"
+        return status, error_class, error
+
+    def close(self):
+        pass
+
+
+def make_turn_runner(agent):
+    if agent == "sh":
+        return ShellTurnRunner()
+    if agent == "claude":
+        return ClaudeTurnRunner()
+    raise RuntimeError(f"unsupported agent {agent}")
+
+
 def sandbox_source_ip():
     try:
         output = subprocess.check_output(["ip", "-j", "addr", "show"], text=True)
@@ -331,6 +463,82 @@ def run_heartbeat_loop(args):
         time.sleep(interval)
 
 
+def start_background_heartbeat(client, interval):
+    stop = threading.Event()
+
+    def loop():
+        while not stop.wait(max(interval, 0.001)):
+            try:
+                client.heartbeat()
+            except Exception as err:
+                print(f"[bridge] heartbeat failed: {err}", file=sys.stderr, flush=True)
+
+    thread = threading.Thread(target=loop, daemon=True)
+    thread.start()
+    return stop
+
+
+def execute_grant(client, runner, grant):
+    turn_id = int(grant["turn_id"])
+    content = str(grant.get("content") or "")
+    output_sequence = int(client.last_output_sequence_by_turn.get(turn_id, 0)) + 1
+    client.ack_turn_started(turn_id, sandbox_source_ip())
+
+    def emit(stream, line):
+        nonlocal output_sequence
+        client.emit_output(turn_id, output_sequence, {"line": line}, stream=stream or "stdout")
+        output_sequence += 1
+
+    try:
+        status, error_class, error = runner.run_turn(content, emit)
+    except Exception as err:
+        status, error_class, error = "failed", "agent_execution_failed", str(err)
+        emit("stderr", str(err))
+    client.last_output_sequence_by_turn[turn_id] = output_sequence - 1
+    client.ack_turn_completed(turn_id, status=status or "completed", error_class=error_class, error=error)
+
+
+def run_claim_loop(args, runner=None):
+    client = BridgeClient(args.bridge_dir, args.session_id, args.generation_id, args.agent, args.poll_interval)
+    client.heartbeat()
+    client.hello(timeout=args.timeout)
+    if args.agent == "claude":
+        run_network_probe(
+            args.base_url,
+            parse_statuses(args.healthz_statuses, {200}),
+            parse_statuses(args.message_statuses, {400}),
+            args.http_timeout,
+            configured_secret("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_SECRET_ID"),
+            configured_secret("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN_SECRET_ID"),
+        )
+    client.probe_network(timeout=args.timeout)
+    runner = runner or make_turn_runner(args.agent)
+    stop_heartbeat = start_background_heartbeat(client, args.heartbeat_interval)
+    completed = 0
+    empty_polls = 0
+    resume_turn_id = client.leased_turn_id
+    try:
+        while args.max_turns <= 0 or completed < args.max_turns:
+            if resume_turn_id is not None:
+                grant = client.resume_turn(int(resume_turn_id), timeout=args.timeout)
+                resume_turn_id = None
+            else:
+                grant = client.claim_next_turn(timeout=args.timeout)
+            if grant is None:
+                empty_polls += 1
+                if args.max_empty_polls > 0 and empty_polls >= args.max_empty_polls:
+                    return
+                time.sleep(max(args.idle_interval, 0.001))
+                continue
+            empty_polls = 0
+            execute_grant(client, runner, grant)
+            completed += 1
+    finally:
+        stop_heartbeat.set()
+        if hasattr(runner, "close"):
+            runner.close()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--bridge-dir", default=os.environ.get("HARNESS_BRIDGE_DIR", "/harness-control/bridge"))
@@ -347,6 +555,11 @@ def main(argv=None):
     subcommands.add_parser("probe")
     heartbeat_loop = subcommands.add_parser("heartbeat-loop")
     heartbeat_loop.add_argument("--interval", type=float, default=float(os.environ.get("HARNESS_BRIDGE_HEARTBEAT_INTERVAL", "30")))
+    claim_loop = subcommands.add_parser("claim-loop")
+    claim_loop.add_argument("--idle-interval", type=float, default=float(os.environ.get("HARNESS_BRIDGE_IDLE_INTERVAL", "0.05")))
+    claim_loop.add_argument("--heartbeat-interval", type=float, default=float(os.environ.get("HARNESS_BRIDGE_HEARTBEAT_INTERVAL", "30")))
+    claim_loop.add_argument("--max-turns", type=int, default=0)
+    claim_loop.add_argument("--max-empty-polls", type=int, default=0)
     args = parser.parse_args(argv)
     if not args.session_id or not args.generation_id:
         parser.error("--session-id and --generation-id are required")
@@ -354,6 +567,8 @@ def main(argv=None):
         run_probe(args)
     elif args.command == "heartbeat-loop":
         run_heartbeat_loop(args)
+    elif args.command == "claim-loop":
+        run_claim_loop(args)
     return 0
 
 
