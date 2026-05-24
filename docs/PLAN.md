@@ -1,6 +1,6 @@
 # gVisor Data Agent Harness - Plan
 
-> This is the active roadmap. Current baseline and implementation notes live in [current-status.md](./current-status.md). The checkpoint-safe refactor target is described in [checkpoint-safe-control-plane-architecture.md](./checkpoint-safe-control-plane-architecture.md).
+> This is the active roadmap. Current baseline and implementation notes live in [current-status.md](./current-status.md). The checkpoint-safe refactor target is described in [phase7/README.md](./phase7/README.md).
 
 ## Phases
 
@@ -54,7 +54,7 @@ Phase 7 is the architecture phase for checkpoint-safe session recovery. It comes
 
 It is split into two delivery slices because the work is large enough that landing it as one phase risks long-lived branches and stdin/bridge dual-write detours. **7a** removes shared `phase1-demo` / `phase2-template` state and gives every generation its own resources without changing the turn execution path. **7b** moves turn execution onto the Agent Bridge and re-enables checkpoint/restore. The lab can run on 7a in production-like mode while 7b is in flight.
 
-The target properties (per-generation isolation, generation fencing, durable turn ledger, claim/ack, cold resume on non-started turns only, checkpoint-safe restore) are specified as Hard Invariants in [checkpoint-safe-control-plane-architecture.md](./checkpoint-safe-control-plane-architecture.md#hard-invariants); this document does not restate them.
+The target properties (per-generation isolation, generation fencing, durable turn ledger, claim/ack, cold resume on non-started turns only, checkpoint-safe restore) are specified as Hard Invariants in [phase7/invariants.md](./phase7/invariants.md#hard-invariants); this document does not restate them.
 
 ### Phase 7a: control-plane skeleton
 
@@ -92,5 +92,5 @@ The older phase status documents remain useful as implementation history, but th
 
 - `current-status.md` for the live baseline.
 - `architecture.md` for system design.
-- `checkpoint-safe-control-plane-architecture.md` for the Phase 7 target architecture.
+- `phase7/` for the Phase 7 target architecture (start at `phase7/README.md`).
 - `PLAN.md` for roadmap only.

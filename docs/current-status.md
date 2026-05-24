@@ -81,24 +81,7 @@ Artifact handling moved from a flat metadata list to a read-only file browser:
 
 ### Explicit Claude Proxy Config
 
-The current codebase loads `config/harness.yaml` for the lab runtime/proxy profile:
-
-```yaml
-runtime:
-  runsc_network: sandbox
-  runsc_overlay2: none
-
-claude:
-  proxy_bind_url: http://0.0.0.0:8082
-  sandbox_base_url: http://10.200.1.1:8082
-  api_key: "123"
-  auth_token: "123"
-  model: sonnet
-  output_format: stream-json
-  disable_nonessential_traffic: true
-```
-
-Those values are written into the per-session `session.json` control manifest. They should not be replaced with host-only Claude configuration or implicit environment variables.
+The current codebase loads `config/harness.yaml` for the lab runtime/proxy profile. The full file shape and per-field semantics live in [architecture.md → Configuration](./architecture.md#configuration); the values flow into the per-session `session.json` control manifest and must not be replaced with host-only Claude configuration or implicit environment variables.
 
 ## Current Flow
 
@@ -124,55 +107,11 @@ Idle monitor
   -> exit because automatic checkpointing is disabled
 ```
 
-Canonical session statuses:
-
-- `created`
-- `running_active`
-- `running_idle`
-- `checkpointing`
-- `checkpointed`
-- `failed`
-- `destroyed`
-
-`running`, `idle`, and `completed` are not current session statuses.
+Canonical session statuses and per-state semantics live in [architecture.md → Session State Machine](./architecture.md#session-state-machine). Note: `running`, `idle`, and `completed` are not current session statuses.
 
 ## Public Interfaces
 
-HTTP:
-
-- `GET /healthz`
-- `POST /api/login`
-- `GET /api/sessions`
-- `POST /api/sessions`
-- `GET /api/sessions/<id>`
-- `DELETE /api/sessions/<id>`
-- `GET /api/sessions/<id>/messages`
-- `POST /api/sessions/<id>/messages`
-- `POST /api/sessions/<id>/interrupt`
-- `GET /api/sessions/<id>/artifacts`
-- `GET /artifacts/<session_id>/<path>`
-
-Events:
-
-- `GET /api/events/stream?session_id=<id>` - SSE, current frontend path
-- `GET /api/events?session_id=<id>` - WebSocket compatibility path
-
-Common event types:
-
-- `session.created`
-- `session.running_active`
-- `session.running_idle`
-- `session.checkpointing`
-- `session.checkpointed`
-- `session.failed`
-- `session.destroyed`
-- `message.created`
-- `agent.delta`
-- `agent.message`
-- `agent.output`
-- `system.status`
-- `artifact.updated`
-- `artifact.deleted`
+HTTP routes, SSE/WebSocket endpoints, and the canonical event-name set are documented in [architecture.md → API Surface](./architecture.md#api-surface) and [architecture.md → Event Model](./architecture.md#event-model). This document does not duplicate those lists.
 
 ## Current Constraints
 
@@ -187,7 +126,7 @@ Common event types:
 
 ## Next Architecture Target
 
-The next major architecture phase is [checkpoint-safe-control-plane-architecture.md](./checkpoint-safe-control-plane-architecture.md). The target is to add runtime generations, durable turns, durable events, explicit network profiles, and a reconnectable agent bridge so sessions can be added, checkpointed, restored, reconnected, and continued across multiple turns without depending on one live host pipe.
+The next major architecture phase is [phase7/README.md](./phase7/README.md). The target is to add runtime generations, durable turns, durable events, explicit network profiles, and a reconnectable agent bridge so sessions can be added, checkpointed, restored, reconnected, and continued across multiple turns without depending on one live host pipe.
 
 ## Checks
 

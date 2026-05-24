@@ -17,7 +17,7 @@ The current baseline uses:
 - PTY-backed shell sessions with interrupt support.
 - Explicit local Claude proxy configuration loaded from `config/harness.yaml`.
 
-The target checkpoint-safe architecture is tracked separately in [checkpoint-safe-control-plane-architecture.md](./checkpoint-safe-control-plane-architecture.md).
+The target checkpoint-safe architecture is tracked separately in [phase7/README.md](./phase7/README.md).
 
 ## Component Model
 

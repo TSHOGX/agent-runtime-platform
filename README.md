@@ -22,7 +22,7 @@
 
 - [docs/current-status.md](./docs/current-status.md) - 当前可用能力、近期提交影响和约束
 - [docs/architecture.md](./docs/architecture.md) - 当前架构、状态机、事件流和运行时设计
-- [docs/checkpoint-safe-control-plane-architecture.md](./docs/checkpoint-safe-control-plane-architecture.md) - checkpoint-safe 控制面与 Phase 7 重构目标
+- [docs/phase7/](./docs/phase7/README.md) - checkpoint-safe 控制面与 Phase 7 重构目标（按主题拆分）
 - [docs/PLAN.md](./docs/PLAN.md) - 总体路线图和后续阶段
 
 ### 技术决策与研究
