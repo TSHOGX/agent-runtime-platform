@@ -66,6 +66,11 @@ type bridgeStore interface {
 	ListBridgePollGenerations(context.Context, string, time.Time) ([]store.BridgePollGeneration, error)
 }
 
+type ensuredGeneration struct {
+	Allocation store.GenerationAllocation
+	IsNew      bool
+}
+
 func New(
 	cfg config.Config,
 	store *store.Store,
@@ -313,7 +318,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, sessionID s
 		return
 	}
 	leaseOwner := store.GenerationLeaseOwner(s.ownerUUID)
-	allocation, err := s.ensureActiveGeneration(r.Context(), session, leaseOwner)
+	ensured, err := s.ensureActiveGeneration(r.Context(), session, leaseOwner)
 	if errors.Is(err, store.ErrPoolExhausted) {
 		writeErrorClass(w, http.StatusServiceUnavailable, "pool_exhausted", "resource pool exhausted")
 		return
@@ -322,36 +327,8 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, sessionID s
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	generationDetails, err := s.runtimeGenerationDetails(r.Context(), session.ID, allocation.GenerationID)
-	if err != nil {
+	if err := s.startEnsuredGeneration(r.Context(), session, ensured); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	isNewGeneration := strings.TrimSpace(session.ActiveGenerationID) == ""
-	preparedArtifacts := runtimeArtifactsFromDetails(generationDetails)
-	if isNewGeneration {
-		preparedArtifacts, err = s.runtime.PrepareGeneration(r.Context(), s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, runtime.GenerationArtifacts{}))
-		if err != nil {
-			s.failGenerationBeforeTurn(session.ID, allocation.GenerationID, allocation.Owner, err)
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if err := s.store.RecordGenerationRuntimeArtifacts(r.Context(), allocation.GenerationID, preparedArtifacts.ManifestDigest, preparedArtifacts.RunscVersion); err != nil {
-			s.failGenerationBeforeTurn(session.ID, allocation.GenerationID, allocation.Owner, err)
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if err := s.store.MarkGenerationResourcesLive(r.Context(), session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
-			s.failGenerationBeforeTurn(session.ID, allocation.GenerationID, allocation.Owner, err)
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-	}
-	startReq := s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, preparedArtifacts)
-	result := s.runtime.Start(r.Context(), startReq, nil)
-	if result.Err != nil {
-		s.failGenerationBeforeTurn(session.ID, allocation.GenerationID, allocation.Owner, result.Err)
-		writeError(w, http.StatusInternalServerError, result.Err.Error())
 		return
 	}
 	runningStatus := string(sessionstate.RunningActive)
@@ -372,6 +349,37 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, sessionID s
 	s.hub.Publish(events.Event{Type: "message.created", SessionID: sessionID, Payload: enqueue.Message})
 	s.hub.Publish(events.Event{Type: "session." + runningStatus, SessionID: sessionID})
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": runningStatus, "session_id": sessionID, "message": enqueue.Message})
+}
+
+func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Session, ensured ensuredGeneration) error {
+	allocation := ensured.Allocation
+	generationDetails, err := s.runtimeGenerationDetails(ctx, session.ID, allocation.GenerationID)
+	if err != nil {
+		return err
+	}
+	preparedArtifacts := runtimeArtifactsFromDetails(generationDetails)
+	if ensured.IsNew {
+		preparedArtifacts, err = s.runtime.PrepareGeneration(ctx, s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, runtime.GenerationArtifacts{}))
+		if err != nil {
+			s.failGenerationBeforeTurn(session.ID, allocation.GenerationID, allocation.Owner, err)
+			return err
+		}
+		if err := s.store.RecordGenerationRuntimeArtifacts(ctx, allocation.GenerationID, preparedArtifacts.ManifestDigest, preparedArtifacts.RunscVersion); err != nil {
+			s.failGenerationBeforeTurn(session.ID, allocation.GenerationID, allocation.Owner, err)
+			return err
+		}
+		if err := s.store.MarkGenerationResourcesLive(ctx, session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
+			s.failGenerationBeforeTurn(session.ID, allocation.GenerationID, allocation.Owner, err)
+			return err
+		}
+	}
+	startReq := s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, preparedArtifacts)
+	result := s.runtime.Start(ctx, startReq, nil)
+	if result.Err != nil {
+		s.failGenerationBeforeTurn(session.ID, allocation.GenerationID, allocation.Owner, result.Err)
+		return result.Err
+	}
+	return nil
 }
 
 func (s *Server) failGenerationBeforeTurn(sessionID, generationID, owner string, failure error) {
@@ -399,12 +407,34 @@ func (s *Server) failGenerationBeforeTurn(sessionID, generationID, owner string,
 	s.hub.Publish(events.Event{Type: "session." + string(sessionstate.Failed), SessionID: sessionID})
 }
 
-func (s *Server) ensureActiveGeneration(ctx context.Context, session store.Session, owner string) (store.GenerationAllocation, error) {
-	if strings.TrimSpace(session.ActiveGenerationID) != "" {
-		return store.GenerationAllocation{
-			GenerationID: session.ActiveGenerationID,
-			Owner:        owner,
-		}, nil
+func (s *Server) ensureActiveGeneration(ctx context.Context, session store.Session, owner string) (ensuredGeneration, error) {
+	activeGenerationID := strings.TrimSpace(session.ActiveGenerationID)
+	if activeGenerationID != "" {
+		status, err := s.store.GetRuntimeGenerationStatus(ctx, session.ID, activeGenerationID)
+		if err != nil {
+			return ensuredGeneration{}, err
+		}
+		if status != "failed" {
+			return ensuredGeneration{
+				Allocation: store.GenerationAllocation{
+					GenerationID: activeGenerationID,
+					Owner:        owner,
+				},
+				IsNew: false,
+			}, nil
+		}
+		allocation, err := s.store.AllocateGeneration(ctx, store.AllocateGenerationParams{
+			SessionID:            session.ID,
+			ExpectedGenerationID: sql.NullString{String: activeGenerationID, Valid: true},
+			Owner:                owner,
+			LeaseTTL:             s.cfg.Phase7.Bridge.LeaseTTL.Duration,
+			Now:                  time.Now().UTC(),
+			Config:               s.resourceAllocatorConfig(session.Agent),
+		})
+		if err != nil {
+			return ensuredGeneration{}, err
+		}
+		return ensuredGeneration{Allocation: allocation, IsNew: true}, nil
 	}
 	allocation, err := s.store.AllocateGeneration(ctx, store.AllocateGenerationParams{
 		SessionID: session.ID,
@@ -414,9 +444,9 @@ func (s *Server) ensureActiveGeneration(ctx context.Context, session store.Sessi
 		Config:    s.resourceAllocatorConfig(session.Agent),
 	})
 	if err != nil {
-		return store.GenerationAllocation{}, err
+		return ensuredGeneration{}, err
 	}
-	return allocation, nil
+	return ensuredGeneration{Allocation: allocation, IsNew: true}, nil
 }
 
 func (s *Server) resourceAllocatorConfig(agent string) store.ResourceAllocatorConfig {
@@ -514,6 +544,45 @@ func (s *Server) runtimeGenerationDetails(ctx context.Context, sessionID, genera
 	return details, nil
 }
 
+func (s *Server) startColdFallbackSessions(ctx context.Context, owner string) {
+	fallbacks, err := s.store.ListColdFallbackSessions(ctx)
+	if err != nil {
+		if !errors.Is(err, context.Canceled) {
+			s.log.Warn("phase7 cold fallback session list failed", "error", err)
+		}
+		return
+	}
+	for _, fallback := range fallbacks {
+		ensured, err := s.ensureActiveGeneration(ctx, fallback.Session, owner)
+		if err != nil {
+			if errors.Is(err, store.ErrPoolExhausted) {
+				s.log.Warn("phase7 cold fallback pool exhausted", "session_id", fallback.Session.ID, "old_generation_id", fallback.OldGeneration, "queued_turns", fallback.QueuedTurns)
+				return
+			}
+			if !errors.Is(err, context.Canceled) {
+				s.log.Warn("phase7 cold fallback allocation failed", "session_id", fallback.Session.ID, "old_generation_id", fallback.OldGeneration, "error", err)
+			}
+			continue
+		}
+		if !ensured.IsNew {
+			continue
+		}
+		if err := s.startEnsuredGeneration(ctx, fallback.Session, ensured); err != nil {
+			if !errors.Is(err, context.Canceled) {
+				s.log.Warn("phase7 cold fallback start failed", "session_id", fallback.Session.ID, "old_generation_id", fallback.OldGeneration, "new_generation_id", ensured.Allocation.GenerationID, "error", err)
+			}
+			continue
+		}
+		if err := s.store.UpdateSessionStatusAndActivity(ctx, fallback.Session.ID, string(sessionstate.RunningActive), nil, time.Now().UTC()); err != nil {
+			if !errors.Is(err, context.Canceled) {
+				s.log.Warn("phase7 cold fallback status update failed", "session_id", fallback.Session.ID, "new_generation_id", ensured.Allocation.GenerationID, "error", err)
+			}
+			continue
+		}
+		s.hub.Publish(events.Event{Type: "session." + string(sessionstate.RunningActive), SessionID: fallback.Session.ID})
+	}
+}
+
 func (s *Server) RunPhase7Maintenance(ctx context.Context) error {
 	if strings.TrimSpace(s.ownerUUID) == "" {
 		return fmt.Errorf("phase7 maintenance requires owner uuid")
@@ -550,6 +619,7 @@ func (s *Server) RunPhase7Maintenance(ctx context.Context) error {
 		}); err != nil && !errors.Is(err, context.Canceled) {
 			s.log.Warn("phase7 generation lease renewal failed", "error", err)
 		}
+		s.startColdFallbackSessions(ctx, owner)
 		generations, err := s.store.ListBridgePollGenerations(ctx, owner, now)
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {

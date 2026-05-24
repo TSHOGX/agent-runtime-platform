@@ -37,11 +37,12 @@ type ResourceAllocatorConfig struct {
 }
 
 type AllocateGenerationParams struct {
-	SessionID string
-	Owner     string
-	LeaseTTL  time.Duration
-	Now       time.Time
-	Config    ResourceAllocatorConfig
+	SessionID            string
+	ExpectedGenerationID sql.NullString
+	Owner                string
+	LeaseTTL             time.Duration
+	Now                  time.Time
+	Config               ResourceAllocatorConfig
 }
 
 type GenerationAllocation struct {
@@ -104,6 +105,12 @@ type BridgePollGeneration struct {
 	SessionID     string
 	GenerationID  string
 	BridgeDirPath string
+}
+
+type ColdFallbackSession struct {
+	Session       Session
+	OldGeneration string
+	QueuedTurns   int
 }
 
 type ReaperParams struct {
@@ -185,7 +192,7 @@ func (s *Store) AllocateGeneration(ctx context.Context, p AllocateGenerationPara
 		return GenerationAllocation{}, err
 	}
 	networkProfileID := "net_" + generationID
-	agentRuntimeProfileID := agentRuntimeProfileID(p.SessionID, p.Config)
+	agentRuntimeProfileID := agentRuntimeProfileID(generationID)
 	resources := buildResourcePaths(p.Config.RunDir, generationID)
 	if p.Config.agent() == "sh" {
 		resources.SecretsDirPath = ""
@@ -297,8 +304,9 @@ INSERT INTO runtime_generation_resources (
 		return GenerationAllocation{}, err
 	}
 	if err := updateSessionActiveGenerationTx(ctx, tx, SessionActiveGenerationCASParams{
-		SessionID:        p.SessionID,
-		NextGenerationID: generationID,
+		SessionID:            p.SessionID,
+		ExpectedGenerationID: p.ExpectedGenerationID,
+		NextGenerationID:     generationID,
 	}); err != nil {
 		return GenerationAllocation{}, err
 	}
@@ -795,6 +803,66 @@ ORDER BY g.session_id, g.generation_id`, owner, formatTime(now))
 	return generations, rows.Err()
 }
 
+func (s *Store) GetRuntimeGenerationStatus(ctx context.Context, sessionID, generationID string) (string, error) {
+	var status string
+	err := s.db.QueryRowContext(ctx, `
+SELECT status
+FROM runtime_generations
+WHERE session_id = ?
+  AND generation_id = ?`, sessionID, generationID).Scan(&status)
+	return status, err
+}
+
+func (s *Store) ListColdFallbackSessions(ctx context.Context) ([]ColdFallbackSession, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT s.id, g.generation_id, COUNT(t.id) AS queued_turns
+FROM sessions s
+JOIN runtime_generations g ON g.generation_id = s.active_generation_id
+  AND g.session_id = s.id
+JOIN turns t ON t.session_id = s.id
+WHERE g.status = 'failed'
+  AND s.status NOT IN ('failed', 'destroyed')
+  AND t.status = 'queued'
+  AND t.lease_owner IS NULL
+GROUP BY s.id, g.generation_id
+ORDER BY MIN(t.sequence), s.updated_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type coldFallbackRow struct {
+		sessionID     string
+		oldGeneration string
+		queuedTurns   int
+	}
+	var pending []coldFallbackRow
+	for rows.Next() {
+		var row coldFallbackRow
+		if err := rows.Scan(&row.sessionID, &row.oldGeneration, &row.queuedTurns); err != nil {
+			return nil, err
+		}
+		pending = append(pending, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	sessions := make([]ColdFallbackSession, 0, len(pending))
+	for _, row := range pending {
+		session, err := s.GetSession(ctx, row.sessionID)
+		if err != nil {
+			return nil, err
+		}
+		sessions = append(sessions, ColdFallbackSession{
+			Session:       session,
+			OldGeneration: row.oldGeneration,
+			QueuedTurns:   row.queuedTurns,
+		})
+	}
+	return sessions, nil
+}
+
 func (s *Store) GetResourceQuota(ctx context.Context) (ResourceQuota, error) {
 	var quota ResourceQuota
 	err := s.db.QueryRowContext(ctx, `
@@ -1206,8 +1274,8 @@ func egressPolicyID(cfg ResourceAllocatorConfig) string {
 	return "egress_" + strings.ReplaceAll(payload, " ", "_")
 }
 
-func agentRuntimeProfileID(sessionID string, cfg ResourceAllocatorConfig) string {
-	return "arp_" + sessionID
+func agentRuntimeProfileID(generationID string) string {
+	return "arp_" + generationID
 }
 
 func (c ResourceAllocatorConfig) agent() string {

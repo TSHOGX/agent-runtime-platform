@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -425,6 +426,195 @@ WHERE g.session_id = ?
 	}
 	if completedTurns != 1 || queuedTurns != 1 {
 		t.Fatalf("unexpected turn statuses after reuse: completed=%d queued=%d", completedTurns, queuedTurns)
+	}
+}
+
+func TestSendMessageColdFallbackAllocatesReplacementGeneration(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_send_fallback", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
+	cfg := testServerConfig(dir)
+	cfg.Phase7.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
+	leaseOwner := store.GenerationLeaseOwner(owner.UUID)
+	old, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     leaseOwner,
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    serverTestAllocatorConfig(cfg, "claude"),
+	})
+	if err != nil {
+		t.Fatalf("allocate old generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, session.ID, old.GenerationID, old.Owner, time.Now().UTC()); err != nil {
+		t.Fatalf("mark old generation live: %v", err)
+	}
+	if err := st.FailGeneration(ctx, store.FailGenerationParams{
+		SessionID:    session.ID,
+		GenerationID: old.GenerationID,
+		Owner:        old.Owner,
+		ErrorClass:   "orchestrator_restart_reconnect_grace_expired",
+		Reason:       "orchestrator_restart_reconnect_grace_expired",
+		Now:          time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("fail old generation: %v", err)
+	}
+
+	rt := &recordingRuntime{}
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: rt,
+		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(`{"content":"after fallback"}`))
+	rec := httptest.NewRecorder()
+	srv.sendMessage(rec, req, session.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status 202, got %d body %s", rec.Code, rec.Body.String())
+	}
+
+	gotSession, err := st.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if gotSession.ActiveGenerationID == "" || gotSession.ActiveGenerationID == old.GenerationID {
+		t.Fatalf("active generation was not replaced: %q old=%q", gotSession.ActiveGenerationID, old.GenerationID)
+	}
+	if gotSession.ClaudeSessionUUID != session.ClaudeSessionUUID ||
+		gotSession.Workspace != session.Workspace ||
+		gotSession.AgentHomePath == "" {
+		t.Fatalf("session identity not preserved: before=%+v after=%+v", session, gotSession)
+	}
+	var oldStatus, oldNetwork, oldResources, newStatus, newNetwork, newResources string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT g.status, n.allocation_state, r.resource_state
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, old.GenerationID).Scan(&oldStatus, &oldNetwork, &oldResources); err != nil {
+		t.Fatalf("query old generation: %v", err)
+	}
+	if oldStatus != "failed" || oldNetwork != "reclaimable" || oldResources != "reclaimable" {
+		t.Fatalf("old generation not fenced/reclaimable: status=%s network=%s resources=%s", oldStatus, oldNetwork, oldResources)
+	}
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT g.status, n.allocation_state, r.resource_state
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, gotSession.ActiveGenerationID).Scan(&newStatus, &newNetwork, &newResources); err != nil {
+		t.Fatalf("query replacement generation: %v", err)
+	}
+	if newStatus != "idle" || newNetwork != "live" || newResources != "live" {
+		t.Fatalf("replacement generation not live idle: status=%s network=%s resources=%s", newStatus, newNetwork, newResources)
+	}
+	var queuedTurns int
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM turns
+WHERE session_id = ?
+  AND status = 'queued'
+  AND generation_id IS NULL
+  AND content = 'after fallback'`, session.ID).Scan(&queuedTurns); err != nil {
+		t.Fatalf("count queued turns: %v", err)
+	}
+	if queuedTurns != 1 {
+		t.Fatalf("queued fallback turn count=%d want 1", queuedTurns)
+	}
+	prepareRequests, startRequests := rt.requests()
+	if len(prepareRequests) != 1 || len(startRequests) != 1 {
+		t.Fatalf("runtime calls prepare=%d start=%d", len(prepareRequests), len(startRequests))
+	}
+	if startRequests[0].GenerationID != gotSession.ActiveGenerationID ||
+		startRequests[0].ClaudeSessionUUID != session.ClaudeSessionUUID ||
+		!startRequests[0].ResumeClaude ||
+		startRequests[0].WaitForTurn {
+		t.Fatalf("unexpected replacement start request: %+v", startRequests[0])
+	}
+}
+
+func TestColdFallbackMaintenanceStartsReplacementForQueuedTurn(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_maintenance_fallback", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
+	cfg := testServerConfig(dir)
+	cfg.Phase7.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
+	leaseOwner := store.GenerationLeaseOwner(owner.UUID)
+	old, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     leaseOwner,
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    serverTestAllocatorConfig(cfg, "claude"),
+	})
+	if err != nil {
+		t.Fatalf("allocate old generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, session.ID, old.GenerationID, old.Owner, time.Now().UTC()); err != nil {
+		t.Fatalf("mark old generation live: %v", err)
+	}
+	if err := st.FailGeneration(ctx, store.FailGenerationParams{
+		SessionID:    session.ID,
+		GenerationID: old.GenerationID,
+		Owner:        old.Owner,
+		ErrorClass:   "orchestrator_restart_reconnect_grace_expired",
+		Reason:       "orchestrator_restart_reconnect_grace_expired",
+		Now:          time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("fail old generation: %v", err)
+	}
+	turnID, err := st.EnqueueTurn(ctx, session.ID, "retry old queued turn", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("enqueue queued turn: %v", err)
+	}
+
+	rt := &recordingRuntime{}
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: rt,
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+	srv.startColdFallbackSessions(ctx, leaseOwner)
+
+	gotSession, err := st.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if gotSession.Status != string(sessionstate.RunningActive) ||
+		gotSession.ActiveGenerationID == "" ||
+		gotSession.ActiveGenerationID == old.GenerationID {
+		t.Fatalf("unexpected fallback session state: %+v old=%s", gotSession, old.GenerationID)
+	}
+	_, startRequests := rt.requests()
+	if len(startRequests) != 1 ||
+		startRequests[0].GenerationID != gotSession.ActiveGenerationID ||
+		startRequests[0].ClaudeSessionUUID != session.ClaudeSessionUUID ||
+		!startRequests[0].ResumeClaude {
+		t.Fatalf("unexpected maintenance start requests: %+v", startRequests)
+	}
+	grant, ok, err := st.ClaimNextTurn(ctx, store.ClaimNextTurnParams{
+		SessionID:    session.ID,
+		GenerationID: gotSession.ActiveGenerationID,
+		Owner:        leaseOwner,
+		RequestID:    "req_fallback_claim",
+		LeaseTTL:     time.Minute,
+		Now:          time.Now().UTC(),
+	})
+	if err != nil || !ok {
+		t.Fatalf("claim queued fallback turn: ok=%v grant=%+v err=%v", ok, grant, err)
+	}
+	if grant.TurnID != turnID || grant.Content != "retry old queued turn" {
+		t.Fatalf("claimed wrong fallback turn: %+v want turn %d", grant, turnID)
 	}
 }
 
@@ -923,6 +1113,52 @@ func (instantRuntime) Interrupt(string) error {
 
 func (instantRuntime) Checkpoint(context.Context, string) error {
 	return nil
+}
+
+type recordingRuntime struct {
+	mu              sync.Mutex
+	prepareRequests []runtime.StartRequest
+	startRequests   []runtime.StartRequest
+}
+
+func (r *recordingRuntime) PrepareGeneration(_ context.Context, req runtime.StartRequest) (runtime.GenerationArtifacts, error) {
+	r.mu.Lock()
+	r.prepareRequests = append(r.prepareRequests, req)
+	r.mu.Unlock()
+	return runtime.GenerationArtifacts{
+		BundleDir:      "/tmp/bundle",
+		SpecPath:       "/tmp/bundle/config.json",
+		ManifestPath:   "/tmp/control/session.json",
+		ManifestDigest: "digest",
+		RunscVersion:   "runsc test",
+	}, nil
+}
+
+func (r *recordingRuntime) Start(_ context.Context, req runtime.StartRequest, _ func(runtime.Output)) runtime.Result {
+	r.mu.Lock()
+	r.startRequests = append(r.startRequests, req)
+	r.mu.Unlock()
+	return runtime.Result{ControlManifestDigest: req.PreparedArtifacts.ManifestDigest, RunscVersion: req.PreparedArtifacts.RunscVersion}
+}
+
+func (r *recordingRuntime) Destroy(context.Context, string) error {
+	return nil
+}
+
+func (r *recordingRuntime) Interrupt(string) error {
+	return nil
+}
+
+func (r *recordingRuntime) Checkpoint(context.Context, string) error {
+	return nil
+}
+
+func (r *recordingRuntime) requests() ([]runtime.StartRequest, []runtime.StartRequest) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	prepares := append([]runtime.StartRequest(nil), r.prepareRequests...)
+	starts := append([]runtime.StartRequest(nil), r.startRequests...)
+	return prepares, starts
 }
 
 type failingRuntime struct {

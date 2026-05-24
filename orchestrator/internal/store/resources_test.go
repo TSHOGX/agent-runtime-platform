@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/netip"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -125,6 +126,192 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ne
 	}
 	if nextCIDR != "10.240.0.4/30" {
 		t.Fatalf("expected reclaimable first slot to remain reserved, got next cidr %s", nextCIDR)
+	}
+}
+
+func TestAllocateGenerationCanCASFromFailedActiveGeneration(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	createStoreSession(t, ctx, st, "sess_fallback")
+	cfg := testAllocatorConfig(t)
+	cfg.CIDRPool = netip.MustParsePrefix("10.240.0.0/28")
+	now := time.Now().UTC()
+	leaseOwner := GenerationLeaseOwner(owner.UUID)
+
+	first, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_fallback",
+		Owner:     leaseOwner,
+		LeaseTTL:  time.Minute,
+		Now:       now,
+		Config:    cfg,
+	})
+	if err != nil {
+		t.Fatalf("allocate first generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, "sess_fallback", first.GenerationID, first.Owner, now.Add(time.Second)); err != nil {
+		t.Fatalf("mark first generation live: %v", err)
+	}
+	if err := st.FailGeneration(ctx, FailGenerationParams{
+		SessionID:    "sess_fallback",
+		GenerationID: first.GenerationID,
+		Owner:        first.Owner,
+		ErrorClass:   "orchestrator_restart_reconnect_grace_expired",
+		Reason:       "orchestrator_restart_reconnect_grace_expired",
+		Now:          now.Add(2 * time.Second),
+	}); err != nil {
+		t.Fatalf("fail first generation: %v", err)
+	}
+
+	_, err = st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID:            "sess_fallback",
+		ExpectedGenerationID: sql.NullString{String: "gen_stale", Valid: true},
+		Owner:                leaseOwner,
+		LeaseTTL:             time.Minute,
+		Now:                  now.Add(3 * time.Second),
+		Config:               cfg,
+	})
+	if err == nil || !strings.Contains(err.Error(), "session active generation CAS failed") {
+		t.Fatalf("expected stale active-generation CAS failure, got %v", err)
+	}
+	var generations int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_generations WHERE session_id = 'sess_fallback'`).Scan(&generations); err != nil {
+		t.Fatalf("count generations after stale CAS: %v", err)
+	}
+	if generations != 1 {
+		t.Fatalf("stale CAS should roll back inserted rows, generations=%d", generations)
+	}
+
+	next, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID:            "sess_fallback",
+		ExpectedGenerationID: sql.NullString{String: first.GenerationID, Valid: true},
+		Owner:                leaseOwner,
+		LeaseTTL:             time.Minute,
+		Now:                  now.Add(4 * time.Second),
+		Config:               cfg,
+	})
+	if err != nil {
+		t.Fatalf("allocate fallback generation: %v", err)
+	}
+	if next.GenerationID == first.GenerationID {
+		t.Fatalf("fallback reused failed generation id %s", next.GenerationID)
+	}
+
+	var activeGeneration, firstStatus, firstNetworkState, nextStatus, nextCIDR string
+	if err := st.db.QueryRowContext(ctx, `SELECT active_generation_id FROM sessions WHERE id = 'sess_fallback'`).Scan(&activeGeneration); err != nil {
+		t.Fatalf("query active generation: %v", err)
+	}
+	if activeGeneration != next.GenerationID {
+		t.Fatalf("active generation = %q, want %q", activeGeneration, next.GenerationID)
+	}
+	if err := st.db.QueryRowContext(ctx, `
+SELECT g.status, n.allocation_state
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+WHERE g.generation_id = ?`, first.GenerationID).Scan(&firstStatus, &firstNetworkState); err != nil {
+		t.Fatalf("query first generation: %v", err)
+	}
+	if firstStatus != "failed" || firstNetworkState != "reclaimable" {
+		t.Fatalf("first generation not fenced/reclaimable: status=%s network=%s", firstStatus, firstNetworkState)
+	}
+	if err := st.db.QueryRowContext(ctx, `
+SELECT g.status, n.host_side_cidr
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+WHERE g.generation_id = ?`, next.GenerationID).Scan(&nextStatus, &nextCIDR); err != nil {
+		t.Fatalf("query fallback generation: %v", err)
+	}
+	if nextStatus != "allocating" || nextCIDR != "10.240.0.4/30" {
+		t.Fatalf("unexpected fallback generation state: status=%s cidr=%s", nextStatus, nextCIDR)
+	}
+}
+
+func TestListColdFallbackSessionsReturnsFailedActiveWithQueuedTurns(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	cfg := testAllocatorConfig(t)
+	cfg.CIDRPool = netip.MustParsePrefix("10.240.0.0/28")
+	now := time.Now().UTC()
+	leaseOwner := GenerationLeaseOwner(owner.UUID)
+
+	createStoreSession(t, ctx, st, "sess_fallback_queue")
+	failed, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_fallback_queue",
+		Owner:     leaseOwner,
+		LeaseTTL:  time.Minute,
+		Now:       now,
+		Config:    cfg,
+	})
+	if err != nil {
+		t.Fatalf("allocate failed generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, "sess_fallback_queue", failed.GenerationID, failed.Owner, now.Add(time.Second)); err != nil {
+		t.Fatalf("mark failed generation live: %v", err)
+	}
+	if err := st.FailGeneration(ctx, FailGenerationParams{
+		SessionID:    "sess_fallback_queue",
+		GenerationID: failed.GenerationID,
+		Owner:        failed.Owner,
+		ErrorClass:   "orchestrator_restart_reconnect_grace_expired",
+		Reason:       "orchestrator_restart_reconnect_grace_expired",
+		Now:          now.Add(2 * time.Second),
+	}); err != nil {
+		t.Fatalf("fail generation: %v", err)
+	}
+	if _, err := st.EnqueueTurn(ctx, "sess_fallback_queue", "retry me", now.Add(3*time.Second)); err != nil {
+		t.Fatalf("enqueue fallback turn: %v", err)
+	}
+
+	createStoreSession(t, ctx, st, "sess_failed_no_queue")
+	noQueue, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_failed_no_queue",
+		Owner:     leaseOwner,
+		LeaseTTL:  time.Minute,
+		Now:       now,
+		Config:    cfg,
+	})
+	if err != nil {
+		t.Fatalf("allocate no-queue generation: %v", err)
+	}
+	if err := st.FailGeneration(ctx, FailGenerationParams{
+		SessionID:    "sess_failed_no_queue",
+		GenerationID: noQueue.GenerationID,
+		Owner:        noQueue.Owner,
+		ErrorClass:   "test_failure",
+		Reason:       "test_failure",
+		Now:          now.Add(time.Second),
+	}); err != nil {
+		t.Fatalf("fail no-queue generation: %v", err)
+	}
+
+	createStoreSession(t, ctx, st, "sess_active_queue")
+	active, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_active_queue",
+		Owner:     leaseOwner,
+		LeaseTTL:  time.Minute,
+		Now:       now,
+		Config:    cfg,
+	})
+	if err != nil {
+		t.Fatalf("allocate active generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, "sess_active_queue", active.GenerationID, active.Owner, now.Add(time.Second)); err != nil {
+		t.Fatalf("mark active generation live: %v", err)
+	}
+	if _, err := st.EnqueueTurn(ctx, "sess_active_queue", "not fallback", now.Add(2*time.Second)); err != nil {
+		t.Fatalf("enqueue active turn: %v", err)
+	}
+
+	fallbacks, err := st.ListColdFallbackSessions(ctx)
+	if err != nil {
+		t.Fatalf("list cold fallback sessions: %v", err)
+	}
+	if len(fallbacks) != 1 {
+		t.Fatalf("fallback sessions=%d want 1: %+v", len(fallbacks), fallbacks)
+	}
+	if fallbacks[0].Session.ID != "sess_fallback_queue" ||
+		fallbacks[0].OldGeneration != failed.GenerationID ||
+		fallbacks[0].QueuedTurns != 1 {
+		t.Fatalf("unexpected fallback session: %+v", fallbacks[0])
 	}
 }
 
