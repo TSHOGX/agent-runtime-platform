@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"harness-platform/orchestrator/internal/agents"
+	"harness-platform/orchestrator/internal/bridge"
 	"harness-platform/orchestrator/internal/store"
 )
 
@@ -159,10 +160,11 @@ type specRoot struct {
 }
 
 type specMount struct {
-	Destination string   `json:"destination"`
-	Type        string   `json:"type"`
-	Source      string   `json:"source"`
-	Options     []string `json:"options,omitempty"`
+	Destination string            `json:"destination"`
+	Type        string            `json:"type"`
+	Source      string            `json:"source"`
+	Options     []string          `json:"options,omitempty"`
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 type GenerationArtifacts struct {
@@ -407,7 +409,6 @@ func (r *Runtime) prepareGenerationDirs(req StartRequest) error {
 		filepath.Dir(details.ControlManifestPath),
 		details.BundleDirPath,
 		filepath.Dir(details.SpecPath),
-		details.BridgeDirPath,
 		details.LogDirPath,
 	} {
 		if strings.TrimSpace(path) == "" {
@@ -415,6 +416,11 @@ func (r *Runtime) prepareGenerationDirs(req StartRequest) error {
 		}
 		if err := os.MkdirAll(path, 0o755); err != nil {
 			return fmt.Errorf("create generation dir %s: %w", path, err)
+		}
+	}
+	if strings.TrimSpace(details.BridgeDirPath) != "" {
+		if err := bridge.EnsureLayout(details.BridgeDirPath); err != nil {
+			return fmt.Errorf("create generation bridge dir: %w", err)
 		}
 	}
 	if strings.TrimSpace(details.SecretsDirPath) != "" {
@@ -744,6 +750,7 @@ func (r *Runtime) renderRuntimeSpec(req StartRequest) (runtimeSpec, string, erro
 		"HARNESS_EXPECTED_AUTH_TOKEN_SECRET_ID="+details.AnthropicAuthTokenSecretID,
 		"HARNESS_EXPECTED_SECRET_VERSION="+details.SecretVersion,
 		fmt.Sprintf("HARNESS_SECRET_READERS_GID=%d", r.cfg.SecretReadersGID),
+		"HARNESS_BRIDGE_DIR="+bridge.BridgeMountDestination,
 	)
 	spec.Mounts = []specMount{
 		{Destination: "/proc", Type: "proc", Source: "proc"},
@@ -755,6 +762,16 @@ func (r *Runtime) renderRuntimeSpec(req StartRequest) (runtimeSpec, string, erro
 		{Destination: "/sessions", Type: "bind", Source: r.cfg.SessionsRoot, Options: []string{"rbind", "rw"}},
 		{Destination: "/agent-homes", Type: "bind", Source: r.cfg.AgentHomesRoot, Options: []string{"rbind", "rw"}},
 		{Destination: "/harness-control", Type: "bind", Source: details.ControlDirPath, Options: []string{"rbind", "ro"}},
+		{
+			Destination: bridge.BridgeMountDestination,
+			Type:        "bind",
+			Source:      details.BridgeDirPath,
+			Options:     []string{"rbind", "rw"},
+			Annotations: map[string]string{
+				"dev.gvisor.spec.mount./harness-control/bridge.type":  "bind",
+				"dev.gvisor.spec.mount./harness-control/bridge.share": "exclusive",
+			},
+		},
 	}
 	if schemaPack := r.schemaPackPath(); schemaPack != "" {
 		spec.Mounts = append(spec.Mounts, specMount{Destination: "/schema-pack", Type: "bind", Source: schemaPack, Options: []string{"rbind", "ro"}})

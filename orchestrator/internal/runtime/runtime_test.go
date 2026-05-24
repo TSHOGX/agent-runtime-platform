@@ -509,6 +509,22 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndSecrets(t *testing.T
 	if mountSource(spec.Mounts, "/harness-control") != details.ControlDirPath {
 		t.Fatalf("control mount = %q, want %q", mountSource(spec.Mounts, "/harness-control"), details.ControlDirPath)
 	}
+	bridgeMount := mountByDestination(spec.Mounts, "/harness-control/bridge")
+	if bridgeMount == nil {
+		t.Fatalf("runtime spec missing bridge mount: %+v", spec.Mounts)
+	}
+	if bridgeMount.Source != details.BridgeDirPath || strings.Join(bridgeMount.Options, ",") != "rbind,rw" {
+		t.Fatalf("unexpected bridge mount: %+v", bridgeMount)
+	}
+	if bridgeMount.Annotations["dev.gvisor.spec.mount./harness-control/bridge.share"] != "exclusive" ||
+		bridgeMount.Annotations["dev.gvisor.spec.mount./harness-control/bridge.type"] != "bind" {
+		t.Fatalf("bridge mount missing exclusive annotation: %+v", bridgeMount.Annotations)
+	}
+	for _, name := range []string{"inbox", "outbox", "heartbeat", "tmp"} {
+		if info, err := os.Stat(filepath.Join(details.BridgeDirPath, name)); err != nil || !info.IsDir() {
+			t.Fatalf("bridge dir %s not initialized: info=%v err=%v", name, info, err)
+		}
+	}
 	if mountSource(spec.Mounts, "/harness-secrets") != details.SecretsDirPath {
 		t.Fatalf("secret mount = %q, want %q", mountSource(spec.Mounts, "/harness-secrets"), details.SecretsDirPath)
 	}
@@ -661,12 +677,20 @@ func testGenerationDetails(dir, generationID string) store.RuntimeGenerationDeta
 }
 
 func mountSource(mounts []specMount, destination string) string {
+	mount := mountByDestination(mounts, destination)
+	if mount == nil {
+		return ""
+	}
+	return mount.Source
+}
+
+func mountByDestination(mounts []specMount, destination string) *specMount {
 	for _, mount := range mounts {
 		if mount.Destination == destination {
-			return mount.Source
+			return &mount
 		}
 	}
-	return ""
+	return nil
 }
 
 func mustReadFile(t *testing.T, path string) []byte {
