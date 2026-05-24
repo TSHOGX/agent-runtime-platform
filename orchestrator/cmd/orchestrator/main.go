@@ -39,12 +39,24 @@ func main() {
 		log.Warn("config warning", "warning", warning)
 	}
 
-	db, err := store.Open(ctx, cfg.DBPath)
+	owner, err := store.AcquireOwnerLock(cfg.Phase7.RunDir)
+	if err != nil {
+		log.Error("failed to acquire orchestrator owner lock", "error", err)
+		os.Exit(1)
+	}
+	defer owner.Close()
+
+	db, err := store.OpenWithOptions(ctx, cfg.DBPath, store.Options{AgentHomesRoot: cfg.AgentHomesRoot})
 	if err != nil {
 		log.Error("failed to open store", "error", err)
 		os.Exit(1)
 	}
 	defer db.Close()
+	if err := db.WriteOwner(ctx, owner); err != nil {
+		log.Error("failed to write orchestrator owner", "error", err)
+		os.Exit(1)
+	}
+	ownerHeartbeatErr := db.StartOwnerHeartbeat(ctx, owner)
 	if err := db.EnsureUser(ctx, "lab", "Lab User"); err != nil {
 		log.Error("failed to ensure lab user", "error", err)
 		os.Exit(1)
@@ -56,6 +68,13 @@ func main() {
 
 	hub := events.NewHub()
 	watcher := artifacts.New(cfg.SessionsRoot, db, hub, log)
+	go func() {
+		if err := <-ownerHeartbeatErr; err != nil {
+			log.Error("orchestrator owner heartbeat failed", "error", err)
+			stop()
+		}
+	}()
+
 	go func() {
 		if err := watcher.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Error("artifact watcher stopped", "error", err)

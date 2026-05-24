@@ -1,0 +1,526 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"harness-platform/orchestrator/internal/sessionstate"
+
+	_ "modernc.org/sqlite"
+)
+
+func TestPhase7MigrationsCreateSchemaAndBackfillLegacySessions(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "legacy.db")
+	agentHomes := filepath.Join(dir, "agent-homes")
+
+	createLegacyPhase6DB(t, dbPath, []legacySession{
+		{id: "sess_created", status: string(sessionstate.Created)},
+		{id: "sess_running", status: string(sessionstate.RunningActive)},
+		{id: "sess_checkpointed", status: string(sessionstate.Checkpointed), checkpointPath: filepath.Join(dir, "cp")},
+	})
+
+	st, err := OpenWithOptions(ctx, dbPath, Options{AgentHomesRoot: agentHomes})
+	if err != nil {
+		t.Fatalf("open migrated store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	assertMigrationVersions(t, st.db, 6)
+	for _, table := range []string{
+		"runtime_generations", "runtime_generation_resources", "turns", "events",
+		"active_model_request_contexts", "network_profiles", "agent_runtime_profiles",
+		"egress_policies", "orchestrator_owner",
+	} {
+		assertTableExists(t, st.db, table)
+	}
+	for _, column := range []string{"active_generation_id", "agent_home_path", "failure_reason", "error_class"} {
+		assertColumnExists(t, st.db, "sessions", column)
+	}
+
+	created, err := st.GetSession(ctx, "sess_created")
+	if err != nil {
+		t.Fatalf("get created: %v", err)
+	}
+	if created.Status != string(sessionstate.Created) || created.ActiveGenerationID != "" {
+		t.Fatalf("created session should remain created with no generation: %+v", created)
+	}
+	if created.AgentHomePath != filepath.Join(agentHomes, "sess_created") {
+		t.Fatalf("created agent home backfill: %q", created.AgentHomePath)
+	}
+
+	running, err := st.GetSession(ctx, "sess_running")
+	if err != nil {
+		t.Fatalf("get running: %v", err)
+	}
+	if running.Status != string(sessionstate.Failed) ||
+		running.ErrorClass != "legacy_pre_phase7_no_generation" ||
+		running.FailureReason != "legacy_pre_phase7_no_generation" ||
+		running.EndedAt == nil {
+		t.Fatalf("running legacy session not fenced as failed: %+v", running)
+	}
+
+	checkpointed, err := st.GetSession(ctx, "sess_checkpointed")
+	if err != nil {
+		t.Fatalf("get checkpointed: %v", err)
+	}
+	if checkpointed.Status != string(sessionstate.Failed) ||
+		checkpointed.ErrorClass != "legacy_checkpoint_unrestorable" ||
+		checkpointed.FailureReason != "legacy_checkpoint_unrestorable" ||
+		checkpointed.CheckpointPath == "" {
+		t.Fatalf("checkpointed legacy session not fenced as unrestorable: %+v", checkpointed)
+	}
+
+	var generations int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_generations`).Scan(&generations); err != nil {
+		t.Fatalf("count runtime generations: %v", err)
+	}
+	if generations != 0 {
+		t.Fatalf("legacy migration must not synthesize runtime generations, got %d", generations)
+	}
+}
+
+func TestPhase7MigrationsAreIdempotent(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+	st, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := st.migrate(ctx); err != nil {
+		t.Fatalf("rerun migrate: %v", err)
+	}
+	assertMigrationVersions(t, st.db, 6)
+	_ = st.Close()
+
+	st, err = Open(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	assertMigrationVersions(t, st.db, 6)
+}
+
+func TestRuntimeGenerationPartialUniqueIndex(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	createStoreSession(t, ctx, st, "sess_unique")
+
+	now := formatTime(time.Now().UTC())
+	if _, err := st.db.ExecContext(ctx, `
+INSERT INTO runtime_generations (generation_id, session_id, status, lease_owner, lease_expires_at)
+VALUES ('gen_a', 'sess_unique', 'idle', 'owner', ?)`, now); err != nil {
+		t.Fatalf("insert gen a: %v", err)
+	}
+	_, err = st.db.ExecContext(ctx, `
+INSERT INTO runtime_generations (generation_id, session_id, status, lease_owner, lease_expires_at)
+VALUES ('gen_b', 'sess_unique', 'allocating', 'owner', ?)`, now)
+	if err == nil || !strings.Contains(err.Error(), "constraint") {
+		t.Fatalf("expected nonterminal uniqueness error, got %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `UPDATE runtime_generations SET status = 'failed' WHERE generation_id = 'gen_a'`); err != nil {
+		t.Fatalf("fail gen a: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+INSERT INTO runtime_generations (generation_id, session_id, status, lease_owner, lease_expires_at)
+VALUES ('gen_b', 'sess_unique', 'allocating', 'owner', ?)`, now); err != nil {
+		t.Fatalf("insert gen b after fail: %v", err)
+	}
+}
+
+func TestOwnerLockContentionAndTamperDetection(t *testing.T) {
+	ctx := context.Background()
+	runDir := t.TempDir()
+	owner, err := AcquireOwnerLock(runDir)
+	if err != nil {
+		t.Fatalf("acquire owner: %v", err)
+	}
+	t.Cleanup(func() { _ = owner.Close() })
+	if second, err := AcquireOwnerLock(runDir); err == nil {
+		_ = second.Close()
+		t.Fatalf("second owner lock should fail")
+	}
+
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.WriteOwner(ctx, owner); err != nil {
+		t.Fatalf("write owner: %v", err)
+	}
+	if err := st.AssertOwner(ctx, owner.UUID); err != nil {
+		t.Fatalf("assert owner: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `UPDATE orchestrator_owner SET uuid = 'tampered' WHERE singleton = 1`); err != nil {
+		t.Fatalf("tamper owner: %v", err)
+	}
+	if err := st.AssertOwner(ctx, owner.UUID); err == nil {
+		t.Fatalf("tampered owner should fail assertion")
+	}
+}
+
+func TestTurnHelperClaimAckComplete(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	createStoreSession(t, ctx, st, "sess_turn")
+	createActiveGeneration(t, ctx, st, "sess_turn", "gen_turn", "owner")
+	if _, err := st.EnqueueTurn(ctx, "sess_turn", "first", time.Now().UTC()); err != nil {
+		t.Fatalf("enqueue first: %v", err)
+	}
+	if _, err := st.EnqueueTurn(ctx, "sess_turn", "second", time.Now().UTC()); err != nil {
+		t.Fatalf("enqueue second: %v", err)
+	}
+
+	now := time.Now().UTC()
+	claim := ClaimNextTurnParams{
+		SessionID:    "sess_turn",
+		GenerationID: "gen_turn",
+		Owner:        "owner",
+		RequestID:    "req-1",
+		LeaseTTL:     time.Minute,
+		Now:          now,
+	}
+	grant, ok, err := st.ClaimNextTurn(ctx, claim)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if !ok || grant.Sequence != 1 || grant.Content != "first" || grant.Replayed {
+		t.Fatalf("unexpected grant: ok=%v grant=%+v", ok, grant)
+	}
+	replay, ok, err := st.ClaimNextTurn(ctx, claim)
+	if err != nil {
+		t.Fatalf("replay claim: %v", err)
+	}
+	if !ok || !replay.Replayed || replay.TurnID != grant.TurnID {
+		t.Fatalf("unexpected replay grant: ok=%v replay=%+v", ok, replay)
+	}
+	if err := st.AckTurnStarted(ctx, AckStartedParams{
+		SessionID:       "sess_turn",
+		GenerationID:    "gen_turn",
+		TurnID:          grant.TurnID,
+		Owner:           "owner",
+		SandboxSourceIP: "10.0.0.2",
+		LeaseTTL:        time.Minute,
+		Now:             now.Add(time.Second),
+	}); err != nil {
+		t.Fatalf("ack started: %v", err)
+	}
+	if err := st.CompleteTurn(ctx, CompleteTurnParams{
+		SessionID:      "sess_turn",
+		GenerationID:   "gen_turn",
+		TurnID:         grant.TurnID,
+		Owner:          "owner",
+		TerminalStatus: "completed",
+		Now:            now.Add(2 * time.Second),
+	}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+
+	var turnStatus, generationStatus string
+	if err := st.db.QueryRowContext(ctx, `SELECT status FROM turns WHERE id = ?`, grant.TurnID).Scan(&turnStatus); err != nil {
+		t.Fatalf("turn status: %v", err)
+	}
+	if err := st.db.QueryRowContext(ctx, `SELECT status FROM runtime_generations WHERE generation_id = 'gen_turn'`).Scan(&generationStatus); err != nil {
+		t.Fatalf("generation status: %v", err)
+	}
+	if turnStatus != "completed" || generationStatus != "idle" {
+		t.Fatalf("unexpected statuses: turn=%s generation=%s", turnStatus, generationStatus)
+	}
+	var contexts int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM active_model_request_contexts`).Scan(&contexts); err != nil {
+		t.Fatalf("context count: %v", err)
+	}
+	if contexts != 0 {
+		t.Fatalf("expected context cleanup, got %d", contexts)
+	}
+}
+
+func TestTurnHelperRejectsWrongSessionGenerationBinding(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	createStoreSession(t, ctx, st, "sess_a")
+	createStoreSession(t, ctx, st, "sess_b")
+	createActiveGeneration(t, ctx, st, "sess_b", "gen_b", "owner")
+	if _, err := st.EnqueueTurn(ctx, "sess_a", "work", time.Now().UTC()); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	_, ok, err := st.ClaimNextTurn(ctx, ClaimNextTurnParams{
+		SessionID:    "sess_a",
+		GenerationID: "gen_b",
+		Owner:        "owner",
+		RequestID:    "req",
+		LeaseTTL:     time.Minute,
+		Now:          time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("claim wrong binding: %v", err)
+	}
+	if ok {
+		t.Fatalf("generation from another session must not claim turn")
+	}
+}
+
+func TestGenerationHeartbeatAndFailureCAS(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	createStoreSession(t, ctx, st, "sess_hb")
+	createActiveGeneration(t, ctx, st, "sess_hb", "gen_hb", "owner")
+
+	now := time.Now().UTC()
+	if err := st.RenewGenerationHeartbeat(ctx, RenewHeartbeatParams{
+		SessionID:    "sess_hb",
+		GenerationID: "gen_hb",
+		Owner:        "owner",
+		LeaseTTL:     time.Minute,
+		Now:          now,
+	}); err != nil {
+		t.Fatalf("renew heartbeat: %v", err)
+	}
+	var leaseExpires string
+	if err := st.db.QueryRowContext(ctx, `SELECT lease_expires_at FROM runtime_generations WHERE generation_id = 'gen_hb'`).Scan(&leaseExpires); err != nil {
+		t.Fatalf("query lease expiry: %v", err)
+	}
+	if leaseExpires == "" {
+		t.Fatalf("expected renewed lease expiry")
+	}
+
+	if err := st.FailGeneration(ctx, FailGenerationParams{
+		SessionID:    "sess_hb",
+		GenerationID: "gen_hb",
+		Owner:        "owner",
+		ErrorClass:   "lifecycle_failure",
+		Reason:       "boom",
+		Now:          now.Add(2 * time.Second),
+	}); err != nil {
+		t.Fatalf("fail generation: %v", err)
+	}
+	var status, failureReason string
+	if err := st.db.QueryRowContext(ctx, `SELECT status, failure_reason FROM runtime_generations WHERE generation_id = 'gen_hb'`).Scan(&status, &failureReason); err != nil {
+		t.Fatalf("query failed generation: %v", err)
+	}
+	if status != "failed" || failureReason != "boom" {
+		t.Fatalf("unexpected failed generation state: %s %s", status, failureReason)
+	}
+}
+
+func TestSessionActiveGenerationCAS(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	createStoreSession(t, ctx, st, "sess_cas")
+	now := time.Now().UTC()
+	if _, err := st.db.ExecContext(ctx, `
+INSERT INTO runtime_generations (generation_id, session_id, status, lease_owner, lease_expires_at)
+VALUES ('gen_a', 'sess_cas', 'idle', 'owner', ?)`, formatTime(now.Add(time.Minute))); err != nil {
+		t.Fatalf("insert gen_a: %v", err)
+	}
+	if err := st.UpdateSessionActiveGeneration(ctx, SessionActiveGenerationCASParams{
+		SessionID:        "sess_cas",
+		NextGenerationID: "gen_a",
+	}); err != nil {
+		t.Fatalf("initial update active generation: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_generations SET status = 'failed' WHERE generation_id = 'gen_a'`); err != nil {
+		t.Fatalf("mark gen_a terminal: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+INSERT INTO runtime_generations (generation_id, session_id, status, lease_owner, lease_expires_at)
+VALUES ('gen_b', 'sess_cas', 'idle', 'owner', ?)`, formatTime(now.Add(time.Minute))); err != nil {
+		t.Fatalf("insert gen_b: %v", err)
+	}
+	if err := st.UpdateSessionActiveGeneration(ctx, SessionActiveGenerationCASParams{
+		SessionID:            "sess_cas",
+		ExpectedGenerationID: sql.NullString{String: "gen_a", Valid: true},
+		NextGenerationID:     "gen_b",
+	}); err != nil {
+		t.Fatalf("update active generation with expected value: %v", err)
+	}
+	if err := st.UpdateSessionActiveGeneration(ctx, SessionActiveGenerationCASParams{
+		SessionID:            "sess_cas",
+		ExpectedGenerationID: sql.NullString{String: "gen_a", Valid: true},
+		NextGenerationID:     "gen_c",
+	}); err == nil {
+		t.Fatalf("stale expected generation should fail")
+	}
+	var activeGeneration string
+	if err := st.db.QueryRowContext(ctx, `SELECT active_generation_id FROM sessions WHERE id = 'sess_cas'`).Scan(&activeGeneration); err != nil {
+		t.Fatalf("query active generation: %v", err)
+	}
+	if activeGeneration != "gen_b" {
+		t.Fatalf("unexpected active generation: %s", activeGeneration)
+	}
+}
+
+type legacySession struct {
+	id             string
+	status         string
+	checkpointPath string
+}
+
+func createLegacyPhase6DB(t *testing.T, path string, sessions []legacySession) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open legacy db: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, `
+CREATE TABLE users (
+  id TEXT PRIMARY KEY,
+  display_name TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  agent TEXT NOT NULL,
+  workspace TEXT NOT NULL,
+  restore_id TEXT NOT NULL,
+  restore_ms INTEGER,
+  claude_session_uuid TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  expires_at TEXT,
+  ended_at TEXT,
+  last_activity_at TEXT,
+  checkpoint_path TEXT
+);
+CREATE TABLE messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE artifacts (
+  session_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  mod_time TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(session_id, path)
+);`); err != nil {
+		t.Fatalf("create legacy schema: %v", err)
+	}
+	now := formatTime(time.Now().UTC())
+	for _, session := range sessions {
+		if _, err := db.ExecContext(ctx, `
+INSERT INTO sessions (
+  id, user_id, status, agent, workspace, restore_id, claude_session_uuid,
+  created_at, updated_at, checkpoint_path
+) VALUES (?, 'lab', ?, 'claude', ?, ?, ?, ?, ?, ?)`,
+			session.id, session.status, filepath.Join(filepath.Dir(path), "sessions", session.id),
+			"phase3-"+session.id, "11111111-2222-3333-4444-555555555555", now, now, nullableString(session.checkpointPath)); err != nil {
+			t.Fatalf("insert legacy session %s: %v", session.id, err)
+		}
+	}
+}
+
+func assertMigrationVersions(t *testing.T, db *sql.DB, wantMax int) {
+	t.Helper()
+	var count, maxVersion int
+	if err := db.QueryRow(`SELECT COUNT(*), COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&count, &maxVersion); err != nil {
+		t.Fatalf("schema migrations: %v", err)
+	}
+	if count != wantMax || maxVersion != wantMax {
+		t.Fatalf("schema migrations count/max = %d/%d, want %d/%d", count, maxVersion, wantMax, wantMax)
+	}
+}
+
+func assertTableExists(t *testing.T, db *sql.DB, table string) {
+	t.Helper()
+	var name string
+	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&name)
+	if err != nil {
+		t.Fatalf("table %s missing: %v", table, err)
+	}
+}
+
+func assertColumnExists(t *testing.T, db *sql.DB, table, column string) {
+	t.Helper()
+	rows, err := db.Query(`PRAGMA table_info(` + quoteSQLiteIdent(table) + `)`)
+	if err != nil {
+		t.Fatalf("table info %s: %v", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			t.Fatalf("scan table info: %v", err)
+		}
+		if name == column {
+			return
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("table info rows: %v", err)
+	}
+	t.Fatalf("column %s.%s missing", table, column)
+}
+
+func createStoreSession(t *testing.T, ctx context.Context, st *Store, id string) {
+	t.Helper()
+	now := time.Now().UTC()
+	if err := st.CreateSession(ctx, Session{
+		ID:        id,
+		UserID:    "lab",
+		Status:    string(sessionstate.Created),
+		Agent:     "claude",
+		Workspace: filepath.Join(t.TempDir(), id),
+		RestoreID: "phase3-" + id,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("create session %s: %v", id, err)
+	}
+}
+
+func createActiveGeneration(t *testing.T, ctx context.Context, st *Store, sessionID, generationID, owner string) {
+	t.Helper()
+	now := time.Now().UTC()
+	expires := now.Add(time.Minute)
+	if _, err := st.db.ExecContext(ctx, `
+INSERT INTO runtime_generations (generation_id, session_id, status, lease_owner, lease_expires_at, last_seen_at)
+VALUES (?, ?, 'idle', ?, ?, ?)`, generationID, sessionID, owner, formatTime(expires), formatTime(now)); err != nil {
+		t.Fatalf("insert generation: %v", err)
+	}
+	if err := st.UpdateSessionActiveGeneration(ctx, SessionActiveGenerationCASParams{
+		SessionID:        sessionID,
+		NextGenerationID: generationID,
+	}); err != nil {
+		t.Fatalf("activate generation: %v", err)
+	}
+}

@@ -16,20 +16,24 @@ import (
 )
 
 type Session struct {
-	ID                string     `json:"id"`
-	UserID            string     `json:"user_id"`
-	Status            string     `json:"status"`
-	Agent             string     `json:"agent"`
-	Workspace         string     `json:"workspace"`
-	RestoreID         string     `json:"restore_id"`
-	RestoreMS         *int64     `json:"restore_ms,omitempty"`
-	ClaudeSessionUUID string     `json:"claude_session_uuid,omitempty"`
-	CreatedAt         time.Time  `json:"created_at"`
-	UpdatedAt         time.Time  `json:"updated_at"`
-	ExpiresAt         *time.Time `json:"expires_at,omitempty"`
-	EndedAt           *time.Time `json:"ended_at,omitempty"`
-	LastActivityAt    *time.Time `json:"last_activity_at,omitempty"`
-	CheckpointPath    string     `json:"checkpoint_path,omitempty"`
+	ID                 string     `json:"id"`
+	UserID             string     `json:"user_id"`
+	Status             string     `json:"status"`
+	Agent              string     `json:"agent"`
+	Workspace          string     `json:"workspace"`
+	AgentHomePath      string     `json:"agent_home_path,omitempty"`
+	ActiveGenerationID string     `json:"active_generation_id,omitempty"`
+	RestoreID          string     `json:"restore_id"`
+	RestoreMS          *int64     `json:"restore_ms,omitempty"`
+	ClaudeSessionUUID  string     `json:"claude_session_uuid,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+	ExpiresAt          *time.Time `json:"expires_at,omitempty"`
+	EndedAt            *time.Time `json:"ended_at,omitempty"`
+	LastActivityAt     *time.Time `json:"last_activity_at,omitempty"`
+	CheckpointPath     string     `json:"checkpoint_path,omitempty"`
+	FailureReason      string     `json:"failure_reason,omitempty"`
+	ErrorClass         string     `json:"error_class,omitempty"`
 }
 
 type Message struct {
@@ -50,12 +54,30 @@ type Artifact struct {
 }
 
 type Store struct {
-	db *sql.DB
+	db      *sql.DB
+	options Options
+}
+
+type Options struct {
+	AgentHomesRoot string
+}
+
+type SessionActiveGenerationCASParams struct {
+	SessionID            string
+	ExpectedGenerationID sql.NullString
+	NextGenerationID     string
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
+	return OpenWithOptions(ctx, path, Options{})
+}
+
+func OpenWithOptions(ctx context.Context, path string, options Options) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
+	}
+	if strings.TrimSpace(options.AgentHomesRoot) == "" {
+		options.AgentHomesRoot = "/var/lib/harness/agent-homes"
 	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -63,7 +85,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	store := &Store{db: db}
+	store := &Store{db: db, options: options}
 	if err := store.migrate(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -76,58 +98,14 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) migrate(ctx context.Context) error {
-	statusCheck := sqlStringList(sessionstate.AllStatuses())
 	if _, err := s.db.ExecContext(ctx, `
 PRAGMA busy_timeout=5000;
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
-
-CREATE TABLE IF NOT EXISTS users (
-  id TEXT PRIMARY KEY,
-  display_name TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS sessions (
-  id TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL,
-  status TEXT NOT NULL CHECK(status IN (`+statusCheck+`)),
-  agent TEXT NOT NULL,
-  workspace TEXT NOT NULL,
-  restore_id TEXT NOT NULL,
-  restore_ms INTEGER,
-  claude_session_uuid TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  expires_at TEXT,
-  ended_at TEXT,
-  last_activity_at TEXT,
-  checkpoint_path TEXT
-);
-
-CREATE TABLE IF NOT EXISTS messages (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id TEXT NOT NULL,
-  role TEXT NOT NULL,
-  content TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS artifacts (
-  session_id TEXT NOT NULL,
-  path TEXT NOT NULL,
-  size INTEGER NOT NULL,
-  mod_time TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  PRIMARY KEY(session_id, path),
-  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
-);
 `); err != nil {
 		return err
 	}
-	return nil
+	return s.runMigrations(ctx, defaultMigrations(s.options))
 }
 
 func (s *Store) EnsureUser(ctx context.Context, id, name string) error {
@@ -143,12 +121,15 @@ func (s *Store) CreateSession(ctx context.Context, session Session) error {
 	if err := sessionstate.Validate(session.Status); err != nil {
 		return err
 	}
+	if strings.TrimSpace(session.AgentHomePath) == "" {
+		session.AgentHomePath = filepath.Join(s.options.AgentHomesRoot, session.ID)
+	}
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO sessions (
-  id, user_id, status, agent, workspace, restore_id, claude_session_uuid, created_at, updated_at, expires_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		session.ID, session.UserID, session.Status, session.Agent, session.Workspace, session.RestoreID,
-		nullableString(session.ClaudeSessionUUID),
+  id, user_id, status, agent, workspace, agent_home_path, restore_id, claude_session_uuid, created_at, updated_at, expires_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		session.ID, session.UserID, session.Status, session.Agent, session.Workspace, nullableString(session.AgentHomePath),
+		session.RestoreID, nullableString(session.ClaudeSessionUUID),
 		formatTime(session.CreatedAt), formatTime(session.UpdatedAt), formatOptionalTime(session.ExpiresAt),
 	)
 	return err
@@ -156,14 +137,14 @@ INSERT INTO sessions (
 
 func (s *Store) GetSession(ctx context.Context, id string) (Session, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT id, user_id, status, agent, workspace, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path
+SELECT id, user_id, status, agent, workspace, agent_home_path, active_generation_id, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path, failure_reason, error_class
 FROM sessions WHERE id = ?`, id)
 	return scanSession(row)
 }
 
 func (s *Store) ListSessions(ctx context.Context) ([]Session, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, user_id, status, agent, workspace, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path
+SELECT id, user_id, status, agent, workspace, agent_home_path, active_generation_id, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path, failure_reason, error_class
 FROM sessions ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -209,6 +190,38 @@ UPDATE sessions
 SET status = ?, restore_ms = COALESCE(?, restore_ms), updated_at = ?, ended_at = COALESCE(?, ended_at)
 WHERE id = ?`, status, restoreMS, formatTime(now), terminalAt, id)
 	return err
+}
+
+func (s *Store) UpdateSessionActiveGeneration(ctx context.Context, p SessionActiveGenerationCASParams) error {
+	if strings.TrimSpace(p.SessionID) == "" {
+		return fmt.Errorf("session id is required")
+	}
+	if strings.TrimSpace(p.NextGenerationID) == "" {
+		return fmt.Errorf("next generation id is required")
+	}
+
+	args := []any{p.NextGenerationID, p.SessionID}
+	where := "active_generation_id IS NULL"
+	if p.ExpectedGenerationID.Valid {
+		where = "active_generation_id = ?"
+		args = append(args, p.ExpectedGenerationID.String)
+	}
+	res, err := s.db.ExecContext(ctx, `
+UPDATE sessions
+SET active_generation_id = ?
+WHERE id = ?
+  AND `+where, args...)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return fmt.Errorf("session active generation CAS failed")
+	}
+	return nil
 }
 
 func (s *Store) AddMessage(ctx context.Context, sessionID, role, content string) (Message, error) {
@@ -311,12 +324,14 @@ func scanSession(row scanner) (Session, error) {
 	var session Session
 	var restoreMS sql.NullInt64
 	var claudeUUID sql.NullString
+	var agentHomePath, activeGenerationID sql.NullString
 	var createdAt, updatedAt string
 	var expiresAt, endedAt, lastActivityAt sql.NullString
-	var checkpointPath sql.NullString
+	var checkpointPath, failureReason, errorClass sql.NullString
 	err := row.Scan(
-		&session.ID, &session.UserID, &session.Status, &session.Agent, &session.Workspace, &session.RestoreID,
-		&restoreMS, &claudeUUID, &createdAt, &updatedAt, &expiresAt, &endedAt, &lastActivityAt, &checkpointPath,
+		&session.ID, &session.UserID, &session.Status, &session.Agent, &session.Workspace, &agentHomePath,
+		&activeGenerationID, &session.RestoreID, &restoreMS, &claudeUUID, &createdAt, &updatedAt,
+		&expiresAt, &endedAt, &lastActivityAt, &checkpointPath, &failureReason, &errorClass,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, err
@@ -326,6 +341,12 @@ func scanSession(row scanner) (Session, error) {
 	}
 	if restoreMS.Valid {
 		session.RestoreMS = &restoreMS.Int64
+	}
+	if agentHomePath.Valid {
+		session.AgentHomePath = agentHomePath.String
+	}
+	if activeGenerationID.Valid {
+		session.ActiveGenerationID = activeGenerationID.String
 	}
 	if claudeUUID.Valid {
 		session.ClaudeSessionUUID = claudeUUID.String
@@ -346,6 +367,12 @@ func scanSession(row scanner) (Session, error) {
 	}
 	if checkpointPath.Valid {
 		session.CheckpointPath = checkpointPath.String
+	}
+	if failureReason.Valid {
+		session.FailureReason = failureReason.String
+	}
+	if errorClass.Valid {
+		session.ErrorClass = errorClass.String
 	}
 	return session, nil
 }
@@ -394,7 +421,7 @@ func (s *Store) ListSessionsByStatus(ctx context.Context, status string) ([]Sess
 		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, user_id, status, agent, workspace, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path
+SELECT id, user_id, status, agent, workspace, agent_home_path, active_generation_id, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path, failure_reason, error_class
 FROM sessions WHERE status = ? ORDER BY last_activity_at ASC`, status)
 	if err != nil {
 		return nil, err
