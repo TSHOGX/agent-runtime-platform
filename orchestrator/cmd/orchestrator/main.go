@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -99,15 +100,19 @@ func main() {
 	}()
 
 	rt := runtime.New(runtime.Config{
-		RestoreScript:   cfg.RestoreScript,
-		RunscRoot:       cfg.RunscRoot,
-		RunscNetwork:    cfg.RunscNetwork,
-		RunscOverlay2:   cfg.RunscOverlay2,
-		SessionsRoot:    cfg.SessionsRoot,
-		AgentHomesRoot:  cfg.AgentHomesRoot,
-		CheckpointsRoot: cfg.CheckpointsRoot,
-		BundleRoot:      cfg.BundleRoot,
-		DefaultAgent:    cfg.DefaultAgent,
+		RestoreScript:    cfg.RestoreScript,
+		RunscRoot:        cfg.RunscRoot,
+		RunscNetwork:     cfg.RunscNetwork,
+		RunscOverlay2:    cfg.RunscOverlay2,
+		SessionsRoot:     cfg.SessionsRoot,
+		AgentHomesRoot:   cfg.AgentHomesRoot,
+		CheckpointsRoot:  cfg.CheckpointsRoot,
+		BundleRoot:       cfg.BundleRoot,
+		RootFSPath:       filepath.Join(cfg.RepoRoot, "sandbox-image", "rootfs"),
+		DefaultAgent:     cfg.DefaultAgent,
+		Phase7RunDir:     cfg.Phase7.RunDir,
+		SecretsRoot:      cfg.Phase7.Secrets.Root,
+		SecretReadersGID: cfg.Phase7.Secrets.ReadersGID,
 		Claude: runtime.ClaudeConfig{
 			ProxyBindURL:               cfg.Claude.ProxyBindURL,
 			SandboxBaseURL:             cfg.Claude.SandboxBaseURL,

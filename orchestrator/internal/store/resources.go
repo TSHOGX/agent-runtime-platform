@@ -31,6 +31,9 @@ type ResourceAllocatorConfig struct {
 	AgentModel                 string
 	AgentOutputFormat          string
 	DisableNonessentialTraffic bool
+	AnthropicAPIKeySecretID    string
+	AnthropicAuthTokenSecretID string
+	SecretVersion              string
 }
 
 type AllocateGenerationParams struct {
@@ -47,6 +50,38 @@ type GenerationAllocation struct {
 	AgentRuntimeProfileID string
 	Owner                 string
 	LeaseExpiresAt        time.Time
+}
+
+type RuntimeGenerationDetails struct {
+	SessionID                  string
+	GenerationID               string
+	NetworkProfileID           string
+	AgentRuntimeProfileID      string
+	RunscPlatform              string
+	ControlDirPath             string
+	ControlManifestPath        string
+	BundleDirPath              string
+	SpecPath                   string
+	CheckpointPath             string
+	SecretsDirPath             string
+	BridgeDirPath              string
+	LogDirPath                 string
+	ControlManifestDigest      string
+	RunscVersion               string
+	HostGatewayIP              string
+	SandboxBaseURL             string
+	NetnsName                  string
+	NetnsPath                  string
+	EgressPolicyDigest         string
+	Agent                      string
+	Model                      string
+	OutputFormat               string
+	DisableNonessentialTraffic bool
+	RequiresSecretDrop         bool
+	ManifestAnthropicBaseURL   string
+	AnthropicAPIKeySecretID    string
+	AnthropicAuthTokenSecretID string
+	SecretVersion              string
 }
 
 type ReaperParams struct {
@@ -123,6 +158,9 @@ func (s *Store) AllocateGeneration(ctx context.Context, p AllocateGenerationPara
 	networkProfileID := "net_" + generationID
 	agentRuntimeProfileID := agentRuntimeProfileID(p.SessionID, p.Config)
 	resources := buildResourcePaths(p.Config.RunDir, generationID)
+	if p.Config.agent() == "sh" {
+		resources.SecretsDirPath = ""
+	}
 	egressPolicyID := egressPolicyID(p.Config)
 	allowedRules := allowedEgressRules(network.HostGatewayIP, p.Config)
 	allowedRulesJSON, err := json.Marshal(allowedRules)
@@ -150,14 +188,16 @@ INSERT INTO agent_runtime_profiles (
   disable_nonessential_traffic, requires_secret_drop,
   manifest_anthropic_base_url, anthropic_api_key_secret_id,
   anthropic_auth_token_secret_id, secret_version, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(agent, model, output_format, disable_nonessential_traffic,
   requires_secret_drop, manifest_anthropic_base_url,
   anthropic_api_key_secret_id, anthropic_auth_token_secret_id, secret_version
 ) DO NOTHING`,
 		agentRuntimeProfileID, p.Config.agent(), nullableString(p.Config.AgentModel), p.Config.outputFormat(),
 		boolInt(p.Config.DisableNonessentialTraffic), boolInt(p.Config.requiresSecretDrop()),
-		network.SandboxBaseURL, now); err != nil {
+		nullableString(p.Config.manifestAnthropicBaseURL(network.SandboxBaseURL)),
+		nullableString(p.Config.apiKeySecretID()), nullableString(p.Config.authTokenSecretID()),
+		nullableString(p.Config.secretVersion()), now); err != nil {
 		return GenerationAllocation{}, err
 	}
 	if err := tx.QueryRowContext(ctx, `
@@ -169,11 +209,14 @@ WHERE agent = ?
   AND disable_nonessential_traffic = ?
   AND requires_secret_drop = ?
   AND COALESCE(manifest_anthropic_base_url, '') = COALESCE(?, '')
-  AND anthropic_api_key_secret_id IS NULL
-  AND anthropic_auth_token_secret_id IS NULL
-  AND secret_version IS NULL`,
+  AND COALESCE(anthropic_api_key_secret_id, '') = COALESCE(?, '')
+  AND COALESCE(anthropic_auth_token_secret_id, '') = COALESCE(?, '')
+  AND COALESCE(secret_version, '') = COALESCE(?, '')`,
 		p.Config.agent(), nullableString(p.Config.AgentModel), p.Config.outputFormat(),
-		boolInt(p.Config.DisableNonessentialTraffic), boolInt(p.Config.requiresSecretDrop()), network.SandboxBaseURL).Scan(&agentRuntimeProfileID); err != nil {
+		boolInt(p.Config.DisableNonessentialTraffic), boolInt(p.Config.requiresSecretDrop()),
+		nullableString(p.Config.manifestAnthropicBaseURL(network.SandboxBaseURL)),
+		nullableString(p.Config.apiKeySecretID()), nullableString(p.Config.authTokenSecretID()),
+		nullableString(p.Config.secretVersion())).Scan(&agentRuntimeProfileID); err != nil {
 		return GenerationAllocation{}, err
 	}
 
@@ -609,6 +652,107 @@ WHERE status IN ('starting','probing','active','idle','checkpointing','restoring
 	return res.RowsAffected()
 }
 
+func (s *Store) GetRuntimeGenerationDetails(ctx context.Context, sessionID, generationID string) (RuntimeGenerationDetails, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT
+  g.session_id,
+  g.generation_id,
+  g.network_profile_id,
+  g.agent_runtime_profile_id,
+  COALESCE(g.runsc_platform, ''),
+  r.control_dir_path,
+  r.control_manifest_path,
+  r.bundle_dir_path,
+  r.spec_path,
+  COALESCE(r.checkpoint_path, ''),
+  COALESCE(r.secrets_dir_path, ''),
+  r.bridge_dir_path,
+  r.log_dir_path,
+  COALESCE(r.control_manifest_digest, ''),
+  COALESCE(r.runsc_version, ''),
+  n.host_gateway_ip,
+  n.sandbox_base_url,
+  n.netns_name,
+  n.netns_path,
+  e.policy_digest,
+  a.agent,
+  COALESCE(a.model, ''),
+  a.output_format,
+  a.disable_nonessential_traffic,
+  a.requires_secret_drop,
+  COALESCE(a.manifest_anthropic_base_url, ''),
+  COALESCE(a.anthropic_api_key_secret_id, ''),
+  COALESCE(a.anthropic_auth_token_secret_id, ''),
+  COALESCE(a.secret_version, '')
+FROM runtime_generations g
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+JOIN network_profiles n ON n.network_profile_id = g.network_profile_id
+JOIN egress_policies e ON e.egress_policy_id = n.egress_policy_id
+JOIN agent_runtime_profiles a ON a.agent_runtime_profile_id = g.agent_runtime_profile_id
+WHERE g.session_id = ?
+  AND g.generation_id = ?`, sessionID, generationID)
+	var details RuntimeGenerationDetails
+	var disableNonessentialTraffic, requiresSecretDrop int
+	if err := row.Scan(
+		&details.SessionID,
+		&details.GenerationID,
+		&details.NetworkProfileID,
+		&details.AgentRuntimeProfileID,
+		&details.RunscPlatform,
+		&details.ControlDirPath,
+		&details.ControlManifestPath,
+		&details.BundleDirPath,
+		&details.SpecPath,
+		&details.CheckpointPath,
+		&details.SecretsDirPath,
+		&details.BridgeDirPath,
+		&details.LogDirPath,
+		&details.ControlManifestDigest,
+		&details.RunscVersion,
+		&details.HostGatewayIP,
+		&details.SandboxBaseURL,
+		&details.NetnsName,
+		&details.NetnsPath,
+		&details.EgressPolicyDigest,
+		&details.Agent,
+		&details.Model,
+		&details.OutputFormat,
+		&disableNonessentialTraffic,
+		&requiresSecretDrop,
+		&details.ManifestAnthropicBaseURL,
+		&details.AnthropicAPIKeySecretID,
+		&details.AnthropicAuthTokenSecretID,
+		&details.SecretVersion,
+	); err != nil {
+		return RuntimeGenerationDetails{}, err
+	}
+	details.DisableNonessentialTraffic = disableNonessentialTraffic != 0
+	details.RequiresSecretDrop = requiresSecretDrop != 0
+	return details, nil
+}
+
+func (s *Store) RecordGenerationRuntimeArtifacts(ctx context.Context, generationID, controlManifestDigest, runscVersion string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `
+UPDATE runtime_generation_resources
+SET control_manifest_digest = ?,
+    runsc_version = COALESCE(?, runsc_version)
+WHERE generation_id = ?`, controlManifestDigest, nullableString(runscVersion), generationID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE runtime_generations
+SET runsc_version = COALESCE(?, runsc_version)
+WHERE generation_id = ?`, nullableString(runscVersion), generationID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) Start7ATurn(ctx context.Context, sessionID, generationID, owner, content string, now time.Time) (int64, error) {
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -954,6 +1098,43 @@ func (c ResourceAllocatorConfig) outputFormat() string {
 
 func (c ResourceAllocatorConfig) requiresSecretDrop() bool {
 	return c.agent() == "claude"
+}
+
+func (c ResourceAllocatorConfig) manifestAnthropicBaseURL(baseURL string) string {
+	if c.agent() == "sh" {
+		return ""
+	}
+	return strings.TrimSpace(baseURL)
+}
+
+func (c ResourceAllocatorConfig) apiKeySecretID() string {
+	if c.agent() == "sh" {
+		return ""
+	}
+	if strings.TrimSpace(c.AnthropicAPIKeySecretID) == "" {
+		return "anthropic_api_key"
+	}
+	return strings.TrimSpace(c.AnthropicAPIKeySecretID)
+}
+
+func (c ResourceAllocatorConfig) authTokenSecretID() string {
+	if c.agent() == "sh" {
+		return ""
+	}
+	if strings.TrimSpace(c.AnthropicAuthTokenSecretID) == "" {
+		return "anthropic_auth_token"
+	}
+	return strings.TrimSpace(c.AnthropicAuthTokenSecretID)
+}
+
+func (c ResourceAllocatorConfig) secretVersion() string {
+	if c.agent() == "sh" {
+		return ""
+	}
+	if strings.TrimSpace(c.SecretVersion) == "" {
+		return "local"
+	}
+	return strings.TrimSpace(c.SecretVersion)
 }
 
 func (c ResourceAllocatorConfig) hostProxyBindURL() string {

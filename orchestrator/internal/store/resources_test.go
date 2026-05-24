@@ -48,9 +48,30 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ne
 	if generationStatus != "allocating" || networkState != "allocating" || resourceState != "allocating" || hostCIDR != "10.240.0.0/30" {
 		t.Fatalf("unexpected allocation row state: generation=%s network=%s resource=%s cidr=%s", generationStatus, networkState, resourceState, hostCIDR)
 	}
+	details, err := st.GetRuntimeGenerationDetails(ctx, "sess_alloc", allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get runtime generation details: %v", err)
+	}
+	if details.AnthropicAPIKeySecretID != "anthropic_api_key" ||
+		details.AnthropicAuthTokenSecretID != "anthropic_auth_token" ||
+		details.SecretVersion != "local" ||
+		!details.RequiresSecretDrop ||
+		details.SecretsDirPath == "" {
+		t.Fatalf("unexpected claude generation details: %+v", details)
+	}
 
 	if err := st.MarkGenerationResourcesLive(ctx, "sess_alloc", allocation.GenerationID, allocation.Owner, now.Add(time.Second)); err != nil {
 		t.Fatalf("mark resources live: %v", err)
+	}
+	if err := st.RecordGenerationRuntimeArtifacts(ctx, allocation.GenerationID, "digest_a", "runsc test"); err != nil {
+		t.Fatalf("record runtime artifacts: %v", err)
+	}
+	details, err = st.GetRuntimeGenerationDetails(ctx, "sess_alloc", allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get runtime generation details after artifact record: %v", err)
+	}
+	if details.ControlManifestDigest != "digest_a" || details.RunscVersion != "runsc test" {
+		t.Fatalf("runtime artifact details not persisted: %+v", details)
 	}
 	if err := st.FailGeneration(ctx, FailGenerationParams{
 		SessionID:    "sess_alloc",
@@ -80,6 +101,39 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ne
 	}
 	if nextCIDR != "10.240.0.4/30" {
 		t.Fatalf("expected reclaimable first slot to remain reserved, got next cidr %s", nextCIDR)
+	}
+}
+
+func TestAllocateShellGenerationHasNoSecretReferences(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	createStoreSession(t, ctx, st, "sess_shell")
+	cfg := testAllocatorConfig(t)
+	cfg.Agent = "sh"
+	cfg.AgentModel = ""
+	cfg.AgentOutputFormat = "shell_pty"
+
+	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_shell",
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    cfg,
+	})
+	if err != nil {
+		t.Fatalf("allocate shell generation: %v", err)
+	}
+	details, err := st.GetRuntimeGenerationDetails(ctx, "sess_shell", allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get shell generation details: %v", err)
+	}
+	if details.Agent != "sh" ||
+		details.RequiresSecretDrop ||
+		details.SecretsDirPath != "" ||
+		details.AnthropicAPIKeySecretID != "" ||
+		details.AnthropicAuthTokenSecretID != "" ||
+		details.SecretVersion != "" {
+		t.Fatalf("shell generation should not carry secrets: %+v", details)
 	}
 }
 

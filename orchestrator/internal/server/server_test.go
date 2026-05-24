@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -287,6 +288,52 @@ WHERE g.session_id = ? AND r.resource_state = 'live'`, session.ID).Scan(&resourc
 	}
 }
 
+func TestSendMessageReusesActiveGenerationArtifacts(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_reuse", string(sessionstate.Created), time.Now().UTC(), nil)
+	srv := &Server{
+		cfg:     testServerConfig(dir),
+		store:   st,
+		runtime: instantRuntime{},
+		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+	atomic.StoreInt64(&instantRuntimePrepareCalls, 0)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(`{"content":"first"}`))
+	rec := httptest.NewRecorder()
+	srv.sendMessage(rec, req, session.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected first status 202, got %d body %s", rec.Code, rec.Body.String())
+	}
+	waitForSessionStatus(t, ctx, st, session.ID, string(sessionstate.RunningIdle))
+	if got := atomic.LoadInt64(&instantRuntimePrepareCalls); got != 1 {
+		t.Fatalf("first turn prepare calls=%d want 1", got)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(`{"content":"second"}`))
+	rec = httptest.NewRecorder()
+	srv.sendMessage(rec, req, session.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected second status 202, got %d body %s", rec.Code, rec.Body.String())
+	}
+	waitForSessionStatus(t, ctx, st, session.ID, string(sessionstate.RunningIdle))
+	if got := atomic.LoadInt64(&instantRuntimePrepareCalls); got != 1 {
+		t.Fatalf("active generation should reuse prepared artifacts, prepare calls=%d", got)
+	}
+	var turns int
+	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM turns WHERE session_id = ? AND status = 'completed'`, session.ID).Scan(&turns); err != nil {
+		t.Fatalf("count turns: %v", err)
+	}
+	if turns != 2 {
+		t.Fatalf("completed turns=%d want 2", turns)
+	}
+}
+
 func TestSendMessageRejectsExpiredSessionBeforeAllocation(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -345,11 +392,24 @@ func TestDownloadArtifactAllowsNestedRegularFile(t *testing.T) {
 
 type instantRuntime struct{}
 
+var instantRuntimePrepareCalls int64
+
+func (instantRuntime) PrepareGeneration(context.Context, runtime.StartRequest) (runtime.GenerationArtifacts, error) {
+	atomic.AddInt64(&instantRuntimePrepareCalls, 1)
+	return runtime.GenerationArtifacts{
+		BundleDir:      "/tmp/bundle",
+		SpecPath:       "/tmp/bundle/config.json",
+		ManifestPath:   "/tmp/control/session.json",
+		ManifestDigest: "digest",
+		RunscVersion:   "runsc test",
+	}, nil
+}
+
 func (instantRuntime) Start(ctx context.Context, req runtime.StartRequest, output func(runtime.Output)) runtime.Result {
 	if output != nil {
 		output(runtime.Output{Stream: "stdout", Line: `{"type":"result","subtype":"success","result":"ok"}`})
 	}
-	return runtime.Result{}
+	return runtime.Result{ControlManifestDigest: req.PreparedArtifacts.ManifestDigest, RunscVersion: req.PreparedArtifacts.RunscVersion}
 }
 
 func (instantRuntime) Destroy(context.Context, string) error {

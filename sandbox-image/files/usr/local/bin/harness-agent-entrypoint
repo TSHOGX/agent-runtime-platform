@@ -25,14 +25,29 @@ fi
 echo "[entrypoint] loading control file: $CONTROL_FILE" >&2
 if [ "$CONTROL_FORMAT" = "json" ]; then
   # shellcheck disable=SC2016
-  eval "$(
+  CONTROL_EXPORTS="$(
     python3 - "$CONTROL_FILE" <<'PY'
+import hashlib
+import hmac
 import json
 import shlex
 import sys
 
 with open(sys.argv[1], "r", encoding="utf-8") as f:
-    data = json.load(f)
+    raw = json.load(f)
+
+if not isinstance(raw, dict) or "payload" not in raw or "digest" not in raw:
+    raise SystemExit("control manifest must be {payload,digest}")
+
+payload = raw["payload"]
+digest = raw["digest"]
+computed = hashlib.sha256(
+    json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+).hexdigest()
+if not hmac.compare_digest(computed, str(digest)):
+    raise SystemExit("control manifest digest mismatch")
+
+data = payload
 
 def emit(key, value):
     if value is None or value == "":
@@ -42,19 +57,26 @@ def emit(key, value):
     print(f"export {key}={shlex.quote(str(value))}")
 
 emit("SESSION_ID", data.get("session_id"))
-emit("SESSION_WORKSPACE", data.get("session_workspace"))
-emit("HARNESS_AGENT_HOME", data.get("harness_agent_home"))
-emit("HARNESS_AGENT", data.get("harness_agent"))
+emit("GENERATION_ID", data.get("generation_id"))
+emit("NETWORK_PROFILE_ID", data.get("network_profile_id"))
+emit("AGENT_RUNTIME_PROFILE_ID", data.get("agent_runtime_profile_id"))
+emit("MANIFEST_VERSION", data.get("manifest_version"))
+emit("SESSION_WORKSPACE", data.get("workspace_path"))
+emit("HARNESS_AGENT_HOME", data.get("agent_home_path"))
+emit("HARNESS_AGENT", data.get("agent"))
 emit("CLAUDE_SESSION_UUID", data.get("claude_session_uuid"))
-emit("CLAUDE_RESUME", data.get("claude_resume", False))
-emit("CLAUDE_MODEL", data.get("claude_model", "sonnet"))
-emit("CLAUDE_OUTPUT_FORMAT", data.get("claude_output_format", "stream-json"))
+emit("CLAUDE_RESUME", data.get("resume_claude", False))
+emit("CLAUDE_MODEL", data.get("model", "sonnet"))
+emit("CLAUDE_OUTPUT_FORMAT", data.get("output_format", "stream-json"))
 emit("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", data.get("claude_code_disable_nonessential_traffic", True))
 emit("ANTHROPIC_BASE_URL", data.get("anthropic_base_url"))
-emit("ANTHROPIC_API_KEY", data.get("anthropic_api_key"))
-emit("ANTHROPIC_AUTH_TOKEN", data.get("anthropic_auth_token"))
+emit("ANTHROPIC_API_KEY_SECRET_ID", data.get("anthropic_api_key_secret_id"))
+emit("ANTHROPIC_AUTH_TOKEN_SECRET_ID", data.get("anthropic_auth_token_secret_id"))
+emit("SECRET_VERSION", data.get("secret_version"))
+emit("SECRET_MOUNT_PATH", data.get("secret_mount_path"))
 PY
-  )"
+  )" || exit 65
+  eval "$CONTROL_EXPORTS"
 else
   # shellcheck disable=SC1090
   . "$CONTROL_FILE"
@@ -63,13 +85,38 @@ fi
 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export PATH
 
-: "${ANTHROPIC_BASE_URL:?ANTHROPIC_BASE_URL is required in control file}"
-: "${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY is required in control file}"
-: "${ANTHROPIC_AUTH_TOKEN:=$ANTHROPIC_API_KEY}"
-export ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
 [ -n "${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-}" ] && export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
 
 : "${SESSION_ID:?SESSION_ID is required in control file}"
+
+check_expected() {
+  actual="$1"
+  expected="$2"
+  label="$3"
+  if [ -n "$expected" ] && [ "$actual" != "$expected" ]; then
+    echo "[entrypoint] ${label} mismatch" >&2
+    exit 65
+  fi
+}
+
+check_expected "$SESSION_ID" "${HARNESS_EXPECTED_SESSION_ID:-}" "session_id"
+check_expected "${GENERATION_ID:-}" "${HARNESS_EXPECTED_GENERATION_ID:-}" "generation_id"
+check_expected "${NETWORK_PROFILE_ID:-}" "${HARNESS_EXPECTED_NETWORK_PROFILE_ID:-}" "network_profile_id"
+check_expected "${AGENT_RUNTIME_PROFILE_ID:-}" "${HARNESS_EXPECTED_AGENT_RUNTIME_PROFILE_ID:-}" "agent_runtime_profile_id"
+check_expected "${MANIFEST_VERSION:-}" "${HARNESS_EXPECTED_MANIFEST_VERSION:-}" "manifest_version"
+check_expected "${ANTHROPIC_API_KEY_SECRET_ID:-}" "${HARNESS_EXPECTED_API_KEY_SECRET_ID:-}" "anthropic_api_key_secret_id"
+check_expected "${ANTHROPIC_AUTH_TOKEN_SECRET_ID:-}" "${HARNESS_EXPECTED_AUTH_TOKEN_SECRET_ID:-}" "anthropic_auth_token_secret_id"
+check_expected "${SECRET_VERSION:-}" "${HARNESS_EXPECTED_SECRET_VERSION:-}" "secret_version"
+
+if [ "${HARNESS_AGENT:-claude}" = "claude" ]; then
+  : "${ANTHROPIC_BASE_URL:?ANTHROPIC_BASE_URL is required for claude agent}"
+  : "${SECRET_MOUNT_PATH:?SECRET_MOUNT_PATH is required for claude agent}"
+  : "${ANTHROPIC_API_KEY_SECRET_ID:?ANTHROPIC_API_KEY_SECRET_ID is required for claude agent}"
+  : "${ANTHROPIC_AUTH_TOKEN_SECRET_ID:?ANTHROPIC_AUTH_TOKEN_SECRET_ID is required for claude agent}"
+  : "${SECRET_VERSION:?SECRET_VERSION is required for claude agent}"
+  : "${HARNESS_SECRET_READERS_GID:?HARNESS_SECRET_READERS_GID is required for claude agent}"
+  export ANTHROPIC_BASE_URL SECRET_MOUNT_PATH ANTHROPIC_API_KEY_SECRET_ID ANTHROPIC_AUTH_TOKEN_SECRET_ID SECRET_VERSION
+fi
 
 SESSION_WORKSPACE="${SESSION_WORKSPACE:-/sessions/$SESSION_ID}"
 mkdir -p "$SESSION_WORKSPACE"
@@ -117,9 +164,19 @@ case "${HARNESS_AGENT:-claude}" in
         set -- "$@" --resume "$CLAUDE_SESSION_UUID"
       fi
       set +e
-      printf '%s\n' "$turn" | setpriv --reuid "$AGENT_UID" --regid "$AGENT_GID" --clear-groups \
+      printf '%s\n' "$turn" | setpriv --reuid "$AGENT_UID" --regid "$AGENT_GID" --groups "$HARNESS_SECRET_READERS_GID" \
         env HOME="$AGENT_HOME" USER="$AGENT_USER" LOGNAME="$AGENT_USER" \
-        "$@"
+        ANTHROPIC_BASE_URL="$ANTHROPIC_BASE_URL" \
+        SECRET_MOUNT_PATH="$SECRET_MOUNT_PATH" \
+        ANTHROPIC_API_KEY_SECRET_ID="$ANTHROPIC_API_KEY_SECRET_ID" \
+        ANTHROPIC_AUTH_TOKEN_SECRET_ID="$ANTHROPIC_AUTH_TOKEN_SECRET_ID" \
+        SECRET_VERSION="$SECRET_VERSION" \
+        sh -c '
+          ANTHROPIC_API_KEY="$(cat "$SECRET_MOUNT_PATH/$ANTHROPIC_API_KEY_SECRET_ID/$SECRET_VERSION")"
+          ANTHROPIC_AUTH_TOKEN="$(cat "$SECRET_MOUNT_PATH/$ANTHROPIC_AUTH_TOKEN_SECRET_ID/$SECRET_VERSION")"
+          export ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
+          exec "$@"
+        ' sh "$@"
       status=$?
       set -e
       if [ "$status" -ne 0 ]; then

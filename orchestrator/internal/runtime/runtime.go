@@ -2,7 +2,9 @@ package runtime
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,8 +15,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 
 	"harness-platform/orchestrator/internal/agents"
+	"harness-platform/orchestrator/internal/store"
 )
 
 type Config struct {
@@ -26,9 +31,13 @@ type Config struct {
 	AgentHomesRoot        string
 	CheckpointsRoot       string
 	BundleRoot            string
+	RootFSPath            string
 	DefaultAgent          string
 	Claude                ClaudeConfig
 	RestoreFromCheckpoint bool
+	Phase7RunDir          string
+	SecretsRoot           string
+	SecretReadersGID      int
 }
 
 const (
@@ -52,11 +61,14 @@ type ClaudeConfig struct {
 type StartRequest struct {
 	SessionID         string
 	RestoreID         string
+	GenerationID      string
 	Agent             string
 	FirstMessage      string
 	ClaudeSessionUUID string
 	ResumeClaude      bool
 	Done              <-chan struct{}
+	Generation        store.RuntimeGenerationDetails
+	PreparedArtifacts GenerationArtifacts
 }
 
 type Output struct {
@@ -65,24 +77,92 @@ type Output struct {
 }
 
 type Result struct {
-	RestoreMS *int64
-	Err       error
+	RestoreMS             *int64
+	ControlManifestDigest string
+	RunscVersion          string
+	Err                   error
 }
 
 type controlManifest struct {
 	SessionID                            string `json:"session_id"`
-	SessionWorkspace                     string `json:"session_workspace"`
-	HarnessAgentHome                     string `json:"harness_agent_home"`
-	HarnessAgent                         string `json:"harness_agent"`
+	GenerationID                         string `json:"generation_id"`
+	CreatedAt                            string `json:"created_at"`
+	AttemptID                            string `json:"attempt_id"`
+	NetworkProfileID                     string `json:"network_profile_id"`
+	AgentRuntimeProfileID                string `json:"agent_runtime_profile_id"`
+	Agent                                string `json:"agent"`
 	ClaudeSessionUUID                    string `json:"claude_session_uuid,omitempty"`
-	ClaudeResume                         bool   `json:"claude_resume"`
-	ProxyBindURL                         string `json:"proxy_bind_url"`
-	AnthropicBaseURL                     string `json:"anthropic_base_url"`
-	AnthropicAPIKey                      string `json:"anthropic_api_key"`
-	AnthropicAuthToken                   string `json:"anthropic_auth_token"`
+	ResumeClaude                         bool   `json:"resume_claude"`
+	RunscPlatform                        string `json:"runsc_platform"`
+	RunscVersion                         string `json:"runsc_version"`
+	AnthropicBaseURL                     string `json:"anthropic_base_url,omitempty"`
+	AnthropicAPIKeySecretID              string `json:"anthropic_api_key_secret_id,omitempty"`
+	AnthropicAuthTokenSecretID           string `json:"anthropic_auth_token_secret_id,omitempty"`
+	SecretVersion                        string `json:"secret_version,omitempty"`
+	SecretMountPath                      string `json:"secret_mount_path,omitempty"`
+	Model                                string `json:"model,omitempty"`
+	OutputFormat                         string `json:"output_format"`
+	WorkspacePath                        string `json:"workspace_path"`
+	AgentHomePath                        string `json:"agent_home_path"`
+	HostHostname                         string `json:"host_hostname"`
+	NetnsName                            string `json:"netns_name"`
+	HostGatewayIP                        string `json:"host_gateway_ip"`
+	BridgeDirPath                        string `json:"bridge_dir_path"`
+	BundleDigest                         string `json:"bundle_digest"`
+	RuntimeConfigDigest                  string `json:"runtime_config_digest"`
+	SpecDigest                           string `json:"spec_digest"`
+	EgressPolicyDigest                   string `json:"egress_policy_digest"`
+	ManifestVersion                      int    `json:"manifest_version"`
 	ClaudeCodeDisableNonessentialTraffic bool   `json:"claude_code_disable_nonessential_traffic"`
-	ClaudeModel                          string `json:"claude_model"`
-	ClaudeOutputFormat                   string `json:"claude_output_format"`
+	ProxyBindURL                         string `json:"proxy_bind_url"`
+}
+
+type controlManifestFile struct {
+	Payload controlManifest `json:"payload"`
+	Digest  string          `json:"digest"`
+}
+
+type runtimeSpec struct {
+	OCIVersion string `json:"ociVersion"`
+	Process    struct {
+		Terminal        bool     `json:"terminal"`
+		User            specUser `json:"user"`
+		Args            []string `json:"args"`
+		Env             []string `json:"env"`
+		Cwd             string   `json:"cwd"`
+		Capabilities    any      `json:"capabilities,omitempty"`
+		Rlimits         any      `json:"rlimits,omitempty"`
+		NoNewPrivileges bool     `json:"noNewPrivileges"`
+	} `json:"process"`
+	Root     specRoot        `json:"root"`
+	Hostname string          `json:"hostname"`
+	Mounts   []specMount     `json:"mounts"`
+	Linux    json.RawMessage `json:"linux"`
+}
+
+type specUser struct {
+	UID int `json:"uid"`
+	GID int `json:"gid"`
+}
+
+type specRoot struct {
+	Path     string `json:"path"`
+	Readonly bool   `json:"readonly"`
+}
+
+type specMount struct {
+	Destination string   `json:"destination"`
+	Type        string   `json:"type"`
+	Source      string   `json:"source"`
+	Options     []string `json:"options,omitempty"`
+}
+
+type GenerationArtifacts struct {
+	BundleDir      string
+	SpecPath       string
+	ManifestPath   string
+	ManifestDigest string
+	RunscVersion   string
 }
 
 type Runtime struct {
@@ -140,6 +220,24 @@ func (r *Runtime) Start(ctx context.Context, req StartRequest, output func(Outpu
 
 	// Fresh start (cold path)
 	return r.startFresh(ctx, req, output)
+}
+
+func (r *Runtime) PrepareGeneration(ctx context.Context, req StartRequest) (GenerationArtifacts, error) {
+	return r.renderGenerationArtifacts(ctx, req)
+}
+
+func (r *Runtime) generationArtifacts(ctx context.Context, req StartRequest) (GenerationArtifacts, error) {
+	if strings.TrimSpace(req.Generation.GenerationID) == "" {
+		return GenerationArtifacts{}, fmt.Errorf("generation details are required")
+	}
+	artifacts := req.PreparedArtifacts
+	if strings.TrimSpace(artifacts.BundleDir) != "" &&
+		strings.TrimSpace(artifacts.SpecPath) != "" &&
+		strings.TrimSpace(artifacts.ManifestPath) != "" &&
+		strings.TrimSpace(artifacts.ManifestDigest) != "" {
+		return artifacts, nil
+	}
+	return r.renderGenerationArtifacts(ctx, req)
 }
 
 func resolveAgent(agent, fallback string) (string, error) {
@@ -224,30 +322,563 @@ func (r *Runtime) readRestoreMS(sessionID string) *int64 {
 	return &value
 }
 
-func buildControlContent(req StartRequest, runscNetwork string, claudeCfg ClaudeConfig) string {
-	claudeCfg = normalizeClaudeConfig(claudeCfg)
-	sessionWorkspace := filepath.Join("/sessions", req.SessionID)
-	agentHome := filepath.Join("/agent-homes", req.SessionID)
-	manifest := controlManifest{
-		SessionID:                            req.SessionID,
-		SessionWorkspace:                     sessionWorkspace,
-		HarnessAgentHome:                     agentHome,
-		HarnessAgent:                         req.Agent,
-		ClaudeSessionUUID:                    req.ClaudeSessionUUID,
-		ClaudeResume:                         req.ResumeClaude,
-		ProxyBindURL:                         claudeCfg.ProxyBindURL,
-		AnthropicBaseURL:                     defaultClaudeBaseURL(runscNetwork, claudeCfg),
-		AnthropicAPIKey:                      claudeCfg.APIKey,
-		AnthropicAuthToken:                   claudeCfg.AuthToken,
-		ClaudeCodeDisableNonessentialTraffic: claudeCfg.DisableNonessentialTraffic,
-		ClaudeModel:                          claudeCfg.Model,
-		ClaudeOutputFormat:                   claudeCfg.OutputFormat,
+func (r *Runtime) renderGenerationArtifacts(ctx context.Context, req StartRequest) (GenerationArtifacts, error) {
+	details := req.Generation
+	if strings.TrimSpace(details.GenerationID) == "" {
+		return GenerationArtifacts{}, fmt.Errorf("generation details are required")
 	}
-	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err := validateGenerationDetails(req); err != nil {
+		return GenerationArtifacts{}, err
+	}
+	if strings.TrimSpace(details.SpecPath) == "" || strings.TrimSpace(details.ControlManifestPath) == "" {
+		return GenerationArtifacts{}, fmt.Errorf("generation resource paths are required")
+	}
+	if err := r.prepareGenerationDirs(req); err != nil {
+		return GenerationArtifacts{}, err
+	}
+	if err := r.materializeSecrets(details); err != nil {
+		return GenerationArtifacts{}, err
+	}
+	spec, specDigest, err := r.renderRuntimeSpec(req)
 	if err != nil {
-		return ""
+		return GenerationArtifacts{}, err
 	}
-	return string(data) + "\n"
+	if err := writeJSONFileAtomic(details.SpecPath, spec, 0o644); err != nil {
+		return GenerationArtifacts{}, fmt.Errorf("write runtime spec: %w", err)
+	}
+	runscVersion := r.runscVersion(ctx)
+	bundleDigest := digestHex(mustCanonicalJSON(map[string]any{
+		"bundle_dir":  filepath.Clean(details.BundleDirPath),
+		"rootfs":      spec.Root.Path,
+		"spec_digest": specDigest,
+	}))
+	runtimeConfigDigest := digestHex(mustCanonicalJSON(map[string]any{
+		"runsc_network":  r.cfg.RunscNetwork,
+		"runsc_overlay2": r.cfg.RunscOverlay2,
+		"runsc_platform": details.RunscPlatform,
+		"rootfs":         spec.Root.Path,
+	}))
+	manifest, err := r.buildGenerationManifest(req, runscVersion, bundleDigest, runtimeConfigDigest, specDigest)
+	if err != nil {
+		return GenerationArtifacts{}, err
+	}
+	manifestDigest, manifestFile, err := wrapControlManifest(manifest)
+	if err != nil {
+		return GenerationArtifacts{}, err
+	}
+	if err := writeJSONFileAtomic(details.ControlManifestPath, manifestFile, 0o644); err != nil {
+		return GenerationArtifacts{}, fmt.Errorf("write control manifest: %w", err)
+	}
+	return GenerationArtifacts{
+		BundleDir:      details.BundleDirPath,
+		SpecPath:       details.SpecPath,
+		ManifestPath:   details.ControlManifestPath,
+		ManifestDigest: manifestDigest,
+		RunscVersion:   runscVersion,
+	}, nil
+}
+
+func (r *Runtime) prepareGenerationDirs(req StartRequest) error {
+	details := req.Generation
+	for _, path := range []string{
+		filepath.Dir(details.ControlManifestPath),
+		details.BundleDirPath,
+		filepath.Dir(details.SpecPath),
+		details.BridgeDirPath,
+		details.LogDirPath,
+	} {
+		if strings.TrimSpace(path) == "" {
+			continue
+		}
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			return fmt.Errorf("create generation dir %s: %w", path, err)
+		}
+	}
+	if strings.TrimSpace(details.SecretsDirPath) != "" {
+		if err := ensureSecretDir(details.SecretsDirPath, r.cfg.SecretReadersGID); err != nil {
+			return fmt.Errorf("create generation secrets dir: %w", err)
+		}
+	}
+	return r.prepareSessionDirs(req.SessionID)
+}
+
+func (r *Runtime) materializeSecrets(details store.RuntimeGenerationDetails) error {
+	if !details.RequiresSecretDrop {
+		if strings.TrimSpace(details.SecretsDirPath) != "" {
+			return fmt.Errorf("shell generation must not carry a secrets dir")
+		}
+		return nil
+	}
+	if strings.TrimSpace(details.SecretsDirPath) == "" {
+		return fmt.Errorf("secret-backed generation requires secrets dir")
+	}
+	if strings.TrimSpace(r.cfg.SecretsRoot) == "" {
+		return fmt.Errorf("secret-backed generation requires secrets root")
+	}
+	if r.cfg.SecretReadersGID <= 0 {
+		return fmt.Errorf("secret-backed generation requires secret readers gid")
+	}
+	if err := ensureSecretDir(details.SecretsDirPath, r.cfg.SecretReadersGID); err != nil {
+		return fmt.Errorf("create materialized secrets root: %w", err)
+	}
+	secrets := map[string]string{
+		details.AnthropicAPIKeySecretID:    r.cfg.Claude.APIKey,
+		details.AnthropicAuthTokenSecretID: r.cfg.Claude.AuthToken,
+	}
+	for secretID, fallbackValue := range secrets {
+		if strings.TrimSpace(secretID) == "" || strings.TrimSpace(details.SecretVersion) == "" {
+			return fmt.Errorf("secret-backed generation requires secret id and version")
+		}
+		src := filepath.Join(r.cfg.SecretsRoot, secretID, details.SecretVersion)
+		if err := publishLocalSecretVersion(src, fallbackValue, r.cfg.SecretReadersGID); err != nil {
+			return err
+		}
+		dst := filepath.Join(details.SecretsDirPath, secretID, details.SecretVersion)
+		if err := materializeSecretVersion(src, dst, r.cfg.SecretReadersGID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func publishLocalSecretVersion(path, value string, readersGID int) error {
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("secret %s is missing and no publish value was configured", path)
+	}
+	if readersGID <= 0 {
+		return fmt.Errorf("secret readers gid must be > 0")
+	}
+	if err := ensureSecretDir(filepath.Dir(path), readersGID); err != nil {
+		return fmt.Errorf("create secret dir: %w", err)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o440)
+	if err != nil {
+		if os.IsExist(err) {
+			return validateSecretVersion(path, readersGID)
+		}
+		return fmt.Errorf("publish secret version: %w", err)
+	}
+	if _, err := file.WriteString(value); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write secret version: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("sync secret version: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close secret version: %w", err)
+	}
+	if err := chownPathIfNeeded(path, readersGID); err != nil {
+		return fmt.Errorf("chown secret version: %w", err)
+	}
+	if err := os.Chmod(path, 0o440); err != nil {
+		return fmt.Errorf("chmod secret version: %w", err)
+	}
+	return nil
+}
+
+func materializeSecretVersion(src, dst string, readersGID int) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return fmt.Errorf("stat secret version %s: %w", src, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("secret version %s is a directory", src)
+	}
+	if err := validateSecretVersion(src, readersGID); err != nil {
+		return err
+	}
+	if err := ensureSecretDir(filepath.Dir(dst), readersGID); err != nil {
+		return fmt.Errorf("create materialized secret dir: %w", err)
+	}
+	if err := os.Link(src, dst); err == nil {
+		return validateSecretVersion(dst, readersGID)
+	} else if os.IsExist(err) {
+		return validateSecretVersion(dst, readersGID)
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("open secret version: %w", err)
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o440)
+	if err != nil {
+		if os.IsExist(err) {
+			return validateSecretVersion(dst, readersGID)
+		}
+		return fmt.Errorf("create materialized secret: %w", err)
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return fmt.Errorf("copy materialized secret: %w", err)
+	}
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		return fmt.Errorf("sync materialized secret: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("close materialized secret: %w", err)
+	}
+	if err := chownPathIfNeeded(dst, readersGID); err != nil {
+		return fmt.Errorf("chown materialized secret: %w", err)
+	}
+	if err := os.Chmod(dst, 0o440); err != nil {
+		return fmt.Errorf("chmod materialized secret: %w", err)
+	}
+	return validateSecretVersion(dst, readersGID)
+}
+
+func ensureSecretDir(path string, readersGID int) error {
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("secret dir path is required")
+	}
+	if err := os.MkdirAll(path, 0o750); err != nil {
+		return err
+	}
+	current := filepath.Clean(path)
+	var dirs []string
+	for {
+		dirs = append(dirs, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		info, err := os.Stat(parent)
+		if err != nil || !info.IsDir() || info.Mode().Perm() != 0o750 {
+			break
+		}
+		current = parent
+	}
+	for i := len(dirs) - 1; i >= 0; i-- {
+		if err := chownPathIfNeeded(dirs[i], readersGID); err != nil {
+			return err
+		}
+		if err := os.Chmod(dirs[i], 0o750); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func chownPathIfNeeded(path string, readersGID int) error {
+	if readersGID <= 0 {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("stat ownership unavailable for %s", path)
+	}
+	if int(stat.Uid) == os.Getuid() && int(stat.Gid) == readersGID {
+		return nil
+	}
+	return os.Chown(path, os.Getuid(), readersGID)
+}
+
+func validateSecretVersion(path string, readersGID int) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("stat secret version %s: %w", path, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("secret version %s is a directory", path)
+	}
+	if mode := info.Mode().Perm(); mode != 0o440 {
+		return fmt.Errorf("secret version %s must have mode 0440, got %04o", path, mode)
+	}
+	if readersGID > 0 {
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			return fmt.Errorf("stat ownership unavailable for %s", path)
+		}
+		if int(stat.Gid) != readersGID {
+			return fmt.Errorf("secret version %s must have group %d, got %d", path, readersGID, stat.Gid)
+		}
+	}
+	return nil
+}
+
+func (r *Runtime) buildGenerationManifest(req StartRequest, runscVersion, bundleDigest, runtimeConfigDigest, specDigest string) (controlManifest, error) {
+	details := req.Generation
+	hostname, err := os.Hostname()
+	if err != nil {
+		return controlManifest{}, err
+	}
+	agentHomePath := filepath.Join("/agent-homes", req.SessionID)
+	workspacePath := filepath.Join("/sessions", req.SessionID)
+	secretMountPath := ""
+	if details.RequiresSecretDrop {
+		secretMountPath = "/harness-secrets"
+	}
+	return controlManifest{
+		SessionID:                            req.SessionID,
+		GenerationID:                         details.GenerationID,
+		CreatedAt:                            time.Now().UTC().Format(time.RFC3339Nano),
+		AttemptID:                            "attempt-0",
+		NetworkProfileID:                     details.NetworkProfileID,
+		AgentRuntimeProfileID:                details.AgentRuntimeProfileID,
+		Agent:                                req.Agent,
+		ClaudeSessionUUID:                    req.ClaudeSessionUUID,
+		ResumeClaude:                         req.ResumeClaude,
+		RunscPlatform:                        defaultString(details.RunscPlatform, "systrap"),
+		RunscVersion:                         runscVersion,
+		AnthropicBaseURL:                     details.ManifestAnthropicBaseURL,
+		AnthropicAPIKeySecretID:              details.AnthropicAPIKeySecretID,
+		AnthropicAuthTokenSecretID:           details.AnthropicAuthTokenSecretID,
+		SecretVersion:                        details.SecretVersion,
+		SecretMountPath:                      secretMountPath,
+		Model:                                details.Model,
+		OutputFormat:                         details.OutputFormat,
+		WorkspacePath:                        workspacePath,
+		AgentHomePath:                        agentHomePath,
+		HostHostname:                         hostname,
+		NetnsName:                            details.NetnsName,
+		HostGatewayIP:                        details.HostGatewayIP,
+		BridgeDirPath:                        details.BridgeDirPath,
+		BundleDigest:                         bundleDigest,
+		RuntimeConfigDigest:                  runtimeConfigDigest,
+		SpecDigest:                           specDigest,
+		EgressPolicyDigest:                   details.EgressPolicyDigest,
+		ManifestVersion:                      1,
+		ClaudeCodeDisableNonessentialTraffic: details.DisableNonessentialTraffic,
+		ProxyBindURL:                         r.cfg.Claude.ProxyBindURL,
+	}, nil
+}
+
+func validateGenerationDetails(req StartRequest) error {
+	details := req.Generation
+	if strings.TrimSpace(details.SessionID) != "" && strings.TrimSpace(req.SessionID) != "" && details.SessionID != req.SessionID {
+		return fmt.Errorf("generation session mismatch")
+	}
+	if strings.TrimSpace(req.GenerationID) != "" && req.GenerationID != details.GenerationID {
+		return fmt.Errorf("generation id mismatch")
+	}
+	if strings.TrimSpace(details.Agent) != "" && strings.TrimSpace(req.Agent) != "" && details.Agent != req.Agent {
+		return fmt.Errorf("generation agent mismatch")
+	}
+	if !details.RequiresSecretDrop {
+		if strings.TrimSpace(details.SecretsDirPath) != "" ||
+			strings.TrimSpace(details.AnthropicAPIKeySecretID) != "" ||
+			strings.TrimSpace(details.AnthropicAuthTokenSecretID) != "" ||
+			strings.TrimSpace(details.SecretVersion) != "" {
+			return fmt.Errorf("shell_secret_disallowed")
+		}
+		return nil
+	}
+	if strings.TrimSpace(details.SecretsDirPath) == "" ||
+		strings.TrimSpace(details.AnthropicAPIKeySecretID) == "" ||
+		strings.TrimSpace(details.AnthropicAuthTokenSecretID) == "" ||
+		strings.TrimSpace(details.SecretVersion) == "" {
+		return fmt.Errorf("secret-backed generation requires secret references")
+	}
+	return nil
+}
+
+func wrapControlManifest(manifest controlManifest) (string, controlManifestFile, error) {
+	payloadBytes, err := canonicalJSON(manifest)
+	if err != nil {
+		return "", controlManifestFile{}, err
+	}
+	digest := digestHex(payloadBytes)
+	return digest, controlManifestFile{Payload: manifest, Digest: digest}, nil
+}
+
+func (r *Runtime) renderRuntimeSpec(req StartRequest) (runtimeSpec, string, error) {
+	var spec runtimeSpec
+	details := req.Generation
+	spec.OCIVersion = "1.0.2"
+	spec.Process.Terminal = false
+	spec.Process.User = specUser{UID: 0, GID: 0}
+	spec.Process.Args = []string{"/usr/local/bin/harness-agent-entrypoint"}
+	spec.Process.Env = []string{
+		"PATH=/usr/local/bin:/usr/bin:/bin",
+		"LANG=C.UTF-8",
+		"MPLCONFIGDIR=/tmp/matplotlib",
+	}
+	spec.Process.Cwd = "/"
+	spec.Process.Capabilities = map[string]any{
+		"bounding":    []string{"CAP_AUDIT_WRITE", "CAP_CHOWN", "CAP_KILL", "CAP_NET_BIND_SERVICE", "CAP_SETGID", "CAP_SETUID"},
+		"effective":   []string{"CAP_AUDIT_WRITE", "CAP_CHOWN", "CAP_KILL", "CAP_NET_BIND_SERVICE", "CAP_SETGID", "CAP_SETUID"},
+		"inheritable": []string{},
+		"permitted":   []string{"CAP_AUDIT_WRITE", "CAP_CHOWN", "CAP_KILL", "CAP_NET_BIND_SERVICE", "CAP_SETGID", "CAP_SETUID"},
+		"ambient":     []string{},
+	}
+	spec.Process.Rlimits = []map[string]any{{"type": "RLIMIT_NOFILE", "hard": 1024, "soft": 1024}}
+	spec.Process.NoNewPrivileges = true
+	spec.Root = specRoot{Path: r.rootFSPath(), Readonly: false}
+	spec.Hostname = "harness-gen-" + shortID(details.GenerationID)
+	spec.Process.Env = append(spec.Process.Env,
+		"HARNESS_EXPECTED_SESSION_ID="+req.SessionID,
+		"HARNESS_EXPECTED_GENERATION_ID="+details.GenerationID,
+		"HARNESS_EXPECTED_NETWORK_PROFILE_ID="+details.NetworkProfileID,
+		"HARNESS_EXPECTED_AGENT_RUNTIME_PROFILE_ID="+details.AgentRuntimeProfileID,
+		"HARNESS_EXPECTED_MANIFEST_VERSION=1",
+		"HARNESS_EXPECTED_API_KEY_SECRET_ID="+details.AnthropicAPIKeySecretID,
+		"HARNESS_EXPECTED_AUTH_TOKEN_SECRET_ID="+details.AnthropicAuthTokenSecretID,
+		"HARNESS_EXPECTED_SECRET_VERSION="+details.SecretVersion,
+		fmt.Sprintf("HARNESS_SECRET_READERS_GID=%d", r.cfg.SecretReadersGID),
+	)
+	spec.Mounts = []specMount{
+		{Destination: "/proc", Type: "proc", Source: "proc"},
+		{Destination: "/dev", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
+		{Destination: "/dev/pts", Type: "devpts", Source: "devpts", Options: []string{"nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620", "gid=5"}},
+		{Destination: "/dev/shm", Type: "tmpfs", Source: "shm", Options: []string{"nosuid", "noexec", "nodev", "mode=1777", "size=65536k"}},
+		{Destination: "/dev/mqueue", Type: "mqueue", Source: "mqueue", Options: []string{"nosuid", "noexec", "nodev"}},
+		{Destination: "/sys", Type: "sysfs", Source: "sysfs", Options: []string{"nosuid", "noexec", "nodev", "ro"}},
+		{Destination: "/sessions", Type: "bind", Source: r.cfg.SessionsRoot, Options: []string{"rbind", "rw"}},
+		{Destination: "/agent-homes", Type: "bind", Source: r.cfg.AgentHomesRoot, Options: []string{"rbind", "rw"}},
+		{Destination: "/harness-control", Type: "bind", Source: details.ControlDirPath, Options: []string{"rbind", "ro"}},
+	}
+	if schemaPack := r.schemaPackPath(); schemaPack != "" {
+		spec.Mounts = append(spec.Mounts, specMount{Destination: "/schema-pack", Type: "bind", Source: schemaPack, Options: []string{"rbind", "ro"}})
+	}
+	if details.RequiresSecretDrop {
+		spec.Mounts = append(spec.Mounts, specMount{
+			Destination: "/harness-secrets",
+			Type:        "bind",
+			Source:      details.SecretsDirPath,
+			Options:     []string{"rbind", "ro", "nosuid", "nodev", "noexec"},
+		})
+	}
+	linux := map[string]any{
+		"resources": map[string]any{
+			"memory": map[string]any{"limit": 1073741824},
+			"cpu":    map[string]any{"shares": 1024},
+			"pids":   map[string]any{"limit": 256},
+		},
+		"namespaces": []map[string]any{
+			{"type": "pid"},
+			{"type": "ipc"},
+			{"type": "uts"},
+			{"type": "mount"},
+		},
+	}
+	if strings.EqualFold(strings.TrimSpace(r.cfg.RunscNetwork), "sandbox") {
+		linux["namespaces"] = append(linux["namespaces"].([]map[string]any), map[string]any{"type": "network", "path": "/var/run/netns/phase1-demo"})
+	}
+	linuxBytes, err := canonicalJSON(linux)
+	if err != nil {
+		return runtimeSpec{}, "", err
+	}
+	spec.Linux = linuxBytes
+	payload, err := canonicalJSON(spec)
+	if err != nil {
+		return runtimeSpec{}, "", err
+	}
+	return spec, digestHex(payload), nil
+}
+
+func (r *Runtime) rootFSPath() string {
+	if strings.TrimSpace(r.cfg.RootFSPath) != "" {
+		return strings.TrimSpace(r.cfg.RootFSPath)
+	}
+	return filepath.Join(r.repoRoot(), "sandbox-image", "rootfs")
+}
+
+func (r *Runtime) schemaPackPath() string {
+	path := filepath.Join(r.repoRoot(), "schema-pack")
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+	return ""
+}
+
+func (r *Runtime) repoRoot() string {
+	if strings.TrimSpace(r.cfg.BundleRoot) == "" {
+		wd, err := os.Getwd()
+		if err == nil {
+			return filepath.Dir(wd)
+		}
+		return "/home/harness-platform"
+	}
+	return filepath.Clean(filepath.Join(r.cfg.BundleRoot, "..", ".."))
+}
+
+func writeJSONFileAtomic(path string, value any, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	file, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+	if err != nil {
+		return err
+	}
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(value); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	parent, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer parent.Close()
+	return parent.Sync()
+}
+
+func canonicalJSON(value any) ([]byte, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	var normalized any
+	if err := json.Unmarshal(data, &normalized); err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(normalized); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+}
+
+func mustCanonicalJSON(value any) []byte {
+	data, err := canonicalJSON(value)
+	if err != nil {
+		return []byte("{}")
+	}
+	return data
+}
+
+func digestHex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func shortID(id string) string {
+	token := strings.NewReplacer("gen_", "", "-", "").Replace(id)
+	if len(token) > 12 {
+		return token[:12]
+	}
+	if token == "" {
+		return "unknown"
+	}
+	return token
+}
+
+func (r *Runtime) runscVersion(ctx context.Context) string {
+	out, err := exec.CommandContext(ctx, "runsc", "--version").CombinedOutput()
+	if err != nil {
+		return "unknown"
+	}
+	return strings.TrimSpace(strings.Join(strings.Fields(string(out)), " "))
 }
 
 func normalizeClaudeConfig(cfg ClaudeConfig) ClaudeConfig {
@@ -283,13 +914,6 @@ func (r *Runtime) prepareSessionDirs(sessionID string) error {
 		}
 	}
 	return nil
-}
-
-func defaultClaudeBaseURL(runscNetwork string, claudeCfg ClaudeConfig) string {
-	if strings.EqualFold(strings.TrimSpace(runscNetwork), "host") {
-		return claudeCfg.ProxyBindURL
-	}
-	return claudeCfg.SandboxBaseURL
 }
 
 func (r *Runtime) ensureSandboxNetwork(ctx context.Context) error {
@@ -473,6 +1097,11 @@ func (r *Runtime) startFresh(ctx context.Context, req StartRequest, output func(
 
 	hub.Publish(OutputEvent{Stream: "runtime", Line: "starting fresh container"})
 
+	artifacts, err := r.generationArtifacts(ctx, req)
+	if err != nil {
+		return Result{Err: err}
+	}
+	req.PreparedArtifacts = artifacts
 	if err := r.prepareSessionDirs(req.SessionID); err != nil {
 		return Result{Err: err}
 	}
@@ -480,22 +1109,10 @@ func (r *Runtime) startFresh(ctx context.Context, req StartRequest, output func(
 		return Result{Err: err}
 	}
 
-	// Create control file in the shared control directory
-	controlDir := "/var/lib/harness/control/phase2-template"
-	if err := os.MkdirAll(controlDir, 0o755); err != nil {
-		return Result{Err: fmt.Errorf("create control dir: %w", err)}
-	}
-
-	controlFile := filepath.Join(controlDir, controlFileName)
-	controlContent := buildControlContent(req, r.cfg.RunscNetwork, r.cfg.Claude)
-
-	if err := os.WriteFile(controlFile, []byte(controlContent), 0o644); err != nil {
-		return Result{Err: fmt.Errorf("write control file: %w", err)}
-	}
-
 	// Build runsc run command
 	containerID := fmt.Sprintf("phase3-%s", req.SessionID)
-	bundlePath := filepath.Join(r.cfg.BundleRoot, "phase2-template-bundle")
+	bundlePath := artifacts.BundleDir
+	hub.Publish(OutputEvent{Stream: "runtime", Line: "using per-generation runtime bundle"})
 	r.cleanupRunscContainer(ctx, containerID)
 
 	cmdCtx, cancelCmd := context.WithCancel(context.Background())
@@ -576,6 +1193,8 @@ func (r *Runtime) startFresh(ctx context.Context, req StartRequest, output func(
 	if result.Err != nil {
 		r.stopContainer(container)
 	}
+	result.ControlManifestDigest = req.PreparedArtifacts.ManifestDigest
+	result.RunscVersion = req.PreparedArtifacts.RunscVersion
 	return result
 }
 
@@ -594,9 +1213,14 @@ func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, ou
 	}
 
 	// Similar to startFresh but use runsc restore
+	artifacts, err := r.generationArtifacts(ctx, req)
+	if err != nil {
+		return Result{Err: err}
+	}
+	req.PreparedArtifacts = artifacts
 	checkpointPath := filepath.Join(r.cfg.CheckpointsRoot, req.SessionID)
 	containerID := fmt.Sprintf("phase3-%s", req.SessionID)
-	bundlePath := filepath.Join(r.cfg.BundleRoot, "phase2-template-bundle")
+	bundlePath := artifacts.BundleDir
 	r.cleanupRunscContainer(ctx, containerID)
 
 	cmdCtx, cancelCmd := context.WithCancel(context.Background())

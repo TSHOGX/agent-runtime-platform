@@ -5,10 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
+
+	"harness-platform/orchestrator/internal/store"
 )
 
 func TestRuntimeStartRejectsUnsupportedAgent(t *testing.T) {
@@ -22,6 +27,29 @@ func TestRuntimeStartRejectsUnsupportedAgent(t *testing.T) {
 	}
 	if !strings.Contains(res.Err.Error(), "unsupported agent") {
 		t.Fatalf("expected unsupported agent error, got %v", res.Err)
+	}
+}
+
+func TestRuntimeStartRequiresGenerationDetailsForColdPath(t *testing.T) {
+	rt := New(Config{
+		DefaultAgent:     "claude",
+		SessionsRoot:     filepath.Join(t.TempDir(), "sessions"),
+		AgentHomesRoot:   filepath.Join(t.TempDir(), "agent-homes"),
+		CheckpointsRoot:  filepath.Join(t.TempDir(), "checkpoints"),
+		BundleRoot:       filepath.Join(t.TempDir(), "bundle", "out"),
+		RunscNetwork:     "host",
+		SecretReadersGID: testSecretReadersGID(),
+	})
+	res := rt.Start(context.Background(), StartRequest{
+		SessionID: "sess_1",
+		Agent:     "claude",
+		Done:      closedDone(),
+	}, nil)
+	if res.Err == nil {
+		t.Fatal("expected missing generation details error")
+	}
+	if !strings.Contains(res.Err.Error(), "generation details are required") {
+		t.Fatalf("expected generation details error, got %v", res.Err)
 	}
 }
 
@@ -201,89 +229,326 @@ func TestWriteUserTurnRejectsUnsupportedAgent(t *testing.T) {
 	}
 }
 
-func TestBuildControlContentUsesExplicitSandboxManifest(t *testing.T) {
+func TestPrepareGenerationWritesPerGenerationSpecManifestAndSecrets(t *testing.T) {
 	t.Setenv("HARNESS_CLAUDE_BASE_URL", "http://bad.invalid")
 	t.Setenv("HARNESS_ANTHROPIC_BASE_URL", "http://bad.invalid")
 	t.Setenv("ANTHROPIC_BASE_URL", "http://bad.invalid")
 	t.Setenv("HARNESS_CLAUDE_API_KEY", "bad")
 	t.Setenv("HARNESS_ANTHROPIC_API_KEY", "bad")
 
-	content := buildControlContent(StartRequest{
+	dir := t.TempDir()
+	secretsRoot := filepath.Join(dir, "secrets")
+	rt := New(Config{
+		SessionsRoot:     filepath.Join(dir, "sessions"),
+		AgentHomesRoot:   filepath.Join(dir, "agent-homes"),
+		BundleRoot:       filepath.Join(dir, "bundle", "out"),
+		RootFSPath:       filepath.Join(dir, "rootfs"),
+		SecretsRoot:      secretsRoot,
+		SecretReadersGID: testSecretReadersGID(),
+		Claude: ClaudeConfig{
+			ProxyBindURL:               "http://0.0.0.0:8082",
+			APIKey:                     "123",
+			AuthToken:                  "123",
+			Model:                      "sonnet",
+			OutputFormat:               "stream-json",
+			DisableNonessentialTraffic: true,
+		},
+	})
+	details := testGenerationDetails(dir, "gen_a")
+
+	artifacts, err := rt.PrepareGeneration(context.Background(), StartRequest{
 		SessionID:         "sess_1",
+		GenerationID:      details.GenerationID,
 		Agent:             "claude",
 		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
 		ResumeClaude:      true,
-	}, "sandbox", ClaudeConfig{})
-
-	var manifest controlManifest
-	if err := json.Unmarshal([]byte(content), &manifest); err != nil {
-		t.Fatalf("control content is not valid JSON: %v\n%s", err, content)
+		Generation:        details,
+	})
+	if err != nil {
+		t.Fatalf("prepare generation: %v", err)
 	}
+	if artifacts.BundleDir != details.BundleDirPath || artifacts.SpecPath != details.SpecPath || artifacts.ManifestPath != details.ControlManifestPath {
+		t.Fatalf("unexpected artifacts: %+v", artifacts)
+	}
+
+	var manifestFile controlManifestFile
+	data, err := os.ReadFile(details.ControlManifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if err := json.Unmarshal(data, &manifestFile); err != nil {
+		t.Fatalf("control manifest is not valid JSON: %v\n%s", err, data)
+	}
+	payloadBytes, err := canonicalJSON(manifestFile.Payload)
+	if err != nil {
+		t.Fatalf("canonical manifest: %v", err)
+	}
+	if got := digestHex(payloadBytes); got != manifestFile.Digest || got != artifacts.ManifestDigest {
+		t.Fatalf("manifest digest mismatch got=%s file=%s artifacts=%s", got, manifestFile.Digest, artifacts.ManifestDigest)
+	}
+	manifest := manifestFile.Payload
 	if manifest.SessionID != "sess_1" {
 		t.Fatalf("unexpected session id: %+v", manifest)
 	}
-	if manifest.SessionWorkspace != "/sessions/sess_1" {
-		t.Fatalf("unexpected session workspace: %+v", manifest)
+	if manifest.GenerationID != details.GenerationID || manifest.NetworkProfileID != details.NetworkProfileID || manifest.AgentRuntimeProfileID != details.AgentRuntimeProfileID {
+		t.Fatalf("manifest missing identity: %+v", manifest)
 	}
-	if manifest.HarnessAgentHome != "/agent-homes/sess_1" {
-		t.Fatalf("unexpected agent home: %+v", manifest)
+	if manifest.WorkspacePath != "/sessions/sess_1" || manifest.AgentHomePath != "/agent-homes/sess_1" {
+		t.Fatalf("unexpected workspace/home paths: %+v", manifest)
 	}
-	if !manifest.ClaudeResume {
+	if !manifest.ResumeClaude {
 		t.Fatalf("expected resume flag to be set: %+v", manifest)
-	}
-	if manifest.ProxyBindURL != "http://0.0.0.0:8082" {
-		t.Fatalf("unexpected proxy bind URL: %+v", manifest)
 	}
 	if manifest.AnthropicBaseURL != "http://10.200.1.1:8082" {
 		t.Fatalf("unexpected sandbox base URL: %+v", manifest)
 	}
-	if manifest.AnthropicAPIKey != "123" || manifest.AnthropicAuthToken != "123" {
-		t.Fatalf("unexpected proxy credential: %+v", manifest)
+	if manifest.AnthropicAPIKeySecretID != "anthropic_api_key" || manifest.AnthropicAuthTokenSecretID != "anthropic_auth_token" || manifest.SecretVersion != "local" {
+		t.Fatalf("unexpected secret refs: %+v", manifest)
+	}
+	if strings.Contains(string(data), `"anthropic_api_key":`) || strings.Contains(string(data), `"anthropic_auth_token":`) {
+		t.Fatalf("manifest must not contain plaintext credential fields: %s", data)
 	}
 	if !manifest.ClaudeCodeDisableNonessentialTraffic {
 		t.Fatalf("expected nonessential traffic to be disabled: %+v", manifest)
 	}
-	if manifest.ClaudeModel != "sonnet" || manifest.ClaudeOutputFormat != "stream-json" {
+	if manifest.Model != "sonnet" || manifest.OutputFormat != "stream-json" {
 		t.Fatalf("unexpected Claude defaults: %+v", manifest)
 	}
+
+	var spec runtimeSpec
+	specData, err := os.ReadFile(details.SpecPath)
+	if err != nil {
+		t.Fatalf("read spec: %v", err)
+	}
+	if err := json.Unmarshal(specData, &spec); err != nil {
+		t.Fatalf("runtime spec is not valid JSON: %v\n%s", err, specData)
+	}
+	if strings.Contains(string(specData), "phase2-template") {
+		t.Fatalf("runtime spec hot path must not reference phase2-template: %s", specData)
+	}
+	if mountSource(spec.Mounts, "/harness-control") != details.ControlDirPath {
+		t.Fatalf("control mount = %q, want %q", mountSource(spec.Mounts, "/harness-control"), details.ControlDirPath)
+	}
+	if mountSource(spec.Mounts, "/harness-secrets") != details.SecretsDirPath {
+		t.Fatalf("secret mount = %q, want %q", mountSource(spec.Mounts, "/harness-secrets"), details.SecretsDirPath)
+	}
+	if _, err := os.Stat(filepath.Join(details.SecretsDirPath, "anthropic_api_key", "local")); err != nil {
+		t.Fatalf("materialized api key secret: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(details.SecretsDirPath, "anthropic_auth_token", "local")); err != nil {
+		t.Fatalf("materialized auth token secret: %v", err)
+	}
+	assertSecretPath(t, secretsRoot)
+	assertSecretPath(t, filepath.Join(secretsRoot, "anthropic_api_key"))
+	assertSecretFile(t, filepath.Join(secretsRoot, "anthropic_api_key", "local"))
+	assertSecretPath(t, details.SecretsDirPath)
+	assertSecretPath(t, filepath.Join(details.SecretsDirPath, "anthropic_api_key"))
+	assertSecretFile(t, filepath.Join(details.SecretsDirPath, "anthropic_api_key", "local"))
 }
 
-func TestBuildControlContentUsesExplicitHostProxyURL(t *testing.T) {
-	content := buildControlContent(StartRequest{
-		SessionID:         "sess_1",
-		Agent:             "claude",
-		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
-	}, "host", ClaudeConfig{})
+func TestPrepareShellGenerationHasNoSecretMount(t *testing.T) {
+	dir := t.TempDir()
+	rt := New(Config{
+		SessionsRoot:   filepath.Join(dir, "sessions"),
+		AgentHomesRoot: filepath.Join(dir, "agent-homes"),
+		BundleRoot:     filepath.Join(dir, "bundle", "out"),
+		RootFSPath:     filepath.Join(dir, "rootfs"),
+	})
+	details := testGenerationDetails(dir, "gen_shell")
+	details.SessionID = "sess_shell"
+	details.Agent = "sh"
+	details.RequiresSecretDrop = false
+	details.ManifestAnthropicBaseURL = ""
+	details.AnthropicAPIKeySecretID = ""
+	details.AnthropicAuthTokenSecretID = ""
+	details.SecretVersion = ""
+	details.SecretsDirPath = ""
 
-	var manifest controlManifest
-	if err := json.Unmarshal([]byte(content), &manifest); err != nil {
-		t.Fatalf("control content is not valid JSON: %v\n%s", err, content)
+	if _, err := rt.PrepareGeneration(context.Background(), StartRequest{
+		SessionID:    "sess_shell",
+		GenerationID: details.GenerationID,
+		Agent:        "sh",
+		Generation:   details,
+	}); err != nil {
+		t.Fatalf("prepare shell generation: %v", err)
 	}
-	if manifest.AnthropicBaseURL != "http://0.0.0.0:8082" {
-		t.Fatalf("expected host proxy URL, got %+v", manifest)
+	specData, err := os.ReadFile(details.SpecPath)
+	if err != nil {
+		t.Fatalf("read shell spec: %v", err)
+	}
+	if strings.Contains(string(specData), "/harness-secrets") {
+		t.Fatalf("shell spec must not mount secrets: %s", specData)
+	}
+	var manifestFile controlManifestFile
+	if err := json.Unmarshal(mustReadFile(t, details.ControlManifestPath), &manifestFile); err != nil {
+		t.Fatalf("read shell manifest: %v", err)
+	}
+	if manifestFile.Payload.SecretMountPath != "" || manifestFile.Payload.AnthropicAPIKeySecretID != "" {
+		t.Fatalf("shell manifest must not reference secrets: %+v", manifestFile.Payload)
+	}
+	if manifestFile.Payload.AnthropicBaseURL != "" {
+		t.Fatalf("shell manifest must not require Claude base URL: %+v", manifestFile.Payload)
 	}
 }
 
-func TestBuildControlContentUsesProjectClaudeConfig(t *testing.T) {
-	content := buildControlContent(StartRequest{
-		SessionID:         "sess_1",
-		Agent:             "claude",
-		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
-	}, "sandbox", ClaudeConfig{
-		ProxyBindURL:               "http://0.0.0.0:8082",
+func TestPrepareShellGenerationRejectsSecretReferences(t *testing.T) {
+	dir := t.TempDir()
+	rt := New(Config{
+		SessionsRoot:     filepath.Join(dir, "sessions"),
+		AgentHomesRoot:   filepath.Join(dir, "agent-homes"),
+		BundleRoot:       filepath.Join(dir, "bundle", "out"),
+		RootFSPath:       filepath.Join(dir, "rootfs"),
+		SecretsRoot:      filepath.Join(dir, "secrets"),
+		SecretReadersGID: testSecretReadersGID(),
+	})
+	details := testGenerationDetails(dir, "gen_shell_bad")
+	details.SessionID = "sess_shell"
+	details.Agent = "sh"
+	details.RequiresSecretDrop = false
+
+	_, err := rt.PrepareGeneration(context.Background(), StartRequest{
+		SessionID:    "sess_shell",
+		GenerationID: details.GenerationID,
+		Agent:        "sh",
+		Generation:   details,
+	})
+	if err == nil {
+		t.Fatal("expected shell secret rejection")
+	}
+	if !strings.Contains(err.Error(), "shell_secret_disallowed") {
+		t.Fatalf("expected shell_secret_disallowed, got %v", err)
+	}
+}
+
+func TestPrepareGenerationRejectsMismatchedIdentity(t *testing.T) {
+	dir := t.TempDir()
+	details := testGenerationDetails(dir, "gen_mismatch")
+	rt := New(Config{
+		SessionsRoot:     filepath.Join(dir, "sessions"),
+		AgentHomesRoot:   filepath.Join(dir, "agent-homes"),
+		BundleRoot:       filepath.Join(dir, "bundle", "out"),
+		RootFSPath:       filepath.Join(dir, "rootfs"),
+		SecretsRoot:      filepath.Join(dir, "secrets"),
+		SecretReadersGID: testSecretReadersGID(),
+		Claude: ClaudeConfig{
+			APIKey:    "123",
+			AuthToken: "123",
+		},
+	})
+
+	_, err := rt.PrepareGeneration(context.Background(), StartRequest{
+		SessionID:    "sess_wrong",
+		GenerationID: details.GenerationID,
+		Agent:        "claude",
+		Generation:   details,
+	})
+	if err == nil {
+		t.Fatal("expected identity mismatch error")
+	}
+	if !strings.Contains(err.Error(), "generation session mismatch") {
+		t.Fatalf("expected generation session mismatch, got %v", err)
+	}
+}
+
+func testGenerationDetails(dir, generationID string) store.RuntimeGenerationDetails {
+	return store.RuntimeGenerationDetails{
+		SessionID:                  "sess_1",
+		GenerationID:               generationID,
+		NetworkProfileID:           "net_" + generationID,
+		AgentRuntimeProfileID:      "arp_" + generationID,
+		RunscPlatform:              "systrap",
+		ControlDirPath:             filepath.Join(dir, "run", "control", "gen-"+generationID),
+		ControlManifestPath:        filepath.Join(dir, "run", "control", "gen-"+generationID, "session.json"),
+		BundleDirPath:              filepath.Join(dir, "run", "runtime", "gen-"+generationID),
+		SpecPath:                   filepath.Join(dir, "run", "runtime", "gen-"+generationID, "config.json"),
+		SecretsDirPath:             filepath.Join(dir, "run", "control", "gen-"+generationID, "secrets"),
+		BridgeDirPath:              filepath.Join(dir, "run", "bridge", "gen-"+generationID),
+		LogDirPath:                 filepath.Join(dir, "run", "logs", "gen-"+generationID),
+		HostGatewayIP:              "10.200.1.1",
 		SandboxBaseURL:             "http://10.200.1.1:8082",
-		APIKey:                     "123",
-		AuthToken:                  "123",
+		NetnsName:                  "harness-gen-" + generationID,
+		EgressPolicyDigest:         "egress_digest",
+		Agent:                      "claude",
 		Model:                      "sonnet",
 		OutputFormat:               "stream-json",
 		DisableNonessentialTraffic: true,
-	})
+		RequiresSecretDrop:         true,
+		ManifestAnthropicBaseURL:   "http://10.200.1.1:8082",
+		AnthropicAPIKeySecretID:    "anthropic_api_key",
+		AnthropicAuthTokenSecretID: "anthropic_auth_token",
+		SecretVersion:              "local",
+	}
+}
 
-	var manifest controlManifest
-	if err := json.Unmarshal([]byte(content), &manifest); err != nil {
-		t.Fatalf("control content is not valid JSON: %v\n%s", err, content)
+func mountSource(mounts []specMount, destination string) string {
+	for _, mount := range mounts {
+		if mount.Destination == destination {
+			return mount.Source
+		}
 	}
-	if manifest.AnthropicBaseURL != "http://10.200.1.1:8082" || manifest.AnthropicAPIKey != "123" {
-		t.Fatalf("unexpected Claude proxy config: %+v", manifest)
+	return ""
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
 	}
+	return data
+}
+
+func assertSecretPath(t *testing.T, path string) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat secret dir %s: %v", path, err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("secret path %s is not a directory", path)
+	}
+	if mode := info.Mode().Perm(); mode != 0o750 {
+		t.Fatalf("secret dir %s mode=%04o want 0750", path, mode)
+	}
+	assertPathGID(t, info, path, testSecretReadersGID())
+}
+
+func assertSecretFile(t *testing.T, path string) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat secret file %s: %v", path, err)
+	}
+	if info.IsDir() {
+		t.Fatalf("secret file %s is a directory", path)
+	}
+	if mode := info.Mode().Perm(); mode != 0o440 {
+		t.Fatalf("secret file %s mode=%04o want 0440", path, mode)
+	}
+	assertPathGID(t, info, path, testSecretReadersGID())
+}
+
+func assertPathGID(t *testing.T, info os.FileInfo, path string, want int) {
+	t.Helper()
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("stat ownership unavailable for %s", path)
+	}
+	if int(stat.Gid) != want {
+		t.Fatalf("%s gid=%d want %d", path, stat.Gid, want)
+	}
+}
+
+func closedDone() <-chan struct{} {
+	done := make(chan struct{})
+	close(done)
+	return done
+}
+
+func testSecretReadersGID() int {
+	gid := os.Getgid()
+	if gid > 0 {
+		return gid
+	}
+	return 1
 }

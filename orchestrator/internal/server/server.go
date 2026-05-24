@@ -53,6 +53,7 @@ type Server struct {
 
 type runtimeDriver interface {
 	Start(context.Context, runtime.StartRequest, func(runtime.Output)) runtime.Result
+	PrepareGeneration(context.Context, runtime.StartRequest) (runtime.GenerationArtifacts, error)
 	Destroy(context.Context, string) error
 	Interrupt(string) error
 	Checkpoint(context.Context, string) error
@@ -282,6 +283,30 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, sessionID s
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	generationDetails, err := s.runtimeGenerationDetails(r.Context(), session.ID, allocation.GenerationID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	isNewGeneration := strings.TrimSpace(session.ActiveGenerationID) == ""
+	preparedArtifacts := runtimeArtifactsFromDetails(generationDetails)
+	recordRuntimeArtifacts := strings.TrimSpace(preparedArtifacts.ManifestDigest) == ""
+	if isNewGeneration {
+		preparedArtifacts, err = s.runtime.PrepareGeneration(r.Context(), s.runtimeStartRequest(session, req.Content, allocation.GenerationID, generationDetails, runtime.GenerationArtifacts{}))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := s.store.RecordGenerationRuntimeArtifacts(r.Context(), allocation.GenerationID, preparedArtifacts.ManifestDigest, preparedArtifacts.RunscVersion); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := s.store.MarkGenerationResourcesLive(r.Context(), session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		recordRuntimeArtifacts = true
+	}
 	turnID, err := s.store.Start7ATurn(r.Context(), sessionID, allocation.GenerationID, allocation.Owner, req.Content, time.Now().UTC())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -301,7 +326,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, sessionID s
 
 	s.hub.Publish(events.Event{Type: "message.created", SessionID: sessionID, Payload: msg})
 	s.hub.Publish(events.Event{Type: "session." + runningStatus, SessionID: sessionID})
-	go s.runSession(context.Background(), session, req.Content, allocation.GenerationID, allocation.Owner, turnID)
+	go s.runSession(context.Background(), session, req.Content, allocation.GenerationID, allocation.Owner, turnID, generationDetails, preparedArtifacts, recordRuntimeArtifacts)
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": runningStatus, "session_id": sessionID, "message": msg})
 }
 
@@ -320,9 +345,6 @@ func (s *Server) ensureActiveGeneration(ctx context.Context, session store.Sessi
 		Config:    s.resourceAllocatorConfig(session.Agent),
 	})
 	if err != nil {
-		return store.GenerationAllocation{}, err
-	}
-	if err := s.store.MarkGenerationResourcesLive(ctx, session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
 		return store.GenerationAllocation{}, err
 	}
 	return allocation, nil
@@ -365,7 +387,31 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request, sessionID 
 	writeJSON(w, http.StatusOK, map[string]any{"messages": messages})
 }
 
-func (s *Server) runSession(ctx context.Context, session store.Session, message, generationID, leaseOwner string, turnID int64) {
+func (s *Server) runtimeStartRequest(session store.Session, message, generationID string, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts) runtime.StartRequest {
+	return runtime.StartRequest{
+		SessionID:         session.ID,
+		RestoreID:         session.RestoreID,
+		GenerationID:      generationID,
+		Agent:             session.Agent,
+		FirstMessage:      message,
+		ClaudeSessionUUID: session.ClaudeSessionUUID,
+		ResumeClaude:      session.Status != string(sessionstate.Created),
+		Generation:        details,
+		PreparedArtifacts: artifacts,
+	}
+}
+
+func runtimeArtifactsFromDetails(details store.RuntimeGenerationDetails) runtime.GenerationArtifacts {
+	return runtime.GenerationArtifacts{
+		BundleDir:      details.BundleDirPath,
+		SpecPath:       details.SpecPath,
+		ManifestPath:   details.ControlManifestPath,
+		ManifestDigest: details.ControlManifestDigest,
+		RunscVersion:   details.RunscVersion,
+	}
+}
+
+func (s *Server) runSession(ctx context.Context, session store.Session, message, generationID, leaseOwner string, turnID int64, generationDetails store.RuntimeGenerationDetails, preparedArtifacts runtime.GenerationArtifacts, recordRuntimeArtifacts bool) {
 	parser := newStreamParser(s, session.ID, session.Agent)
 	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
 	heartbeatDone := s.startRuntimeManagerHeartbeat(heartbeatCtx, session.ID, generationID, leaseOwner)
@@ -374,15 +420,9 @@ func (s *Server) runSession(ctx context.Context, session store.Session, message,
 		<-heartbeatDone
 	}()
 
-	result := s.runtime.Start(ctx, runtime.StartRequest{
-		SessionID:         session.ID,
-		RestoreID:         session.RestoreID,
-		Agent:             session.Agent,
-		FirstMessage:      message,
-		ClaudeSessionUUID: session.ClaudeSessionUUID,
-		ResumeClaude:      session.Status != string(sessionstate.Created),
-		Done:              parser.Done(),
-	}, func(output runtime.Output) {
+	startReq := s.runtimeStartRequest(session, message, generationID, generationDetails, preparedArtifacts)
+	startReq.Done = parser.Done()
+	result := s.runtime.Start(ctx, startReq, func(output runtime.Output) {
 		s.log.Debug("runtime output", "session_id", session.ID, "stream", output.Stream, "line", output.Line)
 		parser.handle(output)
 	})
@@ -410,6 +450,11 @@ func (s *Server) runSession(ctx context.Context, session store.Session, message,
 		}
 	}
 	if generationID != "" {
+		if recordRuntimeArtifacts && result.ControlManifestDigest != "" {
+			if err := s.store.RecordGenerationRuntimeArtifacts(ctx, generationID, result.ControlManifestDigest, result.RunscVersion); err != nil {
+				s.log.Warn("failed to record runtime artifact metadata", "session_id", session.ID, "generation_id", generationID, "error", err)
+			}
+		}
 		if err := s.store.Finish7ATurn(ctx, session.ID, generationID, leaseOwner, turnID, turnStatus, turnError, now.UTC()); err != nil {
 			s.log.Warn("failed to update 7a turn ledger", "session_id", session.ID, "generation_id", generationID, "error", err)
 		}
@@ -421,6 +466,17 @@ func (s *Server) runSession(ctx context.Context, session store.Session, message,
 		s.log.Warn("failed to scan session artifacts", "session_id", session.ID, "error", err)
 	}
 	s.hub.Publish(events.Event{Type: "session." + status, SessionID: session.ID, Payload: map[string]any{"restore_ms": result.RestoreMS}})
+}
+
+func (s *Server) runtimeGenerationDetails(ctx context.Context, sessionID, generationID string) (store.RuntimeGenerationDetails, error) {
+	if strings.TrimSpace(generationID) == "" {
+		return store.RuntimeGenerationDetails{}, fmt.Errorf("generation id is required")
+	}
+	details, err := s.store.GetRuntimeGenerationDetails(ctx, sessionID, generationID)
+	if err != nil {
+		return store.RuntimeGenerationDetails{}, err
+	}
+	return details, nil
 }
 
 func (s *Server) startRuntimeManagerHeartbeat(ctx context.Context, sessionID, generationID, leaseOwner string) <-chan struct{} {
