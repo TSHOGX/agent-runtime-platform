@@ -59,6 +59,29 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ne
 		details.SecretsDirPath == "" {
 		t.Fatalf("unexpected claude generation details: %+v", details)
 	}
+	if details.RunscNetwork != "sandbox" ||
+		details.RunscOverlay2 != "none" ||
+		details.HostProxyBindURL != cfg.HostProxyBindURL ||
+		details.ProxyPort != 8082 ||
+		details.HostGatewayIP != "10.240.0.1" ||
+		details.SandboxBaseURL != "http://10.240.0.1:8082" ||
+		details.ProbeURL != "http://10.240.0.1:8082" ||
+		details.NetnsName == "" ||
+		details.NetnsPath == "" ||
+		details.HostVeth == "" ||
+		details.SandboxVeth == "" ||
+		details.SandboxIPCIDR != "10.240.0.2/30" ||
+		details.HostSideCIDR != "10.240.0.0/30" ||
+		details.EgressPolicyID == "" ||
+		details.EgressPolicyDigest == "" ||
+		details.AllowedEgressRules == "" ||
+		details.DorisFEHosts == "" ||
+		details.DorisBEHosts == "" ||
+		details.DorisPorts == "" ||
+		details.DNSPolicy != "hostnames_only" ||
+		details.NetworkAllocationState != "allocating" {
+		t.Fatalf("generation details missing network allocation fields: %+v", details)
+	}
 
 	if err := st.MarkGenerationResourcesLive(ctx, "sess_alloc", allocation.GenerationID, allocation.Owner, now.Add(time.Second)); err != nil {
 		t.Fatalf("mark resources live: %v", err)

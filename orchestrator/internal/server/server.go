@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"os"
 	pathpkg "path"
 	"path/filepath"
@@ -126,6 +127,8 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.listSessions(w, r)
 	case r.URL.Path == "/api/sessions" && r.Method == http.MethodPost:
 		s.createSession(w, r)
+	case r.URL.Path == "/api/quota" && r.Method == http.MethodGet:
+		s.getQuota(w, r)
 	case r.URL.Path == "/api/events" && r.Method == http.MethodGet:
 		s.events(w, r)
 	case r.URL.Path == "/api/events/stream" && r.Method == http.MethodGet:
@@ -179,6 +182,36 @@ func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
 }
 
+func (s *Server) getQuota(w http.ResponseWriter, r *http.Request) {
+	activeSessions, err := s.store.CountActiveSessions(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	resourceQuota, err := s.store.GetResourceQuota(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	poolCeiling := cidrPool30Capacity(s.cfg.Phase7.Network.CIDRPool.Prefix)
+	remainingPoolSlots := poolCeiling - resourceQuota.AllocatedPoolSlots
+	if remainingPoolSlots < 0 {
+		remainingPoolSlots = 0
+	}
+	effectiveCeiling := s.cfg.MaxSessions
+	if poolCeiling < effectiveCeiling {
+		effectiveCeiling = poolCeiling
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"soft_session_ceiling": s.cfg.MaxSessions,
+		"active_sessions":      activeSessions,
+		"live_pool_ceiling":    poolCeiling,
+		"allocated_pool_slots": resourceQuota.AllocatedPoolSlots,
+		"remaining_pool_slots": remainingPoolSlots,
+		"effective_ceiling":    effectiveCeiling,
+	})
+}
+
 func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Agent string `json:"agent"`
@@ -200,7 +233,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if count >= s.cfg.MaxSessions {
-		writeError(w, http.StatusTooManyRequests, "active session limit reached")
+		writeErrorClass(w, http.StatusServiceUnavailable, "pool_exhausted", "active session limit reached")
 		return
 	}
 
@@ -294,14 +327,17 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, sessionID s
 	if isNewGeneration {
 		preparedArtifacts, err = s.runtime.PrepareGeneration(r.Context(), s.runtimeStartRequest(session, req.Content, allocation.GenerationID, generationDetails, runtime.GenerationArtifacts{}))
 		if err != nil {
+			s.failGenerationBeforeTurn(session.ID, allocation.GenerationID, allocation.Owner, err)
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		if err := s.store.RecordGenerationRuntimeArtifacts(r.Context(), allocation.GenerationID, preparedArtifacts.ManifestDigest, preparedArtifacts.RunscVersion); err != nil {
+			s.failGenerationBeforeTurn(session.ID, allocation.GenerationID, allocation.Owner, err)
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		if err := s.store.MarkGenerationResourcesLive(r.Context(), session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
+			s.failGenerationBeforeTurn(session.ID, allocation.GenerationID, allocation.Owner, err)
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -309,6 +345,9 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, sessionID s
 	}
 	turnID, err := s.store.Start7ATurn(r.Context(), sessionID, allocation.GenerationID, allocation.Owner, req.Content, time.Now().UTC())
 	if err != nil {
+		if isNewGeneration {
+			s.failGenerationBeforeTurn(session.ID, allocation.GenerationID, allocation.Owner, err)
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -328,6 +367,31 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, sessionID s
 	s.hub.Publish(events.Event{Type: "session." + runningStatus, SessionID: sessionID})
 	go s.runSession(context.Background(), session, req.Content, allocation.GenerationID, allocation.Owner, turnID, generationDetails, preparedArtifacts, recordRuntimeArtifacts)
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": runningStatus, "session_id": sessionID, "message": msg})
+}
+
+func (s *Server) failGenerationBeforeTurn(sessionID, generationID, owner string, failure error) {
+	reason := ""
+	if failure != nil {
+		reason = failure.Error()
+	}
+	now := time.Now().UTC()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.store.FailGeneration(ctx, store.FailGenerationParams{
+		SessionID:    sessionID,
+		GenerationID: generationID,
+		Owner:        owner,
+		ErrorClass:   runtimeFailureClass(reason),
+		Reason:       reason,
+		Now:          now,
+	}); err != nil {
+		s.log.Warn("failed to fail generation before turn start", "session_id", sessionID, "generation_id", generationID, "error", err)
+	}
+	if err := s.store.UpdateSessionStatusAndActivity(ctx, sessionID, string(sessionstate.Failed), nil, now); err != nil {
+		s.log.Warn("failed to mark session failed before turn start", "session_id", sessionID, "generation_id", generationID, "error", err)
+	}
+	s.hub.Publish(events.Event{Type: "session.error", SessionID: sessionID, Payload: map[string]string{"error": reason}})
+	s.hub.Publish(events.Event{Type: "session." + string(sessionstate.Failed), SessionID: sessionID})
 }
 
 func (s *Server) ensureActiveGeneration(ctx context.Context, session store.Session, owner string) (store.GenerationAllocation, error) {
@@ -369,6 +433,13 @@ func (s *Server) resourceAllocatorConfig(agent string) store.ResourceAllocatorCo
 		AgentOutputFormat:          outputFormat,
 		DisableNonessentialTraffic: s.cfg.Claude.DisableNonessentialTraffic,
 	}
+}
+
+func cidrPool30Capacity(prefix netip.Prefix) int {
+	if !prefix.IsValid() || !prefix.Addr().Is4() || prefix.Bits() > 30 {
+		return 0
+	}
+	return 1 << uint(30-prefix.Bits())
 }
 
 func (s *Server) listMessages(w http.ResponseWriter, r *http.Request, sessionID string) {
@@ -455,7 +526,19 @@ func (s *Server) runSession(ctx context.Context, session store.Session, message,
 				s.log.Warn("failed to record runtime artifact metadata", "session_id", session.ID, "generation_id", generationID, "error", err)
 			}
 		}
-		if err := s.store.Finish7ATurn(ctx, session.ID, generationID, leaseOwner, turnID, turnStatus, turnError, now.UTC()); err != nil {
+		if status == string(sessionstate.Failed) {
+			if err := s.store.FailGeneration(ctx, store.FailGenerationParams{
+				SessionID:    session.ID,
+				GenerationID: generationID,
+				TurnID:       turnID,
+				Owner:        leaseOwner,
+				ErrorClass:   runtimeFailureClass(turnError),
+				Reason:       turnError,
+				Now:          now.UTC(),
+			}); err != nil {
+				s.log.Warn("failed to fail runtime generation", "session_id", session.ID, "generation_id", generationID, "error", err)
+			}
+		} else if err := s.store.Finish7ATurn(ctx, session.ID, generationID, leaseOwner, turnID, turnStatus, turnError, now.UTC()); err != nil {
 			s.log.Warn("failed to update 7a turn ledger", "session_id", session.ID, "generation_id", generationID, "error", err)
 		}
 	}
@@ -466,6 +549,16 @@ func (s *Server) runSession(ctx context.Context, session store.Session, message,
 		s.log.Warn("failed to scan session artifacts", "session_id", session.ID, "error", err)
 	}
 	s.hub.Publish(events.Event{Type: "session." + status, SessionID: session.ID, Payload: map[string]any{"restore_ms": result.RestoreMS}})
+}
+
+func runtimeFailureClass(message string) string {
+	if strings.Contains(message, "pre-start sandbox network probe") {
+		return "probe_failed_pre_start"
+	}
+	if strings.Contains(message, "configure sandbox network") {
+		return "network_setup_failed"
+	}
+	return "runtime_failed"
 }
 
 func (s *Server) runtimeGenerationDetails(ctx context.Context, sessionID, generationID string) (store.RuntimeGenerationDetails, error) {

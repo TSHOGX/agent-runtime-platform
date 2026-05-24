@@ -96,7 +96,7 @@ harness:
 
 The loader uses strict YAML decoding for the Phase 7 `harness:` schema. Legacy files containing only top-level `runtime:` / `claude:` sections still load during the cutover, but mixing them with `harness:` is rejected.
 
-The runtime currently launches `runsc` directly in sandbox mode and keeps containers alive across turns. It uses the fixed `/var/run/netns/phase1-demo` network namespace so the local Claude proxy stays reachable at `http://10.200.1.1:8082`. Automatic idle checkpointing is disabled because `runsc restore` cannot reliably reconnect the current stdin-based turn channel. `Shell` sessions use the PTY-backed shell shim and can be interrupted with `POST /api/sessions/<id>/interrupt`. `bundle/restore-sandbox.sh` is still useful as a smoke-test boundary, but it is not the main request path anymore.
+The runtime currently launches `runsc` directly in sandbox mode and keeps containers alive across turns. Each generation gets its own network profile, netns/veth pair, `/30`, generated runtime spec, and control manifest; the sandbox-visible Claude proxy URL is derived from that generation's allocated host gateway IP. Automatic idle checkpointing is disabled because `runsc restore` cannot reliably reconnect the current stdin-based turn channel. `Shell` sessions use the PTY-backed shell shim and can be interrupted with `POST /api/sessions/<id>/interrupt`. `bundle/restore-sandbox.sh` is still useful as a smoke-test boundary, but it is not the main request path anymore.
 
 ## Event Streams
 

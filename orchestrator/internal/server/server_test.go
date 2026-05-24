@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -55,6 +56,46 @@ func TestCreateSessionRejectsUnsupportedAgent(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "unsupported agent") {
 		t.Fatalf("expected unsupported agent error, got %s", rec.Body.String())
+	}
+}
+
+func TestCreateSessionSoftLimitUsesPoolExhaustedEnvelope(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	createServerTestSession(t, ctx, st, dir, "sess_existing", string(sessionstate.Created), time.Now().UTC(), nil)
+
+	srv := &Server{
+		cfg: config.Config{
+			SessionsRoot: dir,
+			SessionTTL:   time.Hour,
+			MaxSessions:  1,
+			DefaultAgent: "claude",
+		},
+		store:   st,
+		runtime: runtime.New(runtime.Config{}),
+		watcher: artifacts.New(dir, st, events.NewHub(), slog.Default()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(`{"agent":"claude"}`))
+	rec := httptest.NewRecorder()
+	srv.createSession(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status 503, got %d body %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body["error_class"] != "pool_exhausted" {
+		t.Fatalf("expected pool_exhausted, got %v", body)
 	}
 }
 
@@ -334,6 +375,189 @@ func TestSendMessageReusesActiveGenerationArtifacts(t *testing.T) {
 	}
 }
 
+func TestGetQuotaReportsSessionAndPoolCeilings(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	createServerTestSession(t, ctx, st, dir, "sess_quota", string(sessionstate.Created), time.Now().UTC(), nil)
+	cfg := testServerConfig(dir)
+	cfg.MaxSessions = 3
+	cfg.Phase7.MaxSessions = 3
+	cfg.Phase7.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.242.0.0/29")}
+	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: "sess_quota",
+		Owner:     store.GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config: store.ResourceAllocatorConfig{
+			RunDir:             cfg.Phase7.RunDir,
+			CIDRPool:           cfg.Phase7.Network.CIDRPool.Prefix,
+			EgressDorisFEHosts: cfg.Phase7.Network.Egress.DorisFEHosts,
+			EgressDorisBEHosts: cfg.Phase7.Network.Egress.DorisBEHosts,
+			EgressDorisPorts:   cfg.Phase7.Network.Egress.DorisPorts,
+			EgressDNSPolicy:    string(cfg.Phase7.Network.Egress.DNSPolicy),
+			HostProxyBindURL:   cfg.Claude.ProxyBindURL,
+			ProxyPort:          8082,
+			Agent:              "claude",
+			AgentModel:         cfg.Claude.Model,
+			AgentOutputFormat:  cfg.Claude.OutputFormat,
+		},
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: instantRuntime{},
+		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/quota", nil)
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]int
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode quota: %v", err)
+	}
+	if body["soft_session_ceiling"] != 3 ||
+		body["active_sessions"] != 1 ||
+		body["live_pool_ceiling"] != 2 ||
+		body["allocated_pool_slots"] != 1 ||
+		body["remaining_pool_slots"] != 1 ||
+		body["effective_ceiling"] != 2 {
+		t.Fatalf("unexpected quota body for allocation %s: %+v", allocation.GenerationID, body)
+	}
+}
+
+func TestRunSessionFailureMarksGenerationFailedAndReclaimable(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_runtime_fail", string(sessionstate.Created), time.Now().UTC(), nil)
+	cfg := testServerConfig(dir)
+	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     store.GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config: store.ResourceAllocatorConfig{
+			RunDir:             cfg.Phase7.RunDir,
+			CIDRPool:           cfg.Phase7.Network.CIDRPool.Prefix,
+			EgressDorisFEHosts: cfg.Phase7.Network.Egress.DorisFEHosts,
+			EgressDorisBEHosts: cfg.Phase7.Network.Egress.DorisBEHosts,
+			EgressDorisPorts:   cfg.Phase7.Network.Egress.DorisPorts,
+			EgressDNSPolicy:    string(cfg.Phase7.Network.Egress.DNSPolicy),
+			HostProxyBindURL:   cfg.Claude.ProxyBindURL,
+			ProxyPort:          8082,
+			Agent:              "claude",
+			AgentModel:         cfg.Claude.Model,
+			AgentOutputFormat:  cfg.Claude.OutputFormat,
+		},
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
+		t.Fatalf("mark generation live: %v", err)
+	}
+	turnID, err := st.Start7ATurn(ctx, session.ID, allocation.GenerationID, allocation.Owner, "hello", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("start turn: %v", err)
+	}
+	details, err := st.GetRuntimeGenerationDetails(ctx, session.ID, allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get generation details: %v", err)
+	}
+	srv := &Server{
+		cfg:   cfg,
+		store: st,
+		runtime: failingRuntime{
+			err: errors.New("pre-start sandbox network probe failed"),
+		},
+		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+
+	srv.runSession(ctx, session, "hello", allocation.GenerationID, allocation.Owner, turnID, details, runtime.GenerationArtifacts{}, false)
+
+	var generationStatus, errorClass, networkState, resourceState, turnStatus string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT g.status, COALESCE(g.error_class, ''), n.allocation_state, r.resource_state, t.status
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+JOIN turns t ON t.generation_id = g.generation_id
+WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &errorClass, &networkState, &resourceState, &turnStatus); err != nil {
+		t.Fatalf("query generation state: %v", err)
+	}
+	if generationStatus != "failed" ||
+		errorClass != "probe_failed_pre_start" ||
+		networkState != "reclaimable" ||
+		resourceState != "reclaimable" ||
+		turnStatus != "failed" {
+		t.Fatalf("unexpected failed generation state: generation=%s class=%s network=%s resource=%s turn=%s", generationStatus, errorClass, networkState, resourceState, turnStatus)
+	}
+}
+
+func TestSendMessagePrepareFailureMarksGenerationFailedAndReclaimable(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_prepare_fail", string(sessionstate.Created), time.Now().UTC(), nil)
+	cfg := testServerConfig(dir)
+	srv := &Server{
+		cfg:   cfg,
+		store: st,
+		runtime: failingRuntime{
+			prepareErr: errors.New("pre-start sandbox network probe failed"),
+		},
+		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(`{"content":"hello"}`))
+	rec := httptest.NewRecorder()
+	srv.sendMessage(rec, req, session.ID)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d body %s", rec.Code, rec.Body.String())
+	}
+	var generationStatus, errorClass, networkState, resourceState, sessionStatus string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT g.status, COALESCE(g.error_class, ''), n.allocation_state, r.resource_state, s.status
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+JOIN sessions s ON s.active_generation_id = g.generation_id
+WHERE g.session_id = ?`, session.ID).Scan(&generationStatus, &errorClass, &networkState, &resourceState, &sessionStatus); err != nil {
+		t.Fatalf("query generation state: %v", err)
+	}
+	if generationStatus != "failed" ||
+		errorClass != "probe_failed_pre_start" ||
+		networkState != "reclaimable" ||
+		resourceState != "reclaimable" ||
+		sessionStatus != string(sessionstate.Failed) {
+		t.Fatalf("unexpected failed generation state: generation=%s class=%s network=%s resource=%s session=%s", generationStatus, errorClass, networkState, resourceState, sessionStatus)
+	}
+	var turns int
+	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM turns WHERE session_id = ?`, session.ID).Scan(&turns); err != nil {
+		t.Fatalf("count turns: %v", err)
+	}
+	if turns != 0 {
+		t.Fatalf("prepare failure should happen before turn creation, got %d turns", turns)
+	}
+}
+
 func TestSendMessageRejectsExpiredSessionBeforeAllocation(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -421,6 +645,34 @@ func (instantRuntime) Interrupt(string) error {
 }
 
 func (instantRuntime) Checkpoint(context.Context, string) error {
+	return nil
+}
+
+type failingRuntime struct {
+	prepareErr error
+	err        error
+}
+
+func (f failingRuntime) PrepareGeneration(context.Context, runtime.StartRequest) (runtime.GenerationArtifacts, error) {
+	if f.prepareErr != nil {
+		return runtime.GenerationArtifacts{}, f.prepareErr
+	}
+	return runtime.GenerationArtifacts{}, nil
+}
+
+func (f failingRuntime) Start(context.Context, runtime.StartRequest, func(runtime.Output)) runtime.Result {
+	return runtime.Result{Err: f.err}
+}
+
+func (f failingRuntime) Destroy(context.Context, string) error {
+	return nil
+}
+
+func (f failingRuntime) Interrupt(string) error {
+	return nil
+}
+
+func (f failingRuntime) Checkpoint(context.Context, string) error {
 	return nil
 }
 

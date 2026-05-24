@@ -68,11 +68,27 @@ type RuntimeGenerationDetails struct {
 	LogDirPath                 string
 	ControlManifestDigest      string
 	RunscVersion               string
+	RunscNetwork               string
+	RunscOverlay2              string
+	HostProxyBindURL           string
+	ProxyPort                  int
 	HostGatewayIP              string
 	SandboxBaseURL             string
+	ProbeURL                   string
 	NetnsName                  string
 	NetnsPath                  string
+	HostVeth                   string
+	SandboxVeth                string
+	SandboxIPCIDR              string
+	HostSideCIDR               string
+	EgressPolicyID             string
 	EgressPolicyDigest         string
+	AllowedEgressRules         string
+	DorisFEHosts               string
+	DorisBEHosts               string
+	DorisPorts                 string
+	DNSPolicy                  string
+	NetworkAllocationState     string
 	Agent                      string
 	Model                      string
 	OutputFormat               string
@@ -111,6 +127,10 @@ type RenewLiveGenerationsParams struct {
 	Owner    string
 	LeaseTTL time.Duration
 	Now      time.Time
+}
+
+type ResourceQuota struct {
+	AllocatedPoolSlots int
 }
 
 func GenerationLeaseOwner(ownerUUID string) string {
@@ -652,6 +672,15 @@ WHERE status IN ('starting','probing','active','idle','checkpointing','restoring
 	return res.RowsAffected()
 }
 
+func (s *Store) GetResourceQuota(ctx context.Context) (ResourceQuota, error) {
+	var quota ResourceQuota
+	err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM network_profiles
+WHERE allocation_state != 'destroyed'`).Scan(&quota.AllocatedPoolSlots)
+	return quota, err
+}
+
 func (s *Store) GetRuntimeGenerationDetails(ctx context.Context, sessionID, generationID string) (RuntimeGenerationDetails, error) {
 	row := s.db.QueryRowContext(ctx, `
 SELECT
@@ -670,11 +699,27 @@ SELECT
   r.log_dir_path,
   COALESCE(r.control_manifest_digest, ''),
   COALESCE(r.runsc_version, ''),
+  n.runsc_network,
+  n.runsc_overlay2,
+  n.host_proxy_bind_url,
+  n.proxy_port,
   n.host_gateway_ip,
   n.sandbox_base_url,
+  n.probe_url,
   n.netns_name,
   n.netns_path,
+  n.host_veth,
+  n.sandbox_veth,
+  n.sandbox_ip_cidr,
+  n.host_side_cidr,
+  n.egress_policy_id,
   e.policy_digest,
+  n.allowed_egress_rules,
+  n.doris_fe_hosts,
+  n.doris_be_hosts,
+  n.doris_ports,
+  n.dns_policy,
+  n.allocation_state,
   a.agent,
   COALESCE(a.model, ''),
   a.output_format,
@@ -709,11 +754,27 @@ WHERE g.session_id = ?
 		&details.LogDirPath,
 		&details.ControlManifestDigest,
 		&details.RunscVersion,
+		&details.RunscNetwork,
+		&details.RunscOverlay2,
+		&details.HostProxyBindURL,
+		&details.ProxyPort,
 		&details.HostGatewayIP,
 		&details.SandboxBaseURL,
+		&details.ProbeURL,
 		&details.NetnsName,
 		&details.NetnsPath,
+		&details.HostVeth,
+		&details.SandboxVeth,
+		&details.SandboxIPCIDR,
+		&details.HostSideCIDR,
+		&details.EgressPolicyID,
 		&details.EgressPolicyDigest,
+		&details.AllowedEgressRules,
+		&details.DorisFEHosts,
+		&details.DorisBEHosts,
+		&details.DorisPorts,
+		&details.DNSPolicy,
+		&details.NetworkAllocationState,
 		&details.Agent,
 		&details.Model,
 		&details.OutputFormat,

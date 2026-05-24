@@ -133,7 +133,7 @@ The reaper owns only resources it can prove this orchestrator created. To make t
 netns:        harness-gen-<generation_id>
 veth host:    hgen<short>-h
 veth peer:    hgen<short>-s
-nft chain:    harness-gen-<generation_id>
+nft table:    harness_gen_<generation_id with non-identifier chars replaced by _>
 control dir:  <run_dir>/control/gen-<generation_id>/
 bundle dir:   <run_dir>/runtime/gen-<generation_id>/
 bridge dir:   <run_dir>/bridge/gen-<generation_id>/

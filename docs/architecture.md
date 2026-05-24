@@ -293,7 +293,7 @@ Claude control manifest:
 | Field | Purpose |
 | --- | --- |
 | `proxy_bind_url` | Explicit host bind URL for the local proxy, `http://0.0.0.0:8082` |
-| `anthropic_base_url` | Sandbox-visible proxy URL, `http://10.200.1.1:8082` in the current netns layout |
+| `anthropic_base_url` | Sandbox-visible proxy URL, derived from the generation's allocated `host_gateway_ip` |
 | `anthropic_api_key` / `anthropic_auth_token` | Local proxy credential, fixed to `123` for the lab stack |
 | `claude_model` | Claude model alias, default `sonnet` |
 | `claude_code_disable_nonessential_traffic` | Keep Claude Code from making nonessential traffic during sandbox turns |
@@ -312,7 +312,7 @@ Frontend:
 
 The target security model remains gVisor sandbox networking plus host-side egress controls for Doris and the local LLM proxy.
 
-The current Go runtime launches `runsc` with `-network sandbox -overlay2 none`. It writes an explicit control manifest that fixes the host proxy bind URL at `http://0.0.0.0:8082`, the sandbox-visible Anthropic base URL at `http://10.200.1.1:8082`, and the lab proxy key at `123`. The template bundle uses the fixed `/var/run/netns/phase1-demo` network namespace on this host.
+The current Go runtime launches `runsc` with `-network sandbox -overlay2 none`. The allocator persists a generation-specific netns/veth pair, `/30`, gateway, proxy URL, and egress policy; the runtime recreates those host resources before start/restore, runs a host-side netns probe against the local proxy, and renders the generation's netns path into the OCI spec. The host proxy bind URL remains `http://0.0.0.0:8082`, and the lab proxy key remains `123`.
 
 ## Checkpointing
 

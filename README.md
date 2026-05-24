@@ -14,7 +14,7 @@
 - 前端会在发送消息后轮询 messages/session/artifacts，作为 SSE 断线时的状态补偿。
 - Claude Code 是当前主路径；`Shell` 是 PTY-backed 的交互式命令会话，`Agent` 直接映射到 Claude Code。
 - Artifact 浏览已完成 Phase 6：右栏是实时文件树，支持搜索、下载和 Markdown/code/text/image/JSON/CSV/TSV/PDF 预览；下载路径会拒绝 traversal、symlink escape 和非 regular file。
-- `config/harness.yaml` 已迁到 Phase 7 `harness:` schema；现有热路径仍使用默认本地 Claude proxy 约定：宿主机监听 `http://0.0.0.0:8082`，sandbox 访问 `http://10.200.1.1:8082`，key 为 `123`。
+- `config/harness.yaml` 已迁到 Phase 7 `harness:` schema；现有热路径从每个 generation 的 network profile 派生 sandbox-visible proxy URL，宿主机 proxy 默认监听 `http://0.0.0.0:8082`，本地 key 为 `123`。
 
 ## 文档
 

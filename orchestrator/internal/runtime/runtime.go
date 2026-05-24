@@ -38,19 +38,27 @@ type Config struct {
 	Phase7RunDir          string
 	SecretsRoot           string
 	SecretReadersGID      int
+	PreStartProbeAttempts int
+	PreStartProbeInterval time.Duration
+	ProbeHealthzStatuses  []int
+	ProbeMessageStatuses  []int
+	CommandRunner         CommandRunner
 }
 
-const (
-	controlFileName            = "session.json"
-	runscSandboxNetnsName      = "phase1-demo"
-	runscSandboxNetnsInterface = "gv-phase1"
-	runscSandboxNetnsCIDR      = "10.200.1.2/24"
-	runscSandboxGatewayIP      = "10.200.1.1"
-)
+const controlFileName = "session.json"
+
+type CommandRunner interface {
+	CombinedOutput(context.Context, string, ...string) ([]byte, error)
+}
+
+type execCommandRunner struct{}
+
+func (execCommandRunner) CombinedOutput(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+}
 
 type ClaudeConfig struct {
 	ProxyBindURL               string
-	SandboxBaseURL             string
 	APIKey                     string
 	AuthToken                  string
 	Model                      string
@@ -158,15 +166,17 @@ type specMount struct {
 }
 
 type GenerationArtifacts struct {
-	BundleDir      string
-	SpecPath       string
-	ManifestPath   string
-	ManifestDigest string
-	RunscVersion   string
+	BundleDir       string
+	SpecPath        string
+	ManifestPath    string
+	ManifestDigest  string
+	RunscVersion    string
+	NetworkPrepared bool
 }
 
 type Runtime struct {
 	cfg        Config
+	runner     CommandRunner
 	mu         sync.RWMutex
 	containers map[string]*Container
 }
@@ -186,8 +196,13 @@ type Container struct {
 
 func New(cfg Config) *Runtime {
 	cfg.Claude = normalizeClaudeConfig(cfg.Claude)
+	runner := cfg.CommandRunner
+	if runner == nil {
+		runner = execCommandRunner{}
+	}
 	return &Runtime{
 		cfg:        cfg,
+		runner:     runner,
 		containers: make(map[string]*Container),
 	}
 }
@@ -223,7 +238,15 @@ func (r *Runtime) Start(ctx context.Context, req StartRequest, output func(Outpu
 }
 
 func (r *Runtime) PrepareGeneration(ctx context.Context, req StartRequest) (GenerationArtifacts, error) {
-	return r.renderGenerationArtifacts(ctx, req)
+	artifacts, err := r.renderGenerationArtifacts(ctx, req)
+	if err != nil {
+		return GenerationArtifacts{}, err
+	}
+	if err := r.ensureSandboxNetwork(ctx, req.Generation); err != nil {
+		return GenerationArtifacts{}, err
+	}
+	artifacts.NetworkPrepared = true
+	return artifacts, nil
 }
 
 func (r *Runtime) generationArtifacts(ctx context.Context, req StartRequest) (GenerationArtifacts, error) {
@@ -353,8 +376,8 @@ func (r *Runtime) renderGenerationArtifacts(ctx context.Context, req StartReques
 		"spec_digest": specDigest,
 	}))
 	runtimeConfigDigest := digestHex(mustCanonicalJSON(map[string]any{
-		"runsc_network":  r.cfg.RunscNetwork,
-		"runsc_overlay2": r.cfg.RunscOverlay2,
+		"runsc_network":  r.runscNetwork(details),
+		"runsc_overlay2": r.runscOverlay2(details),
 		"runsc_platform": details.RunscPlatform,
 		"rootfs":         spec.Root.Path,
 	}))
@@ -757,8 +780,11 @@ func (r *Runtime) renderRuntimeSpec(req StartRequest) (runtimeSpec, string, erro
 			{"type": "mount"},
 		},
 	}
-	if strings.EqualFold(strings.TrimSpace(r.cfg.RunscNetwork), "sandbox") {
-		linux["namespaces"] = append(linux["namespaces"].([]map[string]any), map[string]any{"type": "network", "path": "/var/run/netns/phase1-demo"})
+	if strings.EqualFold(strings.TrimSpace(r.runscNetwork(details)), "sandbox") {
+		if strings.TrimSpace(details.NetnsPath) == "" {
+			return runtimeSpec{}, "", fmt.Errorf("sandbox generation requires netns path")
+		}
+		linux["namespaces"] = append(linux["namespaces"].([]map[string]any), map[string]any{"type": "network", "path": details.NetnsPath})
 	}
 	linuxBytes, err := canonicalJSON(linux)
 	if err != nil {
@@ -874,7 +900,7 @@ func shortID(id string) string {
 }
 
 func (r *Runtime) runscVersion(ctx context.Context) string {
-	out, err := exec.CommandContext(ctx, "runsc", "--version").CombinedOutput()
+	out, err := r.runner.CombinedOutput(ctx, "runsc", "--version")
 	if err != nil {
 		return "unknown"
 	}
@@ -884,7 +910,6 @@ func (r *Runtime) runscVersion(ctx context.Context) string {
 func normalizeClaudeConfig(cfg ClaudeConfig) ClaudeConfig {
 	empty := cfg == ClaudeConfig{}
 	cfg.ProxyBindURL = defaultString(cfg.ProxyBindURL, "http://0.0.0.0:8082")
-	cfg.SandboxBaseURL = defaultString(cfg.SandboxBaseURL, "http://"+runscSandboxGatewayIP+":8082")
 	cfg.APIKey = defaultString(cfg.APIKey, "123")
 	cfg.AuthToken = defaultString(cfg.AuthToken, cfg.APIKey)
 	cfg.Model = defaultString(cfg.Model, "sonnet")
@@ -902,6 +927,14 @@ func defaultString(value, fallback string) string {
 	return strings.TrimSpace(value)
 }
 
+func (r *Runtime) runscNetwork(details store.RuntimeGenerationDetails) string {
+	return defaultString(details.RunscNetwork, r.cfg.RunscNetwork)
+}
+
+func (r *Runtime) runscOverlay2(details store.RuntimeGenerationDetails) string {
+	return defaultString(details.RunscOverlay2, r.cfg.RunscOverlay2)
+}
+
 func (r *Runtime) prepareSessionDirs(sessionID string) error {
 	if r.cfg.SessionsRoot != "" {
 		if err := os.MkdirAll(filepath.Join(r.cfg.SessionsRoot, sessionID), 0o755); err != nil {
@@ -916,24 +949,327 @@ func (r *Runtime) prepareSessionDirs(sessionID string) error {
 	return nil
 }
 
-func (r *Runtime) ensureSandboxNetwork(ctx context.Context) error {
-	if !strings.EqualFold(strings.TrimSpace(r.cfg.RunscNetwork), "sandbox") {
+func (r *Runtime) ensureSandboxNetwork(ctx context.Context, details store.RuntimeGenerationDetails) error {
+	if !strings.EqualFold(strings.TrimSpace(r.runscNetwork(details)), "sandbox") {
 		return nil
+	}
+	if strings.TrimSpace(details.NetnsName) == "" ||
+		strings.TrimSpace(details.HostVeth) == "" ||
+		strings.TrimSpace(details.SandboxVeth) == "" ||
+		strings.TrimSpace(details.HostSideCIDR) == "" ||
+		strings.TrimSpace(details.SandboxIPCIDR) == "" ||
+		strings.TrimSpace(details.HostGatewayIP) == "" ||
+		strings.TrimSpace(details.ProbeURL) == "" {
+		return fmt.Errorf("sandbox network allocation is incomplete")
+	}
+	hostGatewayCIDR, err := hostGatewayCIDR(details)
+	if err != nil {
+		return err
 	}
 
 	commands := [][]string{
-		{"ip", "netns", "exec", runscSandboxNetnsName, "ip", "addr", "replace", runscSandboxNetnsCIDR, "dev", runscSandboxNetnsInterface},
-		{"ip", "netns", "exec", runscSandboxNetnsName, "ip", "link", "set", runscSandboxNetnsInterface, "up"},
-		{"ip", "netns", "exec", runscSandboxNetnsName, "ip", "route", "replace", "default", "via", runscSandboxGatewayIP, "dev", runscSandboxNetnsInterface},
+		{"ip", "netns", "add", details.NetnsName},
+		{"ip", "link", "delete", details.HostVeth},
+		{"ip", "netns", "exec", details.NetnsName, "ip", "link", "delete", details.SandboxVeth},
+		{"ip", "link", "add", details.HostVeth, "type", "veth", "peer", "name", details.SandboxVeth},
+		{"ip", "link", "set", details.SandboxVeth, "netns", details.NetnsName},
+		{"ip", "addr", "replace", hostGatewayCIDR, "dev", details.HostVeth},
+		{"ip", "link", "set", details.HostVeth, "up"},
+		{"ip", "netns", "exec", details.NetnsName, "ip", "addr", "replace", details.SandboxIPCIDR, "dev", details.SandboxVeth},
+		{"ip", "netns", "exec", details.NetnsName, "ip", "link", "set", "lo", "up"},
+		{"ip", "netns", "exec", details.NetnsName, "ip", "link", "set", details.SandboxVeth, "up"},
+		{"ip", "netns", "exec", details.NetnsName, "ip", "route", "replace", "default", "via", details.HostGatewayIP, "dev", details.SandboxVeth},
 	}
 	for _, args := range commands {
-		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-		output, err := cmd.CombinedOutput()
+		output, err := r.runner.CombinedOutput(ctx, args[0], args[1:]...)
 		if err != nil {
+			if ignoreSandboxNetworkCommandError(args, string(output), err) {
+				continue
+			}
 			return fmt.Errorf("configure sandbox network %q: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
 		}
 	}
+	if err := r.applySandboxEgressPolicy(ctx, details); err != nil {
+		return err
+	}
+	if err := r.applyHostEgressPolicy(ctx, details); err != nil {
+		return err
+	}
+	if err := r.probeSandboxNetwork(ctx, details); err != nil {
+		return err
+	}
 	return nil
+}
+
+func hostGatewayCIDR(details store.RuntimeGenerationDetails) (string, error) {
+	_, suffix, ok := strings.Cut(strings.TrimSpace(details.HostSideCIDR), "/")
+	if !ok || strings.TrimSpace(suffix) == "" {
+		return "", fmt.Errorf("invalid host side cidr %q", details.HostSideCIDR)
+	}
+	return strings.TrimSpace(details.HostGatewayIP) + "/" + strings.TrimSpace(suffix), nil
+}
+
+func ignoreSandboxNetworkCommandError(args []string, output string, err error) bool {
+	if len(args) >= 4 && args[0] == "ip" && args[1] == "netns" && args[2] == "add" {
+		return commandOutputContains(output, "file exists", "already exists")
+	}
+	if len(args) >= 4 && args[0] == "ip" && args[1] == "link" && args[2] == "delete" {
+		return commandOutputContains(output, "cannot find device", "does not exist", "not found")
+	}
+	if len(args) >= 8 && args[0] == "ip" && args[1] == "netns" && args[2] == "exec" && args[4] == "ip" && args[5] == "link" && args[6] == "delete" {
+		return commandOutputContains(output, "cannot find device", "does not exist", "not found")
+	}
+	return false
+}
+
+func commandOutputContains(output string, needles ...string) bool {
+	output = strings.ToLower(output)
+	for _, needle := range needles {
+		if strings.Contains(output, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Runtime) applySandboxEgressPolicy(ctx context.Context, details store.RuntimeGenerationDetails) error {
+	rules, err := parseAllowedEgressRules(details.AllowedEgressRules)
+	if err != nil {
+		return err
+	}
+	const tableName = "harness_egress"
+	base := []string{"netns", "exec", details.NetnsName, "nft"}
+	if _, err := r.runner.CombinedOutput(ctx, "ip", append(base, "list", "table", "inet", tableName)...); err == nil {
+		if err := r.runNetworkCommand(ctx, "ip", append(base, "delete", "table", "inet", tableName)...); err != nil {
+			return err
+		}
+	}
+	if err := r.runNetworkCommand(ctx, "ip", append(base, "add", "table", "inet", tableName)...); err != nil {
+		return err
+	}
+	if err := r.runNetworkCommand(ctx, "ip", append(base, "add", "chain", "inet", tableName, "output", "{", "type", "filter", "hook", "output", "priority", "0", ";", "policy", "drop", ";", "}")...); err != nil {
+		return err
+	}
+	if err := r.runNetworkCommand(ctx, "ip", append(base, "add", "rule", "inet", tableName, "output", "oifname", "lo", "accept")...); err != nil {
+		return err
+	}
+	for _, rule := range rules {
+		args := append([]string{}, base...)
+		args = append(args, "add", "rule", "inet", tableName, "output")
+		if rule.Host != "" {
+			args = append(args, "ip", "daddr", rule.Host)
+		}
+		args = append(args, rule.Proto, "dport", strconv.Itoa(rule.Port), "accept")
+		if err := r.runNetworkCommand(ctx, "ip", args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Runtime) applyHostEgressPolicy(ctx context.Context, details store.RuntimeGenerationDetails) error {
+	rules, err := parseAllowedEgressRules(details.AllowedEgressRules)
+	if err != nil {
+		return err
+	}
+	if err := r.runNetworkCommand(ctx, "sysctl", "-w", "net.ipv4.ip_forward=1"); err != nil {
+		return err
+	}
+	tableName := "harness_gen_" + nftIdentifier(details.GenerationID)
+	if _, err := r.runner.CombinedOutput(ctx, "nft", "list", "table", "inet", tableName); err == nil {
+		if err := r.runNetworkCommand(ctx, "nft", "delete", "table", "inet", tableName); err != nil {
+			return err
+		}
+	}
+	if err := r.runNetworkCommand(ctx, "nft", "add", "table", "inet", tableName); err != nil {
+		return err
+	}
+	if err := r.runNetworkCommand(ctx, "nft", "add", "chain", "inet", tableName, "forward", "{", "type", "filter", "hook", "forward", "priority", "0", ";", "policy", "accept", ";", "}"); err != nil {
+		return err
+	}
+	if err := r.runNetworkCommand(ctx, "nft", "add", "chain", "inet", tableName, "postrouting", "{", "type", "nat", "hook", "postrouting", "priority", "100", ";", "policy", "accept", ";", "}"); err != nil {
+		return err
+	}
+	for _, rule := range rules {
+		if rule.Host == details.HostGatewayIP {
+			continue
+		}
+		args := []string{"add", "rule", "inet", tableName, "forward", "iifname", details.HostVeth}
+		if rule.Host != "" {
+			args = append(args, "ip", "daddr", rule.Host)
+		}
+		args = append(args, rule.Proto, "dport", strconv.Itoa(rule.Port), "accept")
+		if err := r.runNetworkCommand(ctx, "nft", args...); err != nil {
+			return err
+		}
+	}
+	if err := r.runNetworkCommand(ctx, "nft", "add", "rule", "inet", tableName, "forward", "oifname", details.HostVeth, "ct", "state", "established,related", "accept"); err != nil {
+		return err
+	}
+	if err := r.runNetworkCommand(ctx, "nft", "add", "rule", "inet", tableName, "forward", "iifname", details.HostVeth, "drop"); err != nil {
+		return err
+	}
+	if err := r.runNetworkCommand(ctx, "nft", "add", "rule", "inet", tableName, "postrouting", "ip", "saddr", details.HostSideCIDR, "masquerade"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func nftIdentifier(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	out := b.String()
+	if out == "" {
+		return "unknown"
+	}
+	return out
+}
+
+func (r *Runtime) runNetworkCommand(ctx context.Context, name string, args ...string) error {
+	output, err := r.runner.CombinedOutput(ctx, name, args...)
+	if err != nil {
+		return fmt.Errorf("configure sandbox network %q: %w: %s", strings.Join(append([]string{name}, args...), " "), err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func (r *Runtime) probeSandboxNetwork(ctx context.Context, details store.RuntimeGenerationDetails) error {
+	attempts := r.cfg.PreStartProbeAttempts
+	if attempts <= 0 {
+		attempts = 3
+	}
+	interval := r.cfg.PreStartProbeInterval
+	if interval <= 0 {
+		interval = 500 * time.Millisecond
+	}
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if err := r.runSandboxNetworkProbeOnce(ctx, details); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		if attempt == attempts {
+			break
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return lastErr
+}
+
+func (r *Runtime) runSandboxNetworkProbeOnce(ctx context.Context, details store.RuntimeGenerationDetails) error {
+	baseURL := strings.TrimRight(details.ProbeURL, "/")
+	probes := []struct {
+		args           []string
+		acceptStatuses []int
+	}{
+		{
+			args:           []string{"netns", "exec", details.NetnsName, "curl", "-sS", "--max-time", "2", "-o", "/dev/null", "-w", "%{http_code}", baseURL + "/healthz"},
+			acceptStatuses: defaultIntSlice(r.cfg.ProbeHealthzStatuses, []int{200}),
+		},
+		{
+			args:           []string{"netns", "exec", details.NetnsName, "curl", "-sS", "--max-time", "2", "-o", "/dev/null", "-w", "%{http_code}", "-X", "POST", "-H", "content-type: application/json", "-H", "x-api-key: " + r.cfg.Claude.APIKey, "--data", "{}", baseURL + "/v1/messages"},
+			acceptStatuses: defaultIntSlice(r.cfg.ProbeMessageStatuses, []int{400}),
+		},
+	}
+	for _, probe := range probes {
+		output, err := r.runner.CombinedOutput(ctx, "ip", probe.args...)
+		if err != nil {
+			return fmt.Errorf("pre-start sandbox network probe %q: %w: %s", strings.Join(append([]string{"ip"}, probe.args...), " "), err, strings.TrimSpace(string(output)))
+		}
+		status, err := strconv.Atoi(strings.TrimSpace(string(output)))
+		if err != nil {
+			return fmt.Errorf("pre-start sandbox network probe %q: invalid status %s", strings.Join(append([]string{"ip"}, probe.args...), " "), strings.TrimSpace(string(output)))
+		}
+		if !statusAccepted(status, probe.acceptStatuses) {
+			return fmt.Errorf("pre-start sandbox network probe %q: unexpected status %d", strings.Join(append([]string{"ip"}, probe.args...), " "), status)
+		}
+	}
+	return nil
+}
+
+func defaultIntSlice(values, fallback []int) []int {
+	if len(values) == 0 {
+		return fallback
+	}
+	return values
+}
+
+func statusAccepted(status int, accepted []int) bool {
+	for _, value := range accepted {
+		if status == value {
+			return true
+		}
+	}
+	return false
+}
+
+type egressRule struct {
+	Proto string
+	Host  string
+	Port  int
+}
+
+func parseAllowedEgressRules(raw string) ([]egressRule, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	var values []string
+	if err := json.Unmarshal([]byte(raw), &values); err != nil {
+		return nil, fmt.Errorf("parse egress rules: %w", err)
+	}
+	rules := make([]egressRule, 0, len(values))
+	for _, value := range values {
+		rule, err := parseAllowedEgressRule(value)
+		if err != nil {
+			return nil, err
+		}
+		rules = append(rules, rule)
+	}
+	return rules, nil
+}
+
+func parseAllowedEgressRule(value string) (egressRule, error) {
+	value = strings.TrimSpace(value)
+	parts := strings.Split(value, ":")
+	if len(parts) == 2 {
+		port, err := strconv.Atoi(parts[1])
+		if err != nil || port <= 0 || port > 65535 {
+			return egressRule{}, fmt.Errorf("invalid egress rule %q", value)
+		}
+		if parts[0] != "tcp" && parts[0] != "udp" {
+			return egressRule{}, fmt.Errorf("invalid egress rule %q", value)
+		}
+		return egressRule{Proto: parts[0], Port: port}, nil
+	}
+	if len(parts) != 3 {
+		return egressRule{}, fmt.Errorf("invalid egress rule %q", value)
+	}
+	port, err := strconv.Atoi(parts[2])
+	if err != nil || port <= 0 || port > 65535 {
+		return egressRule{}, fmt.Errorf("invalid egress rule %q", value)
+	}
+	if parts[0] != "tcp" && parts[0] != "udp" {
+		return egressRule{}, fmt.Errorf("invalid egress rule %q", value)
+	}
+	if strings.TrimSpace(parts[1]) == "" {
+		return egressRule{}, fmt.Errorf("invalid egress rule %q", value)
+	}
+	return egressRule{Proto: parts[0], Host: parts[1], Port: port}, nil
 }
 
 type claudeInputFrame struct {
@@ -1105,8 +1441,11 @@ func (r *Runtime) startFresh(ctx context.Context, req StartRequest, output func(
 	if err := r.prepareSessionDirs(req.SessionID); err != nil {
 		return Result{Err: err}
 	}
-	if err := r.ensureSandboxNetwork(ctx); err != nil {
-		return Result{Err: err}
+	if !req.PreparedArtifacts.NetworkPrepared {
+		if err := r.ensureSandboxNetwork(ctx, req.Generation); err != nil {
+			return Result{Err: err}
+		}
+		req.PreparedArtifacts.NetworkPrepared = true
 	}
 
 	// Build runsc run command
@@ -1119,8 +1458,8 @@ func (r *Runtime) startFresh(ctx context.Context, req StartRequest, output func(
 	cmd := exec.CommandContext(cmdCtx, "runsc",
 		"-root", r.cfg.RunscRoot,
 		"-platform", "systrap",
-		"-overlay2", r.cfg.RunscOverlay2,
-		"-network", r.cfg.RunscNetwork,
+		"-overlay2", r.runscOverlay2(req.Generation),
+		"-network", r.runscNetwork(req.Generation),
 		"run",
 		"-bundle", bundlePath,
 		containerID,
@@ -1205,19 +1544,21 @@ func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, ou
 
 	hub.Publish(OutputEvent{Stream: "runtime", Line: "resuming from checkpoint"})
 
-	if err := r.prepareSessionDirs(req.SessionID); err != nil {
-		return Result{Err: err}
-	}
-	if err := r.ensureSandboxNetwork(ctx); err != nil {
-		return Result{Err: err}
-	}
-
 	// Similar to startFresh but use runsc restore
 	artifacts, err := r.generationArtifacts(ctx, req)
 	if err != nil {
 		return Result{Err: err}
 	}
 	req.PreparedArtifacts = artifacts
+	if err := r.prepareSessionDirs(req.SessionID); err != nil {
+		return Result{Err: err}
+	}
+	if !req.PreparedArtifacts.NetworkPrepared {
+		if err := r.ensureSandboxNetwork(ctx, req.Generation); err != nil {
+			return Result{Err: err}
+		}
+		req.PreparedArtifacts.NetworkPrepared = true
+	}
 	checkpointPath := filepath.Join(r.cfg.CheckpointsRoot, req.SessionID)
 	containerID := fmt.Sprintf("phase3-%s", req.SessionID)
 	bundlePath := artifacts.BundleDir
@@ -1227,8 +1568,8 @@ func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, ou
 	cmd := exec.CommandContext(cmdCtx, "runsc",
 		"-root", r.cfg.RunscRoot,
 		"-platform", "systrap",
-		"-overlay2", r.cfg.RunscOverlay2,
-		"-network", r.cfg.RunscNetwork,
+		"-overlay2", r.runscOverlay2(req.Generation),
+		"-network", r.runscNetwork(req.Generation),
 		"restore",
 		"-bundle", bundlePath,
 		"-image-path", checkpointPath,
