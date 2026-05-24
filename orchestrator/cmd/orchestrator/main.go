@@ -58,10 +58,11 @@ func main() {
 		os.Exit(1)
 	}
 	if _, err := db.RecoverAllocations(ctx, store.StartupRecoveryParams{
-		OwnerUUID:      owner.UUID,
-		Now:            time.Now().UTC(),
-		LeaseTTL:       cfg.Phase7.Bridge.LeaseTTL.Duration,
-		ReconnectGrace: cfg.Phase7.Bridge.ReconnectGrace.Duration,
+		OwnerUUID:       owner.UUID,
+		Now:             time.Now().UTC(),
+		LeaseTTL:        cfg.Phase7.Bridge.LeaseTTL.Duration,
+		ReconnectGrace:  cfg.Phase7.Bridge.ReconnectGrace.Duration,
+		AckStartedGrace: cfg.Phase7.Bridge.AckStartedGrace.Duration,
 	}); err != nil {
 		log.Error("failed to recover phase7 allocations", "error", err)
 		os.Exit(1)

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"net/netip"
 	"path/filepath"
@@ -333,6 +334,161 @@ WHERE generation_id = ?`, formatTime(now.Add(-5*time.Second)), recentFailed.Gene
 	}
 }
 
+func TestRecoverAllocationsRequeuesExpiredLeasedTurn(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	cfg := testAllocatorConfig(t)
+	createStoreSession(t, ctx, st, "sess_requeue")
+	now := time.Now().UTC()
+	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_requeue",
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       now.Add(-3 * time.Minute),
+		Config:    cfg,
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, "sess_requeue", allocation.GenerationID, allocation.Owner, now.Add(-3*time.Minute+time.Second)); err != nil {
+		t.Fatalf("mark resources live: %v", err)
+	}
+	turnID, err := st.EnqueueTurn(ctx, "sess_requeue", "retry me", now.Add(-3*time.Minute+2*time.Second))
+	if err != nil {
+		t.Fatalf("enqueue turn: %v", err)
+	}
+	if grant, ok, err := st.ClaimNextTurn(ctx, ClaimNextTurnParams{
+		SessionID:    "sess_requeue",
+		GenerationID: allocation.GenerationID,
+		Owner:        allocation.Owner,
+		RequestID:    "req_requeue",
+		LeaseTTL:     30 * time.Second,
+		Now:          now.Add(-3*time.Minute + 3*time.Second),
+	}); err != nil || !ok || grant.TurnID != turnID {
+		t.Fatalf("claim setup: ok=%v grant=%+v err=%v", ok, grant, err)
+	}
+
+	recovered, err := st.RecoverAllocations(ctx, StartupRecoveryParams{
+		OwnerUUID:       owner.UUID,
+		Now:             now,
+		LeaseTTL:        time.Minute,
+		ReconnectGrace:  time.Minute,
+		AckStartedGrace: 2 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("recover allocations: %v", err)
+	}
+	if recovered.ReconnectGraceFailed != 1 || recovered.ExpiredLeasedRequeued != 1 || recovered.UnknownAfterAckStarted != 0 {
+		t.Fatalf("unexpected recovery result: %+v", recovered)
+	}
+
+	var status string
+	var generationID, leaseOwner, leaseExpires, claimRequest sql.NullString
+	var attempt int
+	if err := st.db.QueryRowContext(ctx, `
+SELECT status, generation_id, lease_owner, lease_expires_at, claim_request_id, attempt
+FROM turns
+WHERE id = ?`, turnID).Scan(&status, &generationID, &leaseOwner, &leaseExpires, &claimRequest, &attempt); err != nil {
+		t.Fatalf("query turn: %v", err)
+	}
+	if status != "queued" || generationID.Valid || leaseOwner.Valid || leaseExpires.Valid || claimRequest.Valid || attempt != 1 {
+		t.Fatalf("leased turn was not reset for retry: status=%s gen=%v owner=%v expires=%v claim=%v attempt=%d", status, generationID, leaseOwner, leaseExpires, claimRequest, attempt)
+	}
+	var generationStatus, networkState, resourceState string
+	if err := st.db.QueryRowContext(ctx, `
+SELECT g.status, n.allocation_state, r.resource_state
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &networkState, &resourceState); err != nil {
+		t.Fatalf("query generation: %v", err)
+	}
+	if generationStatus != "failed" || networkState != "reclaimable" || resourceState != "reclaimable" {
+		t.Fatalf("unexpected generation state after requeue recovery: generation=%s network=%s resource=%s", generationStatus, networkState, resourceState)
+	}
+}
+
+func TestRecoverAllocationsLeavesAckStartedTurnDuringGrace(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	cfg := testAllocatorConfig(t)
+	createStoreSession(t, ctx, st, "sess_ack_grace")
+	now := time.Now().UTC()
+	allocation, turnID := createExpiredAckStartedTurn(t, ctx, st, owner.UUID, cfg, "sess_ack_grace", now, 80*time.Second)
+
+	recovered, err := st.RecoverAllocations(ctx, StartupRecoveryParams{
+		OwnerUUID:       owner.UUID,
+		Now:             now,
+		LeaseTTL:        time.Minute,
+		ReconnectGrace:  10 * time.Second,
+		AckStartedGrace: 90 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("recover allocations: %v", err)
+	}
+	if recovered.ReconnectGraceFailed != 0 || recovered.UnknownAfterAckStarted != 0 || recovered.ExpiredLeasedRequeued != 0 {
+		t.Fatalf("ack-started turn inside grace should not be fenced: %+v", recovered)
+	}
+	var turnStatus, generationStatus string
+	if err := st.db.QueryRowContext(ctx, `SELECT status FROM turns WHERE id = ?`, turnID).Scan(&turnStatus); err != nil {
+		t.Fatalf("query turn status: %v", err)
+	}
+	if err := st.db.QueryRowContext(ctx, `SELECT status FROM runtime_generations WHERE generation_id = ?`, allocation.GenerationID).Scan(&generationStatus); err != nil {
+		t.Fatalf("query generation status: %v", err)
+	}
+	if turnStatus != "running" || generationStatus != "active" {
+		t.Fatalf("ack-started turn should remain recoverable inside grace: turn=%s generation=%s", turnStatus, generationStatus)
+	}
+}
+
+func TestRecoverAllocationsMarksExpiredAckStartedTurnUnknown(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	cfg := testAllocatorConfig(t)
+	createStoreSession(t, ctx, st, "sess_ack_unknown")
+	now := time.Now().UTC()
+	allocation, turnID := createExpiredAckStartedTurn(t, ctx, st, owner.UUID, cfg, "sess_ack_unknown", now, 3*time.Minute)
+
+	recovered, err := st.RecoverAllocations(ctx, StartupRecoveryParams{
+		OwnerUUID:       owner.UUID,
+		Now:             now,
+		LeaseTTL:        time.Minute,
+		ReconnectGrace:  time.Minute,
+		AckStartedGrace: 90 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("recover allocations: %v", err)
+	}
+	if recovered.UnknownAfterAckStarted != 1 || recovered.ReconnectGraceFailed != 0 || recovered.ExpiredLeasedRequeued != 0 {
+		t.Fatalf("unexpected recovery result: %+v", recovered)
+	}
+	var turnStatus, turnError, generationStatus, generationError, networkState, resourceState string
+	if err := st.db.QueryRowContext(ctx, `
+SELECT t.status, COALESCE(t.error_class, ''), g.status, COALESCE(g.error_class, ''), n.allocation_state, r.resource_state
+FROM turns t
+JOIN runtime_generations g ON g.generation_id = t.generation_id
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE t.id = ?`, turnID).Scan(&turnStatus, &turnError, &generationStatus, &generationError, &networkState, &resourceState); err != nil {
+		t.Fatalf("query recovered state: %v", err)
+	}
+	if turnStatus != "failed" ||
+		turnError != "unknown_after_ack_started" ||
+		generationStatus != "failed" ||
+		generationError != "unknown_after_ack_started" ||
+		networkState != "reclaimable" ||
+		resourceState != "reclaimable" {
+		t.Fatalf("unexpected unknown-after-ack state: turn=%s/%s generation=%s/%s network=%s resource=%s", turnStatus, turnError, generationStatus, generationError, networkState, resourceState)
+	}
+	var contexts int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM active_model_request_contexts WHERE generation_id = ?`, allocation.GenerationID).Scan(&contexts); err != nil {
+		t.Fatalf("count active contexts: %v", err)
+	}
+	if contexts != 0 {
+		t.Fatalf("active model contexts should be cleared, got %d", contexts)
+	}
+}
+
 func TestRenewLiveGenerationLeasesKeepsIdle7AGenerationAlive(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
@@ -544,6 +700,63 @@ func openOwnedStore(t *testing.T, ctx context.Context) (*Store, *OwnerLock) {
 		t.Fatalf("write owner: %v", err)
 	}
 	return st, owner
+}
+
+func createExpiredAckStartedTurn(t *testing.T, ctx context.Context, st *Store, ownerUUID string, cfg ResourceAllocatorConfig, sessionID string, now time.Time, expiredFor time.Duration) (GenerationAllocation, int64) {
+	t.Helper()
+	owner := GenerationLeaseOwner(ownerUUID)
+	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: sessionID,
+		Owner:     owner,
+		LeaseTTL:  time.Minute,
+		Now:       now.Add(-expiredFor - time.Minute),
+		Config:    cfg,
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, sessionID, allocation.GenerationID, allocation.Owner, now.Add(-expiredFor-time.Minute+time.Second)); err != nil {
+		t.Fatalf("mark resources live: %v", err)
+	}
+	turnID, err := st.EnqueueTurn(ctx, sessionID, "maybe already ran", now.Add(-expiredFor-time.Minute+2*time.Second))
+	if err != nil {
+		t.Fatalf("enqueue turn: %v", err)
+	}
+	claimAt := now.Add(-expiredFor - time.Minute + 3*time.Second)
+	if grant, ok, err := st.ClaimNextTurn(ctx, ClaimNextTurnParams{
+		SessionID:    sessionID,
+		GenerationID: allocation.GenerationID,
+		Owner:        allocation.Owner,
+		RequestID:    "req_" + sessionID,
+		LeaseTTL:     30 * time.Second,
+		Now:          claimAt,
+	}); err != nil || !ok || grant.TurnID != turnID {
+		t.Fatalf("claim setup: ok=%v grant=%+v err=%v", ok, grant, err)
+	}
+	if err := st.AckTurnStarted(ctx, AckStartedParams{
+		SessionID:       sessionID,
+		GenerationID:    allocation.GenerationID,
+		TurnID:          turnID,
+		Owner:           allocation.Owner,
+		SandboxSourceIP: "10.240.0.2",
+		LeaseTTL:        30 * time.Second,
+		Now:             claimAt.Add(time.Second),
+	}); err != nil {
+		t.Fatalf("ack started setup: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_generations
+SET lease_expires_at = ?
+WHERE generation_id = ?`, formatTime(now.Add(-expiredFor)), allocation.GenerationID); err != nil {
+		t.Fatalf("expire generation lease: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE turns
+SET lease_expires_at = ?
+WHERE id = ?`, formatTime(now.Add(-expiredFor)), turnID); err != nil {
+		t.Fatalf("expire turn lease: %v", err)
+	}
+	return allocation, turnID
 }
 
 func testAllocatorConfig(t *testing.T) ResourceAllocatorConfig {

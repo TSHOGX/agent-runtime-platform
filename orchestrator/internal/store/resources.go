@@ -118,15 +118,18 @@ type ReaperResult struct {
 }
 
 type StartupRecoveryParams struct {
-	OwnerUUID      string
-	Now            time.Time
-	LeaseTTL       time.Duration
-	ReconnectGrace time.Duration
+	OwnerUUID       string
+	Now             time.Time
+	LeaseTTL        time.Duration
+	ReconnectGrace  time.Duration
+	AckStartedGrace time.Duration
 }
 
 type StartupRecoveryResult struct {
 	ExpiredLifecycleFailed int64
 	ReconnectGraceFailed   int64
+	ExpiredLeasedRequeued  int64
+	UnknownAfterAckStarted int64
 }
 
 type RenewLiveGenerationsParams struct {
@@ -568,6 +571,9 @@ func (s *Store) RecoverAllocations(ctx context.Context, p StartupRecoveryParams)
 	if p.Now.IsZero() {
 		p.Now = time.Now().UTC()
 	}
+	if p.AckStartedGrace <= 0 {
+		p.AckStartedGrace = p.ReconnectGrace
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return StartupRecoveryResult{}, err
@@ -576,6 +582,7 @@ func (s *Store) RecoverAllocations(ctx context.Context, p StartupRecoveryParams)
 	if err := assertOwnerTx(ctx, tx, p.OwnerUUID); err != nil {
 		return StartupRecoveryResult{}, err
 	}
+	result := StartupRecoveryResult{}
 	now := formatTime(p.Now)
 	lifecycleIDs, err := queryStringColumnTx(ctx, tx, `
 SELECT generation_id
@@ -587,6 +594,11 @@ WHERE status IN ('allocating','starting','probing','restoring','checkpointing')
 		return StartupRecoveryResult{}, err
 	}
 	if len(lifecycleIDs) > 0 {
+		requeued, err := requeueExpiredLeasedTurnsTx(ctx, tx, lifecycleIDs, p.Now)
+		if err != nil {
+			return StartupRecoveryResult{}, err
+		}
+		result.ExpiredLeasedRequeued += requeued
 		args := []any{now}
 		args = appendStringIDs(args, lifecycleIDs)
 		if _, err := tx.ExecContext(ctx, `
@@ -602,6 +614,67 @@ WHERE generation_id IN (`+sqlPlaceholders(len(lifecycleIDs))+`)`, args...); err 
 		if err := markAllocationsReclaimableTx(ctx, tx, lifecycleIDs); err != nil {
 			return StartupRecoveryResult{}, err
 		}
+	}
+
+	ackStartedCutoff := p.Now.Add(-p.AckStartedGrace)
+	unknownIDs, err := queryStringColumnTx(ctx, tx, `
+SELECT generation_id
+FROM runtime_generations
+WHERE status IN ('active','idle')
+  AND lease_expires_at IS NOT NULL
+  AND lease_expires_at <= ?
+  AND EXISTS (
+    SELECT 1 FROM turns
+    WHERE turns.generation_id = runtime_generations.generation_id
+      AND turns.status = 'running'
+      AND turns.ack_started_at IS NOT NULL
+      AND turns.lease_expires_at IS NOT NULL
+      AND turns.lease_expires_at <= ?
+  )`, formatTime(ackStartedCutoff), formatTime(ackStartedCutoff))
+	if err != nil {
+		return StartupRecoveryResult{}, err
+	}
+	if len(unknownIDs) > 0 {
+		args := []any{now}
+		args = appendStringIDs(args, unknownIDs)
+		res, err := tx.ExecContext(ctx, `
+UPDATE turns
+SET status = 'failed',
+    completed_at = ?,
+    completed_by_generation = generation_id,
+    error_class = 'unknown_after_ack_started',
+    error = 'unknown_after_ack_started',
+    lease_owner = NULL,
+    lease_expires_at = NULL
+WHERE generation_id IN (`+sqlPlaceholders(len(unknownIDs))+`)
+  AND status = 'running'
+  AND ack_started_at IS NOT NULL`, args...)
+		if err != nil {
+			return StartupRecoveryResult{}, err
+		}
+		unknownTurns, err := res.RowsAffected()
+		if err != nil {
+			return StartupRecoveryResult{}, err
+		}
+		args = []any{now}
+		args = appendStringIDs(args, unknownIDs)
+		if _, err := tx.ExecContext(ctx, `
+UPDATE runtime_generations
+SET status = 'failed',
+    error_class = 'unknown_after_ack_started',
+    failure_reason = 'unknown_after_ack_started',
+    ended_at = ?,
+    lease_owner = NULL
+WHERE generation_id IN (`+sqlPlaceholders(len(unknownIDs))+`)`, args...); err != nil {
+			return StartupRecoveryResult{}, err
+		}
+		if err := markAllocationsReclaimableTx(ctx, tx, unknownIDs); err != nil {
+			return StartupRecoveryResult{}, err
+		}
+		if err := deleteActiveContextsForGenerationsTx(ctx, tx, unknownIDs); err != nil {
+			return StartupRecoveryResult{}, err
+		}
+		result.UnknownAfterAckStarted += unknownTurns
 	}
 
 	cutoff := p.Now.Add(-p.ReconnectGrace)
@@ -621,6 +694,11 @@ WHERE status IN ('active','idle')
 		return StartupRecoveryResult{}, err
 	}
 	if len(reconnectIDs) > 0 {
+		requeued, err := requeueExpiredLeasedTurnsTx(ctx, tx, reconnectIDs, p.Now)
+		if err != nil {
+			return StartupRecoveryResult{}, err
+		}
+		result.ExpiredLeasedRequeued += requeued
 		args := []any{now}
 		args = appendStringIDs(args, reconnectIDs)
 		if _, err := tx.ExecContext(ctx, `
@@ -636,6 +714,9 @@ WHERE generation_id IN (`+sqlPlaceholders(len(reconnectIDs))+`)`, args...); err 
 		if err := markAllocationsReclaimableTx(ctx, tx, reconnectIDs); err != nil {
 			return StartupRecoveryResult{}, err
 		}
+		if err := deleteActiveContextsForGenerationsTx(ctx, tx, reconnectIDs); err != nil {
+			return StartupRecoveryResult{}, err
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `
 DELETE FROM active_model_request_contexts
@@ -645,7 +726,9 @@ WHERE lease_owner NOT LIKE ?`, p.OwnerUUID+":%"); err != nil {
 	if err := tx.Commit(); err != nil {
 		return StartupRecoveryResult{}, err
 	}
-	return StartupRecoveryResult{ExpiredLifecycleFailed: int64(len(lifecycleIDs)), ReconnectGraceFailed: int64(len(reconnectIDs))}, nil
+	result.ExpiredLifecycleFailed = int64(len(lifecycleIDs))
+	result.ReconnectGraceFailed = int64(len(reconnectIDs))
+	return result, nil
 }
 
 func (s *Store) RenewLiveGenerationLeases(ctx context.Context, p RenewLiveGenerationsParams) (int64, error) {
@@ -936,6 +1019,48 @@ WHERE resource_state IN ('allocating','ready','live','reserved_checkpointed','re
 		return err
 	}
 	return nil
+}
+
+func requeueExpiredLeasedTurnsTx(ctx context.Context, tx *sql.Tx, generationIDs []string, now time.Time) (int64, error) {
+	if len(generationIDs) == 0 {
+		return 0, nil
+	}
+	args := appendStringIDs([]any{formatTime(now)}, generationIDs)
+	res, err := tx.ExecContext(ctx, `
+UPDATE turns
+SET status = 'queued',
+    generation_id = NULL,
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    claim_request_id = NULL,
+    claim_granted_at = NULL,
+    started_at = NULL,
+    ack_started_at = NULL,
+    completed_by_generation = NULL,
+    completed_at = NULL,
+    error_class = NULL,
+    error = NULL,
+    attempt = attempt + 1
+WHERE lease_expires_at IS NOT NULL
+  AND lease_expires_at <= ?
+  AND generation_id IN (`+sqlPlaceholders(len(generationIDs))+`)
+  AND status = 'leased'
+  AND ack_started_at IS NULL`, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func deleteActiveContextsForGenerationsTx(ctx context.Context, tx *sql.Tx, generationIDs []string) error {
+	if len(generationIDs) == 0 {
+		return nil
+	}
+	args := appendStringIDs(nil, generationIDs)
+	_, err := tx.ExecContext(ctx, `
+DELETE FROM active_model_request_contexts
+WHERE generation_id IN (`+sqlPlaceholders(len(generationIDs))+`)`, args...)
+	return err
 }
 
 func updateSessionActiveGenerationTx(ctx context.Context, tx *sql.Tx, p SessionActiveGenerationCASParams) error {
