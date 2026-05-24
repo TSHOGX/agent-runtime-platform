@@ -27,6 +27,7 @@ type Processor struct {
 	LeaseTTL     time.Duration
 	Now          func() time.Time
 	ProbeHandler func(context.Context, Envelope) error
+	AfterCommit  func(context.Context, Envelope)
 	connected    map[string]bridgeState
 }
 
@@ -237,6 +238,7 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 		}); err != nil {
 			return err
 		}
+		p.afterCommit(ctx, envelope)
 		return nil
 	case TypeEmitOutput:
 		if envelope.TurnID == nil {
@@ -249,7 +251,7 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 		if payload.OutputSequence <= 0 {
 			return protocolErrorf("emit_output requires positive output_sequence")
 		}
-		_, err := p.Store.AppendEvent(ctx, store.AppendEventParams{
+		eventID, err := p.Store.AppendEvent(ctx, store.AppendEventParams{
 			SessionID:      envelope.SessionID,
 			TurnID:         envelope.TurnID,
 			GenerationID:   envelope.GenerationID,
@@ -260,6 +262,9 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 			Payload:        jsonPayload(payload.Payload),
 			Now:            now,
 		})
+		if err == nil && eventID != 0 {
+			p.afterCommit(ctx, envelope)
+		}
 		return err
 	case TypeAckTurnCompleted:
 		if envelope.TurnID == nil {
@@ -287,6 +292,7 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 		}); err != nil {
 			return err
 		}
+		p.afterCommit(ctx, envelope)
 		return nil
 	default:
 		return protocolErrorf("unsupported bridge message type %q", envelope.Type)
@@ -307,6 +313,12 @@ func (p *Processor) writeResponse(ctx context.Context, inbox Queue, request Enve
 		Payload:      raw,
 	})
 	return err
+}
+
+func (p *Processor) afterCommit(ctx context.Context, envelope Envelope) {
+	if p.AfterCommit != nil {
+		p.AfterCommit(ctx, envelope)
+	}
 }
 
 func validateEnvelope(envelope Envelope) error {

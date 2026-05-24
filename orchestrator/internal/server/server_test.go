@@ -653,6 +653,126 @@ func TestRunPhase7MaintenancePollsBridgeOutbox(t *testing.T) {
 	}
 }
 
+func TestRunPhase7MaintenancePublishesBridgeOutputAndCompletion(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_bridge_events", string(sessionstate.RunningActive), time.Now().UTC(), nil)
+	if _, err := st.DBForTest().ExecContext(ctx, `UPDATE sessions SET agent = 'sh' WHERE id = ?`, session.ID); err != nil {
+		t.Fatalf("set shell agent: %v", err)
+	}
+	cfg := testServerConfig(dir)
+	cfg.Phase7.Bridge.PollInterval = config.Duration{Duration: 10 * time.Millisecond}
+	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     store.GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    serverTestAllocatorConfig(cfg, "sh"),
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
+		t.Fatalf("mark generation live: %v", err)
+	}
+	details, err := st.GetRuntimeGenerationDetails(ctx, session.ID, allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get generation details: %v", err)
+	}
+	turnID, err := st.EnqueueTurn(ctx, session.ID, "run", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("enqueue turn: %v", err)
+	}
+	grant, ok, err := st.ClaimNextTurn(ctx, store.ClaimNextTurnParams{
+		SessionID:    session.ID,
+		GenerationID: allocation.GenerationID,
+		Owner:        allocation.Owner,
+		RequestID:    "req_claim",
+		LeaseTTL:     time.Minute,
+		Now:          time.Now().UTC(),
+	})
+	if err != nil || !ok || grant.TurnID != turnID {
+		t.Fatalf("claim setup: ok=%v grant=%+v err=%v", ok, grant, err)
+	}
+	outbox, err := bridge.OpenQueue(details.BridgeDirPath, bridge.OutboxDir)
+	if err != nil {
+		t.Fatalf("open outbox: %v", err)
+	}
+	if _, err := outbox.Write(ctx, bridge.Envelope{
+		MessageID:    "msg_started",
+		Type:         bridge.TypeAckTurnStarted,
+		SessionID:    session.ID,
+		GenerationID: allocation.GenerationID,
+		TurnID:       &turnID,
+		Payload:      json.RawMessage(`{"sandbox_source_ip":"10.240.0.2"}`),
+	}); err != nil {
+		t.Fatalf("write started: %v", err)
+	}
+	if _, err := outbox.Write(ctx, bridge.Envelope{
+		MessageID:    "msg_output",
+		Type:         bridge.TypeEmitOutput,
+		SessionID:    session.ID,
+		GenerationID: allocation.GenerationID,
+		TurnID:       &turnID,
+		Payload:      json.RawMessage(`{"output_sequence":1,"stream":"stdout","payload":{"line":"{\"type\":\"harness.shell_output\",\"stream\":\"stdout\",\"text\":\"ok\\n\"}"}}`),
+	}); err != nil {
+		t.Fatalf("write output: %v", err)
+	}
+	if _, err := outbox.Write(ctx, bridge.Envelope{
+		MessageID:    "msg_done",
+		Type:         bridge.TypeAckTurnCompleted,
+		SessionID:    session.ID,
+		GenerationID: allocation.GenerationID,
+		TurnID:       &turnID,
+		Payload:      json.RawMessage(`{"status":"completed"}`),
+	}); err != nil {
+		t.Fatalf("write done: %v", err)
+	}
+
+	hub := events.NewHub()
+	eventsCh, cancelEvents := hub.Subscribe(session.ID)
+	defer cancelEvents()
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: instantRuntime{},
+		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, hub, slog.Default()),
+		hub:     hub,
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+	done := make(chan error, 1)
+	go func() {
+		done <- srv.RunPhase7Maintenance(runCtx)
+	}()
+	waitForSessionStatus(t, runCtx, st, session.ID, string(sessionstate.RunningIdle))
+	cancel()
+	err = <-done
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("maintenance exit err=%v, want context canceled", err)
+	}
+
+	var assistantMessages int
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM messages
+WHERE session_id = ?
+  AND role = 'assistant'
+  AND content = 'ok
+'`, session.ID).Scan(&assistantMessages); err != nil {
+		t.Fatalf("assistant messages: %v", err)
+	}
+	if assistantMessages != 1 {
+		t.Fatalf("assistant messages=%d want 1", assistantMessages)
+	}
+	if !drainHasEvent(eventsCh, "session."+string(sessionstate.RunningIdle)) {
+		t.Fatalf("missing running_idle hub event")
+	}
+}
+
 func TestSendMessageRejectsExpiredSessionBeforeAllocation(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -876,6 +996,27 @@ func testServerConfig(dir string) config.Config {
 	}
 }
 
+func serverTestAllocatorConfig(cfg config.Config, agent string) store.ResourceAllocatorConfig {
+	outputFormat := cfg.Claude.OutputFormat
+	if agent == "sh" {
+		outputFormat = "shell_pty"
+	}
+	return store.ResourceAllocatorConfig{
+		RunDir:                     cfg.Phase7.RunDir,
+		CIDRPool:                   cfg.Phase7.Network.CIDRPool.Prefix,
+		EgressDorisFEHosts:         cfg.Phase7.Network.Egress.DorisFEHosts,
+		EgressDorisBEHosts:         cfg.Phase7.Network.Egress.DorisBEHosts,
+		EgressDorisPorts:           cfg.Phase7.Network.Egress.DorisPorts,
+		EgressDNSPolicy:            string(cfg.Phase7.Network.Egress.DNSPolicy),
+		HostProxyBindURL:           cfg.Claude.ProxyBindURL,
+		ProxyPort:                  8082,
+		Agent:                      agent,
+		AgentModel:                 cfg.Claude.Model,
+		AgentOutputFormat:          outputFormat,
+		DisableNonessentialTraffic: cfg.Claude.DisableNonessentialTraffic,
+	}
+}
+
 func waitForSessionStatus(t *testing.T, ctx context.Context, st *store.Store, sessionID, want string) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
@@ -895,6 +1036,19 @@ func waitForSessionStatus(t *testing.T, ctx context.Context, st *store.Store, se
 	}
 	data, _ := json.Marshal(got)
 	t.Fatalf("session did not reach %s: %s", want, data)
+}
+
+func drainHasEvent(ch <-chan events.Event, eventType string) bool {
+	for {
+		select {
+		case event := <-ch:
+			if event.Type == eventType {
+				return true
+			}
+		default:
+			return false
+		}
+	}
 }
 
 func TestDownloadArtifactRejectsSymlinkEscape(t *testing.T) {

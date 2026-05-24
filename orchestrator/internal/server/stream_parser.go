@@ -19,6 +19,7 @@ type streamParser struct {
 	srv       *Server
 	sessionID string
 	agent     string
+	turnID    int64
 	// pending text chunks per assistant message id, flushed when we see the
 	// matching "assistant" full message (or when the runtime exits).
 	pending map[string]*strings.Builder

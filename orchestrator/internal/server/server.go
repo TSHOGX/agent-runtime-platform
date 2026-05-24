@@ -636,9 +636,10 @@ func (s *Server) RunPhase7Maintenance(ctx context.Context) error {
 	}
 	owner := store.GenerationLeaseOwner(s.ownerUUID)
 	processor := &bridge.Processor{
-		Store:    bridgeStore(s.store),
-		Owner:    owner,
-		LeaseTTL: s.cfg.Phase7.Bridge.LeaseTTL.Duration,
+		Store:       bridgeStore(s.store),
+		Owner:       owner,
+		LeaseTTL:    s.cfg.Phase7.Bridge.LeaseTTL.Duration,
+		AfterCommit: s.handleBridgeCommittedEnvelope,
 	}
 	touchHostHeartbeat := func(generation store.BridgePollGeneration, now time.Time) {
 		if err := bridge.TouchHeartbeat(generation.BridgeDirPath, bridge.HostHeartbeatFile, now); err != nil && !errors.Is(err, context.Canceled) {
@@ -709,6 +710,75 @@ func (s *Server) RunPhase7Maintenance(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
+}
+
+func (s *Server) handleBridgeCommittedEnvelope(ctx context.Context, envelope bridge.Envelope) {
+	switch envelope.Type {
+	case bridge.TypeEmitOutput:
+		s.handleBridgeOutput(ctx, envelope)
+	case bridge.TypeAckTurnCompleted:
+		s.handleBridgeCompletion(ctx, envelope)
+	}
+}
+
+func (s *Server) handleBridgeOutput(ctx context.Context, envelope bridge.Envelope) {
+	var payload struct {
+		Stream  string `json:"stream"`
+		Payload struct {
+			Line string `json:"line"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+		s.log.Warn("failed to decode bridge output payload", "session_id", envelope.SessionID, "generation_id", envelope.GenerationID, "error", err)
+		return
+	}
+	stream := payload.Stream
+	if stream == "" {
+		stream = "stdout"
+	}
+	line := payload.Payload.Line
+	if line == "" {
+		return
+	}
+	agent := ""
+	if session, err := s.store.GetSession(ctx, envelope.SessionID); err == nil {
+		agent = session.Agent
+	} else {
+		s.log.Warn("failed to load session for bridge output", "session_id", envelope.SessionID, "error", err)
+	}
+	parser := newStreamParser(s, envelope.SessionID, agent)
+	if envelope.TurnID != nil {
+		parser.turnID = *envelope.TurnID
+	}
+	parser.handle(runtime.Output{Stream: stream, Line: line})
+}
+
+func (s *Server) handleBridgeCompletion(ctx context.Context, envelope bridge.Envelope) {
+	var payload struct {
+		Status string `json:"status"`
+		Error  string `json:"error"`
+	}
+	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+		s.log.Warn("failed to decode bridge completion payload", "session_id", envelope.SessionID, "generation_id", envelope.GenerationID, "error", err)
+		return
+	}
+	status := string(sessionstate.RunningIdle)
+	if payload.Status == "failed" || payload.Status == "canceled" {
+		status = string(sessionstate.Failed)
+		if payload.Error != "" {
+			s.hub.Publish(events.Event{Type: "session.error", SessionID: envelope.SessionID, Payload: map[string]string{"error": payload.Error}})
+		}
+	}
+	if err := s.store.UpdateSessionStatusAndActivity(ctx, envelope.SessionID, status, nil, time.Now().UTC()); err != nil {
+		if !errors.Is(err, context.Canceled) {
+			s.log.Warn("failed to update bridge-completed session status", "session_id", envelope.SessionID, "generation_id", envelope.GenerationID, "error", err)
+		}
+		return
+	}
+	if err := s.watcher.ScanSession(ctx, envelope.SessionID); err != nil && !errors.Is(err, context.Canceled) {
+		s.log.Warn("failed to scan bridge-completed session artifacts", "session_id", envelope.SessionID, "error", err)
+	}
+	s.hub.Publish(events.Event{Type: "session." + status, SessionID: envelope.SessionID})
 }
 
 func (s *Server) interruptSession(w http.ResponseWriter, r *http.Request, sessionID string) {
