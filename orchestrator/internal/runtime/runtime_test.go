@@ -425,6 +425,7 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndSecrets(t *testing.T
 		RootFSPath:       filepath.Join(dir, "rootfs"),
 		SecretsRoot:      secretsRoot,
 		SecretReadersGID: testSecretReadersGID(),
+		BridgeHeartbeat:  20 * time.Second,
 		Claude: ClaudeConfig{
 			ProxyBindURL:               "http://0.0.0.0:8082",
 			APIKey:                     "123",
@@ -522,6 +523,7 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndSecrets(t *testing.T
 	}
 	env := specEnv(spec.Process.Env)
 	if env["HARNESS_BRIDGE_DIR"] != "/harness-control/bridge" ||
+		env["HARNESS_BRIDGE_HEARTBEAT_INTERVAL"] != "20" ||
 		env["HARNESS_PROBE_HEALTHZ_STATUSES"] != "200" ||
 		env["HARNESS_PROBE_MESSAGE_STATUSES"] != "400" {
 		t.Fatalf("runtime spec missing bridge/probe env: %+v", env)

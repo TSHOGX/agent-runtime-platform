@@ -12,7 +12,10 @@ from pathlib import Path
 
 INBOX = "inbox"
 OUTBOX = "outbox"
+HEARTBEAT = "heartbeat"
 TMP = "tmp"
+BRIDGE_HEARTBEAT = "bridge"
+HOST_HEARTBEAT = "host"
 
 
 def seq_name(seq):
@@ -37,6 +40,29 @@ def fsync_dir(path):
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def write_heartbeat(root, name):
+    if name not in {BRIDGE_HEARTBEAT, HOST_HEARTBEAT}:
+        raise ValueError(f"unsupported heartbeat file {name}")
+    root = Path(root)
+    tmp = root / TMP
+    heartbeat = root / HEARTBEAT
+    tmp.mkdir(parents=True, exist_ok=True)
+    heartbeat.mkdir(parents=True, exist_ok=True)
+    tmp_path = tmp / f"{uuid.uuid4()}.heartbeat"
+    with open(tmp_path, "xb") as f:
+        f.write(f"{time.time_ns()}\n".encode("ascii"))
+        f.flush()
+        os.fsync(f.fileno())
+    try:
+        os.replace(tmp_path, heartbeat / name)
+        fsync_dir(heartbeat)
+    finally:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 class Queue:
@@ -162,7 +188,11 @@ class BridgeClient:
         return self.wait_response(request_id, timeout=timeout).get("payload") or {}
 
     def heartbeat(self):
+        self.touch_bridge_heartbeat()
         self.send("heartbeat")
+
+    def touch_bridge_heartbeat(self):
+        write_heartbeat(self.root, BRIDGE_HEARTBEAT)
 
     def claim_next_turn(self, timeout=None):
         request_id = str(uuid.uuid4())
@@ -270,6 +300,7 @@ def run_network_probe(base_url, healthz_statuses, message_statuses, timeout, api
 
 def run_probe(args):
     client = BridgeClient(args.bridge_dir, args.session_id, args.generation_id, args.agent, args.poll_interval)
+    client.heartbeat()
     client.hello(timeout=args.timeout)
     if args.agent == "claude":
         run_network_probe(
@@ -281,6 +312,15 @@ def run_probe(args):
             configured_secret("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN_SECRET_ID"),
         )
     client.probe_network(timeout=args.timeout)
+    client.touch_bridge_heartbeat()
+
+
+def run_heartbeat_loop(args):
+    client = BridgeClient(args.bridge_dir, args.session_id, args.generation_id, args.agent, args.poll_interval)
+    interval = max(args.interval, 0.001)
+    while True:
+        client.heartbeat()
+        time.sleep(interval)
 
 
 def main(argv=None):
@@ -297,11 +337,15 @@ def main(argv=None):
     parser.add_argument("--http-timeout", type=float, default=float(os.environ.get("HARNESS_PROBE_HTTP_TIMEOUT", "3")))
     subcommands = parser.add_subparsers(dest="command", required=True)
     subcommands.add_parser("probe")
+    heartbeat_loop = subcommands.add_parser("heartbeat-loop")
+    heartbeat_loop.add_argument("--interval", type=float, default=float(os.environ.get("HARNESS_BRIDGE_HEARTBEAT_INTERVAL", "30")))
     args = parser.parse_args(argv)
     if not args.session_id or not args.generation_id:
         parser.error("--session-id and --generation-id are required")
     if args.command == "probe":
         run_probe(args)
+    elif args.command == "heartbeat-loop":
+        run_heartbeat_loop(args)
     return 0
 
 

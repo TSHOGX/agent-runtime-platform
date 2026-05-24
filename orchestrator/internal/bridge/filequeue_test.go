@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestEnsureLayoutCreatesBridgeTransportDirs(t *testing.T) {
@@ -121,5 +122,36 @@ func TestQueueIgnoresInvalidNamesAndContinuesFromMaxSequence(t *testing.T) {
 	}
 	if seq != 4 {
 		t.Fatalf("seq=%d want 4", seq)
+	}
+}
+
+func TestTouchHeartbeatWritesDurableMtimeFile(t *testing.T) {
+	root := t.TempDir()
+	now := time.Date(2026, 5, 25, 12, 34, 56, 123, time.UTC)
+	if err := TouchHeartbeat(root, BridgeHeartbeatFile, now); err != nil {
+		t.Fatalf("touch bridge heartbeat: %v", err)
+	}
+	path := filepath.Join(root, HeartbeatDir, BridgeHeartbeatFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read bridge heartbeat: %v", err)
+	}
+	if string(data) != now.Format(time.RFC3339Nano)+"\n" {
+		t.Fatalf("heartbeat payload=%q want %q", data, now.Format(time.RFC3339Nano)+"\n")
+	}
+	firstInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat bridge heartbeat: %v", err)
+	}
+	later := now.Add(time.Second)
+	if err := TouchHeartbeat(root, BridgeHeartbeatFile, later); err != nil {
+		t.Fatalf("touch bridge heartbeat again: %v", err)
+	}
+	secondInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat bridge heartbeat again: %v", err)
+	}
+	if secondInfo.ModTime().Before(firstInfo.ModTime()) {
+		t.Fatalf("heartbeat mtime moved backwards: first=%s second=%s", firstInfo.ModTime(), secondInfo.ModTime())
 	}
 }

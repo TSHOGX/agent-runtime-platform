@@ -125,6 +125,7 @@ fi
 if [ "${HARNESS_BRIDGE_MODE:-auto}" = "auto" ]; then
   echo "[entrypoint] bridge probe starting" >&2
   /usr/local/bin/harness-bridge-client probe
+  /usr/local/bin/harness-bridge-client heartbeat-loop &
 fi
 
 SESSION_WORKSPACE="${SESSION_WORKSPACE:-/sessions/$SESSION_ID}"

@@ -640,6 +640,11 @@ func (s *Server) RunPhase7Maintenance(ctx context.Context) error {
 		Owner:    owner,
 		LeaseTTL: s.cfg.Phase7.Bridge.LeaseTTL.Duration,
 	}
+	touchHostHeartbeat := func(generation store.BridgePollGeneration, now time.Time) {
+		if err := bridge.TouchHeartbeat(generation.BridgeDirPath, bridge.HostHeartbeatFile, now); err != nil && !errors.Is(err, context.Canceled) {
+			s.log.Warn("phase7 bridge host heartbeat failed", "session_id", generation.SessionID, "generation_id", generation.GenerationID, "error", err)
+		}
+	}
 
 	runMaintenance := func(now time.Time) {
 		if _, err := s.store.SweepExpiredSessions(ctx, now); err != nil && !errors.Is(err, context.Canceled) {
@@ -651,6 +656,16 @@ func (s *Server) RunPhase7Maintenance(ctx context.Context) error {
 			Now:      now,
 		}); err != nil && !errors.Is(err, context.Canceled) {
 			s.log.Warn("phase7 generation lease renewal failed", "error", err)
+		}
+		generations, err := s.store.ListBridgePollGenerations(ctx, owner, now)
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				s.log.Warn("phase7 bridge heartbeat generation list failed", "error", err)
+			}
+		} else {
+			for _, generation := range generations {
+				touchHostHeartbeat(generation, now)
+			}
 		}
 		if _, err := s.store.ReapResources(ctx, store.ReaperParams{
 			OwnerUUID:       s.ownerUUID,

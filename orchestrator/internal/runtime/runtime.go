@@ -43,6 +43,7 @@ type Config struct {
 	PreStartProbeInterval time.Duration
 	ProbeHealthzStatuses  []int
 	ProbeMessageStatuses  []int
+	BridgeHeartbeat       time.Duration
 	CommandRunner         CommandRunner
 }
 
@@ -751,6 +752,7 @@ func (r *Runtime) renderRuntimeSpec(req StartRequest) (runtimeSpec, string, erro
 		"HARNESS_EXPECTED_SECRET_VERSION="+details.SecretVersion,
 		fmt.Sprintf("HARNESS_SECRET_READERS_GID=%d", r.cfg.SecretReadersGID),
 		"HARNESS_BRIDGE_DIR="+bridge.BridgeMountDestination,
+		"HARNESS_BRIDGE_HEARTBEAT_INTERVAL="+formatSeconds(defaultDuration(r.cfg.BridgeHeartbeat, 30*time.Second)),
 		"HARNESS_PROBE_HEALTHZ_STATUSES="+joinInts(defaultIntSlice(r.cfg.ProbeHealthzStatuses, []int{200})),
 		"HARNESS_PROBE_MESSAGE_STATUSES="+joinInts(defaultIntSlice(r.cfg.ProbeMessageStatuses, []int{400})),
 	)
@@ -924,6 +926,20 @@ func joinInts(values []int) string {
 		parts = append(parts, strconv.Itoa(value))
 	}
 	return strings.Join(parts, ",")
+}
+
+func defaultDuration(value, fallback time.Duration) time.Duration {
+	if value > 0 {
+		return value
+	}
+	return fallback
+}
+
+func formatSeconds(value time.Duration) string {
+	if value%time.Second == 0 {
+		return strconv.FormatInt(int64(value/time.Second), 10)
+	}
+	return strconv.FormatFloat(float64(value)/float64(time.Second), 'f', -1, 64)
 }
 
 func (r *Runtime) runscVersion(ctx context.Context) string {

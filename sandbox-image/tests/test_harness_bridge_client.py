@@ -90,6 +90,40 @@ class BridgeClientTest(unittest.TestCase):
             )
             self.assertEqual(messages[-2]["payload"]["output_sequence"], 1)
 
+    def test_heartbeat_writes_bridge_mtime_file_and_message(self):
+        with tempfile.TemporaryDirectory() as root:
+            client = bridge.BridgeClient(root, "sess", "gen", "claude", poll_interval=0.001)
+            client.heartbeat()
+
+            heartbeat = Path(root) / bridge.HEARTBEAT / bridge.BRIDGE_HEARTBEAT
+            self.assertTrue(heartbeat.exists())
+            self.assertTrue(heartbeat.read_text(encoding="ascii").strip().isdigit())
+            outbox = bridge.Queue(root, bridge.OUTBOX)
+            messages = [envelope for _, _, envelope in outbox.read_all()]
+            self.assertEqual(messages[-1]["type"], "heartbeat")
+
+    def test_heartbeat_loop_uses_configured_interval(self):
+        with tempfile.TemporaryDirectory() as root:
+            args = argparse_namespace(
+                bridge_dir=root,
+                session_id="sess",
+                generation_id="gen",
+                agent="claude",
+                poll_interval=0.001,
+                interval=0.25,
+            )
+            calls = []
+
+            def heartbeat_once(self):
+                calls.append((self.session_id, self.generation_id))
+                raise KeyboardInterrupt()
+
+            with mock.patch.object(bridge.BridgeClient, "heartbeat", heartbeat_once):
+                with self.assertRaises(KeyboardInterrupt):
+                    bridge.run_heartbeat_loop(args)
+
+            self.assertEqual(calls, [("sess", "gen")])
+
     def test_network_probe_checks_health_and_message_statuses(self):
         statuses = iter([200, 400])
         with mock.patch.object(bridge, "http_status", side_effect=lambda *args, **kwargs: next(statuses)) as http_status:
@@ -150,6 +184,7 @@ class BridgeClientTest(unittest.TestCase):
 
             run_network_probe.assert_not_called()
             self.assertEqual([message["type"] for message in sent if message["type"] in {"hello", "probe_network"}], ["hello", "probe_network"])
+            self.assertTrue((Path(root) / bridge.HEARTBEAT / bridge.BRIDGE_HEARTBEAT).exists())
 
     def test_configured_secret_reads_materialized_secret(self):
         with tempfile.TemporaryDirectory() as root:
@@ -179,6 +214,7 @@ class EntrypointStaticTest(unittest.TestCase):
         self.assertIn("exec /usr/local/bin/harness-bridge-client probe", text)
         self.assertIn('HARNESS_BRIDGE_MODE:-auto}" = "auto"', text)
         self.assertIn("/usr/local/bin/harness-bridge-client probe", text)
+        self.assertIn("/usr/local/bin/harness-bridge-client heartbeat-loop &", text)
 
 
 def argparse_namespace(**kwargs):

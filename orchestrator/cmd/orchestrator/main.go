@@ -117,6 +117,7 @@ func main() {
 		PreStartProbeInterval: cfg.Phase7.Probe.PreStartInterval.Duration,
 		ProbeHealthzStatuses:  cfg.Phase7.Probe.AcceptStatus.GetHealthz,
 		ProbeMessageStatuses:  cfg.Phase7.Probe.AcceptStatus.PostV1Messages.MalformedAuthenticated,
+		BridgeHeartbeat:       cfg.Phase7.Bridge.HeartbeatInterval.Duration,
 		Claude: runtime.ClaudeConfig{
 			ProxyBindURL:               cfg.Claude.ProxyBindURL,
 			APIKey:                     cfg.Claude.APIKey,

@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -20,6 +21,11 @@ const (
 	OutboxDir    = "outbox"
 	HeartbeatDir = "heartbeat"
 	tmpDir       = "tmp"
+)
+
+const (
+	BridgeHeartbeatFile = "bridge"
+	HostHeartbeatFile   = "host"
 )
 
 const (
@@ -159,6 +165,31 @@ func (m MessageFile) Unlink() error {
 		return err
 	}
 	return syncDir(filepath.Dir(m.Path))
+}
+
+func TouchHeartbeat(root, name string, now time.Time) error {
+	if name != BridgeHeartbeatFile && name != HostHeartbeatFile {
+		return fmt.Errorf("unsupported bridge heartbeat file %q", name)
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	if err := EnsureLayout(root); err != nil {
+		return err
+	}
+	tmpPath := filepath.Join(root, tmpDir, uuid.NewString()+".heartbeat")
+	payload := []byte(now.Format(time.RFC3339Nano) + "\n")
+	if err := writeFileDurable(tmpPath, payload, 0o644); err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(tmpPath) }()
+	target := filepath.Join(root, HeartbeatDir, name)
+	if err := os.Rename(tmpPath, target); err != nil {
+		return err
+	}
+	return syncDir(filepath.Join(root, HeartbeatDir))
 }
 
 func (q Queue) nextSeq() (uint64, error) {
