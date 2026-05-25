@@ -236,6 +236,78 @@ SELECT COUNT(*) FROM active_model_request_contexts WHERE generation_id = ?`, all
 	}
 }
 
+func TestProxyRequestFinishRecordsTimeoutObservabilityFields(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	now := time.Now().UTC()
+	allocation, turnID := createRunningProxyTurn(t, ctx, st, owner.UUID, "sess_proxy_timeout_fields", "10.240.0.8", now)
+
+	timeoutKinds := []string{"connect", "first_byte", "total", "idle_stream"}
+	for i, timeoutKind := range timeoutKinds {
+		proxyRequestID := "proxy_timeout_" + timeoutKind
+		if _, err := st.StartProxyRequest(ctx, StartProxyRequestParams{
+			SandboxSourceIP: "10.240.0.8",
+			ProxyRequestID:  proxyRequestID,
+			Now:             now.Add(time.Duration(5+i) * time.Second),
+		}); err != nil {
+			t.Fatalf("start %s request: %v", timeoutKind, err)
+		}
+
+		connectLatency := int64(10 + i)
+		firstByteLatency := int64(20 + i)
+		totalLatency := int64(30 + i)
+		retryCount := int64(i)
+		finished, err := st.FinishProxyRequest(ctx, FinishProxyRequestParams{
+			ProxyRequestID:             proxyRequestID,
+			ProxyConnectLatencyMS:      &connectLatency,
+			UpstreamFirstByteLatencyMS: &firstByteLatency,
+			UpstreamTotalLatencyMS:     &totalLatency,
+			RetryCount:                 &retryCount,
+			ErrorClass:                 "timeout",
+			TimeoutKind:                timeoutKind,
+			Error:                      "deadline exceeded",
+			Now:                        now.Add(time.Duration(20+i) * time.Second),
+		})
+		if err != nil {
+			t.Fatalf("finish %s request: %v", timeoutKind, err)
+		}
+		if finished.EventType != "proxy.request.failed" || finished.SessionID != "sess_proxy_timeout_fields" ||
+			finished.GenerationID != allocation.GenerationID || finished.TurnID != turnID {
+			t.Fatalf("unexpected finish result for %s: %+v", timeoutKind, finished)
+		}
+
+		record, ok, err := st.GetEvent(ctx, finished.EventID)
+		if err != nil || !ok {
+			t.Fatalf("get %s failed event: ok=%v err=%v", timeoutKind, ok, err)
+		}
+		var payload struct {
+			ProxyRequestID             string `json:"proxy_request_id"`
+			RequestSequence            int64  `json:"request_sequence"`
+			ProxyConnectLatencyMS      int64  `json:"proxy_connect_latency_ms"`
+			UpstreamFirstByteLatencyMS int64  `json:"upstream_first_byte_latency_ms"`
+			UpstreamTotalLatencyMS     int64  `json:"upstream_total_latency_ms"`
+			RetryCount                 int64  `json:"retry_count"`
+			TimeoutKind                string `json:"timeout_kind"`
+			ErrorClass                 string `json:"error_class"`
+			Error                      string `json:"error"`
+		}
+		if err := json.Unmarshal(record.Payload, &payload); err != nil {
+			t.Fatalf("decode %s failed payload: %v", timeoutKind, err)
+		}
+		if payload.ProxyRequestID != proxyRequestID ||
+			payload.RequestSequence != int64(i+1) ||
+			payload.ProxyConnectLatencyMS != connectLatency ||
+			payload.UpstreamFirstByteLatencyMS != firstByteLatency ||
+			payload.UpstreamTotalLatencyMS != totalLatency ||
+			payload.RetryCount != retryCount ||
+			payload.TimeoutKind != timeoutKind ||
+			payload.ErrorClass != "timeout" ||
+			payload.Error != "deadline exceeded" {
+			t.Fatalf("unexpected %s failed payload: %+v", timeoutKind, payload)
+		}
+	}
+}
+
 func createRunningProxyTurn(t *testing.T, ctx context.Context, st *Store, ownerUUID, sessionID, sandboxSourceIP string, now time.Time) (GenerationAllocation, int64) {
 	t.Helper()
 	cfg := testAllocatorConfig(t)
