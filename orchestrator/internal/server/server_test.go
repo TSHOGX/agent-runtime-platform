@@ -964,6 +964,29 @@ func TestRuntimeFailureClassDetectsPostStartProbeFailure(t *testing.T) {
 	}
 }
 
+func TestRuntimeFailureClassDetectsManifestFailures(t *testing.T) {
+	cases := []struct {
+		message string
+		want    string
+	}{
+		{"shell_secret_disallowed", "shell_secret_disallowed"},
+		{"runsc run: exit status 1: control manifest digest mismatch", "manifest_digest_mismatch"},
+		{"runsc run: exit status 1: expected generation_id=gen_a got gen_b", "manifest_digest_mismatch"},
+		{"runsc run: exit status 1: expected network_profile_id=net_a got net_b", "manifest_digest_mismatch"},
+		{"runsc run: exit status 1: expected agent_runtime_profile_id=arp_a got arp_b", "manifest_digest_mismatch"},
+		{"runsc run: exit status 1: expected anthropic_api_key_secret_id=anthropic_api_key got other", "manifest_digest_mismatch"},
+		{"runsc run: exit status 1: expected anthropic_auth_token_secret_id=anthropic_auth_token got other", "manifest_digest_mismatch"},
+		{"runsc run: exit status 1: expected manifest_version=1 got 2", "manifest_digest_mismatch"},
+		{"runsc run: exit status 1: expected secret_version=local got rotated", "manifest_digest_mismatch"},
+		{"runsc run: exit status 1: secret mount /harness-secrets missing", "manifest_digest_mismatch"},
+	}
+	for _, tc := range cases {
+		if got := runtimeFailureClass(tc.message); got != tc.want {
+			t.Fatalf("runtimeFailureClass(%q)=%s want %s", tc.message, got, tc.want)
+		}
+	}
+}
+
 func TestSendMessagePrepareFailureMarksGenerationFailedAndReclaimable(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

@@ -625,6 +625,20 @@ func runtimeArtifactDigests(artifacts runtime.GenerationArtifacts) store.Generat
 }
 
 func runtimeFailureClass(message string) string {
+	if strings.Contains(message, "shell_secret_disallowed") {
+		return "shell_secret_disallowed"
+	}
+	if strings.Contains(message, "control manifest digest mismatch") ||
+		strings.Contains(message, "expected manifest_") ||
+		strings.Contains(message, "expected generation_id") ||
+		strings.Contains(message, "expected network_profile_id") ||
+		strings.Contains(message, "expected agent_runtime_profile_id") ||
+		strings.Contains(message, "expected anthropic_api_key_secret_id") ||
+		strings.Contains(message, "expected anthropic_auth_token_secret_id") ||
+		strings.Contains(message, "expected secret_version") ||
+		strings.Contains(message, "secret mount") {
+		return "manifest_digest_mismatch"
+	}
 	if strings.Contains(message, "pre-start sandbox network probe") {
 		return "probe_failed_pre_start"
 	}
