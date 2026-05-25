@@ -1310,6 +1310,82 @@ func TestRunPhase7MaintenancePollsBridgeOutbox(t *testing.T) {
 	}
 }
 
+func TestRunPhase7MaintenanceRecoversGenerationThatExpiresAfterStartup(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_expiring_generation", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
+	cfg := testServerConfig(dir)
+	cfg.Phase7.Bridge.HeartbeatInterval = config.Duration{Duration: 10 * time.Millisecond}
+	cfg.Phase7.Bridge.ReconnectGrace = config.Duration{Duration: 20 * time.Millisecond}
+	leaseOwner := store.GenerationLeaseOwner(owner.UUID)
+	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     leaseOwner,
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    serverTestAllocatorConfig(cfg, "claude"),
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
+		t.Fatalf("mark generation live: %v", err)
+	}
+	expiresAt := time.Now().UTC().Add(25 * time.Millisecond)
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE runtime_generations
+SET lease_owner = ?,
+    lease_expires_at = ?,
+    last_seen_at = ?
+WHERE generation_id = ?`,
+		store.GenerationLeaseOwner("previous-owner"),
+		expiresAt.Format(time.RFC3339Nano),
+		expiresAt.Add(-time.Minute).Format(time.RFC3339Nano),
+		allocation.GenerationID,
+	); err != nil {
+		t.Fatalf("move generation to previous owner: %v", err)
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	rt := &recordingRuntime{}
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: rt,
+		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+	done := make(chan error, 1)
+	go func() {
+		done <- srv.RunPhase7Maintenance(runCtx)
+	}()
+
+	waitForGenerationStatus(t, runCtx, st, allocation.GenerationID, "failed")
+	cancel()
+	err = <-done
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("maintenance exit err=%v, want context canceled", err)
+	}
+
+	var errorClass, leaseOwnerAfter string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT COALESCE(error_class, ''), COALESCE(lease_owner, '')
+FROM runtime_generations
+WHERE generation_id = ?`, allocation.GenerationID).Scan(&errorClass, &leaseOwnerAfter); err != nil {
+		t.Fatalf("query recovered generation: %v", err)
+	}
+	if errorClass != "orchestrator_restart_reconnect_grace_expired" || leaseOwnerAfter != "" {
+		t.Fatalf("unexpected recovered generation: error_class=%s lease_owner=%s", errorClass, leaseOwnerAfter)
+	}
+	if _, starts := rt.requests(); len(starts) != 0 {
+		t.Fatalf("maintenance should not cold-start without a queued turn: %+v", starts)
+	}
+}
+
 func TestDestroyReclaimableGenerationResourcesMarksDestroyedOnlyAfterRuntimeCleanup(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()

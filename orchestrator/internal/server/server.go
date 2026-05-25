@@ -746,6 +746,15 @@ func (s *Server) RunPhase7Maintenance(ctx context.Context) error {
 		if _, err := s.store.SweepExpiredSessions(ctx, now); err != nil && !errors.Is(err, context.Canceled) {
 			s.log.Warn("phase7 expired-session sweep failed", "error", err)
 		}
+		if _, err := s.store.RecoverAllocations(ctx, store.StartupRecoveryParams{
+			OwnerUUID:       s.ownerUUID,
+			Now:             now,
+			LeaseTTL:        s.cfg.Phase7.Bridge.LeaseTTL.Duration,
+			ReconnectGrace:  s.cfg.Phase7.Bridge.ReconnectGrace.Duration,
+			AckStartedGrace: s.cfg.Phase7.Bridge.AckStartedGrace.Duration,
+		}); err != nil && !errors.Is(err, context.Canceled) {
+			s.log.Warn("phase7 allocation recovery failed", "error", err)
+		}
 		if _, err := s.store.RenewLiveGenerationLeases(ctx, store.RenewLiveGenerationsParams{
 			Owner:    owner,
 			LeaseTTL: s.cfg.Phase7.Bridge.LeaseTTL.Duration,
