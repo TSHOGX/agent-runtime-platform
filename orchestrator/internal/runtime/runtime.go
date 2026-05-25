@@ -56,6 +56,12 @@ const secretPublishValidationWait = 500 * time.Millisecond
 
 var requiredCheckpointImageFiles = []string{"checkpoint.img", "pages.img", "pages_meta.img"}
 
+type GenerationResourceCleanup struct {
+	NetnsDeleted    bool
+	HostVethDeleted bool
+	NftTableDeleted bool
+}
+
 type CommandRunner interface {
 	CombinedOutput(context.Context, string, ...string) ([]byte, error)
 }
@@ -334,6 +340,52 @@ func (r *Runtime) Destroy(ctx context.Context, restoreID string) error {
 		return fmt.Errorf("runsc delete %s: %w", restoreID, err)
 	}
 	return nil
+}
+
+func (r *Runtime) DestroyGenerationResources(ctx context.Context, details store.RuntimeGenerationDetails) (GenerationResourceCleanup, error) {
+	var cleanup GenerationResourceCleanup
+	if strings.TrimSpace(details.GenerationID) == "" {
+		return cleanup, fmt.Errorf("generation id is required")
+	}
+	if !strings.EqualFold(strings.TrimSpace(r.runscNetwork(details)), "sandbox") {
+		return cleanup, nil
+	}
+	if strings.TrimSpace(details.NetnsName) == "" || strings.TrimSpace(details.HostVeth) == "" {
+		return cleanup, fmt.Errorf("sandbox resource cleanup requires netns and host veth")
+	}
+
+	var errs []error
+	tableName := hostEgressTableName(details.GenerationID)
+	if err := r.deleteNetworkResource(ctx, "nft", []string{"delete", "table", "inet", tableName}, true); err != nil {
+		errs = append(errs, err)
+	} else {
+		cleanup.NftTableDeleted = true
+	}
+	if err := r.deleteNetworkResource(ctx, "ip", []string{"link", "delete", details.HostVeth}, true); err != nil {
+		errs = append(errs, err)
+	} else {
+		cleanup.HostVethDeleted = true
+	}
+	if err := r.deleteNetworkResource(ctx, "ip", []string{"netns", "delete", details.NetnsName}, true); err != nil {
+		errs = append(errs, err)
+	} else {
+		cleanup.NetnsDeleted = true
+	}
+	if len(errs) > 0 {
+		return cleanup, errors.Join(errs...)
+	}
+	return cleanup, nil
+}
+
+func (r *Runtime) deleteNetworkResource(ctx context.Context, name string, args []string, missingOK bool) error {
+	output, err := r.runner.CombinedOutput(ctx, name, args...)
+	if err == nil {
+		return nil
+	}
+	if missingOK && commandOutputContains(string(output), "cannot find device", "does not exist", "not found", "no such file", "no such process", "no such table") {
+		return nil
+	}
+	return fmt.Errorf("destroy sandbox network resource %q: %w: %s", strings.Join(append([]string{name}, args...), " "), err, strings.TrimSpace(string(output)))
 }
 
 func (r *Runtime) deleteRunscContainer(ctx context.Context, restoreID string) error {
@@ -1241,7 +1293,7 @@ func (r *Runtime) applyHostEgressPolicy(ctx context.Context, details store.Runti
 	if err := r.runNetworkCommand(ctx, "sysctl", "-w", "net.ipv4.ip_forward=1"); err != nil {
 		return err
 	}
-	tableName := "harness_gen_" + nftIdentifier(details.GenerationID)
+	tableName := hostEgressTableName(details.GenerationID)
 	if _, err := r.runner.CombinedOutput(ctx, "nft", "list", "table", "inet", tableName); err == nil {
 		if err := r.runNetworkCommand(ctx, "nft", "delete", "table", "inet", tableName); err != nil {
 			return err
@@ -1296,6 +1348,10 @@ func nftIdentifier(value string) string {
 		return "unknown"
 	}
 	return out
+}
+
+func hostEgressTableName(generationID string) string {
+	return "harness_gen_" + nftIdentifier(generationID)
 }
 
 func (r *Runtime) runNetworkCommand(ctx context.Context, name string, args ...string) error {

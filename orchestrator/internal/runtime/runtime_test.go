@@ -475,6 +475,36 @@ func TestProbeSandboxNetworkRetriesAndUsesConfiguredStatuses(t *testing.T) {
 	}
 }
 
+func TestDestroyGenerationResourcesDeletesPerGenerationNetwork(t *testing.T) {
+	runner := &recordingCommandRunner{}
+	rt := New(Config{
+		RunscNetwork:  "sandbox",
+		RunscOverlay2: "none",
+		CommandRunner: runner,
+	})
+	details := testGenerationDetails(t.TempDir(), "gen_a")
+	details.RunscNetwork = "sandbox"
+	details.NetnsName = "harness-gen-a"
+	details.HostVeth = "hgenah"
+
+	cleanup, err := rt.DestroyGenerationResources(context.Background(), details)
+	if err != nil {
+		t.Fatalf("destroy generation resources: %v", err)
+	}
+	if !cleanup.NftTableDeleted || !cleanup.HostVethDeleted || !cleanup.NetnsDeleted {
+		t.Fatalf("unexpected cleanup result: %+v", cleanup)
+	}
+
+	want := []string{
+		"nft delete table inet harness_gen_gen_a",
+		"ip link delete hgenah",
+		"ip netns delete harness-gen-a",
+	}
+	if got := runner.Commands(); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("unexpected commands:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
 func TestRenderRuntimeSpecUsesGenerationNetnsPath(t *testing.T) {
 	dir := t.TempDir()
 	rt := New(Config{

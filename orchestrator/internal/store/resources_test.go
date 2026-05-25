@@ -690,15 +690,27 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ne
 	if err != nil {
 		t.Fatalf("reap resources: %v", err)
 	}
-	if reaped.DestroyedAllocations != 1 {
-		t.Fatalf("expected one destroyed allocation, got %+v", reaped)
-	}
-	reaped, err = st.ReapResources(ctx, ReaperParams{OwnerUUID: owner.UUID, FailedRetention: 0, Now: now.Add(2 * time.Second)})
-	if err != nil {
-		t.Fatalf("second reap resources: %v", err)
-	}
 	if reaped.DestroyedAllocations != 0 {
-		t.Fatalf("second reap should be idempotent, got %+v", reaped)
+		t.Fatalf("store reaper must not mark physical allocations destroyed, got %+v", reaped)
+	}
+	destroyable, err := st.ListDestroyableReclaimableGenerations(ctx, now.Add(time.Second), 0)
+	if err != nil {
+		t.Fatalf("list destroyable resources: %v", err)
+	}
+	if len(destroyable) != 1 || destroyable[0].GenerationID != allocation.GenerationID {
+		t.Fatalf("unexpected destroyable resources: %+v", destroyable)
+	}
+	if err := st.MarkGenerationResourcesDestroyed(ctx, DestroyGenerationResourcesParams{
+		SessionID:    "sess_recover",
+		GenerationID: allocation.GenerationID,
+		Now:          now.Add(2 * time.Second),
+	}); err != nil {
+		t.Fatalf("mark generation resources destroyed: %v", err)
+	}
+	if destroyable, err = st.ListDestroyableReclaimableGenerations(ctx, now.Add(3*time.Second), 0); err != nil {
+		t.Fatalf("list destroyable after mark: %v", err)
+	} else if len(destroyable) != 0 {
+		t.Fatalf("destroyed generation must not remain destroyable: %+v", destroyable)
 	}
 }
 

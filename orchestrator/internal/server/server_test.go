@@ -1119,6 +1119,77 @@ func TestRunPhase7MaintenancePollsBridgeOutbox(t *testing.T) {
 	}
 }
 
+func TestDestroyReclaimableGenerationResourcesMarksDestroyedOnlyAfterRuntimeCleanup(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	for _, tc := range []struct {
+		name       string
+		destroyErr error
+		wantState  string
+	}{
+		{name: "cleanup succeeds", wantState: "destroyed"},
+		{name: "cleanup fails", destroyErr: errors.New("netns busy"), wantState: "reclaimable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			st, owner := openServerOwnedStore(t, ctx, dir)
+			cfg := testServerConfig(dir)
+			createServerTestSession(t, ctx, st, dir, "sess_cleanup", string(sessionstate.Created), now.Add(-time.Minute), nil)
+			allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+				SessionID: "sess_cleanup",
+				Owner:     store.GenerationLeaseOwner(owner.UUID),
+				LeaseTTL:  time.Minute,
+				Now:       now.Add(-time.Minute),
+				Config:    serverTestAllocatorConfig(cfg, "claude"),
+			})
+			if err != nil {
+				t.Fatalf("allocate generation: %v", err)
+			}
+			if err := st.MarkGenerationResourcesLive(ctx, "sess_cleanup", allocation.GenerationID, allocation.Owner, now.Add(-59*time.Second)); err != nil {
+				t.Fatalf("mark resources live: %v", err)
+			}
+			if err := st.FailGeneration(ctx, store.FailGenerationParams{
+				SessionID:    "sess_cleanup",
+				GenerationID: allocation.GenerationID,
+				Owner:        allocation.Owner,
+				ErrorClass:   "probe_failed_pre_start",
+				Reason:       "probe failed",
+				Now:          now.Add(-58 * time.Second),
+			}); err != nil {
+				t.Fatalf("fail generation: %v", err)
+			}
+
+			rt := &recordingRuntime{destroyErr: tc.destroyErr}
+			srv := &Server{
+				cfg:     cfg,
+				store:   st,
+				runtime: rt,
+				watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+				hub:     events.NewHub(),
+				log:     slog.Default(),
+			}
+			srv.destroyReclaimableGenerationResources(ctx, now)
+
+			calls := rt.destroyGenerationRequests()
+			if len(calls) != 1 || calls[0].GenerationID != allocation.GenerationID {
+				t.Fatalf("destroy generation calls=%+v", calls)
+			}
+			var networkState, resourceState string
+			if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT n.allocation_state, r.resource_state
+FROM network_profiles n
+JOIN runtime_generation_resources r ON r.generation_id = n.generation_id
+WHERE n.generation_id = ?`, allocation.GenerationID).Scan(&networkState, &resourceState); err != nil {
+				t.Fatalf("query resource states: %v", err)
+			}
+			if networkState != tc.wantState || resourceState != tc.wantState {
+				t.Fatalf("unexpected states after cleanup: network=%s resource=%s want %s", networkState, resourceState, tc.wantState)
+			}
+		})
+	}
+}
+
 func TestRunPhase7MaintenancePublishesBridgeOutputAndCompletion(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -1664,6 +1735,10 @@ func (instantRuntime) Destroy(context.Context, string) error {
 	return nil
 }
 
+func (instantRuntime) DestroyGenerationResources(context.Context, store.RuntimeGenerationDetails) (runtime.GenerationResourceCleanup, error) {
+	return runtime.GenerationResourceCleanup{}, nil
+}
+
 func (instantRuntime) Interrupt(string) error {
 	return nil
 }
@@ -1676,6 +1751,8 @@ type recordingRuntime struct {
 	mu              sync.Mutex
 	prepareRequests []runtime.StartRequest
 	startRequests   []runtime.StartRequest
+	destroyRequests []store.RuntimeGenerationDetails
+	destroyErr      error
 	checkpointReqs  []runtime.CheckpointRequest
 	checkpointErr   error
 }
@@ -1692,6 +1769,21 @@ func (r *recordingRuntime) Start(_ context.Context, req runtime.StartRequest, _ 
 	r.startRequests = append(r.startRequests, req)
 	r.mu.Unlock()
 	return runtime.Result{ControlManifestDigest: req.PreparedArtifacts.ManifestDigest, RunscVersion: req.PreparedArtifacts.RunscVersion}
+}
+
+func (r *recordingRuntime) DestroyGenerationResources(_ context.Context, details store.RuntimeGenerationDetails) (runtime.GenerationResourceCleanup, error) {
+	r.mu.Lock()
+	r.destroyRequests = append(r.destroyRequests, details)
+	err := r.destroyErr
+	r.mu.Unlock()
+	if err != nil {
+		return runtime.GenerationResourceCleanup{}, err
+	}
+	return runtime.GenerationResourceCleanup{
+		NetnsDeleted:    true,
+		HostVethDeleted: true,
+		NftTableDeleted: true,
+	}, nil
 }
 
 func (r *recordingRuntime) Destroy(context.Context, string) error {
@@ -1722,6 +1814,12 @@ func (r *recordingRuntime) checkpointRequests() []runtime.CheckpointRequest {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]runtime.CheckpointRequest(nil), r.checkpointReqs...)
+}
+
+func (r *recordingRuntime) destroyGenerationRequests() []store.RuntimeGenerationDetails {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]store.RuntimeGenerationDetails(nil), r.destroyRequests...)
 }
 
 type restoreFailoverRuntime struct {
@@ -1758,6 +1856,10 @@ func (f failingRuntime) Start(context.Context, runtime.StartRequest, func(runtim
 
 func (f failingRuntime) Destroy(context.Context, string) error {
 	return nil
+}
+
+func (f failingRuntime) DestroyGenerationResources(context.Context, store.RuntimeGenerationDetails) (runtime.GenerationResourceCleanup, error) {
+	return runtime.GenerationResourceCleanup{}, nil
 }
 
 func (f failingRuntime) Interrupt(string) error {

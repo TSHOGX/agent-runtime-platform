@@ -60,6 +60,7 @@ type runtimeDriver interface {
 	Start(context.Context, runtime.StartRequest, func(runtime.Output)) runtime.Result
 	PrepareGeneration(context.Context, runtime.StartRequest) (runtime.GenerationArtifacts, error)
 	Destroy(context.Context, string) error
+	DestroyGenerationResources(context.Context, store.RuntimeGenerationDetails) (runtime.GenerationResourceCleanup, error)
 	Interrupt(string) error
 	Checkpoint(context.Context, runtime.CheckpointRequest) error
 }
@@ -759,6 +760,7 @@ func (s *Server) RunPhase7Maintenance(ctx context.Context) error {
 		}); err != nil && !errors.Is(err, context.Canceled) {
 			s.log.Warn("phase7 resource reaper failed", "error", err)
 		}
+		s.destroyReclaimableGenerationResources(ctx, now)
 		if _, err := s.store.PruneEvents(ctx, store.PruneEventsParams{
 			RetentionWindow: s.cfg.Phase7.Events.RetentionWindow.Duration,
 			RetentionRows:   s.cfg.Phase7.Events.RetentionRows,
@@ -799,6 +801,38 @@ func (s *Server) RunPhase7Maintenance(ctx context.Context) error {
 			pollBridge(now.UTC())
 		case <-ctx.Done():
 			return ctx.Err()
+		}
+	}
+}
+
+func (s *Server) destroyReclaimableGenerationResources(ctx context.Context, now time.Time) {
+	candidates, err := s.store.ListDestroyableReclaimableGenerations(ctx, now, s.cfg.Phase7.Reaper.FailedRetention.Duration)
+	if err != nil {
+		if !errors.Is(err, context.Canceled) {
+			s.log.Warn("phase7 destroyable resource list failed", "error", err)
+		}
+		return
+	}
+	for _, candidate := range candidates {
+		details, err := s.store.GetRuntimeGenerationDetails(ctx, candidate.SessionID, candidate.GenerationID)
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				s.log.Warn("phase7 destroyable resource lookup failed", "session_id", candidate.SessionID, "generation_id", candidate.GenerationID, "error", err)
+			}
+			continue
+		}
+		if _, err := s.runtime.DestroyGenerationResources(ctx, details); err != nil {
+			if !errors.Is(err, context.Canceled) {
+				s.log.Warn("phase7 generation resource cleanup failed", "session_id", candidate.SessionID, "generation_id", candidate.GenerationID, "error", err)
+			}
+			continue
+		}
+		if err := s.store.MarkGenerationResourcesDestroyed(ctx, store.DestroyGenerationResourcesParams{
+			SessionID:    candidate.SessionID,
+			GenerationID: candidate.GenerationID,
+			Now:          now,
+		}); err != nil && !errors.Is(err, context.Canceled) {
+			s.log.Warn("phase7 generation resource destroy mark failed", "session_id", candidate.SessionID, "generation_id", candidate.GenerationID, "error", err)
 		}
 	}
 }

@@ -163,6 +163,17 @@ type ReaperResult struct {
 	DestroyedAllocations    int64
 }
 
+type ReclaimableGeneration struct {
+	SessionID    string
+	GenerationID string
+}
+
+type DestroyGenerationResourcesParams struct {
+	SessionID    string
+	GenerationID string
+	Now          time.Time
+}
+
 type StartupRecoveryParams struct {
 	OwnerUUID       string
 	Now             time.Time
@@ -658,44 +669,6 @@ func (s *Store) ReapResources(ctx context.Context, p ReaperParams) (ReaperResult
 	cutoff := p.Now.Add(-p.FailedRetention)
 	res, err := tx.ExecContext(ctx, `
 UPDATE network_profiles
-SET allocation_state = 'destroyed',
-    destroyed_at = COALESCE(destroyed_at, ?)
-WHERE allocation_state = 'reclaimable'
-  AND netns_name LIKE 'harness-gen-%'
-  AND EXISTS (
-    SELECT 1 FROM runtime_generation_resources r
-    WHERE r.generation_id = network_profiles.generation_id
-      AND r.resource_state IN ('reclaimable', 'destroyed')
-  )
-  AND EXISTS (
-    SELECT 1 FROM runtime_generations g
-    WHERE g.generation_id = network_profiles.generation_id
-      AND (
-        g.status != 'failed'
-        OR (g.ended_at IS NOT NULL AND g.ended_at <= ?)
-      )
-  )`, formatTime(p.Now), formatTime(cutoff))
-	if err != nil {
-		return ReaperResult{}, err
-	}
-	destroyed, err := res.RowsAffected()
-	if err != nil {
-		return ReaperResult{}, err
-	}
-	if _, err := tx.ExecContext(ctx, `
-UPDATE runtime_generation_resources
-SET resource_state = 'destroyed',
-    destroyed_at = COALESCE(destroyed_at, ?)
-WHERE resource_state = 'reclaimable'
-  AND generation_id IN (
-    SELECT generation_id FROM network_profiles
-    WHERE allocation_state = 'destroyed'
-  )`, formatTime(p.Now)); err != nil {
-		return ReaperResult{}, err
-	}
-
-	res, err = tx.ExecContext(ctx, `
-UPDATE network_profiles
 SET allocation_state = 'reclaimable'
 WHERE allocation_state IN ('allocating','ready','live','reserved_checkpointed','recreating')
   AND generation_id IN (
@@ -726,7 +699,95 @@ WHERE resource_state IN ('allocating','ready','live','reserved_checkpointed','re
 	if err := tx.Commit(); err != nil {
 		return ReaperResult{}, err
 	}
-	return ReaperResult{FailedMarkedReclaimable: failedMarked, DestroyedAllocations: destroyed}, nil
+	return ReaperResult{FailedMarkedReclaimable: failedMarked}, nil
+}
+
+func (s *Store) ListDestroyableReclaimableGenerations(ctx context.Context, now time.Time, failedRetention time.Duration) ([]ReclaimableGeneration, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	cutoff := now.Add(-failedRetention)
+	rows, err := s.db.QueryContext(ctx, `
+SELECT n.session_id, n.generation_id
+FROM network_profiles n
+JOIN runtime_generation_resources r ON r.generation_id = n.generation_id
+JOIN runtime_generations g ON g.generation_id = n.generation_id
+WHERE n.allocation_state = 'reclaimable'
+  AND n.netns_name LIKE 'harness-gen-%'
+  AND r.resource_state = 'reclaimable'
+  AND (
+    g.status != 'failed'
+    OR (g.ended_at IS NOT NULL AND g.ended_at <= ?)
+  )
+ORDER BY n.created_at, n.generation_id`, formatTime(cutoff))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var generations []ReclaimableGeneration
+	for rows.Next() {
+		var generation ReclaimableGeneration
+		if err := rows.Scan(&generation.SessionID, &generation.GenerationID); err != nil {
+			return nil, err
+		}
+		generations = append(generations, generation)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return generations, nil
+}
+
+func (s *Store) MarkGenerationResourcesDestroyed(ctx context.Context, p DestroyGenerationResourcesParams) error {
+	if p.Now.IsZero() {
+		p.Now = time.Now().UTC()
+	}
+	if strings.TrimSpace(p.SessionID) == "" {
+		return fmt.Errorf("session id is required")
+	}
+	if strings.TrimSpace(p.GenerationID) == "" {
+		return fmt.Errorf("generation id is required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `
+UPDATE network_profiles
+SET allocation_state = 'destroyed',
+    destroyed_at = COALESCE(destroyed_at, ?)
+WHERE session_id = ?
+  AND generation_id = ?
+  AND allocation_state = 'reclaimable'`,
+		formatTime(p.Now), p.SessionID, p.GenerationID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return fmt.Errorf("network allocation destroyed CAS failed")
+	}
+	res, err = tx.ExecContext(ctx, `
+UPDATE runtime_generation_resources
+SET resource_state = 'destroyed',
+    destroyed_at = COALESCE(destroyed_at, ?)
+WHERE generation_id = ?
+  AND resource_state = 'reclaimable'`, formatTime(p.Now), p.GenerationID)
+	if err != nil {
+		return err
+	}
+	affected, err = res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return fmt.Errorf("generation resource destroyed CAS failed")
+	}
+	return tx.Commit()
 }
 
 func (s *Store) RecoverAllocations(ctx context.Context, p StartupRecoveryParams) (StartupRecoveryResult, error) {
