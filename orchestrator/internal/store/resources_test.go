@@ -1067,6 +1067,59 @@ WHERE t.id = ?`, turnID).Scan(&turnStatus, &turnError, &generationStatus, &gener
 	}
 }
 
+func TestRecoverAllocationsDeletesStaleProxyContextsFromPreviousOwner(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	cfg := testAllocatorConfig(t)
+	now := time.Now().UTC()
+
+	createStoreSession(t, ctx, st, "sess_proxy_context_current")
+	current, currentTurnID := createExpiredAckStartedTurn(t, ctx, st, owner.UUID, cfg, "sess_proxy_context_current", now, 30*time.Second)
+	createStoreSession(t, ctx, st, "sess_proxy_context_stale")
+	stale, staleTurnID := createExpiredAckStartedTurn(t, ctx, st, owner.UUID, cfg, "sess_proxy_context_stale", now, 30*time.Second)
+	staleOwner := GenerationLeaseOwner("previous-owner")
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE active_model_request_contexts
+SET lease_owner = ?
+WHERE generation_id = ?`, staleOwner, stale.GenerationID); err != nil {
+		t.Fatalf("move stale proxy context to previous owner: %v", err)
+	}
+
+	recovered, err := st.RecoverAllocations(ctx, StartupRecoveryParams{
+		OwnerUUID:       owner.UUID,
+		Now:             now,
+		LeaseTTL:        time.Minute,
+		ReconnectGrace:  10 * time.Second,
+		AckStartedGrace: 90 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("recover allocations: %v", err)
+	}
+	if recovered.UnknownAfterAckStarted != 0 || recovered.ReconnectGraceFailed != 0 {
+		t.Fatalf("proxy context cleanup should not fence recoverable turns: %+v", recovered)
+	}
+
+	var currentContexts, staleContexts int
+	if err := st.db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM active_model_request_contexts
+WHERE generation_id = ?
+  AND turn_id = ?
+  AND lease_owner = ?`, current.GenerationID, currentTurnID, current.Owner).Scan(&currentContexts); err != nil {
+		t.Fatalf("count current proxy contexts: %v", err)
+	}
+	if err := st.db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM active_model_request_contexts
+WHERE generation_id = ?
+  AND turn_id = ?`, stale.GenerationID, staleTurnID).Scan(&staleContexts); err != nil {
+		t.Fatalf("count stale proxy contexts: %v", err)
+	}
+	if currentContexts != 1 || staleContexts != 0 {
+		t.Fatalf("unexpected proxy context cleanup: current=%d stale=%d", currentContexts, staleContexts)
+	}
+}
+
 func TestRenewLiveGenerationLeasesKeepsIdle7AGenerationAlive(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
