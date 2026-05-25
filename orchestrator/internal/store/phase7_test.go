@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -391,6 +392,118 @@ func TestTurnHelperClaimAckComplete(t *testing.T) {
 	}
 }
 
+func TestClaimNextTurnConcurrentAttemptsOnlyOneWins(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	createStoreSession(t, ctx, st, "sess_claim_race")
+	createActiveGeneration(t, ctx, st, "sess_claim_race", "gen_claim_race", "owner")
+	turnID, err := st.EnqueueTurn(ctx, "sess_claim_race", "race", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	requestIDs := []string{"req-a", "req-b", "req-c", "req-d", "req-e", "req-f", "req-g", "req-h"}
+	stores := make([]*Store, len(requestIDs))
+	for i := range stores {
+		storeConn, err := Open(ctx, dbPath)
+		if err != nil {
+			t.Fatalf("open contender %d: %v", i, err)
+		}
+		stores[i] = storeConn
+		t.Cleanup(func() { _ = storeConn.Close() })
+	}
+
+	type claimResult struct {
+		requestID string
+		grant     TurnGrant
+		ok        bool
+		err       error
+	}
+	results := make(chan claimResult, len(requestIDs))
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	claimAt := time.Now().UTC()
+	for i, requestID := range requestIDs {
+		wg.Add(1)
+		go func(storeConn *Store, requestID string) {
+			defer wg.Done()
+			<-start
+			grant, ok, err := storeConn.ClaimNextTurn(ctx, ClaimNextTurnParams{
+				SessionID:    "sess_claim_race",
+				GenerationID: "gen_claim_race",
+				Owner:        "owner",
+				RequestID:    requestID,
+				LeaseTTL:     time.Minute,
+				Now:          claimAt,
+			})
+			results <- claimResult{requestID: requestID, grant: grant, ok: ok, err: err}
+		}(stores[i], requestID)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	var winner *claimResult
+	for result := range results {
+		if result.err != nil {
+			if !strings.Contains(result.err.Error(), "database is locked") && !strings.Contains(result.err.Error(), "SQLITE_BUSY") {
+				t.Fatalf("unexpected claim error for %s: %v", result.requestID, result.err)
+			}
+			continue
+		}
+		if !result.ok {
+			continue
+		}
+		if winner != nil {
+			t.Fatalf("multiple concurrent claims won: first=%+v second=%+v", *winner, result)
+		}
+		resultCopy := result
+		winner = &resultCopy
+	}
+	if winner == nil {
+		t.Fatalf("no concurrent claim won")
+	}
+	if winner.grant.TurnID != turnID || winner.grant.Sequence != 1 || winner.grant.Content != "race" {
+		t.Fatalf("unexpected winning grant: %+v turnID=%d", winner.grant, turnID)
+	}
+
+	var status, generationID, owner, claimRequestID string
+	if err := st.db.QueryRowContext(ctx, `
+SELECT status, generation_id, lease_owner, claim_request_id
+FROM turns
+WHERE id = ?`, turnID).Scan(&status, &generationID, &owner, &claimRequestID); err != nil {
+		t.Fatalf("query raced turn: %v", err)
+	}
+	if status != "leased" || generationID != "gen_claim_race" || owner != "owner" || claimRequestID != winner.requestID {
+		t.Fatalf("turn lease was stolen or not written atomically: status=%s generation=%s owner=%s request=%s winner=%s",
+			status, generationID, owner, claimRequestID, winner.requestID)
+	}
+	for _, requestID := range requestIDs {
+		if requestID == winner.requestID {
+			continue
+		}
+		replay, ok, err := st.ClaimNextTurn(ctx, ClaimNextTurnParams{
+			SessionID:    "sess_claim_race",
+			GenerationID: "gen_claim_race",
+			Owner:        "owner",
+			RequestID:    requestID,
+			LeaseTTL:     time.Minute,
+			Now:          claimAt.Add(time.Second),
+		})
+		if err != nil {
+			t.Fatalf("loser replay %s: %v", requestID, err)
+		}
+		if ok {
+			t.Fatalf("loser request %s replayed or stole winner grant: %+v", requestID, replay)
+		}
+	}
+}
+
 func TestResumeTurnRenewsOnlyActiveGenerationLease(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
@@ -556,6 +669,108 @@ func TestTurnHelperRejectsWrongSessionGenerationBinding(t *testing.T) {
 	}
 	if ok {
 		t.Fatalf("generation from another session must not claim turn")
+	}
+}
+
+func TestTurnHelperRejectsStaleGenerationLifecycleWrites(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	createStoreSession(t, ctx, st, "sess_stale_writes")
+	createActiveGeneration(t, ctx, st, "sess_stale_writes", "gen_old", "owner")
+	turnID, err := st.EnqueueTurn(ctx, "sess_stale_writes", "old turn", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	claimAt := time.Now().UTC()
+	if grant, ok, err := st.ClaimNextTurn(ctx, ClaimNextTurnParams{
+		SessionID:    "sess_stale_writes",
+		GenerationID: "gen_old",
+		Owner:        "owner",
+		RequestID:    "req_old",
+		LeaseTTL:     time.Minute,
+		Now:          claimAt,
+	}); err != nil || !ok || grant.TurnID != turnID {
+		t.Fatalf("claim setup: ok=%v grant=%+v err=%v", ok, grant, err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_generations
+SET status = 'failed'
+WHERE generation_id = 'gen_old'`); err != nil {
+		t.Fatalf("fail old generation directly: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+INSERT INTO runtime_generations (generation_id, session_id, status, lease_owner, lease_expires_at, last_seen_at)
+VALUES ('gen_new', 'sess_stale_writes', 'idle', 'owner', ?, ?)`,
+		formatTime(claimAt.Add(time.Minute)), formatTime(claimAt)); err != nil {
+		t.Fatalf("insert replacement generation: %v", err)
+	}
+	if err := st.UpdateSessionActiveGeneration(ctx, SessionActiveGenerationCASParams{
+		SessionID:            "sess_stale_writes",
+		ExpectedGenerationID: sql.NullString{String: "gen_old", Valid: true},
+		NextGenerationID:     "gen_new",
+	}); err != nil {
+		t.Fatalf("activate replacement generation: %v", err)
+	}
+
+	if _, err := st.AckTurnStarted(ctx, AckStartedParams{
+		SessionID:       "sess_stale_writes",
+		GenerationID:    "gen_old",
+		TurnID:          turnID,
+		Owner:           "owner",
+		SandboxSourceIP: "10.240.0.2",
+		LeaseTTL:        time.Minute,
+		Now:             claimAt.Add(time.Second),
+	}); err == nil || !strings.Contains(err.Error(), "generation ack_started CAS failed") {
+		t.Fatalf("stale ack_started err=%v, want generation CAS failure", err)
+	}
+	seq := int64(1)
+	if _, err := st.AppendEvent(ctx, AppendEventParams{
+		SessionID:      "sess_stale_writes",
+		GenerationID:   "gen_old",
+		TurnID:         &turnID,
+		Owner:          "owner",
+		OutputSequence: &seq,
+		Type:           "bridge.emit_output",
+		Payload:        map[string]string{"line": "stale"},
+		Now:            claimAt.Add(2 * time.Second),
+	}); err == nil || !strings.Contains(err.Error(), "output event turn CAS failed") {
+		t.Fatalf("stale output event err=%v, want output CAS failure", err)
+	}
+	if _, err := st.CompleteTurn(ctx, CompleteTurnParams{
+		SessionID:      "sess_stale_writes",
+		GenerationID:   "gen_old",
+		TurnID:         turnID,
+		Owner:          "owner",
+		TerminalStatus: "completed",
+		Now:            claimAt.Add(3 * time.Second),
+	}); err == nil || !strings.Contains(err.Error(), "generation idle CAS failed") {
+		t.Fatalf("stale completion err=%v, want generation CAS failure", err)
+	}
+	if err := st.FailGeneration(ctx, FailGenerationParams{
+		SessionID:    "sess_stale_writes",
+		GenerationID: "gen_old",
+		TurnID:       turnID,
+		Owner:        "owner",
+		ErrorClass:   "stale_failure",
+		Reason:       "stale",
+		Now:          claimAt.Add(4 * time.Second),
+	}); err == nil || !strings.Contains(err.Error(), "generation failure CAS failed") {
+		t.Fatalf("stale generation failure err=%v, want generation CAS failure", err)
+	}
+
+	var status, activeGeneration string
+	if err := st.db.QueryRowContext(ctx, `SELECT status FROM turns WHERE id = ?`, turnID).Scan(&status); err != nil {
+		t.Fatalf("query turn status: %v", err)
+	}
+	if err := st.db.QueryRowContext(ctx, `SELECT active_generation_id FROM sessions WHERE id = 'sess_stale_writes'`).Scan(&activeGeneration); err != nil {
+		t.Fatalf("query active generation: %v", err)
+	}
+	if status != "leased" || activeGeneration != "gen_new" {
+		t.Fatalf("stale writes mutated state: turn=%s active_generation=%s", status, activeGeneration)
 	}
 }
 
