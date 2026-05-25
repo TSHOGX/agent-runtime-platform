@@ -62,51 +62,58 @@ type GenerationAllocation struct {
 }
 
 type RuntimeGenerationDetails struct {
-	SessionID                  string
-	GenerationID               string
-	NetworkProfileID           string
-	AgentRuntimeProfileID      string
-	RunscPlatform              string
-	ControlDirPath             string
-	ControlManifestPath        string
-	BundleDirPath              string
-	SpecPath                   string
-	CheckpointPath             string
-	SecretsDirPath             string
-	BridgeDirPath              string
-	LogDirPath                 string
-	ControlManifestDigest      string
-	RunscVersion               string
-	RunscNetwork               string
-	RunscOverlay2              string
-	HostProxyBindURL           string
-	ProxyPort                  int
-	HostGatewayIP              string
-	SandboxBaseURL             string
-	ProbeURL                   string
-	NetnsName                  string
-	NetnsPath                  string
-	HostVeth                   string
-	SandboxVeth                string
-	SandboxIPCIDR              string
-	HostSideCIDR               string
-	EgressPolicyID             string
-	EgressPolicyDigest         string
-	AllowedEgressRules         string
-	DorisFEHosts               string
-	DorisBEHosts               string
-	DorisPorts                 string
-	DNSPolicy                  string
-	NetworkAllocationState     string
-	Agent                      string
-	Model                      string
-	OutputFormat               string
-	DisableNonessentialTraffic bool
-	RequiresSecretDrop         bool
-	ManifestAnthropicBaseURL   string
-	AnthropicAPIKeySecretID    string
-	AnthropicAuthTokenSecretID string
-	SecretVersion              string
+	SessionID                       string
+	GenerationID                    string
+	NetworkProfileID                string
+	AgentRuntimeProfileID           string
+	RunscPlatform                   string
+	ControlDirPath                  string
+	ControlManifestPath             string
+	BundleDirPath                   string
+	SpecPath                        string
+	CheckpointPath                  string
+	SecretsDirPath                  string
+	BridgeDirPath                   string
+	LogDirPath                      string
+	ControlManifestDigest           string
+	RunscVersion                    string
+	CheckpointNetworkProfileID      string
+	CheckpointAgentRuntimeProfileID string
+	CheckpointRunscVersion          string
+	CheckpointRunscPlatform         string
+	CheckpointBundleDigest          string
+	CheckpointRuntimeConfigDigest   string
+	CheckpointControlManifestDigest string
+	RunscNetwork                    string
+	RunscOverlay2                   string
+	HostProxyBindURL                string
+	ProxyPort                       int
+	HostGatewayIP                   string
+	SandboxBaseURL                  string
+	ProbeURL                        string
+	NetnsName                       string
+	NetnsPath                       string
+	HostVeth                        string
+	SandboxVeth                     string
+	SandboxIPCIDR                   string
+	HostSideCIDR                    string
+	EgressPolicyID                  string
+	EgressPolicyDigest              string
+	AllowedEgressRules              string
+	DorisFEHosts                    string
+	DorisBEHosts                    string
+	DorisPorts                      string
+	DNSPolicy                       string
+	NetworkAllocationState          string
+	Agent                           string
+	Model                           string
+	OutputFormat                    string
+	DisableNonessentialTraffic      bool
+	RequiresSecretDrop              bool
+	ManifestAnthropicBaseURL        string
+	AnthropicAPIKeySecretID         string
+	AnthropicAuthTokenSecretID      string
+	SecretVersion                   string
 }
 
 type BridgePollGeneration struct {
@@ -1027,6 +1034,13 @@ SELECT
   r.log_dir_path,
   COALESCE(r.control_manifest_digest, ''),
   COALESCE(r.runsc_version, ''),
+  COALESCE(g.checkpoint_network_profile_id, ''),
+  COALESCE(g.checkpoint_agent_runtime_profile_id, ''),
+  COALESCE(g.checkpoint_runsc_version, ''),
+  COALESCE(g.checkpoint_runsc_platform, ''),
+  COALESCE(g.checkpoint_bundle_digest, ''),
+  COALESCE(g.checkpoint_runtime_config_digest, ''),
+  COALESCE(g.checkpoint_control_manifest_digest, ''),
   n.runsc_network,
   n.runsc_overlay2,
   n.host_proxy_bind_url,
@@ -1082,6 +1096,13 @@ WHERE g.session_id = ?
 		&details.LogDirPath,
 		&details.ControlManifestDigest,
 		&details.RunscVersion,
+		&details.CheckpointNetworkProfileID,
+		&details.CheckpointAgentRuntimeProfileID,
+		&details.CheckpointRunscVersion,
+		&details.CheckpointRunscPlatform,
+		&details.CheckpointBundleDigest,
+		&details.CheckpointRuntimeConfigDigest,
+		&details.CheckpointControlManifestDigest,
 		&details.RunscNetwork,
 		&details.RunscOverlay2,
 		&details.HostProxyBindURL,

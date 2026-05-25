@@ -297,6 +297,15 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ge
 		details.RunscVersion != "runsc test" {
 		t.Fatalf("restore details not preserved: %+v", details)
 	}
+	if details.CheckpointNetworkProfileID != allocation.NetworkProfileID ||
+		details.CheckpointAgentRuntimeProfileID != allocation.AgentRuntimeProfileID ||
+		details.CheckpointRunscVersion != "runsc test" ||
+		details.CheckpointRunscPlatform != "systrap" ||
+		details.CheckpointBundleDigest != "bundle_digest" ||
+		details.CheckpointRuntimeConfigDigest != "runtime_config_digest" ||
+		details.CheckpointControlManifestDigest != "manifest_digest" {
+		t.Fatalf("checkpoint metadata not loaded into restore details: %+v", details)
+	}
 
 	if err := st.MarkGenerationResourcesLive(ctx, "sess_restore_claim", allocation.GenerationID, claimed.Owner, now.Add(4*time.Second)); err != nil {
 		t.Fatalf("mark restored generation live: %v", err)

@@ -172,12 +172,16 @@ type specMount struct {
 }
 
 type GenerationArtifacts struct {
-	BundleDir       string
-	SpecPath        string
-	ManifestPath    string
-	ManifestDigest  string
-	RunscVersion    string
-	NetworkPrepared bool
+	BundleDir               string
+	SpecPath                string
+	ManifestPath            string
+	ManifestDigest          string
+	ProjectedManifestDigest string
+	BundleDigest            string
+	RuntimeConfigDigest     string
+	SpecDigest              string
+	RunscVersion            string
+	NetworkPrepared         bool
 }
 
 type Runtime struct {
@@ -404,12 +408,20 @@ func (r *Runtime) renderGenerationArtifacts(ctx context.Context, req StartReques
 	if err := writeJSONFileAtomic(details.ControlManifestPath, manifestFile, 0o644); err != nil {
 		return GenerationArtifacts{}, fmt.Errorf("write control manifest: %w", err)
 	}
+	projectedManifestDigest, err := projectedControlManifestDigest(manifest)
+	if err != nil {
+		return GenerationArtifacts{}, err
+	}
 	return GenerationArtifacts{
-		BundleDir:      details.BundleDirPath,
-		SpecPath:       details.SpecPath,
-		ManifestPath:   details.ControlManifestPath,
-		ManifestDigest: manifestDigest,
-		RunscVersion:   runscVersion,
+		BundleDir:               details.BundleDirPath,
+		SpecPath:                details.SpecPath,
+		ManifestPath:            details.ControlManifestPath,
+		ManifestDigest:          manifestDigest,
+		ProjectedManifestDigest: projectedManifestDigest,
+		BundleDigest:            bundleDigest,
+		RuntimeConfigDigest:     runtimeConfigDigest,
+		SpecDigest:              specDigest,
+		RunscVersion:            runscVersion,
 	}, nil
 }
 
@@ -724,6 +736,67 @@ func wrapControlManifest(manifest controlManifest) (string, controlManifestFile,
 	}
 	digest := digestHex(payloadBytes)
 	return digest, controlManifestFile{Payload: manifest, Digest: digest}, nil
+}
+
+func projectedControlManifestDigest(manifest controlManifest) (string, error) {
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		return "", err
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return "", err
+	}
+	strictFields := map[string]struct{}{
+		"session_id":                     {},
+		"generation_id":                  {},
+		"network_profile_id":             {},
+		"agent_runtime_profile_id":       {},
+		"agent":                          {},
+		"claude_session_uuid":            {},
+		"resume_claude":                  {},
+		"runsc_platform":                 {},
+		"runsc_version":                  {},
+		"anthropic_base_url":             {},
+		"anthropic_api_key_secret_id":    {},
+		"anthropic_auth_token_secret_id": {},
+		"secret_version":                 {},
+		"secret_mount_path":              {},
+		"model":                          {},
+		"output_format":                  {},
+		"workspace_path":                 {},
+		"agent_home_path":                {},
+		"bundle_digest":                  {},
+		"runtime_config_digest":          {},
+		"spec_digest":                    {},
+		"egress_policy_digest":           {},
+		"manifest_version":               {},
+		"claude_code_disable_nonessential_traffic": {},
+		"proxy_bind_url": {},
+	}
+	regenerableFields := map[string]struct{}{
+		"created_at":      {},
+		"attempt_id":      {},
+		"host_hostname":   {},
+		"netns_name":      {},
+		"host_gateway_ip": {},
+		"bridge_dir_path": {},
+	}
+	projected := map[string]any{}
+	for key, value := range fields {
+		if _, ok := regenerableFields[key]; ok {
+			continue
+		}
+		if _, ok := strictFields[key]; !ok {
+			return "", fmt.Errorf("unclassified control manifest field %q", key)
+		}
+		projected[key] = value
+	}
+	payloadBytes, err := canonicalJSON(projected)
+	if err != nil {
+		return "", err
+	}
+	return digestHex(payloadBytes), nil
 }
 
 func (r *Runtime) renderRuntimeSpec(req StartRequest) (runtimeSpec, string, error) {
@@ -1604,13 +1677,18 @@ func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, ou
 
 	hub.Publish(OutputEvent{Stream: "runtime", Line: "resuming from checkpoint"})
 
-	// Similar to startFresh but use runsc restore
-	artifacts, err := r.generationArtifacts(ctx, req)
+	// Restore re-renders regenerable host artifacts before comparing them with
+	// checkpoint metadata, then uses runsc restore instead of run.
+	checkpointPath, err := r.resolveCheckpointPath(req)
+	if err != nil {
+		return Result{Err: err}
+	}
+	artifacts, err := r.renderGenerationArtifacts(ctx, req)
 	if err != nil {
 		return Result{Err: err}
 	}
 	req.PreparedArtifacts = artifacts
-	if err := r.prepareSessionDirs(req.SessionID); err != nil {
+	if err := validateCheckpointRestore(req.Generation, artifacts, checkpointPath); err != nil {
 		return Result{Err: err}
 	}
 	if !req.PreparedArtifacts.NetworkPrepared {
@@ -1618,10 +1696,6 @@ func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, ou
 			return Result{Err: err}
 		}
 		req.PreparedArtifacts.NetworkPrepared = true
-	}
-	checkpointPath, err := r.resolveCheckpointPath(req)
-	if err != nil {
-		return Result{Err: err}
 	}
 	containerID := fmt.Sprintf("phase3-%s", req.SessionID)
 	bundlePath := artifacts.BundleDir
@@ -1733,6 +1807,41 @@ func (r *Runtime) resolveCheckpointPath(req StartRequest) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("checkpoint image not found in %s", strings.Join(candidates, ", "))
+}
+
+func validateCheckpointRestore(details store.RuntimeGenerationDetails, artifacts GenerationArtifacts, checkpointPath string) error {
+	for _, name := range []string{"checkpoint.img", "pages.img", "pages_meta.img"} {
+		path := filepath.Join(checkpointPath, name)
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("checkpoint image incomplete: %s: %w", path, err)
+		}
+		if info.IsDir() || info.Size() == 0 {
+			return fmt.Errorf("checkpoint image incomplete: %s is not a non-empty file", path)
+		}
+	}
+	checks := []struct {
+		field string
+		got   string
+		want  string
+	}{
+		{"checkpoint_network_profile_id", details.NetworkProfileID, details.CheckpointNetworkProfileID},
+		{"checkpoint_agent_runtime_profile_id", details.AgentRuntimeProfileID, details.CheckpointAgentRuntimeProfileID},
+		{"checkpoint_runsc_platform", defaultString(details.RunscPlatform, "systrap"), details.CheckpointRunscPlatform},
+		{"checkpoint_runsc_version", artifacts.RunscVersion, details.CheckpointRunscVersion},
+		{"checkpoint_bundle_digest", artifacts.BundleDigest, details.CheckpointBundleDigest},
+		{"checkpoint_runtime_config_digest", artifacts.RuntimeConfigDigest, details.CheckpointRuntimeConfigDigest},
+		{"checkpoint_control_manifest_digest", artifacts.ProjectedManifestDigest, details.CheckpointControlManifestDigest},
+	}
+	for _, check := range checks {
+		if strings.TrimSpace(check.want) == "" {
+			return fmt.Errorf("checkpoint metadata missing: %s", check.field)
+		}
+		if check.got != check.want {
+			return fmt.Errorf("checkpoint metadata mismatch: %s got %q want %q", check.field, check.got, check.want)
+		}
+	}
+	return nil
 }
 
 func (r *Runtime) Checkpoint(ctx context.Context, sessionID string) error {

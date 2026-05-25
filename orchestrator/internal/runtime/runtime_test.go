@@ -105,6 +105,117 @@ func TestRuntimeStartRestoreRequiresCheckpointPath(t *testing.T) {
 	}
 }
 
+func TestProjectedControlManifestDigestIgnoresRegenerableFields(t *testing.T) {
+	base := testControlManifest()
+	first, err := projectedControlManifestDigest(base)
+	if err != nil {
+		t.Fatalf("project base manifest: %v", err)
+	}
+	changed := base
+	changed.CreatedAt = "2030-01-01T00:00:00Z"
+	changed.AttemptID = "attempt-2"
+	changed.HostHostname = "other-host"
+	changed.BridgeDirPath = "/tmp/other-bridge"
+	changed.NetnsName = "other-netns"
+	changed.HostGatewayIP = "10.1.2.3"
+	second, err := projectedControlManifestDigest(changed)
+	if err != nil {
+		t.Fatalf("project changed manifest: %v", err)
+	}
+	if first != second {
+		t.Fatalf("regenerable fields changed projected digest: %s != %s", first, second)
+	}
+	strictChanged := base
+	strictChanged.SecretVersion = "rotated"
+	third, err := projectedControlManifestDigest(strictChanged)
+	if err != nil {
+		t.Fatalf("project strict changed manifest: %v", err)
+	}
+	if first == third {
+		t.Fatalf("strict field change did not change projected digest: %s", first)
+	}
+}
+
+func TestValidateCheckpointRestoreRejectsMetadataMismatch(t *testing.T) {
+	dir := t.TempDir()
+	checkpointPath := filepath.Join(dir, "checkpoint")
+	writeCheckpointFiles(t, checkpointPath)
+	details := testGenerationDetails(dir, "gen_restore")
+	details.CheckpointNetworkProfileID = details.NetworkProfileID
+	details.CheckpointAgentRuntimeProfileID = details.AgentRuntimeProfileID
+	details.CheckpointRunscPlatform = details.RunscPlatform
+	details.CheckpointRunscVersion = "runsc test"
+	details.CheckpointBundleDigest = "bundle_digest"
+	details.CheckpointRuntimeConfigDigest = "runtime_config_digest"
+	details.CheckpointControlManifestDigest = "control_manifest_digest"
+	artifacts := GenerationArtifacts{
+		RunscVersion:            "runsc test",
+		BundleDigest:            "bundle_digest",
+		RuntimeConfigDigest:     "runtime_config_digest",
+		ProjectedManifestDigest: "other_control_manifest_digest",
+	}
+
+	err := validateCheckpointRestore(details, artifacts, checkpointPath)
+	if err == nil {
+		t.Fatal("expected checkpoint metadata mismatch")
+	}
+	if !strings.Contains(err.Error(), "checkpoint_control_manifest_digest") {
+		t.Fatalf("expected manifest digest mismatch, got %v", err)
+	}
+}
+
+func TestRuntimeStartRestoreRejectsMetadataBeforeRunscRestore(t *testing.T) {
+	dir := t.TempDir()
+	checkpointPath := filepath.Join(dir, "checkpoint")
+	writeCheckpointFiles(t, checkpointPath)
+	runner := &recordingCommandRunner{
+		outputs: map[string][]byte{
+			"runsc --version": []byte("runsc current"),
+		},
+	}
+	rt := New(Config{
+		DefaultAgent:   "claude",
+		SessionsRoot:   filepath.Join(dir, "sessions"),
+		AgentHomesRoot: filepath.Join(dir, "agent-homes"),
+		RootFSPath:     filepath.Join(dir, "rootfs"),
+		RunscNetwork:   "host",
+		CommandRunner:  runner,
+	})
+	details := testGenerationDetails(dir, "gen_restore_mismatch")
+	details.Agent = "sh"
+	details.OutputFormat = "shell_pty"
+	details.RequiresSecretDrop = false
+	details.ManifestAnthropicBaseURL = ""
+	details.AnthropicAPIKeySecretID = ""
+	details.AnthropicAuthTokenSecretID = ""
+	details.SecretVersion = ""
+	details.SecretsDirPath = ""
+	details.CheckpointPath = checkpointPath
+	details.CheckpointNetworkProfileID = details.NetworkProfileID
+	details.CheckpointAgentRuntimeProfileID = details.AgentRuntimeProfileID
+	details.CheckpointRunscPlatform = details.RunscPlatform
+	details.CheckpointRunscVersion = "runsc old"
+
+	res := rt.Start(context.Background(), StartRequest{
+		SessionID:             "sess_1",
+		GenerationID:          details.GenerationID,
+		Agent:                 "sh",
+		RestoreFromCheckpoint: true,
+		Generation:            details,
+	}, nil)
+	if res.Err == nil {
+		t.Fatal("expected restore metadata mismatch")
+	}
+	if !strings.Contains(res.Err.Error(), "checkpoint_runsc_version") {
+		t.Fatalf("expected runsc version mismatch, got %v", res.Err)
+	}
+	for _, command := range runner.Commands() {
+		if strings.Contains(command, " restore ") {
+			t.Fatalf("runsc restore ran despite metadata mismatch: %v", runner.Commands())
+		}
+	}
+}
+
 func TestCleanupExitedContainerDoesNotRemoveReplacement(t *testing.T) {
 	rt := New(Config{})
 	oldContainer := &Container{SessionID: "sess_1", RestoreID: "phase3-sess_1"}
@@ -733,6 +844,54 @@ func testGenerationDetails(dir, generationID string) store.RuntimeGenerationDeta
 		AnthropicAPIKeySecretID:    "anthropic_api_key",
 		AnthropicAuthTokenSecretID: "anthropic_auth_token",
 		SecretVersion:              "local",
+	}
+}
+
+func testControlManifest() controlManifest {
+	return controlManifest{
+		SessionID:                            "sess_1",
+		GenerationID:                         "gen_a",
+		CreatedAt:                            "2026-01-01T00:00:00Z",
+		AttemptID:                            "attempt-1",
+		NetworkProfileID:                     "net_a",
+		AgentRuntimeProfileID:                "arp_a",
+		Agent:                                "claude",
+		ClaudeSessionUUID:                    "11111111-2222-3333-4444-555555555555",
+		ResumeClaude:                         true,
+		RunscPlatform:                        "systrap",
+		RunscVersion:                         "runsc test",
+		AnthropicBaseURL:                     "http://10.200.1.1:8082",
+		AnthropicAPIKeySecretID:              "anthropic_api_key",
+		AnthropicAuthTokenSecretID:           "anthropic_auth_token",
+		SecretVersion:                        "local",
+		SecretMountPath:                      "/harness-secrets",
+		Model:                                "sonnet",
+		OutputFormat:                         "stream-json",
+		WorkspacePath:                        "/sessions/sess_1",
+		AgentHomePath:                        "/agent-homes/sess_1",
+		HostHostname:                         "host-a",
+		NetnsName:                            "harness-gen-a",
+		HostGatewayIP:                        "10.200.1.1",
+		BridgeDirPath:                        "/tmp/bridge-a",
+		BundleDigest:                         "bundle_digest",
+		RuntimeConfigDigest:                  "runtime_config_digest",
+		SpecDigest:                           "spec_digest",
+		EgressPolicyDigest:                   "egress_digest",
+		ManifestVersion:                      1,
+		ClaudeCodeDisableNonessentialTraffic: true,
+		ProxyBindURL:                         "http://0.0.0.0:8082",
+	}
+}
+
+func writeCheckpointFiles(t *testing.T, checkpointPath string) {
+	t.Helper()
+	if err := os.MkdirAll(checkpointPath, 0o755); err != nil {
+		t.Fatalf("create checkpoint path: %v", err)
+	}
+	for _, name := range []string{"checkpoint.img", "pages.img", "pages_meta.img"} {
+		if err := os.WriteFile(filepath.Join(checkpointPath, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write checkpoint file %s: %v", name, err)
+		}
 	}
 }
 
