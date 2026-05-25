@@ -1415,6 +1415,114 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ne
 	}
 }
 
+func TestSweepExpiredSessionsCancelsUnstartedTurnsButPreservesAckStartedLease(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	now := time.Now().UTC()
+	expiredAt := now.Add(-time.Second)
+
+	if err := st.CreateSession(ctx, Session{
+		ID:        "sess_expired_queued",
+		UserID:    "lab",
+		Status:    string(sessionstate.RunningIdle),
+		Agent:     "claude",
+		Workspace: filepath.Join(t.TempDir(), "sess_expired_queued"),
+		RestoreID: "phase3-sess_expired_queued",
+		CreatedAt: now.Add(-time.Hour),
+		UpdatedAt: now.Add(-time.Hour),
+		ExpiresAt: &expiredAt,
+	}); err != nil {
+		t.Fatalf("create expired queued session: %v", err)
+	}
+	queuedTurnID, err := st.EnqueueTurn(ctx, "sess_expired_queued", "queued", now.Add(-time.Minute))
+	if err != nil {
+		t.Fatalf("enqueue queued turn: %v", err)
+	}
+
+	if err := st.CreateSession(ctx, Session{
+		ID:        "sess_expired_ack",
+		UserID:    "lab",
+		Status:    string(sessionstate.RunningActive),
+		Agent:     "claude",
+		Workspace: filepath.Join(t.TempDir(), "sess_expired_ack"),
+		RestoreID: "phase3-sess_expired_ack",
+		CreatedAt: now.Add(-time.Hour),
+		UpdatedAt: now.Add(-time.Hour),
+		ExpiresAt: &expiredAt,
+	}); err != nil {
+		t.Fatalf("create expired ack session: %v", err)
+	}
+	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_expired_ack",
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       now.Add(-30 * time.Second),
+		Config:    testAllocatorConfig(t),
+	})
+	if err != nil {
+		t.Fatalf("allocate ack generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, "sess_expired_ack", allocation.GenerationID, allocation.Owner, now.Add(-29*time.Second)); err != nil {
+		t.Fatalf("mark ack resources live: %v", err)
+	}
+	ackTurnID, err := st.EnqueueTurn(ctx, "sess_expired_ack", "started", now.Add(-28*time.Second))
+	if err != nil {
+		t.Fatalf("enqueue ack turn: %v", err)
+	}
+	if grant, ok, err := st.ClaimNextTurn(ctx, ClaimNextTurnParams{
+		SessionID:    "sess_expired_ack",
+		GenerationID: allocation.GenerationID,
+		Owner:        allocation.Owner,
+		RequestID:    "claim_expired_ack",
+		LeaseTTL:     time.Minute,
+		Now:          now.Add(-27 * time.Second),
+	}); err != nil || !ok || grant.TurnID != ackTurnID {
+		t.Fatalf("claim ack turn: ok=%v grant=%+v err=%v", ok, grant, err)
+	}
+	if _, err := st.AckTurnStarted(ctx, AckStartedParams{
+		SessionID:       "sess_expired_ack",
+		GenerationID:    allocation.GenerationID,
+		TurnID:          ackTurnID,
+		Owner:           allocation.Owner,
+		SandboxSourceIP: sandboxSourceIPForGeneration(t, ctx, st, allocation.GenerationID),
+		LeaseTTL:        time.Minute,
+		Now:             now.Add(-26 * time.Second),
+	}); err != nil {
+		t.Fatalf("ack turn started: %v", err)
+	}
+
+	changed, err := st.SweepExpiredSessions(ctx, now)
+	if err != nil {
+		t.Fatalf("sweep expired sessions: %v", err)
+	}
+	if changed != 2 {
+		t.Fatalf("expired sessions changed=%d want 2", changed)
+	}
+
+	var queuedStatus, queuedError, ackStatus, generationStatus, networkState, resourceState string
+	if err := st.db.QueryRowContext(ctx, `
+SELECT status, COALESCE(error_class, '')
+FROM turns
+WHERE id = ?`, queuedTurnID).Scan(&queuedStatus, &queuedError); err != nil {
+		t.Fatalf("query queued turn: %v", err)
+	}
+	if err := st.db.QueryRowContext(ctx, `
+SELECT t.status, g.status, n.allocation_state, r.resource_state
+FROM turns t
+JOIN runtime_generations g ON g.generation_id = t.generation_id
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE t.id = ?`, ackTurnID).Scan(&ackStatus, &generationStatus, &networkState, &resourceState); err != nil {
+		t.Fatalf("query ack-started state: %v", err)
+	}
+	if queuedStatus != "canceled" || queuedError != "session_expired" {
+		t.Fatalf("queued turn not canceled by TTL: status=%s error=%s", queuedStatus, queuedError)
+	}
+	if ackStatus != "running" || generationStatus != "active" || networkState != "live" || resourceState != "live" {
+		t.Fatalf("ack-started lease should be preserved: turn=%s generation=%s network=%s resource=%s", ackStatus, generationStatus, networkState, resourceState)
+	}
+}
+
 func TestUpdateSessionStatusDoesNotResurrectDestroyedSession(t *testing.T) {
 	ctx := context.Background()
 	st, _ := openOwnedStore(t, ctx)
