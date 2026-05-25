@@ -91,6 +91,117 @@ func TestProcessorRequiresHelloAndProbeBeforeClaimGrant(t *testing.T) {
 	}
 }
 
+func TestProcessorRequiresProbeBeforeRestoredGenerationClaimsTurn(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openBridgeStore(t, ctx)
+	sessionID := "sess_restore_probe"
+	createBridgeSession(t, ctx, st, sessionID)
+	allocation, details := allocateBridgeGeneration(t, ctx, st, owner, sessionID)
+	if err := st.RecordGenerationRuntimeArtifacts(ctx, allocation.GenerationID, "restore_manifest_digest", "runsc restore-test"); err != nil {
+		t.Fatalf("record generation artifacts: %v", err)
+	}
+	now := time.Now().UTC()
+	markBridgeGenerationCheckpointed(t, ctx, st, sessionID, allocation.GenerationID, now)
+	restoring, err := st.ClaimCheckpointedGenerationForRestore(ctx, store.ClaimCheckpointedGenerationParams{
+		SessionID:    sessionID,
+		GenerationID: allocation.GenerationID,
+		Owner:        allocation.Owner,
+		LeaseTTL:     time.Minute,
+		Now:          now.Add(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("claim checkpointed generation for restore: %v", err)
+	}
+	turnID, err := st.EnqueueTurn(ctx, sessionID, "after restore", now.Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("enqueue turn: %v", err)
+	}
+
+	processorNow := now.Add(3 * time.Second)
+	processor := &Processor{
+		Store:    st,
+		Owner:    allocation.Owner,
+		LeaseTTL: time.Minute,
+		Now: func() time.Time {
+			return processorNow
+		},
+	}
+	writeOutbox(t, ctx, details.BridgeDirPath, Envelope{
+		MessageID:    "msg_restore_claim_early",
+		RequestID:    "req_restore_claim_early",
+		Type:         TypeClaimNextTurn,
+		SessionID:    sessionID,
+		GenerationID: allocation.GenerationID,
+	})
+	if err := processor.ProcessOnce(ctx, details.BridgeDirPath); err != nil {
+		t.Fatalf("process restore claim before probe: %v", err)
+	}
+	response := assertSingleInboxResponse(t, details.BridgeDirPath, TypeNoWork, "req_restore_claim_early")
+	var noWork map[string]string
+	if err := json.Unmarshal(response.Payload, &noWork); err != nil {
+		t.Fatalf("decode no_work response: %v", err)
+	}
+	if noWork["reason"] != "bridge_not_ready" {
+		t.Fatalf("early restore claim reason=%q want bridge_not_ready", noWork["reason"])
+	}
+	var turnStatus, turnGeneration, turnOwner string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT status, COALESCE(generation_id, ''), COALESCE(lease_owner, '')
+FROM turns
+WHERE id = ?`, turnID).Scan(&turnStatus, &turnGeneration, &turnOwner); err != nil {
+		t.Fatalf("query turn after early claim: %v", err)
+	}
+	if turnStatus != "queued" || turnGeneration != "" || turnOwner != "" {
+		t.Fatalf("turn leased before bridge probe: status=%s generation=%s owner=%s", turnStatus, turnGeneration, turnOwner)
+	}
+
+	writeOutbox(t, ctx, details.BridgeDirPath, Envelope{
+		MessageID:    "msg_restore_hello",
+		RequestID:    "req_restore_hello",
+		Type:         TypeHello,
+		SessionID:    sessionID,
+		GenerationID: allocation.GenerationID,
+	})
+	if err := processor.ProcessOnce(ctx, details.BridgeDirPath); err != nil {
+		t.Fatalf("process restore hello: %v", err)
+	}
+	assertSingleInboxResponse(t, details.BridgeDirPath, TypeHelloAck, "req_restore_hello")
+	writeOutbox(t, ctx, details.BridgeDirPath, Envelope{
+		MessageID:    "msg_restore_probe",
+		RequestID:    "req_restore_probe",
+		Type:         TypeProbeNetwork,
+		SessionID:    sessionID,
+		GenerationID: allocation.GenerationID,
+	})
+	if err := processor.ProcessOnce(ctx, details.BridgeDirPath); err != nil {
+		t.Fatalf("process restore probe: %v", err)
+	}
+	assertSingleInboxResponse(t, details.BridgeDirPath, TypeNoWork, "req_restore_probe")
+	if err := st.MarkGenerationResourcesLive(ctx, sessionID, allocation.GenerationID, restoring.Owner, now.Add(4*time.Second)); err != nil {
+		t.Fatalf("mark restored resources live: %v", err)
+	}
+	processorNow = now.Add(5 * time.Second)
+
+	writeOutbox(t, ctx, details.BridgeDirPath, Envelope{
+		MessageID:    "msg_restore_claim_ready",
+		RequestID:    "req_restore_claim_ready",
+		Type:         TypeClaimNextTurn,
+		SessionID:    sessionID,
+		GenerationID: allocation.GenerationID,
+	})
+	if err := processor.ProcessOnce(ctx, details.BridgeDirPath); err != nil {
+		t.Fatalf("process restore claim after probe: %v", err)
+	}
+	response = assertSingleInboxResponse(t, details.BridgeDirPath, TypeGrant, "req_restore_claim_ready")
+	var grant grantPayload
+	if err := json.Unmarshal(response.Payload, &grant); err != nil {
+		t.Fatalf("decode restore grant: %v", err)
+	}
+	if grant.TurnID != turnID || grant.Content != "after restore" || grant.Sequence != 1 {
+		t.Fatalf("unexpected restore grant: %+v", grant)
+	}
+}
+
 func TestProcessorLifecycleMessagesUpdateTurnAndEvents(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openBridgeStore(t, ctx)
@@ -708,6 +819,48 @@ func allocateBridgeGeneration(t *testing.T, ctx context.Context, st *store.Store
 		t.Fatalf("ensure bridge layout: %v", err)
 	}
 	return allocation, details
+}
+
+func markBridgeGenerationCheckpointed(t *testing.T, ctx context.Context, st *store.Store, sessionID, generationID string, now time.Time) {
+	t.Helper()
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE runtime_generations
+SET status = 'checkpointed',
+    checkpoint_created_at = ?,
+    checkpoint_network_profile_id = network_profile_id,
+    checkpoint_agent_runtime_profile_id = agent_runtime_profile_id,
+    checkpoint_runsc_version = COALESCE(runsc_version, 'runsc test'),
+    checkpoint_runsc_platform = COALESCE(runsc_platform, 'systrap'),
+    checkpoint_bundle_digest = 'bundle_digest',
+    checkpoint_runtime_config_digest = 'runtime_config_digest',
+    checkpoint_control_manifest_digest = COALESCE((
+      SELECT control_manifest_digest
+      FROM runtime_generation_resources
+      WHERE runtime_generation_resources.generation_id = runtime_generations.generation_id
+    ), 'manifest_digest'),
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    last_seen_at = ?
+WHERE generation_id = ?
+  AND session_id = ?`, formatStoreTimeForBridgeTest(now), formatStoreTimeForBridgeTest(now), generationID, sessionID); err != nil {
+		t.Fatalf("set checkpointed generation: %v", err)
+	}
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE network_profiles
+SET allocation_state = 'reserved_checkpointed'
+WHERE generation_id = ?
+  AND session_id = ?`, generationID, sessionID); err != nil {
+		t.Fatalf("reserve checkpointed network: %v", err)
+	}
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE runtime_generation_resources
+SET resource_state = 'reserved_checkpointed'
+WHERE generation_id = ?`, generationID); err != nil {
+		t.Fatalf("reserve checkpointed resources: %v", err)
+	}
+	if err := st.UpdateSessionStatus(ctx, sessionID, string(sessionstate.Checkpointed), nil); err != nil {
+		t.Fatalf("set checkpointed session: %v", err)
+	}
 }
 
 type storeFailure struct {
