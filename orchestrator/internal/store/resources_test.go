@@ -297,6 +297,21 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ge
 		details.RunscVersion != "runsc test" {
 		t.Fatalf("restore details not preserved: %+v", details)
 	}
+
+	if err := st.MarkGenerationResourcesLive(ctx, "sess_restore_claim", allocation.GenerationID, claimed.Owner, now.Add(4*time.Second)); err != nil {
+		t.Fatalf("mark restored generation live: %v", err)
+	}
+	if err := st.db.QueryRowContext(ctx, `
+SELECT g.status, n.allocation_state, r.resource_state
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &networkState, &resourceState); err != nil {
+		t.Fatalf("query restored live state: %v", err)
+	}
+	if generationStatus != "idle" || networkState != "live" || resourceState != "live" {
+		t.Fatalf("restored generation not live idle: generation=%s network=%s resource=%s", generationStatus, networkState, resourceState)
+	}
 }
 
 func TestClaimCheckpointedGenerationForRestoreRollsBackOnResourceMismatch(t *testing.T) {

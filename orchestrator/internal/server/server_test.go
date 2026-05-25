@@ -540,6 +540,97 @@ WHERE session_id = ?
 	}
 }
 
+func TestSendMessageRestoresCheckpointedGeneration(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_restore", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
+	cfg := testServerConfig(dir)
+	leaseOwner := store.GenerationLeaseOwner(owner.UUID)
+	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     leaseOwner,
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    serverTestAllocatorConfig(cfg, "claude"),
+	})
+	if err != nil {
+		t.Fatalf("allocate checkpointed generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
+		t.Fatalf("mark checkpointed generation live: %v", err)
+	}
+	if err := st.RecordGenerationRuntimeArtifacts(ctx, allocation.GenerationID, "restore_manifest_digest", "runsc restore-test"); err != nil {
+		t.Fatalf("record checkpointed artifacts: %v", err)
+	}
+	markServerGenerationCheckpointed(t, ctx, st, session.ID, allocation.GenerationID, time.Now().UTC())
+
+	rt := &recordingRuntime{}
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: rt,
+		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(`{"content":"after restore"}`))
+	rec := httptest.NewRecorder()
+	srv.sendMessage(rec, req, session.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status 202, got %d body %s", rec.Code, rec.Body.String())
+	}
+
+	gotSession, err := st.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("get restored session: %v", err)
+	}
+	if gotSession.ActiveGenerationID != allocation.GenerationID || gotSession.Status != string(sessionstate.RunningActive) {
+		t.Fatalf("unexpected restored session: %+v allocation=%+v", gotSession, allocation)
+	}
+	var generationStatus, networkState, resourceState string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT g.status, n.allocation_state, r.resource_state
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &networkState, &resourceState); err != nil {
+		t.Fatalf("query restored generation: %v", err)
+	}
+	if generationStatus != "idle" || networkState != "live" || resourceState != "live" {
+		t.Fatalf("restored generation not live idle: status=%s network=%s resources=%s", generationStatus, networkState, resourceState)
+	}
+	var queuedTurns int
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM turns
+WHERE session_id = ?
+  AND status = 'queued'
+  AND generation_id IS NULL
+  AND content = 'after restore'`, session.ID).Scan(&queuedTurns); err != nil {
+		t.Fatalf("count restored queued turns: %v", err)
+	}
+	if queuedTurns != 1 {
+		t.Fatalf("queued restored turn count=%d want 1", queuedTurns)
+	}
+	prepareRequests, startRequests := rt.requests()
+	if len(prepareRequests) != 0 || len(startRequests) != 1 {
+		t.Fatalf("restore should skip prepare and start once: prepare=%d start=%d", len(prepareRequests), len(startRequests))
+	}
+	start := startRequests[0]
+	if start.GenerationID != allocation.GenerationID ||
+		!start.RestoreFromCheckpoint ||
+		!start.ResumeClaude ||
+		start.WaitForTurn ||
+		start.PreparedArtifacts.ManifestDigest != "restore_manifest_digest" ||
+		start.PreparedArtifacts.RunscVersion != "runsc restore-test" ||
+		start.Generation.NetworkAllocationState != "recreating" {
+		t.Fatalf("unexpected restore start request: %+v", start)
+	}
+}
+
 func TestColdFallbackMaintenanceStartsReplacementForQueuedTurn(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -1547,6 +1638,49 @@ func createServerTestSession(t *testing.T, ctx context.Context, st *store.Store,
 		t.Fatalf("create session: %v", err)
 	}
 	return session
+}
+
+func markServerGenerationCheckpointed(t *testing.T, ctx context.Context, st *store.Store, sessionID, generationID string, now time.Time) {
+	t.Helper()
+	formattedNow := now.UTC().Format(time.RFC3339Nano)
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE runtime_generations
+SET status = 'checkpointed',
+    checkpoint_created_at = ?,
+    checkpoint_network_profile_id = network_profile_id,
+    checkpoint_agent_runtime_profile_id = agent_runtime_profile_id,
+    checkpoint_runsc_version = COALESCE(runsc_version, 'runsc test'),
+    checkpoint_runsc_platform = COALESCE(runsc_platform, 'systrap'),
+    checkpoint_bundle_digest = 'bundle_digest',
+    checkpoint_runtime_config_digest = 'runtime_config_digest',
+    checkpoint_control_manifest_digest = COALESCE((
+      SELECT control_manifest_digest
+      FROM runtime_generation_resources
+      WHERE runtime_generation_resources.generation_id = runtime_generations.generation_id
+    ), 'manifest_digest'),
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    last_seen_at = ?
+WHERE generation_id = ?
+  AND session_id = ?`, formattedNow, formattedNow, generationID, sessionID); err != nil {
+		t.Fatalf("set checkpointed generation: %v", err)
+	}
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE network_profiles
+SET allocation_state = 'reserved_checkpointed'
+WHERE generation_id = ?
+  AND session_id = ?`, generationID, sessionID); err != nil {
+		t.Fatalf("reserve checkpointed network: %v", err)
+	}
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE runtime_generation_resources
+SET resource_state = 'reserved_checkpointed'
+WHERE generation_id = ?`, generationID); err != nil {
+		t.Fatalf("reserve checkpointed resources: %v", err)
+	}
+	if err := st.UpdateSessionStatus(ctx, sessionID, string(sessionstate.Checkpointed), nil); err != nil {
+		t.Fatalf("set checkpointed session: %v", err)
+	}
 }
 
 func testServerConfig(dir string) config.Config {

@@ -346,7 +346,7 @@ SET status = 'idle',
     last_seen_at = ?
 WHERE generation_id = ?
   AND session_id = ?
-  AND status = 'allocating'
+  AND status IN ('allocating','restoring')
   AND lease_owner = ?
   AND lease_expires_at > ?
   AND EXISTS (
@@ -370,7 +370,7 @@ UPDATE network_profiles
 SET allocation_state = 'live'
 WHERE generation_id = ?
   AND session_id = ?
-  AND allocation_state IN ('allocating','ready')`, generationID, sessionID)
+  AND allocation_state IN ('allocating','ready','recreating')`, generationID, sessionID)
 	if err != nil {
 		return err
 	}
@@ -385,7 +385,7 @@ WHERE generation_id = ?
 UPDATE runtime_generation_resources
 SET resource_state = 'live'
 WHERE generation_id = ?
-  AND resource_state IN ('allocating','ready')`, generationID)
+  AND resource_state IN ('allocating','ready','recreating')`, generationID)
 	if err != nil {
 		return err
 	}

@@ -54,6 +54,57 @@ func TestRuntimeStartRequiresGenerationDetailsForColdPath(t *testing.T) {
 	}
 }
 
+func TestResolveCheckpointPathPrefersGenerationPath(t *testing.T) {
+	dir := t.TempDir()
+	generationPath := filepath.Join(dir, "run", "gen_a", "checkpoint")
+	legacyPath := filepath.Join(dir, "checkpoints", "sess_1")
+	if err := os.MkdirAll(generationPath, 0o755); err != nil {
+		t.Fatalf("create generation checkpoint: %v", err)
+	}
+	if err := os.MkdirAll(legacyPath, 0o755); err != nil {
+		t.Fatalf("create legacy checkpoint: %v", err)
+	}
+	rt := New(Config{CheckpointsRoot: filepath.Join(dir, "checkpoints")})
+
+	got, err := rt.resolveCheckpointPath(StartRequest{
+		SessionID: "sess_1",
+		Generation: store.RuntimeGenerationDetails{
+			CheckpointPath: generationPath,
+		},
+	})
+	if err != nil {
+		t.Fatalf("resolve checkpoint path: %v", err)
+	}
+	if got != generationPath {
+		t.Fatalf("checkpoint path=%q want generation path %q", got, generationPath)
+	}
+}
+
+func TestRuntimeStartRestoreRequiresCheckpointPath(t *testing.T) {
+	rt := New(Config{DefaultAgent: "claude"})
+	res := rt.Start(context.Background(), StartRequest{
+		SessionID:             "sess_missing_checkpoint",
+		Agent:                 "claude",
+		RestoreFromCheckpoint: true,
+		Generation: store.RuntimeGenerationDetails{
+			SessionID:    "sess_missing_checkpoint",
+			GenerationID: "gen_missing",
+		},
+		PreparedArtifacts: GenerationArtifacts{
+			BundleDir:      filepath.Join(t.TempDir(), "bundle"),
+			SpecPath:       filepath.Join(t.TempDir(), "bundle", "config.json"),
+			ManifestPath:   filepath.Join(t.TempDir(), "control", "session.json"),
+			ManifestDigest: "digest",
+		},
+	}, nil)
+	if res.Err == nil {
+		t.Fatal("expected missing checkpoint error")
+	}
+	if !strings.Contains(res.Err.Error(), "checkpoint path is required") {
+		t.Fatalf("expected checkpoint path error, got %v", res.Err)
+	}
+}
+
 func TestCleanupExitedContainerDoesNotRemoveReplacement(t *testing.T) {
 	rt := New(Config{})
 	oldContainer := &Container{SessionID: "sess_1", RestoreID: "phase3-sess_1"}

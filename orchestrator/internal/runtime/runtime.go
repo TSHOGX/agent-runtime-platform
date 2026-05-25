@@ -70,17 +70,18 @@ type ClaudeConfig struct {
 }
 
 type StartRequest struct {
-	SessionID         string
-	RestoreID         string
-	GenerationID      string
-	Agent             string
-	FirstMessage      string
-	WaitForTurn       bool
-	ClaudeSessionUUID string
-	ResumeClaude      bool
-	Done              <-chan struct{}
-	Generation        store.RuntimeGenerationDetails
-	PreparedArtifacts GenerationArtifacts
+	SessionID             string
+	RestoreID             string
+	GenerationID          string
+	Agent                 string
+	FirstMessage          string
+	WaitForTurn           bool
+	ClaudeSessionUUID     string
+	ResumeClaude          bool
+	RestoreFromCheckpoint bool
+	Done                  <-chan struct{}
+	Generation            store.RuntimeGenerationDetails
+	PreparedArtifacts     GenerationArtifacts
 }
 
 type Output struct {
@@ -231,12 +232,15 @@ func (r *Runtime) Start(ctx context.Context, req StartRequest, output func(Outpu
 		return r.sendMessage(ctx, container, req.FirstMessage, req.Done, output)
 	}
 
-	// Check if checkpoint exists (resume path). This stays opt-in because
+	if req.RestoreFromCheckpoint {
+		return r.resumeFromCheckpoint(ctx, req, output)
+	}
+
+	// Check if checkpoint exists (legacy resume path). This stays opt-in because
 	// runsc restore currently cannot reliably reconnect the long-lived stdin
 	// turn channel used by the agent entrypoint.
-	checkpointPath := filepath.Join(r.cfg.CheckpointsRoot, req.SessionID)
 	if r.cfg.RestoreFromCheckpoint {
-		if _, err := os.Stat(checkpointPath); err == nil {
+		if _, err := r.resolveCheckpointPath(req); err == nil {
 			return r.resumeFromCheckpoint(ctx, req, output)
 		}
 	}
@@ -1615,7 +1619,10 @@ func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, ou
 		}
 		req.PreparedArtifacts.NetworkPrepared = true
 	}
-	checkpointPath := filepath.Join(r.cfg.CheckpointsRoot, req.SessionID)
+	checkpointPath, err := r.resolveCheckpointPath(req)
+	if err != nil {
+		return Result{Err: err}
+	}
 	containerID := fmt.Sprintf("phase3-%s", req.SessionID)
 	bundlePath := artifacts.BundleDir
 	r.cleanupRunscContainer(ctx, containerID)
@@ -1701,7 +1708,31 @@ func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, ou
 	if result.Err != nil {
 		r.stopContainer(container)
 	}
+	result.ControlManifestDigest = req.PreparedArtifacts.ManifestDigest
+	result.RunscVersion = req.PreparedArtifacts.RunscVersion
 	return result
+}
+
+func (r *Runtime) resolveCheckpointPath(req StartRequest) (string, error) {
+	candidates := []string{}
+	if path := strings.TrimSpace(req.Generation.CheckpointPath); path != "" {
+		candidates = append(candidates, path)
+	}
+	if root := strings.TrimSpace(r.cfg.CheckpointsRoot); root != "" {
+		path := filepath.Join(root, req.SessionID)
+		if len(candidates) == 0 || candidates[len(candidates)-1] != path {
+			candidates = append(candidates, path)
+		}
+	}
+	if len(candidates) == 0 {
+		return "", errors.New("checkpoint path is required")
+	}
+	for _, path := range candidates {
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("checkpoint image not found in %s", strings.Join(candidates, ", "))
 }
 
 func (r *Runtime) Checkpoint(ctx context.Context, sessionID string) error {

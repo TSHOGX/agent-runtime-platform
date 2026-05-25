@@ -44,6 +44,8 @@ const (
 	autoCheckpointEnabled   = false
 )
 
+var errGenerationBusy = errors.New("generation lifecycle is busy")
+
 type Server struct {
 	cfg       config.Config
 	store     *store.Store
@@ -69,8 +71,9 @@ type bridgeStore interface {
 }
 
 type ensuredGeneration struct {
-	Allocation store.GenerationAllocation
-	IsNew      bool
+	Allocation            store.GenerationAllocation
+	IsNew                 bool
+	RestoreFromCheckpoint bool
 }
 
 func New(
@@ -327,6 +330,10 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, sessionID s
 		writeErrorClass(w, http.StatusServiceUnavailable, "pool_exhausted", "resource pool exhausted")
 		return
 	}
+	if errors.Is(err, errGenerationBusy) {
+		writeError(w, http.StatusConflict, "session is busy")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -378,10 +385,20 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		}
 	}
 	startReq := s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, preparedArtifacts)
+	startReq.RestoreFromCheckpoint = ensured.RestoreFromCheckpoint
 	result := s.runtime.Start(ctx, startReq, nil)
 	if result.Err != nil {
 		s.failGenerationBeforeTurn(session.ID, allocation.GenerationID, allocation.Owner, result.Err)
 		return result.Err
+	}
+	if ensured.RestoreFromCheckpoint {
+		if err := s.store.MarkGenerationResourcesLive(ctx, session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
+			if destroyErr := s.runtime.Destroy(ctx, session.ID); destroyErr != nil && !errors.Is(destroyErr, context.Canceled) {
+				s.log.Warn("failed to destroy runtime after restore live CAS failure", "session_id", session.ID, "generation_id", allocation.GenerationID, "error", destroyErr)
+			}
+			s.failGenerationBeforeTurn(session.ID, allocation.GenerationID, allocation.Owner, err)
+			return err
+		}
 	}
 	return nil
 }
@@ -418,6 +435,25 @@ func (s *Server) ensureActiveGeneration(ctx context.Context, session store.Sessi
 		if err != nil {
 			return ensuredGeneration{}, err
 		}
+		if status == "checkpointed" {
+			allocation, err := s.store.ClaimCheckpointedGenerationForRestore(ctx, store.ClaimCheckpointedGenerationParams{
+				SessionID:    session.ID,
+				GenerationID: activeGenerationID,
+				Owner:        owner,
+				LeaseTTL:     s.cfg.Phase7.Bridge.LeaseTTL.Duration,
+				Now:          time.Now().UTC(),
+			})
+			if err != nil {
+				return ensuredGeneration{}, err
+			}
+			return ensuredGeneration{
+				Allocation:            allocation,
+				RestoreFromCheckpoint: true,
+			}, nil
+		}
+		if generationLifecycleBusy(status) {
+			return ensuredGeneration{}, errGenerationBusy
+		}
 		if status != "failed" {
 			return ensuredGeneration{
 				Allocation: store.GenerationAllocation{
@@ -451,6 +487,15 @@ func (s *Server) ensureActiveGeneration(ctx context.Context, session store.Sessi
 		return ensuredGeneration{}, err
 	}
 	return ensuredGeneration{Allocation: allocation, IsNew: true}, nil
+}
+
+func generationLifecycleBusy(status string) bool {
+	switch status {
+	case "allocating", "starting", "probing", "checkpointing", "restoring":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) resourceAllocatorConfig(agent string) store.ResourceAllocatorConfig {
