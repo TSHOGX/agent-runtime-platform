@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -757,6 +758,141 @@ WHERE session_id = ?
 	}
 	if startRequests[1].RestoreFromCheckpoint || startRequests[1].GenerationID != gotSession.ActiveGenerationID {
 		t.Fatalf("second start was not cold fallback: %+v", startRequests[1])
+	}
+}
+
+func TestSendMessageFallsBackWhenCheckpointImageManifestInvalid(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_restore_manifest_fallback", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
+	if _, err := st.DBForTest().ExecContext(ctx, `UPDATE sessions SET agent = 'sh' WHERE id = ?`, session.ID); err != nil {
+		t.Fatalf("set shell session agent: %v", err)
+	}
+	session.Agent = "sh"
+	cfg := testServerConfig(dir)
+	cfg.Phase7.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
+	leaseOwner := store.GenerationLeaseOwner(owner.UUID)
+	old, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     leaseOwner,
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    serverTestAllocatorConfig(cfg, "sh"),
+	})
+	if err != nil {
+		t.Fatalf("allocate checkpointed generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, session.ID, old.GenerationID, old.Owner, time.Now().UTC()); err != nil {
+		t.Fatalf("mark checkpointed generation live: %v", err)
+	}
+
+	checkpointPath := filepath.Join(dir, "checkpoints", session.ID)
+	writeServerCheckpointFilesWithoutManifest(t, checkpointPath)
+	manifest, err := buildServerCheckpointImageManifest(checkpointPath)
+	if err != nil {
+		t.Fatalf("build checkpoint image manifest: %v", err)
+	}
+	if err := writeServerJSONFile(filepath.Join(checkpointPath, "harness-checkpoint-manifest.json"), manifest); err != nil {
+		t.Fatalf("write checkpoint image manifest: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(checkpointPath, "pages.img"), []byte("corrupt"), 0o644); err != nil {
+		t.Fatalf("corrupt checkpoint image file: %v", err)
+	}
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE runtime_generation_resources
+SET checkpoint_path = ?
+WHERE generation_id = ?`, checkpointPath, old.GenerationID); err != nil {
+		t.Fatalf("record checkpoint path: %v", err)
+	}
+	markServerGenerationCheckpointed(t, ctx, st, session.ID, old.GenerationID, time.Now().UTC())
+
+	realRuntime := runtime.New(runtime.Config{
+		DefaultAgent:    "sh",
+		SessionsRoot:    cfg.SessionsRoot,
+		AgentHomesRoot:  filepath.Join(dir, "agent-homes"),
+		CheckpointsRoot: filepath.Join(dir, "checkpoints"),
+		RootFSPath:      filepath.Join(dir, "rootfs"),
+		BundleRoot:      filepath.Join(dir, "run", "runtime"),
+		RunscNetwork:    "host",
+		RunscOverlay2:   "none",
+		Phase7RunDir:    cfg.Phase7.RunDir,
+		CommandRunner:   serverCommandRunner{outputs: map[string][]byte{"runsc --version": []byte("runsc test")}},
+		BridgeMode:      "claim-loop",
+		BridgeHeartbeat: time.Second,
+	})
+	rt := &restoreValidationRuntime{restore: realRuntime}
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: rt,
+		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(`{"content":"after corrupt checkpoint"}`))
+	rec := httptest.NewRecorder()
+	srv.sendMessage(rec, req, session.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status 202, got %d body %s", rec.Code, rec.Body.String())
+	}
+	gotSession, err := st.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("get fallback session: %v", err)
+	}
+	if gotSession.ActiveGenerationID == "" || gotSession.ActiveGenerationID == old.GenerationID || gotSession.Status != string(sessionstate.RunningActive) {
+		t.Fatalf("fallback did not replace active generation: %+v old=%s", gotSession, old.GenerationID)
+	}
+	var oldStatus, oldNetwork, oldResources, oldReason string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT g.status, n.allocation_state, r.resource_state, COALESCE(g.failure_reason, '')
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, old.GenerationID).Scan(&oldStatus, &oldNetwork, &oldResources, &oldReason); err != nil {
+		t.Fatalf("query old generation: %v", err)
+	}
+	if oldStatus != "failed" || oldNetwork != "reclaimable" || oldResources != "reclaimable" {
+		t.Fatalf("old generation not fenced after invalid checkpoint manifest: status=%s network=%s resources=%s reason=%s", oldStatus, oldNetwork, oldResources, oldReason)
+	}
+	if !strings.Contains(oldReason, "checkpoint image manifest") || !strings.Contains(oldReason, "pages.img") {
+		t.Fatalf("old generation failure reason did not include checkpoint manifest mismatch: %q", oldReason)
+	}
+	var newStatus, newNetwork, newResources string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT g.status, n.allocation_state, r.resource_state
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, gotSession.ActiveGenerationID).Scan(&newStatus, &newNetwork, &newResources); err != nil {
+		t.Fatalf("query fallback generation: %v", err)
+	}
+	if newStatus != "idle" || newNetwork != "live" || newResources != "live" {
+		t.Fatalf("fallback generation not live idle: status=%s network=%s resources=%s", newStatus, newNetwork, newResources)
+	}
+	var queuedTurns int
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM turns
+WHERE session_id = ?
+  AND status = 'queued'
+  AND generation_id IS NULL
+  AND content = 'after corrupt checkpoint'`, session.ID).Scan(&queuedTurns); err != nil {
+		t.Fatalf("count fallback queued turns: %v", err)
+	}
+	if queuedTurns != 1 {
+		t.Fatalf("queued fallback turn count=%d want 1", queuedTurns)
+	}
+	if got := len(rt.startRequests); got != 2 {
+		t.Fatalf("runtime calls start=%d want 2", got)
+	}
+	if !rt.startRequests[0].RestoreFromCheckpoint || rt.startRequests[0].GenerationID != old.GenerationID {
+		t.Fatalf("first start was not restore: %+v", rt.startRequests[0])
+	}
+	if rt.startRequests[1].RestoreFromCheckpoint || rt.startRequests[1].GenerationID != gotSession.ActiveGenerationID {
+		t.Fatalf("second start was not cold fallback: %+v", rt.startRequests[1])
 	}
 }
 
@@ -1891,6 +2027,51 @@ func (r *restoreFailoverRuntime) Start(_ context.Context, req runtime.StartReque
 	return runtime.Result{ControlManifestDigest: req.PreparedArtifacts.ManifestDigest, RunscVersion: req.PreparedArtifacts.RunscVersion}
 }
 
+type restoreValidationRuntime struct {
+	restore       *runtime.Runtime
+	startRequests []runtime.StartRequest
+}
+
+func (r *restoreValidationRuntime) PrepareGeneration(context.Context, runtime.StartRequest) (runtime.GenerationArtifacts, error) {
+	return testGenerationArtifacts(), nil
+}
+
+func (r *restoreValidationRuntime) Start(ctx context.Context, req runtime.StartRequest, output func(runtime.Output)) runtime.Result {
+	r.startRequests = append(r.startRequests, req)
+	if req.RestoreFromCheckpoint {
+		return r.restore.Start(ctx, req, output)
+	}
+	return runtime.Result{ControlManifestDigest: req.PreparedArtifacts.ManifestDigest, RunscVersion: req.PreparedArtifacts.RunscVersion}
+}
+
+func (r *restoreValidationRuntime) Destroy(context.Context, string) error {
+	return nil
+}
+
+func (r *restoreValidationRuntime) DestroyGenerationResources(context.Context, store.RuntimeGenerationDetails) (runtime.GenerationResourceCleanup, error) {
+	return runtime.GenerationResourceCleanup{}, nil
+}
+
+func (r *restoreValidationRuntime) Interrupt(string) error {
+	return nil
+}
+
+func (r *restoreValidationRuntime) Checkpoint(context.Context, runtime.CheckpointRequest) error {
+	return nil
+}
+
+type serverCommandRunner struct {
+	outputs map[string][]byte
+}
+
+func (r serverCommandRunner) CombinedOutput(_ context.Context, name string, args ...string) ([]byte, error) {
+	key := strings.Join(append([]string{name}, args...), " ")
+	if out, ok := r.outputs[key]; ok {
+		return out, nil
+	}
+	return nil, nil
+}
+
 type failingRuntime struct {
 	prepareErr    error
 	err           error
@@ -1936,6 +2117,55 @@ func testGenerationArtifacts() runtime.GenerationArtifacts {
 		SpecDigest:              "spec_digest",
 		RunscVersion:            "runsc test",
 	}
+}
+
+type serverCheckpointImageManifest struct {
+	Version int                                 `json:"version"`
+	Files   []serverCheckpointImageManifestFile `json:"files"`
+}
+
+type serverCheckpointImageManifestFile struct {
+	Path   string `json:"path"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
+}
+
+func writeServerCheckpointFilesWithoutManifest(t *testing.T, checkpointPath string) {
+	t.Helper()
+	if err := os.MkdirAll(checkpointPath, 0o755); err != nil {
+		t.Fatalf("create checkpoint path: %v", err)
+	}
+	for _, name := range []string{"checkpoint.img", "pages.img", "pages_meta.img"} {
+		if err := os.WriteFile(filepath.Join(checkpointPath, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write checkpoint file %s: %v", name, err)
+		}
+	}
+}
+
+func buildServerCheckpointImageManifest(checkpointPath string) (serverCheckpointImageManifest, error) {
+	manifest := serverCheckpointImageManifest{Version: 1}
+	for _, name := range []string{"checkpoint.img", "pages.img", "pages_meta.img"} {
+		path := filepath.Join(checkpointPath, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return serverCheckpointImageManifest{}, err
+		}
+		sum := sha256.Sum256(data)
+		manifest.Files = append(manifest.Files, serverCheckpointImageManifestFile{
+			Path:   name,
+			Size:   int64(len(data)),
+			SHA256: fmt.Sprintf("%x", sum),
+		})
+	}
+	return manifest, nil
+}
+
+func writeServerJSONFile(path string, value any) error {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
 }
 
 func openServerOwnedStore(t *testing.T, ctx context.Context, dir string) (*store.Store, *store.OwnerLock) {
