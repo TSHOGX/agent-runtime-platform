@@ -9,12 +9,16 @@ This file owns every Phase 7 SQL fragment: table definitions, indexes, the CAS h
 ```text
 id                           -- existing PK; exposed as session_id in APIs/protocols
 user_id
-agent
 status
+agent
 claude_session_uuid
 workspace                   -- legacy column name; canonical workspace path
+restore_id                  -- legacy logical restore id; retained for compatibility/forensics
+restore_ms                  -- legacy restore duration; retained for compatibility/forensics
+checkpoint_path             -- legacy session-level checkpoint path; retained for forensics
 agent_home_path
 active_generation_id        -- FK -> runtime_generations.generation_id, nullable
+auto_checkpoint_enabled     -- default copied to newly allocated generations
 created_at
 updated_at
 last_activity_at
@@ -156,6 +160,7 @@ network_profile_id
 agent_runtime_profile_id
 runsc_platform = systrap
 runsc_version
+auto_checkpoint_enabled     -- session policy snapshot captured at allocation
 lease_owner
 lease_expires_at
 started_at
@@ -254,6 +259,11 @@ agent_runtime_profile_id   -- FK; redundant with runtime_generations for join sp
 control_dir_path           -- per-generation control dir (Control Manifest)
 control_manifest_path      -- absolute path to session.json under control_dir
 control_manifest_digest    -- JCS digest the entrypoint validates against
+projected_control_manifest_digest
+                           -- restore/checkpoint digest after removing regenerable fields
+bundle_digest              -- digest of the generated runsc bundle
+runtime_config_digest      -- digest of the generated runtime config payload
+spec_digest                -- digest of config.json written to spec_path
 bundle_dir_path            -- per-generation runsc bundle dir
 spec_path                  -- absolute path to bundle config.json
 checkpoint_path            -- checkpoint payload path, if present
@@ -664,15 +674,15 @@ The requeue helper is only invoked when the turn's `retry_policy` permits anothe
 
 ## SQLite Migration Strategy
 
-The current `Store.migrate` in `orchestrator/internal/store/store.go:78` is a single bootstrap pass of `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` statements. It is sufficient for fresh installs but does *not* run any `ALTER TABLE`, does not add new columns to pre-existing tables, and has no notion of schema versions. A lab DB carried over from Phase 6 will not pick up the Phase 7 session columns (`active_generation_id`, `agent_home_path`, `failure_reason`, `error_class`), the `runtime_generations_one_nonterminal_per_session` partial index, or any new Phase 7 tables (`runtime_generations`, `network_profiles`, `agent_runtime_profiles`, `egress_policies`, `turns`, `events`, `active_model_request_contexts`, `orchestrator_owner`) just because the binary is upgraded. Phase 7a therefore replaces the bootstrap pass with an explicit, ordered, version-tracked migration runner.
+`Store.migrate` in `orchestrator/internal/store/store.go` enables SQLite's WAL, foreign keys, and busy timeout, then runs the ordered, version-tracked migration runner defined in `orchestrator/internal/store/migrations.go`. A lab DB carried over from Phase 6 is advanced through explicit migrations that add Phase 7 columns, tables, indexes, retention helpers, and checkpoint-policy metadata; fresh installs run the same migration list and land at the same current version.
 
 ### `schema_migrations` table
 
-The first migration writes a singleton tracking table:
+The runner creates the migration tracking table before applying the first pending migration:
 
 ```sql
 create table if not exists schema_migrations (
-    version    integer primary key,    -- monotonic; gaps not allowed
+    version    integer primary key,    -- one row per applied migration
     name       text    not null,
     applied_at text    not null        -- RFC3339 UTC
 );
@@ -680,7 +690,7 @@ create table if not exists schema_migrations (
 
 The runner is wrapped in `BEGIN IMMEDIATE … COMMIT`, with `PRAGMA foreign_keys=ON` and the existing `MaxOpenConns(1)` single-writer guarantee. Each migration body runs in its own transaction; on partial failure the transaction is rolled back and `schema_migrations` is unchanged so a re-run resumes from the same version.
 
-### Required Phase 7a migrations
+### Required migrations
 
 The migrations land in this order, each as one `version` row, and each one must be idempotent under re-run (the runner re-checks `schema_migrations` and a re-applied no-op is allowed for any migration that previously committed):
 
@@ -710,11 +720,15 @@ v4  phase7_session_columns
       ALTER TABLE sessions ADD COLUMN agent_home_path TEXT;
       ALTER TABLE sessions ADD COLUMN failure_reason TEXT;
       ALTER TABLE sessions ADD COLUMN error_class TEXT;
+      ALTER TABLE sessions ADD COLUMN auto_checkpoint_enabled INTEGER
+        NOT NULL DEFAULT 0 CHECK(auto_checkpoint_enabled IN (0,1));
       Keep the existing `workspace` column as the canonical workspace
       path; do not add a parallel `workspace_path` column. Backfill
       agent_home_path from the resolved agent-homes root and session id.
       active_generation_id starts NULL on legacy rows and is patched by
       the allocator / 7a ledger shim via the standard CAS predicate.
+      auto_checkpoint_enabled starts disabled for migrated sessions and
+      is controlled by the current checkpoint policy for new sessions.
 
 v5  phase7_indexes
       CREATE INDEX statements for the per-table indexes referenced
@@ -793,6 +807,31 @@ v6  phase7_legacy_session_backfill
           `claude_session_uuid` was recorded.
       Idempotent: re-running v6 finds no eligible rows (the prior pass
       already moved them to a terminal state).
+
+v7  phase7_proxy_event_uniqueness
+      Add partial UNIQUE indexes that make proxy request start and
+      terminal events idempotent per proxy_request_id:
+      `events_proxy_started_request_uq` for `proxy.request.started`
+      and `events_proxy_finished_request_uq` for
+      `proxy.request.completed` / `proxy.request.failed`.
+
+v8  phase7_event_retention_index
+      Normalize existing `events.created_at` values to the event-log
+      timestamp format and add `events_created_at_idx` so retention
+      sweeps can seek by creation time without scanning the event log.
+
+v9  phase7_checkpoint_policy
+      Add the Step 10 automatic-checkpoint policy and artifact digest
+      columns to upgraded databases:
+        - sessions.auto_checkpoint_enabled
+        - runtime_generations.auto_checkpoint_enabled
+        - runtime_generation_resources.projected_control_manifest_digest
+        - runtime_generation_resources.bundle_digest
+        - runtime_generation_resources.runtime_config_digest
+        - runtime_generation_resources.spec_digest
+      The migration checks for each column before issuing ALTER TABLE,
+      so databases that already picked up sessions.auto_checkpoint_enabled
+      from v4 or fresh schema creation remain idempotent.
 ```
 
 `v6` is intentionally aggressive about not inventing fenced generations. Manufacturing a fake `runtime_generations` row to satisfy `sessions.active_generation_id` would create a row that no allocator owns, no reaper will reclaim by name (it would fail the `harness-gen-<id>` ownership filter), and no resource allocation row backs. It is structurally safer to declare the legacy session terminal and let the user resume via Claude's conversation UUID than to forge generation rows.
@@ -804,13 +843,15 @@ The `store` package ships a migration test suite that exercises the runner again
 ```text
 - test/migration_fixtures/v1_phase6_clean.sqlite
     A snapshot of a Phase 6 lab DB taken from a running instance.
-    Test: open under the Phase 7 Store, assert all six versions apply
-    to completion, schema_migrations ends at version 6, every Phase 7
-    table and session column exists, every legacy session row has
-    `agent_home_path` backfilled, and every row is either still-active
-    (no eligible candidates in this fixture) or `failed` with the
-    documented error_class / failure_reason; any legacy `created` row
-    stays `created` and keeps `active_generation_id = NULL`.
+    Test: open under the Phase 7 Store, assert all migrations apply to
+    completion, schema_migrations ends at the current version (v9),
+    every Phase 7 table, index, session column, generation policy
+    column, and resource digest column exists, every legacy session row
+    has `agent_home_path` backfilled, and every row is either
+    still-active (no eligible candidates in this fixture) or `failed`
+    with the documented error_class / failure_reason; any legacy
+    `created` row stays `created` and keeps active_generation_id set
+    to NULL.
 
 - test/migration_fixtures/v1_phase6_with_running.sqlite
     A snapshot with mid-flight running sessions and one
