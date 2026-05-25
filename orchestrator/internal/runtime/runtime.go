@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -149,6 +150,7 @@ type controlManifest struct {
 	HostHostname                         string `json:"host_hostname"`
 	NetnsName                            string `json:"netns_name"`
 	HostGatewayIP                        string `json:"host_gateway_ip"`
+	SandboxSourceIP                      string `json:"sandbox_source_ip"`
 	BridgeDirPath                        string `json:"bridge_dir_path"`
 	BundleDigest                         string `json:"bundle_digest"`
 	RuntimeConfigDigest                  string `json:"runtime_config_digest"`
@@ -757,6 +759,10 @@ func (r *Runtime) buildGenerationManifest(req StartRequest, runscVersion, bundle
 	if details.RequiresSecretDrop {
 		secretMountPath = "/harness-secrets"
 	}
+	sandboxSourceIP, err := sandboxSourceIP(details.SandboxIPCIDR)
+	if err != nil {
+		return controlManifest{}, err
+	}
 	return controlManifest{
 		SessionID:                            req.SessionID,
 		GenerationID:                         details.GenerationID,
@@ -781,6 +787,7 @@ func (r *Runtime) buildGenerationManifest(req StartRequest, runscVersion, bundle
 		HostHostname:                         hostname,
 		NetnsName:                            details.NetnsName,
 		HostGatewayIP:                        details.HostGatewayIP,
+		SandboxSourceIP:                      sandboxSourceIP,
 		BridgeDirPath:                        details.BridgeDirPath,
 		BundleDigest:                         bundleDigest,
 		RuntimeConfigDigest:                  runtimeConfigDigest,
@@ -790,6 +797,17 @@ func (r *Runtime) buildGenerationManifest(req StartRequest, runscVersion, bundle
 		ClaudeCodeDisableNonessentialTraffic: details.DisableNonessentialTraffic,
 		ProxyBindURL:                         r.cfg.Claude.ProxyBindURL,
 	}, nil
+}
+
+func sandboxSourceIP(sandboxCIDR string) (string, error) {
+	if strings.TrimSpace(sandboxCIDR) == "" {
+		return "", nil
+	}
+	prefix, err := netip.ParsePrefix(strings.TrimSpace(sandboxCIDR))
+	if err != nil {
+		return "", fmt.Errorf("invalid sandbox ip cidr %q: %w", sandboxCIDR, err)
+	}
+	return prefix.Addr().String(), nil
 }
 
 func validateGenerationDetails(req StartRequest) error {
@@ -867,12 +885,13 @@ func projectedControlManifestDigest(manifest controlManifest) (string, error) {
 		"proxy_bind_url": {},
 	}
 	regenerableFields := map[string]struct{}{
-		"created_at":      {},
-		"attempt_id":      {},
-		"host_hostname":   {},
-		"netns_name":      {},
-		"host_gateway_ip": {},
-		"bridge_dir_path": {},
+		"created_at":        {},
+		"attempt_id":        {},
+		"host_hostname":     {},
+		"netns_name":        {},
+		"host_gateway_ip":   {},
+		"sandbox_source_ip": {},
+		"bridge_dir_path":   {},
 	}
 	projected := map[string]any{}
 	for key, value := range fields {

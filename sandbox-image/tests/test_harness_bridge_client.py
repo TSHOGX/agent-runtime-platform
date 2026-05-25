@@ -147,6 +147,13 @@ class BridgeClientTest(unittest.TestCase):
             client.clear_checkpoint_ready()
             self.assertFalse(ready.exists())
 
+    def test_sandbox_source_ip_prefers_manifest_env(self):
+        with mock.patch.dict(os.environ, {"HARNESS_SANDBOX_SOURCE_IP": "10.240.0.2"}, clear=False):
+            with mock.patch.object(bridge.subprocess, "check_output") as check_output:
+                self.assertEqual(bridge.sandbox_source_ip(), "10.240.0.2")
+
+        check_output.assert_not_called()
+
     def test_heartbeat_loop_uses_configured_interval(self):
         with tempfile.TemporaryDirectory() as root:
             args = argparse_namespace(
@@ -575,7 +582,7 @@ class EntrypointStaticTest(unittest.TestCase):
     def test_manifest_digest_matches_host_fixture(self):
         fixture = Path(__file__).resolve().parents[2] / "docs" / "phase7" / "fixtures" / "control-manifest-payload.json"
         payload = json.loads(fixture.read_text(encoding="utf-8"))
-        digest = "9458fdd58b3315147cf8321bd4ba3fa130a6c880aee2daa108342400eac440e4"
+        digest = "2dcc2b3e69e7792c65fb521284d627253787e77f60202482e2839fe1fd97a341"
 
         self.assertEqual(manifest.manifest_digest(payload), digest)
         with tempfile.TemporaryDirectory() as root:

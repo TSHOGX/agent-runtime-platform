@@ -119,6 +119,7 @@ func TestProjectedControlManifestDigestIgnoresRegenerableFields(t *testing.T) {
 	changed.BridgeDirPath = "/tmp/other-bridge"
 	changed.NetnsName = "other-netns"
 	changed.HostGatewayIP = "10.1.2.3"
+	changed.SandboxSourceIP = "10.1.2.4"
 	second, err := projectedControlManifestDigest(changed)
 	if err != nil {
 		t.Fatalf("project changed manifest: %v", err)
@@ -147,8 +148,8 @@ func TestCanonicalManifestDigestMatchesSandboxFixture(t *testing.T) {
 	if err != nil {
 		t.Fatalf("canonicalize manifest fixture: %v", err)
 	}
-	const wantCanonical = `{"agent":"sh","agent_home_path":"/agent-homes/sess_fixture","agent_runtime_profile_id":"arp_fixture","attempt_id":"attempt_fixture","bridge_dir_path":"/run/bridge/gen_fixture","bundle_digest":"bundle_digest_fixture","claude_code_disable_nonessential_traffic":true,"created_at":"2026-05-25T00:00:00Z","egress_policy_digest":"egress_digest_fixture","generation_id":"gen_fixture","host_gateway_ip":"10.240.0.1","host_hostname":"host-fixture","manifest_version":1,"netns_name":"hns-fixture","network_profile_id":"net_fixture","output_format":"stream-json","proxy_bind_url":"http://10.240.0.1:8082","resume_claude":false,"runsc_platform":"systrap","runsc_version":"runsc release-20260511.0","runtime_config_digest":"runtime_config_digest_fixture","session_id":"sess_fixture","spec_digest":"spec_digest_fixture","workspace_path":"/sessions/sess_fixture"}`
-	const wantDigest = "9458fdd58b3315147cf8321bd4ba3fa130a6c880aee2daa108342400eac440e4"
+	const wantCanonical = `{"agent":"sh","agent_home_path":"/agent-homes/sess_fixture","agent_runtime_profile_id":"arp_fixture","attempt_id":"attempt_fixture","bridge_dir_path":"/run/bridge/gen_fixture","bundle_digest":"bundle_digest_fixture","claude_code_disable_nonessential_traffic":true,"created_at":"2026-05-25T00:00:00Z","egress_policy_digest":"egress_digest_fixture","generation_id":"gen_fixture","host_gateway_ip":"10.240.0.1","host_hostname":"host-fixture","manifest_version":1,"netns_name":"hns-fixture","network_profile_id":"net_fixture","output_format":"stream-json","proxy_bind_url":"http://10.240.0.1:8082","resume_claude":false,"runsc_platform":"systrap","runsc_version":"runsc release-20260511.0","runtime_config_digest":"runtime_config_digest_fixture","sandbox_source_ip":"10.240.0.2","session_id":"sess_fixture","spec_digest":"spec_digest_fixture","workspace_path":"/sessions/sess_fixture"}`
+	const wantDigest = "2dcc2b3e69e7792c65fb521284d627253787e77f60202482e2839fe1fd97a341"
 	if string(canonical) != wantCanonical {
 		t.Fatalf("canonical fixture mismatch:\ngot  %s\nwant %s", canonical, wantCanonical)
 	}
@@ -774,6 +775,9 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndSecrets(t *testing.T
 	if manifest.AnthropicBaseURL != "http://10.200.1.1:8082" {
 		t.Fatalf("unexpected sandbox base URL: %+v", manifest)
 	}
+	if manifest.SandboxSourceIP != "10.200.1.2" {
+		t.Fatalf("unexpected sandbox source ip: %+v", manifest)
+	}
 	if manifest.AnthropicAPIKeySecretID != "anthropic_api_key" || manifest.AnthropicAuthTokenSecretID != "anthropic_auth_token" || manifest.SecretVersion != "local" {
 		t.Fatalf("unexpected secret refs: %+v", manifest)
 	}
@@ -1058,6 +1062,7 @@ func testGenerationDetails(dir, generationID string) store.RuntimeGenerationDeta
 		BridgeDirPath:              filepath.Join(dir, "run", "bridge", "gen-"+generationID),
 		LogDirPath:                 filepath.Join(dir, "run", "logs", "gen-"+generationID),
 		HostGatewayIP:              "10.200.1.1",
+		SandboxIPCIDR:              "10.200.1.2/30",
 		SandboxBaseURL:             "http://10.200.1.1:8082",
 		NetnsName:                  "harness-gen-" + generationID,
 		EgressPolicyDigest:         "egress_digest",
@@ -1098,6 +1103,7 @@ func testControlManifest() controlManifest {
 		HostHostname:                         "host-a",
 		NetnsName:                            "harness-gen-a",
 		HostGatewayIP:                        "10.200.1.1",
+		SandboxSourceIP:                      "10.200.1.2",
 		BridgeDirPath:                        "/tmp/bridge-a",
 		BundleDigest:                         "bundle_digest",
 		RuntimeConfigDigest:                  "runtime_config_digest",

@@ -418,6 +418,9 @@ def make_turn_runner(agent):
 
 
 def sandbox_source_ip():
+    configured = os.environ.get("HARNESS_SANDBOX_SOURCE_IP", "").strip()
+    if configured:
+        return configured
     try:
         output = subprocess.check_output(["ip", "-j", "addr", "show"], text=True)
         for link in json.loads(output):

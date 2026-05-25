@@ -20,6 +20,7 @@
   "runsc_platform": "systrap",
   "runsc_version": "runsc release-20260511.0",
   "runtime_config_digest": "runtime_config_digest_fixture",
+  "sandbox_source_ip": "10.240.0.2",
   "session_id": "sess_fixture",
   "spec_digest": "spec_digest_fixture",
   "workspace_path": "/sessions/sess_fixture"

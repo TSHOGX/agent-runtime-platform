@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -54,6 +55,9 @@ type Server struct {
 	log       *slog.Logger
 	upgrader  websocket.Upgrader
 	ownerUUID string
+
+	bridgeParserMu sync.Mutex
+	bridgeParsers  map[bridgeStreamParserKey]*streamParser
 }
 
 type runtimeDriver interface {
@@ -74,6 +78,12 @@ type ensuredGeneration struct {
 	Allocation            store.GenerationAllocation
 	IsNew                 bool
 	RestoreFromCheckpoint bool
+}
+
+type bridgeStreamParserKey struct {
+	SessionID    string
+	GenerationID string
+	TurnID       int64
 }
 
 func New(
@@ -887,10 +897,7 @@ func (s *Server) handleBridgeOutput(ctx context.Context, envelope bridge.Envelop
 	} else {
 		s.log.Warn("failed to load session for bridge output", "session_id", envelope.SessionID, "error", err)
 	}
-	parser := newStreamParser(s, envelope.SessionID, agent)
-	if envelope.TurnID != nil {
-		parser.turnID = *envelope.TurnID
-	}
+	parser := s.bridgeStreamParser(envelope, agent)
 	parser.handle(runtime.Output{Stream: stream, Line: line})
 }
 
@@ -903,6 +910,7 @@ func (s *Server) handleBridgeCompletion(ctx context.Context, envelope bridge.Env
 		s.log.Warn("failed to decode bridge completion payload", "session_id", envelope.SessionID, "generation_id", envelope.GenerationID, "error", err)
 		return
 	}
+	s.completeBridgeStreamParser(envelope)
 	status := string(sessionstate.RunningIdle)
 	if payload.Status == "failed" || payload.Status == "canceled" {
 		status = string(sessionstate.Failed)
@@ -920,6 +928,52 @@ func (s *Server) handleBridgeCompletion(ctx context.Context, envelope bridge.Env
 		s.log.Warn("failed to scan bridge-completed session artifacts", "session_id", envelope.SessionID, "error", err)
 	}
 	s.hub.Publish(events.Event{Type: "session." + status, SessionID: envelope.SessionID})
+}
+
+func (s *Server) bridgeStreamParser(envelope bridge.Envelope, agent string) *streamParser {
+	key, ok := bridgeParserKey(envelope)
+	if !ok {
+		return newStreamParser(s, envelope.SessionID, agent)
+	}
+	s.bridgeParserMu.Lock()
+	defer s.bridgeParserMu.Unlock()
+	if s.bridgeParsers == nil {
+		s.bridgeParsers = make(map[bridgeStreamParserKey]*streamParser)
+	}
+	parser := s.bridgeParsers[key]
+	if parser == nil {
+		parser = newStreamParser(s, envelope.SessionID, agent)
+		parser.turnID = key.TurnID
+		s.bridgeParsers[key] = parser
+	}
+	return parser
+}
+
+func (s *Server) completeBridgeStreamParser(envelope bridge.Envelope) {
+	key, ok := bridgeParserKey(envelope)
+	if !ok {
+		return
+	}
+	s.bridgeParserMu.Lock()
+	parser := s.bridgeParsers[key]
+	delete(s.bridgeParsers, key)
+	s.bridgeParserMu.Unlock()
+	if parser == nil {
+		return
+	}
+	parser.flush()
+	parser.complete()
+}
+
+func bridgeParserKey(envelope bridge.Envelope) (bridgeStreamParserKey, bool) {
+	if envelope.TurnID == nil {
+		return bridgeStreamParserKey{}, false
+	}
+	return bridgeStreamParserKey{
+		SessionID:    envelope.SessionID,
+		GenerationID: envelope.GenerationID,
+		TurnID:       *envelope.TurnID,
+	}, true
 }
 
 func (s *Server) internalProxyRequestStart(w http.ResponseWriter, r *http.Request) {

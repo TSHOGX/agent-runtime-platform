@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"harness-platform/orchestrator/internal/bridge"
 	"harness-platform/orchestrator/internal/events"
 	"harness-platform/orchestrator/internal/runtime"
 	"harness-platform/orchestrator/internal/sessionstate"
@@ -90,6 +92,51 @@ func TestStreamParserPersistsResultWhenAssistantMessageIsMissing(t *testing.T) {
 	}
 }
 
+func TestBridgeOutputReusesParserAcrossTurn(t *testing.T) {
+	srv, st := newParserTestServer(t)
+	turnID := int64(7)
+	generationID := "gen_1"
+	assistantLine := `{"type":"assistant","message":{"id":"msg_1","role":"assistant","content":[{"type":"text","text":"hi"}]}}`
+	resultLine := `{"type":"result","subtype":"success","result":"hi"}`
+
+	srv.handleBridgeOutput(context.Background(), bridge.Envelope{
+		Type:         bridge.TypeEmitOutput,
+		SessionID:    "sess_1",
+		GenerationID: generationID,
+		TurnID:       &turnID,
+		Payload:      bridgeOutputPayload(t, 1, assistantLine),
+	})
+	srv.handleBridgeOutput(context.Background(), bridge.Envelope{
+		Type:         bridge.TypeEmitOutput,
+		SessionID:    "sess_1",
+		GenerationID: generationID,
+		TurnID:       &turnID,
+		Payload:      bridgeOutputPayload(t, 2, resultLine),
+	})
+
+	messages, err := st.ListMessages(context.Background(), "sess_1")
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	if len(messages) != 1 || messages[0].Content != "hi" {
+		t.Fatalf("expected one assistant message, got %+v", messages)
+	}
+
+	srv.completeBridgeStreamParser(bridge.Envelope{
+		Type:         bridge.TypeAckTurnCompleted,
+		SessionID:    "sess_1",
+		GenerationID: generationID,
+		TurnID:       &turnID,
+		Payload:      json.RawMessage(`{"status":"completed"}`),
+	})
+
+	srv.bridgeParserMu.Lock()
+	defer srv.bridgeParserMu.Unlock()
+	if len(srv.bridgeParsers) != 0 {
+		t.Fatalf("expected bridge parser cache to be empty, got %d", len(srv.bridgeParsers))
+	}
+}
+
 func TestStreamParserIgnoresClaudeThinkingAndToolDeltas(t *testing.T) {
 	srv, _ := newParserTestServer(t)
 	parser := newStreamParser(srv, "sess_1", "claude")
@@ -125,6 +172,21 @@ func TestStreamParserDoesNotFailSessionOnClaudeExecutionError(t *testing.T) {
 	if len(messages) != 1 || messages[0].Content != "Claude turn ended with error_during_execution." {
 		t.Fatalf("expected turn error message to be persisted, got %+v", messages)
 	}
+}
+
+func bridgeOutputPayload(t *testing.T, sequence int64, line string) json.RawMessage {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"output_sequence": sequence,
+		"stream":          "stdout",
+		"payload": map[string]string{
+			"line": line,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal bridge output: %v", err)
+	}
+	return payload
 }
 
 func TestStreamParserPersistsNonSuccessResultText(t *testing.T) {
