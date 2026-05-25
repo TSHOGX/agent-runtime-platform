@@ -900,6 +900,60 @@ func TestGetQuotaReportsSessionAndPoolCeilings(t *testing.T) {
 	}
 }
 
+func TestSendMessagePoolExhaustionDoesNotQueueTurn(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	cfg := testServerConfig(dir)
+	cfg.Phase7.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.242.0.0/30")}
+	createServerTestSession(t, ctx, st, dir, "sess_pool_used", string(sessionstate.Created), time.Now().UTC(), nil)
+	target := createServerTestSession(t, ctx, st, dir, "sess_pool_target", string(sessionstate.Created), time.Now().UTC(), nil)
+	if _, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: "sess_pool_used",
+		Owner:     store.GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    serverTestAllocatorConfig(cfg, "claude"),
+	}); err != nil {
+		t.Fatalf("allocate pool slot: %v", err)
+	}
+
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: instantRuntime{},
+		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+target.ID+"/messages", strings.NewReader(`{"content":"hello"}`))
+	rec := httptest.NewRecorder()
+	srv.sendMessage(rec, req, target.ID)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status 503, got %d body %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body["error_class"] != "pool_exhausted" {
+		t.Fatalf("expected pool_exhausted, got %v", body)
+	}
+	var targetGenerations, targetTurns int
+	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_generations WHERE session_id = ?`, target.ID).Scan(&targetGenerations); err != nil {
+		t.Fatalf("count target generations: %v", err)
+	}
+	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM turns WHERE session_id = ?`, target.ID).Scan(&targetTurns); err != nil {
+		t.Fatalf("count target turns: %v", err)
+	}
+	if targetGenerations != 0 || targetTurns != 0 {
+		t.Fatalf("pool exhaustion leaked target state: generations=%d turns=%d", targetGenerations, targetTurns)
+	}
+}
+
 func TestSendMessageRuntimeStartFailureMarksGenerationFailedAndReclaimable(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
