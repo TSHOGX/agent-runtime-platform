@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,6 +50,10 @@ type Config struct {
 }
 
 const controlFileName = "session.json"
+const checkpointImageManifestFileName = "harness-checkpoint-manifest.json"
+const checkpointImageManifestVersion = 1
+
+var requiredCheckpointImageFiles = []string{"checkpoint.img", "pages.img", "pages_meta.img"}
 
 type CommandRunner interface {
 	CombinedOutput(context.Context, string, ...string) ([]byte, error)
@@ -100,6 +105,17 @@ type CheckpointRequest struct {
 	SessionID      string
 	GenerationID   string
 	CheckpointPath string
+}
+
+type checkpointImageManifest struct {
+	Version int                           `json:"version"`
+	Files   []checkpointImageManifestFile `json:"files"`
+}
+
+type checkpointImageManifestFile struct {
+	Path   string `json:"path"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
 }
 
 type controlManifest struct {
@@ -1819,15 +1835,8 @@ func (r *Runtime) resolveCheckpointPath(req StartRequest) (string, error) {
 }
 
 func validateCheckpointRestore(details store.RuntimeGenerationDetails, artifacts GenerationArtifacts, checkpointPath string) error {
-	for _, name := range []string{"checkpoint.img", "pages.img", "pages_meta.img"} {
-		path := filepath.Join(checkpointPath, name)
-		info, err := os.Stat(path)
-		if err != nil {
-			return fmt.Errorf("checkpoint image incomplete: %s: %w", path, err)
-		}
-		if info.IsDir() || info.Size() == 0 {
-			return fmt.Errorf("checkpoint image incomplete: %s is not a non-empty file", path)
-		}
+	if err := validateCheckpointImageManifest(checkpointPath); err != nil {
+		return err
 	}
 	checks := []struct {
 		field string
@@ -1851,6 +1860,111 @@ func validateCheckpointRestore(details store.RuntimeGenerationDetails, artifacts
 		}
 	}
 	return nil
+}
+
+func writeCheckpointImageManifest(checkpointPath string) error {
+	manifest, err := buildCheckpointImageManifest(checkpointPath)
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(checkpointPath, checkpointImageManifestFileName)
+	if err := writeJSONFileAtomic(path, manifest, 0o644); err != nil {
+		return fmt.Errorf("write checkpoint image manifest: %w", err)
+	}
+	return nil
+}
+
+func buildCheckpointImageManifest(checkpointPath string) (checkpointImageManifest, error) {
+	manifest := checkpointImageManifest{
+		Version: checkpointImageManifestVersion,
+		Files:   make([]checkpointImageManifestFile, 0, len(requiredCheckpointImageFiles)),
+	}
+	for _, name := range requiredCheckpointImageFiles {
+		entry, err := checkpointImageManifestEntry(checkpointPath, name)
+		if err != nil {
+			return checkpointImageManifest{}, err
+		}
+		manifest.Files = append(manifest.Files, entry)
+	}
+	return manifest, nil
+}
+
+func checkpointImageManifestEntry(checkpointPath, name string) (checkpointImageManifestFile, error) {
+	if strings.TrimSpace(name) == "" || filepath.IsAbs(name) || filepath.Clean(name) != name || strings.HasPrefix(name, "..") {
+		return checkpointImageManifestFile{}, fmt.Errorf("checkpoint image manifest invalid path %q", name)
+	}
+	path := filepath.Join(checkpointPath, name)
+	info, err := os.Stat(path)
+	if err != nil {
+		return checkpointImageManifestFile{}, fmt.Errorf("checkpoint image incomplete: %s: %w", path, err)
+	}
+	if info.IsDir() || info.Size() == 0 {
+		return checkpointImageManifestFile{}, fmt.Errorf("checkpoint image incomplete: %s is not a non-empty file", path)
+	}
+	digest, err := fileSHA256(path)
+	if err != nil {
+		return checkpointImageManifestFile{}, fmt.Errorf("digest checkpoint image file %s: %w", path, err)
+	}
+	return checkpointImageManifestFile{
+		Path:   name,
+		Size:   info.Size(),
+		SHA256: digest,
+	}, nil
+}
+
+func validateCheckpointImageManifest(checkpointPath string) error {
+	path := filepath.Join(checkpointPath, checkpointImageManifestFileName)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("checkpoint image manifest missing: %s: %w", path, err)
+	}
+	var manifest checkpointImageManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return fmt.Errorf("checkpoint image manifest invalid: %w", err)
+	}
+	if manifest.Version != checkpointImageManifestVersion {
+		return fmt.Errorf("checkpoint image manifest unsupported version: got %d want %d", manifest.Version, checkpointImageManifestVersion)
+	}
+	entries := map[string]checkpointImageManifestFile{}
+	for _, entry := range manifest.Files {
+		name := strings.TrimSpace(entry.Path)
+		if name == "" || filepath.IsAbs(name) || filepath.Clean(name) != name || strings.HasPrefix(name, "..") {
+			return fmt.Errorf("checkpoint image manifest invalid path %q", entry.Path)
+		}
+		if _, exists := entries[name]; exists {
+			return fmt.Errorf("checkpoint image manifest duplicate path %q", name)
+		}
+		current, err := checkpointImageManifestEntry(checkpointPath, name)
+		if err != nil {
+			return err
+		}
+		if entry.Size != current.Size {
+			return fmt.Errorf("checkpoint image manifest size mismatch for %s: got %d want %d", name, current.Size, entry.Size)
+		}
+		if !strings.EqualFold(entry.SHA256, current.SHA256) {
+			return fmt.Errorf("checkpoint image manifest sha256 mismatch for %s", name)
+		}
+		entries[name] = entry
+	}
+	for _, name := range requiredCheckpointImageFiles {
+		if _, ok := entries[name]; !ok {
+			return fmt.Errorf("checkpoint image manifest missing required file %q", name)
+		}
+	}
+	return nil
+}
+
+func fileSHA256(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func (r *Runtime) Checkpoint(ctx context.Context, req CheckpointRequest) error {
@@ -1897,6 +2011,10 @@ func (r *Runtime) Checkpoint(ctx context.Context, req CheckpointRequest) error {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		_ = os.RemoveAll(checkpointPath)
 		return fmt.Errorf("runsc checkpoint: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	if err := writeCheckpointImageManifest(checkpointPath); err != nil {
+		_ = os.RemoveAll(checkpointPath)
+		return err
 	}
 
 	r.mu.Lock()

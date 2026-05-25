@@ -164,6 +164,70 @@ func TestValidateCheckpointRestoreRejectsMetadataMismatch(t *testing.T) {
 	}
 }
 
+func TestValidateCheckpointRestoreRequiresCheckpointImageManifest(t *testing.T) {
+	dir := t.TempDir()
+	checkpointPath := filepath.Join(dir, "checkpoint")
+	writeCheckpointFilesWithoutManifest(t, checkpointPath)
+
+	err := validateCheckpointImageManifest(checkpointPath)
+	if err == nil {
+		t.Fatal("expected missing checkpoint image manifest")
+	}
+	if !strings.Contains(err.Error(), "checkpoint image manifest missing") {
+		t.Fatalf("expected checkpoint image manifest missing, got %v", err)
+	}
+}
+
+func TestValidateCheckpointRestoreRejectsCheckpointImageManifestMismatch(t *testing.T) {
+	dir := t.TempDir()
+	checkpointPath := filepath.Join(dir, "checkpoint")
+	writeCheckpointFiles(t, checkpointPath)
+	if err := os.WriteFile(filepath.Join(checkpointPath, "pages.img"), []byte("y"), 0o644); err != nil {
+		t.Fatalf("mutate checkpoint file: %v", err)
+	}
+
+	err := validateCheckpointImageManifest(checkpointPath)
+	if err == nil {
+		t.Fatal("expected checkpoint image manifest mismatch")
+	}
+	if !strings.Contains(err.Error(), "checkpoint image manifest sha256 mismatch") {
+		t.Fatalf("expected checkpoint image manifest sha256 mismatch, got %v", err)
+	}
+}
+
+func TestValidateCheckpointRestoreRejectsExtraCheckpointImageManifestMismatch(t *testing.T) {
+	dir := t.TempDir()
+	checkpointPath := filepath.Join(dir, "checkpoint")
+	writeCheckpointFiles(t, checkpointPath)
+	extraPath := filepath.Join(checkpointPath, "memory_extra.img")
+	if err := os.WriteFile(extraPath, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write extra checkpoint file: %v", err)
+	}
+	manifest, err := buildCheckpointImageManifest(checkpointPath)
+	if err != nil {
+		t.Fatalf("build checkpoint image manifest: %v", err)
+	}
+	entry, err := checkpointImageManifestEntry(checkpointPath, "memory_extra.img")
+	if err != nil {
+		t.Fatalf("build extra checkpoint image manifest entry: %v", err)
+	}
+	manifest.Files = append(manifest.Files, entry)
+	if err := writeJSONFileAtomic(filepath.Join(checkpointPath, checkpointImageManifestFileName), manifest, 0o644); err != nil {
+		t.Fatalf("write checkpoint image manifest: %v", err)
+	}
+	if err := os.WriteFile(extraPath, []byte("y"), 0o644); err != nil {
+		t.Fatalf("mutate extra checkpoint file: %v", err)
+	}
+
+	err = validateCheckpointImageManifest(checkpointPath)
+	if err == nil {
+		t.Fatal("expected extra checkpoint image manifest mismatch")
+	}
+	if !strings.Contains(err.Error(), "checkpoint image manifest sha256 mismatch for memory_extra.img") {
+		t.Fatalf("expected extra checkpoint image manifest sha256 mismatch, got %v", err)
+	}
+}
+
 func TestRuntimeStartRestoreRejectsMetadataBeforeRunscRestore(t *testing.T) {
 	dir := t.TempDir()
 	checkpointPath := filepath.Join(dir, "checkpoint")
@@ -919,10 +983,18 @@ func testControlManifest() controlManifest {
 
 func writeCheckpointFiles(t *testing.T, checkpointPath string) {
 	t.Helper()
+	writeCheckpointFilesWithoutManifest(t, checkpointPath)
+	if err := writeCheckpointImageManifest(checkpointPath); err != nil {
+		t.Fatalf("write checkpoint image manifest: %v", err)
+	}
+}
+
+func writeCheckpointFilesWithoutManifest(t *testing.T, checkpointPath string) {
+	t.Helper()
 	if err := os.MkdirAll(checkpointPath, 0o755); err != nil {
 		t.Fatalf("create checkpoint path: %v", err)
 	}
-	for _, name := range []string{"checkpoint.img", "pages.img", "pages_meta.img"} {
+	for _, name := range requiredCheckpointImageFiles {
 		if err := os.WriteFile(filepath.Join(checkpointPath, name), []byte("x"), 0o644); err != nil {
 			t.Fatalf("write checkpoint file %s: %v", name, err)
 		}
