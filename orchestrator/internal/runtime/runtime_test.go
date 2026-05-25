@@ -727,6 +727,26 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndSecrets(t *testing.T
 	assertSecretFile(t, filepath.Join(details.SecretsDirPath, "anthropic_api_key", "local"))
 }
 
+func TestPublishLocalSecretVersionDoesNotOverwriteExistingVersion(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secrets", "anthropic_api_key", "local")
+	readersGID := testSecretReadersGID()
+	if err := publishLocalSecretVersion(path, "first-value", readersGID); err != nil {
+		t.Fatalf("publish first secret version: %v", err)
+	}
+	if err := publishLocalSecretVersion(path, "second-value", readersGID); err != nil {
+		t.Fatalf("republish existing secret version: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read secret version: %v", err)
+	}
+	if string(data) != "first-value" {
+		t.Fatalf("existing secret version was overwritten: %q", data)
+	}
+	assertSecretFile(t, path)
+}
+
 func TestPrepareShellGenerationHasNoSecretMount(t *testing.T) {
 	dir := t.TempDir()
 	rt := New(Config{
