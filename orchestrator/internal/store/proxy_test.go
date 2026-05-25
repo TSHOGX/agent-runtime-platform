@@ -120,6 +120,85 @@ func TestProxyRequestStartRejectsExpiredContext(t *testing.T) {
 	}
 }
 
+func TestProxyRequestStartRejectsCrossSessionTampering(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		tamper func(context.Context, *testing.T, *Store, GenerationAllocation)
+	}{
+		{
+			name: "session active generation points elsewhere",
+			tamper: func(ctx context.Context, t *testing.T, st *Store, allocation GenerationAllocation) {
+				t.Helper()
+				createStoreSession(t, ctx, st, "sess_proxy_other_active")
+				cfg := testAllocatorConfig(t)
+				other, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+					SessionID: "sess_proxy_other_active",
+					Owner:     allocation.Owner,
+					LeaseTTL:  time.Minute,
+					Now:       time.Now().UTC(),
+					Config:    cfg,
+				})
+				if err != nil {
+					t.Fatalf("allocate other generation: %v", err)
+				}
+				if _, err := st.db.ExecContext(ctx, `
+UPDATE sessions
+SET active_generation_id = ?
+WHERE id = ?`, other.GenerationID, "sess_proxy_cross"); err != nil {
+					t.Fatalf("tamper active generation: %v", err)
+				}
+			},
+		},
+		{
+			name: "runtime generation session id points elsewhere",
+			tamper: func(ctx context.Context, t *testing.T, st *Store, allocation GenerationAllocation) {
+				t.Helper()
+				createStoreSession(t, ctx, st, "sess_proxy_other_runtime")
+				if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_generations
+SET session_id = ?
+WHERE generation_id = ?`, "sess_proxy_other_runtime", allocation.GenerationID); err != nil {
+					t.Fatalf("tamper runtime generation session: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			st, owner := openOwnedStore(t, ctx)
+			now := time.Now().UTC()
+			allocation, _, sandboxSourceIP := createRunningProxyTurn(t, ctx, st, owner.UUID, "sess_proxy_cross", now)
+			tc.tamper(ctx, t, st, allocation)
+
+			_, err := st.StartProxyRequest(ctx, StartProxyRequestParams{
+				SandboxSourceIP: sandboxSourceIP,
+				ProxyRequestID:  "proxy_cross_session",
+				Now:             now.Add(5 * time.Second),
+			})
+			if !errors.Is(err, ErrProxyContextUnavailable) {
+				t.Fatalf("cross-session proxy start err=%v want ErrProxyContextUnavailable", err)
+			}
+
+			var events, nextSequence int
+			if err := st.db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM events
+WHERE proxy_request_id = 'proxy_cross_session'`).Scan(&events); err != nil {
+				t.Fatalf("count proxy events: %v", err)
+			}
+			if err := st.db.QueryRowContext(ctx, `
+SELECT next_request_sequence
+FROM active_model_request_contexts
+WHERE sandbox_source_ip = ?`, sandboxSourceIP).Scan(&nextSequence); err != nil {
+				t.Fatalf("query active context sequence: %v", err)
+			}
+			if events != 0 || nextSequence != 1 {
+				t.Fatalf("cross-session proxy start mutated state: events=%d next_sequence=%d", events, nextSequence)
+			}
+		})
+	}
+}
+
 func TestProxyRequestFinishUsesDurableStartEvent(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
