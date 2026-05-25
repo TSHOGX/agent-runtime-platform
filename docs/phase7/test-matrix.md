@@ -37,7 +37,7 @@ Bullets are observable assertions; rules and rationale live in the linked sectio
 
 - Sandbox base URL is derived from `http://{allocated_host_gateway_ip}:8082`; `0.0.0.0` is never written as a sandbox base URL.
 - Wrong proxy key or proxy-down fails the in-sandbox probe and prevents `claim_next_turn` (turn stays queued or generation marked failed before claim).
-- Probe contract test runs against the pinned `claude-code-proxy` version: `GET /healthz` returns `200`, `POST /v1/messages` returns `401` for missing or wrong keys, and the same route returns `400` for a well-authenticated but malformed body. A divergent proxy build fails the contract test before it can ship. (See [Probe contract](./network-and-probes.md#probe-contract-with-claude-code-proxy).)
+- The in-repo probe tests assert the orchestrator and bridge call `GET /healthz` and authenticated malformed `POST /v1/messages` with the configured accept sets. Release qualification must also run the pinned `claude-code-proxy` contract: `GET /healthz` returns `200`, `POST /v1/messages` returns `401` for missing or wrong keys, and the same route returns `400` for a well-authenticated but malformed body. A divergent proxy build fails the release gate before it can ship. (See [Probe contract](./network-and-probes.md#probe-contract-with-claude-code-proxy).)
 - Egress policy allows the local proxy and configured Doris FE/BE hosts/ports, allows DNS only when hostnames are used, denies arbitrary public destinations.
 - On 7a, every `network_profiles` row is populated with the configured `doris_fe_hosts` / `doris_be_hosts` / `doris_ports` / `dns_policy` values from `harness.network.egress` (not NULL); a corresponding `egress_policies` row materializes the matching allow-rules. A 7a-allocated row with empty Doris fields fails the test.
 - `GET /api/quota` reports the soft session ceiling and the live pool ceiling, and the lower bound matches the allocator's rejection threshold.
@@ -52,7 +52,7 @@ Bullets are observable assertions; rules and rationale live in the linked sectio
 - `claim_next_turn` leases exactly one eligible turn; `resume_turn` is the only path used when `hello_ack.leased_turn_id` is non-null; output dedup by `(turn_id, generation_id, output_sequence)`; host assigns durable `event_id`.
 - Cross-turn / cross-generation forgery is rejected and recorded as a fenced violation; reconnect after orchestrator restart resumes from durable state.
 - Bridge messages written from inside the sandbox are durably visible to the host across an induced orchestrator restart between bridge-side fsync and host-side read; the unlink-after-commit ordering makes replays a no-op. (See [gVisor file-access mode](./bridge-protocol.md#gvisor-file-access-mode).)
-- End-to-end turn-start latency (`POST` enqueue to `ack_turn_started`) stays under 50 ms at lab load; the test fails the build, not just a dashboard, when the budget regresses.
+- End-to-end turn-start latency (`POST` enqueue to `ack_turn_started`) stays under 50 ms at lab load. This is a release benchmark gate: config changes that affect `harness.bridge.poll_interval`, event durability, or bridge batching require remeasurement and must fail or block deployment when the budget regresses.
 
 ## Multi-Turn And Restart Recovery
 

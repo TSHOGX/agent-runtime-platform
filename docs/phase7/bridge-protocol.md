@@ -107,7 +107,7 @@ Bridge-side write ordering is the mirror image: write under `tmp/`, fsync the fi
 
 `hello_ack`'s `last_output_sequence_by_turn` is computed by the host as `MAX(output_sequence)` over the durable event log filtered by `(session_id, generation_id, turn_id)` for every non-terminal turn this generation owns. Only **committed** event-log rows are visible; in-flight `emit_output` batch transactions are not. The committed boundary therefore lags the bridge's locally-observed last-emitted sequence by up to one batch window — this is by construction (see Idempotency And Sequence Recovery for why this lag is the protocol's primary reconnect path, not an edge case). The bridge's local view is discarded on reconnect; it must trust the host-returned `last_output_sequence_by_turn` and re-emit anything past it.
 
-End-to-end turn-start latency budget (claim observed in `inbox/` to `ack_turn_started` durable in events): under 50 ms at lab load. The default `harness.bridge.poll_interval` is sized to leave room for the host's durable write path and `emit_output` batching; if that interval is raised, this budget must be remeasured, not assumed.
+End-to-end turn-start latency budget (`POST` enqueue through `ack_turn_started` durable in events): under 50 ms at lab load. The default `harness.bridge.poll_interval` is sized to leave room for the host's durable write path and `emit_output` batching; if that interval is raised, this budget must be remeasured, not assumed. This is enforced as a release benchmark gate rather than by the default deterministic unit test suite.
 
 ## Idempotency And Sequence Recovery
 
