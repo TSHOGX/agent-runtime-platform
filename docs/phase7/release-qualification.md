@@ -29,6 +29,8 @@ The deterministic gates can also be run through the evidence-producing wrapper:
 tools/phase7/release-gates.py --output /tmp/harness-phase7-release-gates.json
 ```
 
+The wrapper records the candidate commit, dirty worktree status, selected Phase 7 config values, `runsc --version`, and the pinned proxy checkout commit. For external gates that emit JSON or evidence files, the wrapper embeds that structured evidence in the gate result.
+
 External gates are opt-in so the wrapper never touches live lab state by default:
 
 ```bash

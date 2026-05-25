@@ -88,14 +88,72 @@ class ReleaseGatesTest(unittest.TestCase):
                 {"name": "bad", "status": "failed"},
             ],
             commit="abc123",
+            context={"git": {"commit": "abc123"}, "phase7_config": {}},
         )
 
         self.assertEqual(payload["result"], "failed")
         self.assertEqual(payload["commit"], "abc123")
+        self.assertEqual(payload["context"]["git"]["commit"], "abc123")
+        self.assertIn("phase7_config", payload["context"])
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "evidence.json"
             MODULE.write_output(output, payload)
             self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["commit"], "abc123")
+
+    def test_load_release_config_extracts_release_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "harness.yaml"
+            config.write_text(
+                """
+harness:
+  max_sessions: 30
+  network:
+    cidr_pool: 10.200.0.0/16
+    egress:
+      dns_policy: hostnames_only
+  events:
+    emit_output_batch_max_rows: 64
+    emit_output_batch_max_age: 100ms
+  bridge:
+    poll_interval: 10ms
+    lease_ttl: 60s
+    ack_started_grace: 90s
+  secrets:
+    root: /var/lib/harness/secrets
+    readers_gid: 65501
+""",
+                encoding="utf-8",
+            )
+
+            values = MODULE.load_release_config(config)
+
+            self.assertEqual(values["harness.bridge.poll_interval"], "10ms")
+            self.assertEqual(values["harness.events.emit_output_batch_max_rows"], "64")
+            self.assertEqual(values["harness.secrets.readers_gid"], "65501")
+
+    def test_attach_structured_output_reads_bridge_lab_evidence(self):
+        with tempfile.TemporaryDirectory(prefix="harness-phase7-bridge-lab.") as tmp:
+            evidence = Path(tmp) / "evidence.json"
+            evidence.write_text(json.dumps({"result": "passed", "workdir": tmp}), encoding="utf-8")
+            result = {
+                "name": "gvisor_bridge_durability_lab",
+                "stdout_tail": "logs\n" + str(evidence) + "\n",
+            }
+
+            enriched = MODULE.attach_structured_output(result)
+
+            self.assertEqual(enriched["evidence_path"], str(evidence))
+            self.assertEqual(enriched["structured_output"]["result"], "passed")
+
+    def test_attach_structured_output_reads_json_stdout(self):
+        result = {
+            "name": "live_turn_start_latency",
+            "stdout_tail": json.dumps({"max_ms": 12.5}),
+        }
+
+        enriched = MODULE.attach_structured_output(result)
+
+        self.assertEqual(enriched["structured_output"]["max_ms"], 12.5)
 
 
 if __name__ == "__main__":

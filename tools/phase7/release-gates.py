@@ -10,6 +10,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+PROXY_ROOT = Path("/root/claude-code-proxy")
 
 
 @dataclass(frozen=True)
@@ -144,10 +145,112 @@ def git_commit():
     return result.stdout.strip()
 
 
+def command_output(command, cwd):
+    try:
+        result = subprocess.run(
+            list(command),
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+        )
+    except FileNotFoundError as err:
+        return {"ok": False, "returncode": 127, "output": str(err)}
+    output = (result.stdout + result.stderr).strip()
+    return {"ok": result.returncode == 0, "returncode": result.returncode, "output": output}
+
+
+def load_release_config(config_path=REPO_ROOT / "config" / "harness.yaml"):
+    targets = {
+        "harness.max_sessions",
+        "harness.network.cidr_pool",
+        "harness.network.egress.dns_policy",
+        "harness.events.emit_output_batch_max_rows",
+        "harness.events.emit_output_batch_max_age",
+        "harness.bridge.poll_interval",
+        "harness.bridge.lease_ttl",
+        "harness.bridge.ack_started_grace",
+        "harness.secrets.root",
+        "harness.secrets.readers_gid",
+    }
+    values = {}
+    stack = []
+    with open(config_path, encoding="utf-8") as handle:
+        for raw in handle:
+            line = raw.split("#", 1)[0].rstrip()
+            if not line.strip():
+                continue
+            stripped = line.strip()
+            if stripped.startswith("- ") or ":" not in stripped:
+                continue
+            indent = len(line) - len(line.lstrip(" "))
+            while stack and indent <= stack[-1][0]:
+                stack.pop()
+            key, value = stripped.split(":", 1)
+            value = value.strip().strip("'\"")
+            path = ".".join([item[1] for item in stack] + [key])
+            if value == "":
+                stack.append((indent, key))
+                continue
+            if path in targets:
+                values[path] = value
+    return values
+
+
+def proxy_context(proxy_root=PROXY_ROOT):
+    if not proxy_root.exists():
+        return {"path": str(proxy_root), "present": False}
+    commit = command_output(("git", "rev-parse", "HEAD"), proxy_root)
+    status = command_output(("git", "status", "--short"), proxy_root)
+    return {
+        "path": str(proxy_root),
+        "present": True,
+        "commit": commit["output"] if commit["ok"] else "",
+        "dirty": bool(status["output"]) if status["ok"] else None,
+        "status_short": status["output"].splitlines() if status["ok"] and status["output"] else [],
+    }
+
+
+def release_context(commit=None):
+    status = command_output(("git", "status", "--short"), REPO_ROOT)
+    return {
+        "repo_root": str(REPO_ROOT),
+        "git": {
+            "commit": commit or git_commit(),
+            "dirty": bool(status["output"]) if status["ok"] else None,
+            "status_short": status["output"].splitlines() if status["ok"] and status["output"] else [],
+        },
+        "phase7_config": load_release_config(),
+        "runsc_version": command_output(("runsc", "--version"), REPO_ROOT),
+        "proxy": proxy_context(),
+    }
+
+
 def tail(text, limit=12000):
     if len(text) <= limit:
         return text
     return text[-limit:]
+
+
+def attach_structured_output(result):
+    if result["name"] in {"secret_permission_lab", "live_turn_start_latency"} and result["stdout_tail"].strip():
+        try:
+            result["structured_output"] = json.loads(result["stdout_tail"])
+        except json.JSONDecodeError:
+            pass
+    if result["name"] == "gvisor_bridge_durability_lab":
+        for raw in reversed(result["stdout_tail"].splitlines()):
+            path = raw.strip()
+            if not path.endswith("/evidence.json"):
+                continue
+            evidence_path = Path(path)
+            result["evidence_path"] = str(evidence_path)
+            if evidence_path.is_file():
+                try:
+                    result["structured_output"] = json.loads(evidence_path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    result["structured_output_error"] = "invalid evidence json"
+            break
+    return result
 
 
 def run_gate(gate, env=None):
@@ -161,7 +264,7 @@ def run_gate(gate, env=None):
             text=True,
             capture_output=True,
         )
-        return {
+        return attach_structured_output({
             "name": gate.name,
             "category": gate.category,
             "command": list(gate.command),
@@ -172,7 +275,7 @@ def run_gate(gate, env=None):
             "status": "passed" if result.returncode == 0 else "failed",
             "stdout_tail": tail(result.stdout),
             "stderr_tail": tail(result.stderr),
-        }
+        })
     except FileNotFoundError as err:
         return {
             "name": gate.name,
@@ -192,13 +295,15 @@ def run_gates(gates, env=None):
     return [run_gate(gate, env=env) for gate in gates]
 
 
-def evidence(results, commit=None):
+def evidence(results, commit=None, context=None):
+    commit = commit or git_commit()
     status = "passed" if all(result["status"] == "passed" for result in results) else "failed"
     return {
         "phase": "phase7",
         "result": status,
-        "commit": commit or git_commit(),
+        "commit": commit,
         "generated_at": utc_now(),
+        "context": context or release_context(commit),
         "gates": results,
     }
 
