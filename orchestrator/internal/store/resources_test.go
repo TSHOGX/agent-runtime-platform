@@ -225,6 +225,185 @@ WHERE g.generation_id = ?`, next.GenerationID).Scan(&nextStatus, &nextCIDR); err
 	}
 }
 
+func TestClaimCheckpointedGenerationForRestoreMovesReservedResources(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	createStoreSession(t, ctx, st, "sess_restore_claim")
+	cfg := testAllocatorConfig(t)
+	now := time.Now().UTC()
+	leaseOwner := GenerationLeaseOwner(owner.UUID)
+
+	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_restore_claim",
+		Owner:     leaseOwner,
+		LeaseTTL:  time.Minute,
+		Now:       now,
+		Config:    cfg,
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, "sess_restore_claim", allocation.GenerationID, allocation.Owner, now.Add(time.Second)); err != nil {
+		t.Fatalf("mark generation live: %v", err)
+	}
+	if err := st.RecordGenerationRuntimeArtifacts(ctx, allocation.GenerationID, "manifest_digest", "runsc test"); err != nil {
+		t.Fatalf("record artifacts: %v", err)
+	}
+	checkpointedGeneration(t, ctx, st, "sess_restore_claim", allocation.GenerationID, now.Add(2*time.Second))
+
+	claimed, err := st.ClaimCheckpointedGenerationForRestore(ctx, ClaimCheckpointedGenerationParams{
+		SessionID:    "sess_restore_claim",
+		GenerationID: allocation.GenerationID,
+		Owner:        leaseOwner,
+		LeaseTTL:     2 * time.Minute,
+		Now:          now.Add(3 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("claim checkpointed generation: %v", err)
+	}
+	if claimed.GenerationID != allocation.GenerationID ||
+		claimed.NetworkProfileID != allocation.NetworkProfileID ||
+		claimed.AgentRuntimeProfileID != allocation.AgentRuntimeProfileID ||
+		claimed.Owner != leaseOwner ||
+		!claimed.LeaseExpiresAt.Equal(now.Add(3*time.Second).Add(2*time.Minute)) {
+		t.Fatalf("unexpected claimed allocation: %+v want base %+v", claimed, allocation)
+	}
+
+	var generationStatus, generationOwner, leaseExpires, lastSeen, networkState, resourceState string
+	if err := st.db.QueryRowContext(ctx, `
+SELECT g.status, COALESCE(g.lease_owner, ''), COALESCE(g.lease_expires_at, ''), COALESCE(g.last_seen_at, ''),
+       n.allocation_state, r.resource_state
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &generationOwner, &leaseExpires, &lastSeen, &networkState, &resourceState); err != nil {
+		t.Fatalf("query restore claim state: %v", err)
+	}
+	if generationStatus != "restoring" ||
+		generationOwner != leaseOwner ||
+		!parseTime(leaseExpires).Equal(claimed.LeaseExpiresAt) ||
+		!parseTime(lastSeen).Equal(now.Add(3*time.Second)) ||
+		networkState != "recreating" ||
+		resourceState != "recreating" {
+		t.Fatalf("unexpected restore claim state: generation=%s owner=%s expires=%s last_seen=%s network=%s resource=%s",
+			generationStatus, generationOwner, leaseExpires, lastSeen, networkState, resourceState)
+	}
+	details, err := st.GetRuntimeGenerationDetails(ctx, "sess_restore_claim", allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get restore details: %v", err)
+	}
+	if details.NetworkAllocationState != "recreating" ||
+		details.ControlManifestDigest != "manifest_digest" ||
+		details.RunscVersion != "runsc test" {
+		t.Fatalf("restore details not preserved: %+v", details)
+	}
+}
+
+func TestClaimCheckpointedGenerationForRestoreRollsBackOnResourceMismatch(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	createStoreSession(t, ctx, st, "sess_restore_mismatch")
+	cfg := testAllocatorConfig(t)
+	now := time.Now().UTC()
+	leaseOwner := GenerationLeaseOwner(owner.UUID)
+
+	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_restore_mismatch",
+		Owner:     leaseOwner,
+		LeaseTTL:  time.Minute,
+		Now:       now,
+		Config:    cfg,
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, "sess_restore_mismatch", allocation.GenerationID, allocation.Owner, now.Add(time.Second)); err != nil {
+		t.Fatalf("mark generation live: %v", err)
+	}
+	checkpointedGeneration(t, ctx, st, "sess_restore_mismatch", allocation.GenerationID, now.Add(2*time.Second))
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_generation_resources
+SET resource_state = 'live'
+WHERE generation_id = ?`, allocation.GenerationID); err != nil {
+		t.Fatalf("break resource state: %v", err)
+	}
+
+	_, err = st.ClaimCheckpointedGenerationForRestore(ctx, ClaimCheckpointedGenerationParams{
+		SessionID:    "sess_restore_mismatch",
+		GenerationID: allocation.GenerationID,
+		Owner:        leaseOwner,
+		LeaseTTL:     time.Minute,
+		Now:          now.Add(3 * time.Second),
+	})
+	if err == nil || !strings.Contains(err.Error(), "checkpointed resource restore CAS failed") {
+		t.Fatalf("expected resource CAS failure, got %v", err)
+	}
+	var generationStatus, leaseOwnerAfter, networkState, resourceState string
+	if err := st.db.QueryRowContext(ctx, `
+SELECT g.status, COALESCE(g.lease_owner, ''), n.allocation_state, r.resource_state
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &leaseOwnerAfter, &networkState, &resourceState); err != nil {
+		t.Fatalf("query rolled back state: %v", err)
+	}
+	if generationStatus != "checkpointed" || leaseOwnerAfter != "" || networkState != "reserved_checkpointed" || resourceState != "live" {
+		t.Fatalf("restore claim did not roll back cleanly: generation=%s owner=%q network=%s resource=%s",
+			generationStatus, leaseOwnerAfter, networkState, resourceState)
+	}
+}
+
+func TestClaimCheckpointedGenerationForRestoreRequiresCheckpointedSession(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	createStoreSession(t, ctx, st, "sess_restore_session_state")
+	cfg := testAllocatorConfig(t)
+	now := time.Now().UTC()
+	leaseOwner := GenerationLeaseOwner(owner.UUID)
+
+	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_restore_session_state",
+		Owner:     leaseOwner,
+		LeaseTTL:  time.Minute,
+		Now:       now,
+		Config:    cfg,
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, "sess_restore_session_state", allocation.GenerationID, allocation.Owner, now.Add(time.Second)); err != nil {
+		t.Fatalf("mark generation live: %v", err)
+	}
+	checkpointedGeneration(t, ctx, st, "sess_restore_session_state", allocation.GenerationID, now.Add(2*time.Second))
+	if err := st.UpdateSessionStatus(ctx, "sess_restore_session_state", string(sessionstate.RunningIdle), nil); err != nil {
+		t.Fatalf("set non-checkpointed session state: %v", err)
+	}
+
+	_, err = st.ClaimCheckpointedGenerationForRestore(ctx, ClaimCheckpointedGenerationParams{
+		SessionID:    "sess_restore_session_state",
+		GenerationID: allocation.GenerationID,
+		Owner:        leaseOwner,
+		LeaseTTL:     time.Minute,
+		Now:          now.Add(3 * time.Second),
+	})
+	if err == nil || !strings.Contains(err.Error(), "checkpointed generation restore CAS failed") {
+		t.Fatalf("expected generation CAS failure, got %v", err)
+	}
+	var generationStatus, leaseOwnerAfter, networkState, resourceState string
+	if err := st.db.QueryRowContext(ctx, `
+SELECT g.status, COALESCE(g.lease_owner, ''), n.allocation_state, r.resource_state
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &leaseOwnerAfter, &networkState, &resourceState); err != nil {
+		t.Fatalf("query rejected restore state: %v", err)
+	}
+	if generationStatus != "checkpointed" || leaseOwnerAfter != "" || networkState != "reserved_checkpointed" || resourceState != "reserved_checkpointed" {
+		t.Fatalf("restore claim mutated rejected session state: generation=%s owner=%q network=%s resource=%s",
+			generationStatus, leaseOwnerAfter, networkState, resourceState)
+	}
+}
+
 func TestListColdFallbackSessionsReturnsFailedActiveWithQueuedTurns(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
@@ -916,6 +1095,48 @@ func TestUpdateSessionStatusDoesNotResurrectDestroyedSession(t *testing.T) {
 	}
 	if got.Status != string(sessionstate.Destroyed) {
 		t.Fatalf("destroyed session was resurrected as %s", got.Status)
+	}
+}
+
+func checkpointedGeneration(t *testing.T, ctx context.Context, st *Store, sessionID, generationID string, now time.Time) {
+	t.Helper()
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_generations
+SET status = 'checkpointed',
+    checkpoint_created_at = ?,
+    checkpoint_network_profile_id = network_profile_id,
+    checkpoint_agent_runtime_profile_id = agent_runtime_profile_id,
+    checkpoint_runsc_version = COALESCE(runsc_version, 'runsc test'),
+    checkpoint_runsc_platform = COALESCE(runsc_platform, 'systrap'),
+    checkpoint_bundle_digest = 'bundle_digest',
+    checkpoint_runtime_config_digest = 'runtime_config_digest',
+    checkpoint_control_manifest_digest = COALESCE((
+      SELECT control_manifest_digest
+      FROM runtime_generation_resources
+      WHERE runtime_generation_resources.generation_id = runtime_generations.generation_id
+    ), 'manifest_digest'),
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    last_seen_at = ?
+WHERE generation_id = ?
+  AND session_id = ?`, formatTime(now), formatTime(now), generationID, sessionID); err != nil {
+		t.Fatalf("set checkpointed generation: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE network_profiles
+SET allocation_state = 'reserved_checkpointed'
+WHERE generation_id = ?
+  AND session_id = ?`, generationID, sessionID); err != nil {
+		t.Fatalf("reserve checkpointed network: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_generation_resources
+SET resource_state = 'reserved_checkpointed'
+WHERE generation_id = ?`, generationID); err != nil {
+		t.Fatalf("reserve checkpointed resources: %v", err)
+	}
+	if err := st.UpdateSessionStatus(ctx, sessionID, string(sessionstate.Checkpointed), nil); err != nil {
+		t.Fatalf("set checkpointed session: %v", err)
 	}
 }
 

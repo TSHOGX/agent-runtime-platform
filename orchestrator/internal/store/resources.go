@@ -45,6 +45,14 @@ type AllocateGenerationParams struct {
 	Config               ResourceAllocatorConfig
 }
 
+type ClaimCheckpointedGenerationParams struct {
+	SessionID    string
+	GenerationID string
+	Owner        string
+	LeaseTTL     time.Duration
+	Now          time.Time
+}
+
 type GenerationAllocation struct {
 	GenerationID          string
 	NetworkProfileID      string
@@ -389,6 +397,110 @@ WHERE generation_id = ?
 		return fmt.Errorf("generation resource live CAS failed")
 	}
 	return tx.Commit()
+}
+
+func (s *Store) ClaimCheckpointedGenerationForRestore(ctx context.Context, p ClaimCheckpointedGenerationParams) (GenerationAllocation, error) {
+	if p.Now.IsZero() {
+		p.Now = time.Now().UTC()
+	}
+	if strings.TrimSpace(p.SessionID) == "" {
+		return GenerationAllocation{}, fmt.Errorf("session id is required")
+	}
+	if strings.TrimSpace(p.GenerationID) == "" {
+		return GenerationAllocation{}, fmt.Errorf("generation id is required")
+	}
+	if strings.TrimSpace(p.Owner) == "" {
+		return GenerationAllocation{}, fmt.Errorf("owner is required")
+	}
+	if p.LeaseTTL <= 0 {
+		return GenerationAllocation{}, fmt.Errorf("lease ttl must be > 0")
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return GenerationAllocation{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := assertOwnerTx(ctx, tx, ownerUUIDFromLeaseOwner(p.Owner)); err != nil {
+		return GenerationAllocation{}, err
+	}
+
+	expiresAt := p.Now.Add(p.LeaseTTL)
+	res, err := tx.ExecContext(ctx, `
+UPDATE runtime_generations
+SET status = 'restoring',
+    lease_owner = ?,
+    lease_expires_at = ?,
+    last_seen_at = ?
+WHERE generation_id = ?
+  AND session_id = ?
+  AND status = 'checkpointed'
+  AND EXISTS (
+    SELECT 1 FROM sessions
+    WHERE id = ?
+      AND active_generation_id = ?
+      AND status = 'checkpointed'
+  )`, p.Owner, formatTime(expiresAt), formatTime(p.Now), p.GenerationID, p.SessionID, p.SessionID, p.GenerationID)
+	if err != nil {
+		return GenerationAllocation{}, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return GenerationAllocation{}, err
+	}
+	if affected != 1 {
+		return GenerationAllocation{}, fmt.Errorf("checkpointed generation restore CAS failed")
+	}
+
+	res, err = tx.ExecContext(ctx, `
+UPDATE network_profiles
+SET allocation_state = 'recreating'
+WHERE generation_id = ?
+  AND session_id = ?
+  AND allocation_state = 'reserved_checkpointed'`, p.GenerationID, p.SessionID)
+	if err != nil {
+		return GenerationAllocation{}, err
+	}
+	affected, err = res.RowsAffected()
+	if err != nil {
+		return GenerationAllocation{}, err
+	}
+	if affected != 1 {
+		return GenerationAllocation{}, fmt.Errorf("checkpointed network restore CAS failed")
+	}
+
+	res, err = tx.ExecContext(ctx, `
+UPDATE runtime_generation_resources
+SET resource_state = 'recreating'
+WHERE generation_id = ?
+  AND resource_state = 'reserved_checkpointed'`, p.GenerationID)
+	if err != nil {
+		return GenerationAllocation{}, err
+	}
+	affected, err = res.RowsAffected()
+	if err != nil {
+		return GenerationAllocation{}, err
+	}
+	if affected != 1 {
+		return GenerationAllocation{}, fmt.Errorf("checkpointed resource restore CAS failed")
+	}
+
+	allocation := GenerationAllocation{
+		GenerationID:   p.GenerationID,
+		Owner:          p.Owner,
+		LeaseExpiresAt: expiresAt,
+	}
+	if err := tx.QueryRowContext(ctx, `
+SELECT network_profile_id, agent_runtime_profile_id
+FROM runtime_generations
+WHERE generation_id = ?
+  AND session_id = ?`, p.GenerationID, p.SessionID).Scan(&allocation.NetworkProfileID, &allocation.AgentRuntimeProfileID); err != nil {
+		return GenerationAllocation{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return GenerationAllocation{}, err
+	}
+	return allocation, nil
 }
 
 func (s *Store) SweepExpiredSessions(ctx context.Context, now time.Time) (int64, error) {
