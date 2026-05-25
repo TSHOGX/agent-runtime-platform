@@ -41,6 +41,11 @@ harness:
     ack_started_grace: 90s
     reconnect_grace: 30s
 
+  checkpoint:
+    auto_enabled: false
+    idle_threshold: 30m
+    monitor_interval: 5m
+
   reaper:
     failed_retention: 10m
 

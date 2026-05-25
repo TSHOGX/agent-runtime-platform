@@ -109,6 +109,7 @@ func defaultMigrations(options Options) []migration {
 		{version: 6, name: "phase7_legacy_session_backfill", fn: migrateV6Phase7LegacySessionBackfill},
 		{version: 7, name: "phase7_proxy_event_uniqueness", fn: migrateV7Phase7ProxyEventUniqueness},
 		{version: 8, name: "phase7_event_retention_index", fn: migrateV8Phase7EventRetentionIndex},
+		{version: 9, name: "phase7_checkpoint_policy", fn: migrateV9Phase7CheckpointPolicy},
 	}
 }
 
@@ -135,7 +136,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at TEXT,
   ended_at TEXT,
   last_activity_at TEXT,
-  checkpoint_path TEXT
+  checkpoint_path TEXT,
+  auto_checkpoint_enabled INTEGER NOT NULL DEFAULT 0 CHECK(auto_checkpoint_enabled IN (0,1))
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -188,6 +190,7 @@ CREATE TABLE IF NOT EXISTS runtime_generations (
   agent_runtime_profile_id TEXT,
   runsc_platform TEXT DEFAULT 'systrap',
   runsc_version TEXT,
+  auto_checkpoint_enabled INTEGER NOT NULL DEFAULT 0 CHECK(auto_checkpoint_enabled IN (0,1)),
   lease_owner TEXT,
   lease_expires_at TEXT,
   started_at TEXT,
@@ -265,6 +268,10 @@ CREATE TABLE IF NOT EXISTS runtime_generation_resources (
   control_dir_path TEXT NOT NULL,
   control_manifest_path TEXT NOT NULL,
   control_manifest_digest TEXT,
+  projected_control_manifest_digest TEXT,
+  bundle_digest TEXT,
+  runtime_config_digest TEXT,
+  spec_digest TEXT,
   bundle_dir_path TEXT NOT NULL,
   spec_path TEXT NOT NULL,
   checkpoint_path TEXT,
@@ -357,6 +364,7 @@ func migrateV4Phase7SessionColumns(ctx context.Context, tx dbRunner, agentHomesR
 		{name: "agent_home_path", ddl: "ALTER TABLE sessions ADD COLUMN agent_home_path TEXT"},
 		{name: "failure_reason", ddl: "ALTER TABLE sessions ADD COLUMN failure_reason TEXT"},
 		{name: "error_class", ddl: "ALTER TABLE sessions ADD COLUMN error_class TEXT"},
+		{name: "auto_checkpoint_enabled", ddl: "ALTER TABLE sessions ADD COLUMN auto_checkpoint_enabled INTEGER NOT NULL DEFAULT 0 CHECK(auto_checkpoint_enabled IN (0,1))"},
 	}
 	for _, column := range columns {
 		exists, err := columnExists(ctx, tx, "sessions", column.name)
@@ -593,6 +601,34 @@ CREATE INDEX IF NOT EXISTS events_created_at_idx
   ON events (created_at);
 `)
 	return err
+}
+
+func migrateV9Phase7CheckpointPolicy(ctx context.Context, tx dbRunner) error {
+	columns := []struct {
+		table string
+		name  string
+		ddl   string
+	}{
+		{table: "sessions", name: "auto_checkpoint_enabled", ddl: "ALTER TABLE sessions ADD COLUMN auto_checkpoint_enabled INTEGER NOT NULL DEFAULT 0 CHECK(auto_checkpoint_enabled IN (0,1))"},
+		{table: "runtime_generations", name: "auto_checkpoint_enabled", ddl: "ALTER TABLE runtime_generations ADD COLUMN auto_checkpoint_enabled INTEGER NOT NULL DEFAULT 0 CHECK(auto_checkpoint_enabled IN (0,1))"},
+		{table: "runtime_generation_resources", name: "projected_control_manifest_digest", ddl: "ALTER TABLE runtime_generation_resources ADD COLUMN projected_control_manifest_digest TEXT"},
+		{table: "runtime_generation_resources", name: "bundle_digest", ddl: "ALTER TABLE runtime_generation_resources ADD COLUMN bundle_digest TEXT"},
+		{table: "runtime_generation_resources", name: "runtime_config_digest", ddl: "ALTER TABLE runtime_generation_resources ADD COLUMN runtime_config_digest TEXT"},
+		{table: "runtime_generation_resources", name: "spec_digest", ddl: "ALTER TABLE runtime_generation_resources ADD COLUMN spec_digest TEXT"},
+	}
+	for _, column := range columns {
+		exists, err := columnExists(ctx, tx, column.table, column.name)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, column.ddl); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func columnExists(ctx context.Context, tx dbRunner, table, column string) (bool, error) {

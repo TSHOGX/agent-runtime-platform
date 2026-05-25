@@ -87,6 +87,10 @@ harness:
     poll_interval: 10ms
     ack_started_grace: 90s
     reconnect_grace: 30s
+  checkpoint:
+    auto_enabled: false
+    idle_threshold: 30m
+    monitor_interval: 5m
   reaper:
     failed_retention: 10m
   secrets:
@@ -96,7 +100,7 @@ harness:
 
 The loader uses strict YAML decoding for the Phase 7 `harness:` schema. Legacy files containing only top-level `runtime:` / `claude:` sections still load during the cutover, but mixing them with `harness:` is rejected.
 
-The runtime currently launches `runsc` directly in sandbox mode and keeps containers alive across turns. Each generation gets its own network profile, netns/veth pair, `/30`, generated runtime spec, and control manifest; the sandbox-visible Claude proxy URL is derived from that generation's allocated host gateway IP. Automatic idle checkpointing is disabled because `runsc restore` cannot reliably reconnect the current stdin-based turn channel. `Shell` sessions use the PTY-backed shell shim and can be interrupted with `POST /api/sessions/<id>/interrupt`. `bundle/restore-sandbox.sh` is still useful as a smoke-test boundary, but it is not the main request path anymore.
+The runtime currently launches `runsc` directly in sandbox mode and keeps containers alive across turns. Each generation gets its own network profile, netns/veth pair, `/30`, generated runtime spec, control manifest, and file-queue bridge. Automatic idle checkpointing is a per-session policy: the checked-in default is off, `HARNESS_AUTO_CHECKPOINT_ENABLED=true` enables the policy for newly created sessions, and only the next idle generation with an empty turn queue plus fresh bridge heartbeat/checkpoint-ready markers can checkpoint. `Shell` sessions use the PTY-backed shell shim and can be interrupted with `POST /api/sessions/<id>/interrupt`. `bundle/restore-sandbox.sh` is still useful as a smoke-test boundary, but it is not the main request path anymore.
 
 ## Event Streams
 
@@ -164,4 +168,4 @@ Artifact downloads are read-only and limited to regular files under the session 
 
 - The current Claude path uses stream-json turns and a per-container output hub.
 - `sh` is the interactive shell session path; it is still useful for smoke tests and shell-style debugging.
-- Checkpoint/restore is present as experimental runtime plumbing, but automatic checkpointing should wait for the Phase 7 checkpoint-safe control plane.
+- Checkpoint/restore is generation-aware. Automatic checkpointing remains default-off while Phase 7b validates the policy, and should be enabled only for the lab profile or explicit test environments.

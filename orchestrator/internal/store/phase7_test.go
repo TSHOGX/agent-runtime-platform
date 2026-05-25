@@ -31,7 +31,7 @@ func TestPhase7MigrationsCreateSchemaAndBackfillLegacySessions(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	assertMigrationVersions(t, st.db, 8)
+	assertMigrationVersions(t, st.db, 9)
 	for _, table := range []string{
 		"runtime_generations", "runtime_generation_resources", "turns", "events",
 		"active_model_request_contexts", "network_profiles", "agent_runtime_profiles",
@@ -39,8 +39,14 @@ func TestPhase7MigrationsCreateSchemaAndBackfillLegacySessions(t *testing.T) {
 	} {
 		assertTableExists(t, st.db, table)
 	}
-	for _, column := range []string{"active_generation_id", "agent_home_path", "failure_reason", "error_class"} {
+	for _, column := range []string{"active_generation_id", "agent_home_path", "failure_reason", "error_class", "auto_checkpoint_enabled"} {
 		assertColumnExists(t, st.db, "sessions", column)
+	}
+	for _, column := range []string{"auto_checkpoint_enabled"} {
+		assertColumnExists(t, st.db, "runtime_generations", column)
+	}
+	for _, column := range []string{"projected_control_manifest_digest", "bundle_digest", "runtime_config_digest", "spec_digest"} {
+		assertColumnExists(t, st.db, "runtime_generation_resources", column)
 	}
 	for _, index := range []string{"events_proxy_started_request_uq", "events_proxy_finished_request_uq", "events_created_at_idx"} {
 		assertIndexExists(t, st.db, index)
@@ -98,7 +104,7 @@ func TestPhase7MigrationsAreIdempotent(t *testing.T) {
 	if err := st.migrate(ctx); err != nil {
 		t.Fatalf("rerun migrate: %v", err)
 	}
-	assertMigrationVersions(t, st.db, 8)
+	assertMigrationVersions(t, st.db, 9)
 	_ = st.Close()
 
 	st, err = Open(ctx, path)
@@ -106,7 +112,7 @@ func TestPhase7MigrationsAreIdempotent(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	assertMigrationVersions(t, st.db, 8)
+	assertMigrationVersions(t, st.db, 9)
 }
 
 func TestPhase7EventTimeMigrationNormalizesLegacyTimestamps(t *testing.T) {

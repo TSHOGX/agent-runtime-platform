@@ -46,6 +46,10 @@ func TestLoadProjectConfigUsesPhase7HarnessSchema(t *testing.T) {
     poll_interval: 15ms
     ack_started_grace: 50s
     reconnect_grace: 25s
+  checkpoint:
+    auto_enabled: true
+    idle_threshold: 7m
+    monitor_interval: 11s
   reaper:
     failed_retention: 0s
   secrets:
@@ -90,6 +94,11 @@ func TestLoadProjectConfigUsesPhase7HarnessSchema(t *testing.T) {
 		phase7.Bridge.ReconnectGrace.Duration != 25*time.Second ||
 		phase7.Reaper.FailedRetention.Duration != 0 {
 		t.Fatalf("unexpected bridge/reaper config: bridge=%+v reaper=%+v", phase7.Bridge, phase7.Reaper)
+	}
+	if !phase7.Checkpoint.AutoEnabled ||
+		phase7.Checkpoint.IdleThreshold.Duration != 7*time.Minute ||
+		phase7.Checkpoint.MonitorInterval.Duration != 11*time.Second {
+		t.Fatalf("unexpected checkpoint config: %+v", phase7.Checkpoint)
 	}
 	if phase7.Secrets.Root != secretsRoot || phase7.Secrets.ReadersGID != 1234 {
 		t.Fatalf("unexpected secrets config: %+v", phase7.Secrets)
@@ -247,6 +256,20 @@ func TestValidatePhase7Config(t *testing.T) {
 			want: "cannot both be zero",
 		},
 		{
+			name: "checkpoint monitor",
+			mutate: func(cfg *Phase7Config) {
+				cfg.Checkpoint.MonitorInterval.Duration = 0
+			},
+			want: "monitor_interval must be > 0",
+		},
+		{
+			name: "checkpoint idle threshold",
+			mutate: func(cfg *Phase7Config) {
+				cfg.Checkpoint.IdleThreshold.Duration = -time.Second
+			},
+			want: "idle_threshold must be >= 0",
+		},
+		{
 			name: "negative reaper",
 			mutate: func(cfg *Phase7Config) {
 				cfg.Reaper.FailedRetention.Duration = -time.Second
@@ -343,6 +366,44 @@ func TestLoadValidatesMergedPhase7Config(t *testing.T) {
 	_, err = Load()
 	if err == nil || !strings.Contains(err.Error(), "must be less than /30 capacity") {
 		t.Fatalf("expected merged validation error, got %v", err)
+	}
+}
+
+func TestLoadAutoCheckpointEnvOverride(t *testing.T) {
+	repo := t.TempDir()
+	configDir := filepath.Join(repo, "config")
+	if err := os.Mkdir(configDir, 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "harness.yaml"), []byte(`harness:
+  checkpoint:
+    auto_enabled: false
+  secrets:
+    root: `+prepareSecretsRoot(t, repo, 1234)+`
+    readers_gid: 1234
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(repo); err != nil {
+		t.Fatalf("chdir repo: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(oldWD); err != nil {
+			t.Fatalf("restore wd: %v", err)
+		}
+	})
+	t.Setenv("HARNESS_AUTO_CHECKPOINT_ENABLED", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if !cfg.Phase7.Checkpoint.AutoEnabled {
+		t.Fatalf("expected env override to enable checkpoint policy: %+v", cfg.Phase7.Checkpoint)
 	}
 }
 

@@ -18,6 +18,7 @@ HEARTBEAT = "heartbeat"
 TMP = "tmp"
 BRIDGE_HEARTBEAT = "bridge"
 HOST_HEARTBEAT = "host"
+CHECKPOINT_READY = "checkpoint-ready"
 
 
 def seq_name(seq):
@@ -47,19 +48,36 @@ def fsync_dir(path):
 def write_heartbeat(root, name):
     if name not in {BRIDGE_HEARTBEAT, HOST_HEARTBEAT}:
         raise ValueError(f"unsupported heartbeat file {name}")
+    write_control_file(root, HEARTBEAT, name, ".heartbeat")
+
+
+def write_checkpoint_ready(root):
+    write_control_file(root, HEARTBEAT, CHECKPOINT_READY, ".ready")
+
+
+def clear_checkpoint_ready(root):
+    ready = Path(root) / HEARTBEAT / CHECKPOINT_READY
+    try:
+        ready.unlink()
+        fsync_dir(ready.parent)
+    except FileNotFoundError:
+        pass
+
+
+def write_control_file(root, dirname, name, suffix):
     root = Path(root)
     tmp = root / TMP
-    heartbeat = root / HEARTBEAT
+    target_dir = root / dirname
     tmp.mkdir(parents=True, exist_ok=True)
-    heartbeat.mkdir(parents=True, exist_ok=True)
-    tmp_path = tmp / f"{uuid.uuid4()}.heartbeat"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = tmp / f"{uuid.uuid4()}{suffix}"
     with open(tmp_path, "xb") as f:
         f.write(f"{time.time_ns()}\n".encode("ascii"))
         f.flush()
         os.fsync(f.fileno())
     try:
-        os.replace(tmp_path, heartbeat / name)
-        fsync_dir(heartbeat)
+        os.replace(tmp_path, target_dir / name)
+        fsync_dir(target_dir)
     finally:
         try:
             tmp_path.unlink()
@@ -195,6 +213,12 @@ class BridgeClient:
 
     def touch_bridge_heartbeat(self):
         write_heartbeat(self.root, BRIDGE_HEARTBEAT)
+
+    def mark_checkpoint_ready(self):
+        write_checkpoint_ready(self.root)
+
+    def clear_checkpoint_ready(self):
+        clear_checkpoint_ready(self.root)
 
     def claim_next_turn(self, timeout=None):
         request_id = str(uuid.uuid4())
@@ -485,6 +509,7 @@ def run_probe(args):
         )
     client.probe_network(timeout=args.timeout)
     client.touch_bridge_heartbeat()
+    client.mark_checkpoint_ready()
 
 
 def run_heartbeat_loop(args):
@@ -514,6 +539,7 @@ def execute_grant(client, runner, grant):
     turn_id = int(grant["turn_id"])
     content = str(grant.get("content") or "")
     output_sequence = int(client.last_output_sequence_by_turn.get(turn_id, 0)) + 1
+    client.clear_checkpoint_ready()
     client.ack_turn_started(turn_id, sandbox_source_ip())
 
     def emit(stream, line):
@@ -528,6 +554,7 @@ def execute_grant(client, runner, grant):
         emit("stderr", str(err))
     client.last_output_sequence_by_turn[turn_id] = output_sequence - 1
     client.ack_turn_completed(turn_id, status=status or "completed", error_class=error_class, error=error)
+    client.mark_checkpoint_ready()
 
 
 def run_claim_loop(args, runner=None):
@@ -544,6 +571,7 @@ def run_claim_loop(args, runner=None):
             configured_secret("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN_SECRET_ID"),
         )
     client.probe_network(timeout=args.timeout)
+    client.mark_checkpoint_ready()
     runner = runner or make_turn_runner(args.agent)
     stop_heartbeat = start_background_heartbeat(client, args.heartbeat_interval)
     completed = 0

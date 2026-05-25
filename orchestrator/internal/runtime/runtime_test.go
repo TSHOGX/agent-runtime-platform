@@ -229,6 +229,20 @@ func TestCleanupExitedContainerDoesNotRemoveReplacement(t *testing.T) {
 	}
 }
 
+func TestCheckpointRequiresGenerationIdentity(t *testing.T) {
+	rt := New(Config{})
+	rt.containers["sess_1"] = &Container{SessionID: "sess_1", GenerationID: "gen_a", RestoreID: "phase3-sess_1"}
+
+	err := rt.Checkpoint(context.Background(), CheckpointRequest{SessionID: "sess_1"})
+	if err == nil || !strings.Contains(err.Error(), "generation id is required") {
+		t.Fatalf("expected missing generation id error, got %v", err)
+	}
+	err = rt.Checkpoint(context.Background(), CheckpointRequest{SessionID: "sess_1", GenerationID: "gen_b"})
+	if err == nil || !strings.Contains(err.Error(), "container generation mismatch") {
+		t.Fatalf("expected generation mismatch error, got %v", err)
+	}
+}
+
 func TestSendMessageDoesNotReconfigureLiveSandboxNetwork(t *testing.T) {
 	rt := New(Config{
 		DefaultAgent: "claude",

@@ -96,6 +96,12 @@ type Result struct {
 	Err                   error
 }
 
+type CheckpointRequest struct {
+	SessionID      string
+	GenerationID   string
+	CheckpointPath string
+}
+
 type controlManifest struct {
 	SessionID                            string `json:"session_id"`
 	GenerationID                         string `json:"generation_id"`
@@ -192,16 +198,17 @@ type Runtime struct {
 }
 
 type Container struct {
-	SessionID string
-	RestoreID string
-	Agent     string
-	Cmd       *exec.Cmd
-	Stdin     io.WriteCloser
-	Stdout    io.ReadCloser
-	Stderr    io.ReadCloser
-	Cancel    context.CancelFunc
-	InputMu   sync.Mutex
-	OutputHub *OutputHub // Per-container pub/sub for output events
+	SessionID    string
+	GenerationID string
+	RestoreID    string
+	Agent        string
+	Cmd          *exec.Cmd
+	Stdin        io.WriteCloser
+	Stdout       io.ReadCloser
+	Stderr       io.ReadCloser
+	Cancel       context.CancelFunc
+	InputMu      sync.Mutex
+	OutputHub    *OutputHub // Per-container pub/sub for output events
 }
 
 func New(cfg Config) *Runtime {
@@ -1615,15 +1622,16 @@ func (r *Runtime) startFresh(ctx context.Context, req StartRequest, output func(
 
 	// Store container
 	container := &Container{
-		SessionID: req.SessionID,
-		RestoreID: containerID,
-		Agent:     req.Agent,
-		Cmd:       cmd,
-		Stdin:     stdin,
-		Stdout:    stdout,
-		Stderr:    stderr,
-		Cancel:    cancelCmd,
-		OutputHub: hub,
+		SessionID:    req.SessionID,
+		GenerationID: req.GenerationID,
+		RestoreID:    containerID,
+		Agent:        req.Agent,
+		Cmd:          cmd,
+		Stdin:        stdin,
+		Stdout:       stdout,
+		Stderr:       stderr,
+		Cancel:       cancelCmd,
+		OutputHub:    hub,
 	}
 
 	r.mu.Lock()
@@ -1735,15 +1743,16 @@ func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, ou
 	}
 
 	container := &Container{
-		SessionID: req.SessionID,
-		RestoreID: containerID,
-		Agent:     req.Agent,
-		Cmd:       cmd,
-		Stdin:     stdin,
-		Stdout:    stdout,
-		Stderr:    stderr,
-		Cancel:    cancelCmd,
-		OutputHub: hub,
+		SessionID:    req.SessionID,
+		GenerationID: req.GenerationID,
+		RestoreID:    containerID,
+		Agent:        req.Agent,
+		Cmd:          cmd,
+		Stdin:        stdin,
+		Stdout:       stdout,
+		Stderr:       stderr,
+		Cancel:       cancelCmd,
+		OutputHub:    hub,
 	}
 
 	r.mu.Lock()
@@ -1844,16 +1853,28 @@ func validateCheckpointRestore(details store.RuntimeGenerationDetails, artifacts
 	return nil
 }
 
-func (r *Runtime) Checkpoint(ctx context.Context, sessionID string) error {
+func (r *Runtime) Checkpoint(ctx context.Context, req CheckpointRequest) error {
+	if strings.TrimSpace(req.SessionID) == "" {
+		return errors.New("session id is required")
+	}
+	if strings.TrimSpace(req.GenerationID) == "" {
+		return errors.New("generation id is required")
+	}
 	r.mu.RLock()
-	container, exists := r.containers[sessionID]
+	container, exists := r.containers[req.SessionID]
 	r.mu.RUnlock()
 
 	if !exists {
 		return errors.New("container not found")
 	}
+	if container.GenerationID != req.GenerationID {
+		return fmt.Errorf("container generation mismatch: got %s want %s", container.GenerationID, req.GenerationID)
+	}
 
-	checkpointPath := filepath.Join(r.cfg.CheckpointsRoot, sessionID)
+	checkpointPath := strings.TrimSpace(req.CheckpointPath)
+	if checkpointPath == "" {
+		checkpointPath = filepath.Join(r.cfg.CheckpointsRoot, req.SessionID)
+	}
 	if err := os.MkdirAll(filepath.Dir(checkpointPath), 0o755); err != nil {
 		return fmt.Errorf("create checkpoint dir: %w", err)
 	}
@@ -1879,8 +1900,8 @@ func (r *Runtime) Checkpoint(ctx context.Context, sessionID string) error {
 	}
 
 	r.mu.Lock()
-	if current := r.containers[sessionID]; current == container {
-		delete(r.containers, sessionID)
+	if current := r.containers[req.SessionID]; current == container {
+		delete(r.containers, req.SessionID)
 	}
 	r.mu.Unlock()
 

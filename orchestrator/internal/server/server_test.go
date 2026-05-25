@@ -116,9 +116,7 @@ func TestMonitorIdleSessionsSkipsHostNetwork(t *testing.T) {
 }
 
 func TestMonitorIdleSessionsReEnablesCheckpointedSessionsWhenCheckpointDisabled(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+	ctx := context.Background()
 	dir := t.TempDir()
 	st, err := store.Open(ctx, filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -143,145 +141,177 @@ func TestMonitorIdleSessionsReEnablesCheckpointedSessionsWhenCheckpointDisabled(
 
 	srv := &Server{
 		cfg: config.Config{
-			RunscNetwork:    "sandbox",
-			CheckpointsRoot: filepath.Join(dir, "checkpoints"),
+			RunscNetwork: "sandbox",
 		},
 		store: st,
 		hub:   events.NewHub(),
 		log:   slog.Default(),
 	}
-	if err := srv.MonitorIdleSessions(ctx); err != nil {
+	if err := srv.MonitorIdleSessions(context.Background()); err != nil {
 		t.Fatalf("monitor idle sessions: %v", err)
 	}
 	got, err := st.GetSession(ctx, session.ID)
 	if err != nil {
 		t.Fatalf("get session: %v", err)
 	}
-	if got.Status != string(sessionstate.RunningIdle) {
-		t.Fatalf("want running_idle, got %s", got.Status)
-	}
-}
-
-func TestReconcileCheckpointingSessionsMarksCompleteCheckpoint(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	st, err := store.Open(ctx, filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
-
-	now := time.Now().UTC()
-	session := store.Session{
-		ID:        "sess_complete",
-		UserID:    "lab",
-		Status:    string(sessionstate.Checkpointing),
-		Agent:     "claude",
-		Workspace: filepath.Join(dir, "sessions", "sess_complete"),
-		RestoreID: "phase3-sess_complete",
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	if err := st.CreateSession(ctx, session); err != nil {
-		t.Fatalf("create session: %v", err)
-	}
-	checkpointPath := filepath.Join(dir, "checkpoints", session.ID)
-	if err := os.MkdirAll(checkpointPath, 0o755); err != nil {
-		t.Fatalf("create checkpoint dir: %v", err)
-	}
-	for _, name := range []string{"checkpoint.img", "pages.img", "pages_meta.img"} {
-		if err := os.WriteFile(filepath.Join(checkpointPath, name), []byte("x"), 0o644); err != nil {
-			t.Fatalf("write checkpoint file %s: %v", name, err)
-		}
-	}
-
-	srv := &Server{
-		cfg: config.Config{
-			CheckpointsRoot: filepath.Join(dir, "checkpoints"),
-		},
-		store: st,
-		hub:   events.NewHub(),
-		log:   slog.Default(),
-	}
-
-	if err := srv.reconcileCheckpointingSessions(ctx); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-	got, err := st.GetSession(ctx, session.ID)
-	if err != nil {
-		t.Fatalf("get session: %v", err)
-	}
 	if got.Status != string(sessionstate.Checkpointed) {
-		t.Fatalf("want checkpointed, got %s", got.Status)
+		t.Fatalf("disabled monitor should leave checkpointed session alone, got %s", got.Status)
 	}
 }
 
-func TestReconcileCheckpointingSessionsRevertsIncompleteCheckpoint(t *testing.T) {
+func TestBridgeCheckpointReadyRequiresFreshHeartbeatAndMarker(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+
+	if bridgeCheckpointReady(dir, now, time.Second) {
+		t.Fatal("empty bridge dir should not be checkpoint-ready")
+	}
+	if err := bridge.TouchHeartbeat(dir, bridge.BridgeHeartbeatFile, now); err != nil {
+		t.Fatalf("touch heartbeat: %v", err)
+	}
+	if bridgeCheckpointReady(dir, now, time.Second) {
+		t.Fatal("missing ready marker should not be checkpoint-ready")
+	}
+	if err := bridge.TouchCheckpointReady(dir, now); err != nil {
+		t.Fatalf("touch ready: %v", err)
+	}
+	if !bridgeCheckpointReady(dir, now, time.Second) {
+		t.Fatal("fresh heartbeat and ready marker should be checkpoint-ready")
+	}
+	if bridgeCheckpointReady(dir, now.Add(10*time.Second), time.Second) {
+		t.Fatal("stale bridge control files should not be checkpoint-ready")
+	}
+}
+
+func TestMonitorIdleSessionsCheckpointsEligibleGeneration(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	st, err := store.Open(ctx, filepath.Join(dir, "test.db"))
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_auto_checkpoint", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
+	enableSessionAutoCheckpoint(t, ctx, st, session.ID)
+	cfg := testServerConfig(dir)
+	cfg.Phase7.Checkpoint.AutoEnabled = true
+	cfg.Phase7.Checkpoint.IdleThreshold = config.Duration{Duration: time.Nanosecond}
+	cfg.Phase7.Checkpoint.MonitorInterval = config.Duration{Duration: time.Hour}
+	allocation := prepareServerIdleGeneration(t, ctx, st, cfg, owner.UUID, session.ID)
+	details, err := st.GetRuntimeGenerationDetails(ctx, session.ID, allocation.GenerationID)
 	if err != nil {
-		t.Fatalf("open store: %v", err)
+		t.Fatalf("get generation details: %v", err)
 	}
-	t.Cleanup(func() { _ = st.Close() })
-
-	now := time.Now().UTC()
-	freshSession := store.Session{
-		ID:        "sess_fresh",
-		UserID:    "lab",
-		Status:    string(sessionstate.Checkpointing),
-		Agent:     "claude",
-		Workspace: filepath.Join(dir, "sessions", "sess_fresh"),
-		RestoreID: "phase3-sess_fresh",
-		CreatedAt: now,
-		UpdatedAt: now,
+	if err := bridge.TouchHeartbeat(details.BridgeDirPath, bridge.BridgeHeartbeatFile, time.Now().UTC()); err != nil {
+		t.Fatalf("touch heartbeat: %v", err)
 	}
-	if err := st.CreateSession(ctx, freshSession); err != nil {
-		t.Fatalf("create fresh session: %v", err)
+	if err := bridge.TouchCheckpointReady(details.BridgeDirPath, time.Now().UTC()); err != nil {
+		t.Fatalf("touch ready: %v", err)
 	}
-	if err := st.UpdateSessionStatus(ctx, freshSession.ID, string(sessionstate.Checkpointing), nil); err != nil {
-		t.Fatalf("refresh checkpointing status: %v", err)
-	}
-
-	staleSession := store.Session{
-		ID:        "sess_incomplete",
-		UserID:    "lab",
-		Status:    string(sessionstate.Checkpointing),
-		Agent:     "claude",
-		Workspace: filepath.Join(dir, "sessions", "sess_incomplete"),
-		RestoreID: "phase3-sess_incomplete",
-		CreatedAt: now.Add(-(checkpointTimeout + time.Minute)),
-		UpdatedAt: now.Add(-(checkpointTimeout + time.Minute)),
-	}
-	if err := st.CreateSession(ctx, staleSession); err != nil {
-		t.Fatalf("create stale session: %v", err)
-	}
-
+	rt := &recordingRuntime{}
+	runCtx, cancel := context.WithCancel(ctx)
 	srv := &Server{
-		cfg: config.Config{
-			CheckpointsRoot: filepath.Join(dir, "checkpoints"),
-		},
-		store: st,
-		hub:   events.NewHub(),
-		log:   slog.Default(),
+		cfg:     cfg,
+		store:   st,
+		runtime: rt,
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.MonitorIdleSessions(runCtx)
+	}()
+	waitForSessionStatus(t, ctx, st, session.ID, string(sessionstate.Checkpointed))
+	cancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("monitor exit err=%v, want context canceled", err)
 	}
 
-	if err := srv.reconcileCheckpointingSessions(ctx); err != nil {
-		t.Fatalf("reconcile: %v", err)
+	checkpoints := rt.checkpointRequests()
+	if len(checkpoints) != 1 {
+		t.Fatalf("checkpoint requests=%d want 1: %+v", len(checkpoints), checkpoints)
 	}
-	got, err := st.GetSession(ctx, freshSession.ID)
+	if checkpoints[0].SessionID != session.ID ||
+		checkpoints[0].GenerationID != allocation.GenerationID ||
+		checkpoints[0].CheckpointPath != details.CheckpointPath {
+		t.Fatalf("unexpected checkpoint request: %+v details=%+v", checkpoints[0], details)
+	}
+	var generationStatus, networkState, resourceState, checkpointPath, checkpointBundle, checkpointRuntimeConfig, checkpointManifest string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT g.status, n.allocation_state, r.resource_state, COALESCE(r.checkpoint_path, ''),
+       COALESCE(g.checkpoint_bundle_digest, ''), COALESCE(g.checkpoint_runtime_config_digest, ''), COALESCE(g.checkpoint_control_manifest_digest, '')
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, allocation.GenerationID).Scan(
+		&generationStatus, &networkState, &resourceState, &checkpointPath,
+		&checkpointBundle, &checkpointRuntimeConfig, &checkpointManifest,
+	); err != nil {
+		t.Fatalf("query checkpointed generation: %v", err)
+	}
+	if generationStatus != "checkpointed" ||
+		networkState != "reserved_checkpointed" ||
+		resourceState != "reserved_checkpointed" ||
+		checkpointPath != details.CheckpointPath ||
+		checkpointBundle != "bundle_digest" ||
+		checkpointRuntimeConfig != "runtime_config_digest" ||
+		checkpointManifest != "projected_manifest_digest" {
+		t.Fatalf("unexpected checkpoint metadata: generation=%s network=%s resource=%s path=%s bundle=%s runtime=%s manifest=%s",
+			generationStatus, networkState, resourceState, checkpointPath, checkpointBundle, checkpointRuntimeConfig, checkpointManifest)
+	}
+}
+
+func TestMonitorIdleSessionsAbortsFailedCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_auto_checkpoint_fail", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
+	enableSessionAutoCheckpoint(t, ctx, st, session.ID)
+	cfg := testServerConfig(dir)
+	cfg.Phase7.Checkpoint.AutoEnabled = true
+	cfg.Phase7.Checkpoint.IdleThreshold = config.Duration{Duration: time.Nanosecond}
+	cfg.Phase7.Checkpoint.MonitorInterval = config.Duration{Duration: time.Hour}
+	allocation := prepareServerIdleGeneration(t, ctx, st, cfg, owner.UUID, session.ID)
+	details, err := st.GetRuntimeGenerationDetails(ctx, session.ID, allocation.GenerationID)
 	if err != nil {
-		t.Fatalf("get fresh session: %v", err)
+		t.Fatalf("get generation details: %v", err)
 	}
-	if got.Status != string(sessionstate.Checkpointing) {
-		t.Fatalf("fresh checkpointing session should be left alone, got %s", got.Status)
+	if err := bridge.TouchHeartbeat(details.BridgeDirPath, bridge.BridgeHeartbeatFile, time.Now().UTC()); err != nil {
+		t.Fatalf("touch heartbeat: %v", err)
 	}
-	got, err = st.GetSession(ctx, staleSession.ID)
-	if err != nil {
-		t.Fatalf("get stale session: %v", err)
+	if err := bridge.TouchCheckpointReady(details.BridgeDirPath, time.Now().UTC()); err != nil {
+		t.Fatalf("touch ready: %v", err)
 	}
-	if got.Status != string(sessionstate.RunningIdle) {
-		t.Fatalf("want running_idle, got %s", got.Status)
+	rt := &recordingRuntime{checkpointErr: errors.New("checkpoint boom")}
+	runCtx, cancel := context.WithCancel(ctx)
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: rt,
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.MonitorIdleSessions(runCtx)
+	}()
+	waitForCheckpointRequests(t, ctx, rt, 1)
+	waitForGenerationStatus(t, ctx, st, allocation.GenerationID, "idle")
+	cancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("monitor exit err=%v, want context canceled", err)
+	}
+	var generationStatus, networkState, resourceState string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT g.status, n.allocation_state, r.resource_state
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &networkState, &resourceState); err != nil {
+		t.Fatalf("query aborted generation: %v", err)
+	}
+	if generationStatus != "idle" || networkState != "live" || resourceState != "live" {
+		t.Fatalf("checkpoint failure should return generation live idle, got generation=%s network=%s resource=%s", generationStatus, networkState, resourceState)
 	}
 }
 
@@ -1595,13 +1625,7 @@ var instantRuntimePrepareCalls int64
 
 func (instantRuntime) PrepareGeneration(context.Context, runtime.StartRequest) (runtime.GenerationArtifacts, error) {
 	atomic.AddInt64(&instantRuntimePrepareCalls, 1)
-	return runtime.GenerationArtifacts{
-		BundleDir:      "/tmp/bundle",
-		SpecPath:       "/tmp/bundle/config.json",
-		ManifestPath:   "/tmp/control/session.json",
-		ManifestDigest: "digest",
-		RunscVersion:   "runsc test",
-	}, nil
+	return testGenerationArtifacts(), nil
 }
 
 func (instantRuntime) Start(ctx context.Context, req runtime.StartRequest, output func(runtime.Output)) runtime.Result {
@@ -1619,7 +1643,7 @@ func (instantRuntime) Interrupt(string) error {
 	return nil
 }
 
-func (instantRuntime) Checkpoint(context.Context, string) error {
+func (instantRuntime) Checkpoint(context.Context, runtime.CheckpointRequest) error {
 	return nil
 }
 
@@ -1627,19 +1651,15 @@ type recordingRuntime struct {
 	mu              sync.Mutex
 	prepareRequests []runtime.StartRequest
 	startRequests   []runtime.StartRequest
+	checkpointReqs  []runtime.CheckpointRequest
+	checkpointErr   error
 }
 
 func (r *recordingRuntime) PrepareGeneration(_ context.Context, req runtime.StartRequest) (runtime.GenerationArtifacts, error) {
 	r.mu.Lock()
 	r.prepareRequests = append(r.prepareRequests, req)
 	r.mu.Unlock()
-	return runtime.GenerationArtifacts{
-		BundleDir:      "/tmp/bundle",
-		SpecPath:       "/tmp/bundle/config.json",
-		ManifestPath:   "/tmp/control/session.json",
-		ManifestDigest: "digest",
-		RunscVersion:   "runsc test",
-	}, nil
+	return testGenerationArtifacts(), nil
 }
 
 func (r *recordingRuntime) Start(_ context.Context, req runtime.StartRequest, _ func(runtime.Output)) runtime.Result {
@@ -1657,8 +1677,12 @@ func (r *recordingRuntime) Interrupt(string) error {
 	return nil
 }
 
-func (r *recordingRuntime) Checkpoint(context.Context, string) error {
-	return nil
+func (r *recordingRuntime) Checkpoint(_ context.Context, req runtime.CheckpointRequest) error {
+	r.mu.Lock()
+	r.checkpointReqs = append(r.checkpointReqs, req)
+	err := r.checkpointErr
+	r.mu.Unlock()
+	return err
 }
 
 func (r *recordingRuntime) requests() ([]runtime.StartRequest, []runtime.StartRequest) {
@@ -1667,6 +1691,12 @@ func (r *recordingRuntime) requests() ([]runtime.StartRequest, []runtime.StartRe
 	prepares := append([]runtime.StartRequest(nil), r.prepareRequests...)
 	starts := append([]runtime.StartRequest(nil), r.startRequests...)
 	return prepares, starts
+}
+
+func (r *recordingRuntime) checkpointRequests() []runtime.CheckpointRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]runtime.CheckpointRequest(nil), r.checkpointReqs...)
 }
 
 type restoreFailoverRuntime struct {
@@ -1685,15 +1715,16 @@ func (r *restoreFailoverRuntime) Start(_ context.Context, req runtime.StartReque
 }
 
 type failingRuntime struct {
-	prepareErr error
-	err        error
+	prepareErr    error
+	err           error
+	checkpointErr error
 }
 
 func (f failingRuntime) PrepareGeneration(context.Context, runtime.StartRequest) (runtime.GenerationArtifacts, error) {
 	if f.prepareErr != nil {
 		return runtime.GenerationArtifacts{}, f.prepareErr
 	}
-	return runtime.GenerationArtifacts{}, nil
+	return testGenerationArtifacts(), nil
 }
 
 func (f failingRuntime) Start(context.Context, runtime.StartRequest, func(runtime.Output)) runtime.Result {
@@ -1708,8 +1739,22 @@ func (f failingRuntime) Interrupt(string) error {
 	return nil
 }
 
-func (f failingRuntime) Checkpoint(context.Context, string) error {
-	return nil
+func (f failingRuntime) Checkpoint(context.Context, runtime.CheckpointRequest) error {
+	return f.checkpointErr
+}
+
+func testGenerationArtifacts() runtime.GenerationArtifacts {
+	return runtime.GenerationArtifacts{
+		BundleDir:               "/tmp/bundle",
+		SpecPath:                "/tmp/bundle/config.json",
+		ManifestPath:            "/tmp/control/session.json",
+		ManifestDigest:          "manifest_digest",
+		ProjectedManifestDigest: "projected_manifest_digest",
+		BundleDigest:            "bundle_digest",
+		RuntimeConfigDigest:     "runtime_config_digest",
+		SpecDigest:              "spec_digest",
+		RunscVersion:            "runsc test",
+	}
 }
 
 func openServerOwnedStore(t *testing.T, ctx context.Context, dir string) (*store.Store, *store.OwnerLock) {
@@ -1751,6 +1796,46 @@ func createServerTestSession(t *testing.T, ctx context.Context, st *store.Store,
 		t.Fatalf("create session: %v", err)
 	}
 	return session
+}
+
+func enableSessionAutoCheckpoint(t *testing.T, ctx context.Context, st *store.Store, sessionID string) {
+	t.Helper()
+	if _, err := st.DBForTest().ExecContext(ctx, `UPDATE sessions SET auto_checkpoint_enabled = 1 WHERE id = ?`, sessionID); err != nil {
+		t.Fatalf("enable auto checkpoint: %v", err)
+	}
+}
+
+func prepareServerIdleGeneration(t *testing.T, ctx context.Context, st *store.Store, cfg config.Config, ownerUUID, sessionID string) store.GenerationAllocation {
+	t.Helper()
+	now := time.Now().UTC()
+	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: sessionID,
+		Owner:     store.GenerationLeaseOwner(ownerUUID),
+		LeaseTTL:  time.Minute,
+		Now:       now,
+		Config:    serverTestAllocatorConfig(cfg, "claude"),
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	artifacts := testGenerationArtifacts()
+	if err := st.RecordGenerationRuntimeArtifactDigests(ctx, allocation.GenerationID, store.GenerationRuntimeArtifactDigests{
+		ControlManifestDigest:          artifacts.ManifestDigest,
+		ProjectedControlManifestDigest: artifacts.ProjectedManifestDigest,
+		BundleDigest:                   artifacts.BundleDigest,
+		RuntimeConfigDigest:            artifacts.RuntimeConfigDigest,
+		SpecDigest:                     artifacts.SpecDigest,
+		RunscVersion:                   artifacts.RunscVersion,
+	}); err != nil {
+		t.Fatalf("record runtime artifacts: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, sessionID, allocation.GenerationID, allocation.Owner, now.Add(time.Second)); err != nil {
+		t.Fatalf("mark generation live: %v", err)
+	}
+	if err := st.UpdateSessionStatusAndActivity(ctx, sessionID, string(sessionstate.RunningIdle), nil, now.Add(-time.Minute)); err != nil {
+		t.Fatalf("mark session idle: %v", err)
+	}
+	return allocation
 }
 
 func markServerGenerationCheckpointed(t *testing.T, ctx context.Context, st *store.Store, sessionID, generationID string, now time.Time) {
@@ -1879,6 +1964,46 @@ func waitForSessionStatus(t *testing.T, ctx context.Context, st *store.Store, se
 	}
 	data, _ := json.Marshal(got)
 	t.Fatalf("session did not reach %s: %s", want, data)
+}
+
+func waitForCheckpointRequests(t *testing.T, ctx context.Context, rt *recordingRuntime, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if got := len(rt.checkpointRequests()); got >= want {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("context canceled before checkpoint requests reached %d", want)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	t.Fatalf("checkpoint requests=%d want at least %d", len(rt.checkpointRequests()), want)
+}
+
+func waitForGenerationStatus(t *testing.T, ctx context.Context, st *store.Store, generationID, want string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		var got string
+		if err := st.DBForTest().QueryRowContext(ctx, `SELECT status FROM runtime_generations WHERE generation_id = ?`, generationID).Scan(&got); err != nil {
+			t.Fatalf("query generation status: %v", err)
+		}
+		if got == want {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("context canceled before generation reached %s", want)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	var got string
+	if err := st.DBForTest().QueryRowContext(ctx, `SELECT status FROM runtime_generations WHERE generation_id = ?`, generationID).Scan(&got); err != nil {
+		t.Fatalf("query final generation status: %v", err)
+	}
+	t.Fatalf("generation did not reach %s: got %s", want, got)
 }
 
 func waitForEventIDs(t *testing.T, ctx context.Context, st *store.Store, want []int64) {

@@ -26,6 +26,7 @@ const (
 const (
 	BridgeHeartbeatFile = "bridge"
 	HostHeartbeatFile   = "host"
+	CheckpointReadyFile = "checkpoint-ready"
 )
 
 const (
@@ -172,6 +173,28 @@ func TouchHeartbeat(root, name string, now time.Time) error {
 	if name != BridgeHeartbeatFile && name != HostHeartbeatFile {
 		return fmt.Errorf("unsupported bridge heartbeat file %q", name)
 	}
+	return touchControlFile(root, HeartbeatDir, name, now, ".heartbeat")
+}
+
+func TouchCheckpointReady(root string, now time.Time) error {
+	return touchControlFile(root, HeartbeatDir, CheckpointReadyFile, now, ".ready")
+}
+
+func ClearCheckpointReady(root string) error {
+	if strings.TrimSpace(root) == "" {
+		return fmt.Errorf("bridge root is required")
+	}
+	path := filepath.Join(root, HeartbeatDir, CheckpointReadyFile)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(path))
+}
+
+func touchControlFile(root, dir, name string, now time.Time, suffix string) error {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	} else {
@@ -180,17 +203,17 @@ func TouchHeartbeat(root, name string, now time.Time) error {
 	if err := EnsureLayout(root); err != nil {
 		return err
 	}
-	tmpPath := filepath.Join(root, tmpDir, uuid.NewString()+".heartbeat")
+	tmpPath := filepath.Join(root, tmpDir, uuid.NewString()+suffix)
 	payload := []byte(now.Format(time.RFC3339Nano) + "\n")
 	if err := writeFileDurable(tmpPath, payload, 0o644); err != nil {
 		return err
 	}
 	defer func() { _ = os.Remove(tmpPath) }()
-	target := filepath.Join(root, HeartbeatDir, name)
+	target := filepath.Join(root, dir, name)
 	if err := os.Rename(tmpPath, target); err != nil {
 		return err
 	}
-	return syncDir(filepath.Join(root, HeartbeatDir))
+	return syncDir(filepath.Join(root, dir))
 }
 
 func (q Queue) nextSeq() (uint64, error) {

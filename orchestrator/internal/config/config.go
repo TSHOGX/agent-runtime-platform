@@ -50,15 +50,16 @@ type ClaudeConfig struct {
 }
 
 type Phase7Config struct {
-	RunDir      string        `yaml:"run_dir"`
-	SessionTTL  Duration      `yaml:"session_ttl"`
-	MaxSessions int           `yaml:"max_sessions"`
-	Network     NetworkConfig `yaml:"network"`
-	Events      EventsConfig  `yaml:"events"`
-	Probe       ProbeConfig   `yaml:"probe"`
-	Bridge      BridgeConfig  `yaml:"bridge"`
-	Reaper      ReaperConfig  `yaml:"reaper"`
-	Secrets     SecretsConfig `yaml:"secrets"`
+	RunDir      string           `yaml:"run_dir"`
+	SessionTTL  Duration         `yaml:"session_ttl"`
+	MaxSessions int              `yaml:"max_sessions"`
+	Network     NetworkConfig    `yaml:"network"`
+	Events      EventsConfig     `yaml:"events"`
+	Probe       ProbeConfig      `yaml:"probe"`
+	Bridge      BridgeConfig     `yaml:"bridge"`
+	Checkpoint  CheckpointConfig `yaml:"checkpoint"`
+	Reaper      ReaperConfig     `yaml:"reaper"`
+	Secrets     SecretsConfig    `yaml:"secrets"`
 }
 
 func (c Phase7Config) ControlRoot() string {
@@ -143,6 +144,12 @@ type BridgeConfig struct {
 	PollInterval      Duration `yaml:"poll_interval"`
 	AckStartedGrace   Duration `yaml:"ack_started_grace"`
 	ReconnectGrace    Duration `yaml:"reconnect_grace"`
+}
+
+type CheckpointConfig struct {
+	AutoEnabled     bool     `yaml:"auto_enabled"`
+	IdleThreshold   Duration `yaml:"idle_threshold"`
+	MonitorInterval Duration `yaml:"monitor_interval"`
 }
 
 type ReaperConfig struct {
@@ -230,6 +237,9 @@ func Load() (Config, error) {
 	}
 	cfg.Phase7.SessionTTL = Duration{Duration: sessionTTL}
 	cfg.Phase7.MaxSessions = maxSessions
+	if value, ok := boolEnv("HARNESS_AUTO_CHECKPOINT_ENABLED"); ok {
+		cfg.Phase7.Checkpoint.AutoEnabled = value
+	}
 	if err := validatePhase7Config(cfg.Phase7); err != nil {
 		return Config{}, err
 	}
@@ -376,6 +386,11 @@ func defaultPhase7Config() Phase7Config {
 			AckStartedGrace:   Duration{Duration: 90 * time.Second},
 			ReconnectGrace:    Duration{Duration: 30 * time.Second},
 		},
+		Checkpoint: CheckpointConfig{
+			AutoEnabled:     false,
+			IdleThreshold:   Duration{Duration: 30 * time.Minute},
+			MonitorInterval: Duration{Duration: 5 * time.Minute},
+		},
 		Reaper: ReaperConfig{
 			FailedRetention: Duration{Duration: 10 * time.Minute},
 		},
@@ -470,6 +485,12 @@ func validatePhase7Config(cfg Phase7Config) error {
 	}
 	if cfg.Bridge.AckStartedGrace.Duration < cfg.Bridge.ReconnectGrace.Duration {
 		return fmt.Errorf("harness.bridge.ack_started_grace must be >= harness.bridge.reconnect_grace")
+	}
+	if cfg.Checkpoint.IdleThreshold.Duration < 0 {
+		return fmt.Errorf("harness.checkpoint.idle_threshold must be >= 0")
+	}
+	if cfg.Checkpoint.MonitorInterval.Duration <= 0 {
+		return fmt.Errorf("harness.checkpoint.monitor_interval must be > 0")
 	}
 	if cfg.Events.RetentionWindow.Duration == 0 && cfg.Events.RetentionRows == 0 {
 		return fmt.Errorf("harness.events.retention_window and harness.events.retention_rows cannot both be zero")
@@ -594,6 +615,18 @@ func intEnv(key string, fallback int) int {
 		return fallback
 	}
 	return value
+}
+
+func boolEnv(key string) (bool, bool) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return false, false
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, false
+	}
+	return parsed, true
 }
 
 func durationEnv(key string, fallback time.Duration) time.Duration {

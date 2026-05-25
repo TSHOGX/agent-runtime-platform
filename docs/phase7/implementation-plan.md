@@ -217,7 +217,7 @@ Each step lists its PR boundary, prerequisites, and acceptance signal. Behaviora
 
 **PR boundary.** Automatic checkpoint policy.
 
-**Acceptance.** Triggers only on idle generation with empty turn queue, bridge checkpoint-ready, output flushed; `autoCheckpointEnabled` promoted from Go const to a per-session policy (default off during 7b validation, on for the lab profile after Step 10). The policy gates whether the next idle generation of a session is eligible for auto-checkpoint, not the in-flight generation. Checkpoint remains an executor optimization, not a correctness mechanism.
+**Acceptance.** Triggers only on idle generation with empty turn queue, bridge checkpoint-ready, output flushed; `autoCheckpointEnabled` promoted from Go const to a per-session policy (default off during 7b validation, on for the lab profile after Step 10). The policy gates whether the next idle generation of a session is eligible for auto-checkpoint, not the in-flight generation. Config lives under `harness.checkpoint` (`auto_enabled`, `idle_threshold`, `monitor_interval`), with `HARNESS_AUTO_CHECKPOINT_ENABLED` as the lab override for newly created sessions. Checkpoint remains an executor optimization, not a correctness mechanism.
 
 **Detail:** [checkpoint-restore.md](./checkpoint-restore.md#checkpoint-policy).
 

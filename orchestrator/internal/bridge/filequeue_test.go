@@ -155,3 +155,25 @@ func TestTouchHeartbeatWritesDurableMtimeFile(t *testing.T) {
 		t.Fatalf("heartbeat mtime moved backwards: first=%s second=%s", firstInfo.ModTime(), secondInfo.ModTime())
 	}
 }
+
+func TestTouchAndClearCheckpointReady(t *testing.T) {
+	root := t.TempDir()
+	now := time.Date(2026, 5, 25, 12, 34, 56, 123, time.UTC)
+	if err := TouchCheckpointReady(root, now); err != nil {
+		t.Fatalf("touch checkpoint ready: %v", err)
+	}
+	path := filepath.Join(root, HeartbeatDir, CheckpointReadyFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read checkpoint ready: %v", err)
+	}
+	if string(data) != now.Format(time.RFC3339Nano)+"\n" {
+		t.Fatalf("checkpoint ready payload=%q want %q", data, now.Format(time.RFC3339Nano)+"\n")
+	}
+	if err := ClearCheckpointReady(root); err != nil {
+		t.Fatalf("clear checkpoint ready: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("checkpoint ready file should be removed, err=%v", err)
+	}
+}

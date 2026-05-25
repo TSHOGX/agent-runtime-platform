@@ -129,6 +129,45 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ne
 	}
 }
 
+func TestAllocateGenerationSnapshotsSessionAutoCheckpointPolicy(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	now := time.Now().UTC()
+	if err := st.CreateSession(ctx, Session{
+		ID:                    "sess_policy",
+		UserID:                "lab",
+		Status:                string(sessionstate.Created),
+		Agent:                 "claude",
+		Workspace:             filepath.Join(t.TempDir(), "sess_policy"),
+		RestoreID:             "phase3-sess_policy",
+		AutoCheckpointEnabled: true,
+		CreatedAt:             now,
+		UpdatedAt:             now,
+	}); err != nil {
+		t.Fatalf("create policy session: %v", err)
+	}
+	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_policy",
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       now,
+		Config:    testAllocatorConfig(t),
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `UPDATE sessions SET auto_checkpoint_enabled = 0 WHERE id = 'sess_policy'`); err != nil {
+		t.Fatalf("disable session policy after allocation: %v", err)
+	}
+	details, err := st.GetRuntimeGenerationDetails(ctx, "sess_policy", allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get generation details: %v", err)
+	}
+	if !details.AutoCheckpointEnabled {
+		t.Fatalf("generation policy should snapshot enabled session policy: %+v", details)
+	}
+}
+
 func TestAllocateGenerationCanCASFromFailedActiveGeneration(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
@@ -922,6 +961,7 @@ func TestListBridgePollGenerationsFiltersCurrentOwnerLiveResources(t *testing.T)
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
 	cfg := testAllocatorConfig(t)
+	cfg.CIDRPool = netip.MustParsePrefix("10.240.0.0/27")
 	now := time.Now().UTC()
 
 	createStoreSession(t, ctx, st, "sess_poll")
@@ -1020,6 +1060,141 @@ WHERE id = ?`, previousOwner, recoverableTurnID); err != nil {
 		if generation.GenerationID == recoverable.GenerationID || generation.GenerationID == expired.GenerationID {
 			t.Fatalf("expired ack-started generation listed without grace: %+v", generations)
 		}
+	}
+}
+
+func TestAutoCheckpointCandidatesRequirePolicyArtifactsAndNoActiveTurns(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	cfg := testAllocatorConfig(t)
+	cfg.CIDRPool = netip.MustParsePrefix("10.240.0.0/27")
+	now := time.Now().UTC()
+	ownerLease := GenerationLeaseOwner(owner.UUID)
+
+	eligible := createAutoCheckpointGeneration(t, ctx, st, cfg, "sess_auto_eligible", ownerLease, now)
+	disabled := createAutoCheckpointGeneration(t, ctx, st, cfg, "sess_auto_disabled", ownerLease, now)
+	if _, err := st.db.ExecContext(ctx, `UPDATE sessions SET auto_checkpoint_enabled = 0 WHERE id = ?`, "sess_auto_disabled"); err != nil {
+		t.Fatalf("disable session policy: %v", err)
+	}
+	busy := createAutoCheckpointGeneration(t, ctx, st, cfg, "sess_auto_busy", ownerLease, now)
+	if _, err := st.EnqueueTurn(ctx, "sess_auto_busy", "queued", now.Add(time.Second)); err != nil {
+		t.Fatalf("enqueue busy turn: %v", err)
+	}
+	missingArtifacts := createAutoCheckpointGeneration(t, ctx, st, cfg, "sess_auto_missing_artifacts", ownerLease, now)
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_generation_resources
+SET bundle_digest = NULL
+WHERE generation_id = ?`, missingArtifacts.GenerationID); err != nil {
+		t.Fatalf("clear artifact digest: %v", err)
+	}
+	otherOwner := createAutoCheckpointGeneration(t, ctx, st, cfg, "sess_auto_other_owner", ownerLease, now)
+	if _, err := st.db.ExecContext(ctx, `UPDATE runtime_generations SET lease_owner = ? WHERE generation_id = ?`, GenerationLeaseOwner("other"), otherOwner.GenerationID); err != nil {
+		t.Fatalf("move owner: %v", err)
+	}
+
+	candidates, err := st.ListAutoCheckpointCandidates(ctx, ownerLease, now.Add(2*time.Minute), time.Minute)
+	if err != nil {
+		t.Fatalf("list candidates: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("candidates=%+v want one eligible generation", candidates)
+	}
+	if candidates[0].SessionID != "sess_auto_eligible" ||
+		candidates[0].GenerationID != eligible.GenerationID ||
+		candidates[0].BridgeDirPath == "" {
+		t.Fatalf("unexpected candidate: %+v eligible=%+v disabled=%s busy=%s",
+			candidates[0], eligible, disabled.GenerationID, busy.GenerationID)
+	}
+}
+
+func TestGenerationCheckpointTransitionsAndMetadata(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	cfg := testAllocatorConfig(t)
+	now := time.Now().UTC()
+	allocation := createAutoCheckpointGeneration(t, ctx, st, cfg, "sess_auto_complete", GenerationLeaseOwner(owner.UUID), now)
+
+	if err := st.BeginGenerationCheckpoint(ctx, "sess_auto_complete", allocation.GenerationID, allocation.Owner, now.Add(2*time.Minute)); err != nil {
+		t.Fatalf("begin checkpoint: %v", err)
+	}
+	var generationStatus, sessionStatus string
+	if err := st.db.QueryRowContext(ctx, `
+SELECT g.status, s.status
+FROM runtime_generations g
+JOIN sessions s ON s.active_generation_id = g.generation_id
+WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &sessionStatus); err != nil {
+		t.Fatalf("query checkpointing state: %v", err)
+	}
+	if generationStatus != "checkpointing" || sessionStatus != string(sessionstate.Checkpointing) {
+		t.Fatalf("unexpected checkpointing state: generation=%s session=%s", generationStatus, sessionStatus)
+	}
+	if err := st.CompleteGenerationCheckpoint(ctx, CompleteCheckpointParams{
+		SessionID:                       "sess_auto_complete",
+		GenerationID:                    allocation.GenerationID,
+		Owner:                           allocation.Owner,
+		CheckpointPath:                  filepath.Join(cfg.RunDir, "checkpoint"),
+		RunscPlatform:                   "systrap",
+		RunscVersion:                    "runsc auto",
+		CheckpointBundleDigest:          "bundle_digest",
+		CheckpointRuntimeConfigDigest:   "runtime_config_digest",
+		CheckpointControlManifestDigest: "projected_manifest_digest",
+		Now:                             now.Add(3 * time.Minute),
+	}); err != nil {
+		t.Fatalf("complete checkpoint: %v", err)
+	}
+	var networkState, resourceState, checkpointPath, checkpointBundle, checkpointManifest string
+	if err := st.db.QueryRowContext(ctx, `
+SELECT g.status, s.status, n.allocation_state, r.resource_state, COALESCE(r.checkpoint_path, ''),
+       COALESCE(g.checkpoint_bundle_digest, ''), COALESCE(g.checkpoint_control_manifest_digest, '')
+FROM runtime_generations g
+JOIN sessions s ON s.active_generation_id = g.generation_id
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, allocation.GenerationID).Scan(
+		&generationStatus, &sessionStatus, &networkState, &resourceState, &checkpointPath, &checkpointBundle, &checkpointManifest,
+	); err != nil {
+		t.Fatalf("query checkpoint complete state: %v", err)
+	}
+	if generationStatus != "checkpointed" ||
+		sessionStatus != string(sessionstate.Checkpointed) ||
+		networkState != "reserved_checkpointed" ||
+		resourceState != "reserved_checkpointed" ||
+		checkpointPath == "" ||
+		checkpointBundle != "bundle_digest" ||
+		checkpointManifest != "projected_manifest_digest" {
+		t.Fatalf("unexpected completed checkpoint state: generation=%s session=%s network=%s resource=%s path=%s bundle=%s manifest=%s",
+			generationStatus, sessionStatus, networkState, resourceState, checkpointPath, checkpointBundle, checkpointManifest)
+	}
+}
+
+func TestGenerationCheckpointAbortRestoresIdleState(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	cfg := testAllocatorConfig(t)
+	now := time.Now().UTC()
+	allocation := createAutoCheckpointGeneration(t, ctx, st, cfg, "sess_auto_abort", GenerationLeaseOwner(owner.UUID), now)
+
+	if err := st.BeginGenerationCheckpoint(ctx, "sess_auto_abort", allocation.GenerationID, allocation.Owner, now.Add(2*time.Minute)); err != nil {
+		t.Fatalf("begin checkpoint: %v", err)
+	}
+	if err := st.AbortGenerationCheckpoint(ctx, "sess_auto_abort", allocation.GenerationID, allocation.Owner, now.Add(3*time.Minute)); err != nil {
+		t.Fatalf("abort checkpoint: %v", err)
+	}
+	var generationStatus, sessionStatus, networkState, resourceState string
+	if err := st.db.QueryRowContext(ctx, `
+SELECT g.status, s.status, n.allocation_state, r.resource_state
+FROM runtime_generations g
+JOIN sessions s ON s.active_generation_id = g.generation_id
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &sessionStatus, &networkState, &resourceState); err != nil {
+		t.Fatalf("query aborted checkpoint state: %v", err)
+	}
+	if generationStatus != "idle" ||
+		sessionStatus != string(sessionstate.RunningIdle) ||
+		networkState != "live" ||
+		resourceState != "live" {
+		t.Fatalf("unexpected aborted checkpoint state: generation=%s session=%s network=%s resource=%s", generationStatus, sessionStatus, networkState, resourceState)
 	}
 }
 
@@ -1181,6 +1356,50 @@ func openOwnedStore(t *testing.T, ctx context.Context) (*Store, *OwnerLock) {
 		t.Fatalf("write owner: %v", err)
 	}
 	return st, owner
+}
+
+func createAutoCheckpointGeneration(t *testing.T, ctx context.Context, st *Store, cfg ResourceAllocatorConfig, sessionID, owner string, now time.Time) GenerationAllocation {
+	t.Helper()
+	if err := st.CreateSession(ctx, Session{
+		ID:                    sessionID,
+		UserID:                "lab",
+		Status:                string(sessionstate.Created),
+		Agent:                 "claude",
+		Workspace:             filepath.Join(t.TempDir(), sessionID),
+		RestoreID:             "phase3-" + sessionID,
+		AutoCheckpointEnabled: true,
+		CreatedAt:             now.Add(-2 * time.Minute),
+		UpdatedAt:             now.Add(-2 * time.Minute),
+	}); err != nil {
+		t.Fatalf("create session %s: %v", sessionID, err)
+	}
+	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: sessionID,
+		Owner:     owner,
+		LeaseTTL:  time.Hour,
+		Now:       now.Add(-2 * time.Minute),
+		Config:    cfg,
+	})
+	if err != nil {
+		t.Fatalf("allocate generation for %s: %v", sessionID, err)
+	}
+	if err := st.RecordGenerationRuntimeArtifactDigests(ctx, allocation.GenerationID, GenerationRuntimeArtifactDigests{
+		ControlManifestDigest:          "manifest_digest",
+		ProjectedControlManifestDigest: "projected_manifest_digest",
+		BundleDigest:                   "bundle_digest",
+		RuntimeConfigDigest:            "runtime_config_digest",
+		SpecDigest:                     "spec_digest",
+		RunscVersion:                   "runsc auto",
+	}); err != nil {
+		t.Fatalf("record artifacts for %s: %v", sessionID, err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, sessionID, allocation.GenerationID, allocation.Owner, now.Add(-time.Minute)); err != nil {
+		t.Fatalf("mark generation live for %s: %v", sessionID, err)
+	}
+	if err := st.UpdateSessionStatusAndActivity(ctx, sessionID, string(sessionstate.RunningIdle), nil, now.Add(-2*time.Minute)); err != nil {
+		t.Fatalf("mark session idle for %s: %v", sessionID, err)
+	}
+	return allocation
 }
 
 func createExpiredAckStartedTurn(t *testing.T, ctx context.Context, st *Store, ownerUUID string, cfg ResourceAllocatorConfig, sessionID string, now time.Time, expiredFor time.Duration) (GenerationAllocation, int64) {

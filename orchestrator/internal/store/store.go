@@ -16,24 +16,25 @@ import (
 )
 
 type Session struct {
-	ID                 string     `json:"id"`
-	UserID             string     `json:"user_id"`
-	Status             string     `json:"status"`
-	Agent              string     `json:"agent"`
-	Workspace          string     `json:"workspace"`
-	AgentHomePath      string     `json:"agent_home_path,omitempty"`
-	ActiveGenerationID string     `json:"active_generation_id,omitempty"`
-	RestoreID          string     `json:"restore_id"`
-	RestoreMS          *int64     `json:"restore_ms,omitempty"`
-	ClaudeSessionUUID  string     `json:"claude_session_uuid,omitempty"`
-	CreatedAt          time.Time  `json:"created_at"`
-	UpdatedAt          time.Time  `json:"updated_at"`
-	ExpiresAt          *time.Time `json:"expires_at,omitempty"`
-	EndedAt            *time.Time `json:"ended_at,omitempty"`
-	LastActivityAt     *time.Time `json:"last_activity_at,omitempty"`
-	CheckpointPath     string     `json:"checkpoint_path,omitempty"`
-	FailureReason      string     `json:"failure_reason,omitempty"`
-	ErrorClass         string     `json:"error_class,omitempty"`
+	ID                    string     `json:"id"`
+	UserID                string     `json:"user_id"`
+	Status                string     `json:"status"`
+	Agent                 string     `json:"agent"`
+	Workspace             string     `json:"workspace"`
+	AgentHomePath         string     `json:"agent_home_path,omitempty"`
+	ActiveGenerationID    string     `json:"active_generation_id,omitempty"`
+	RestoreID             string     `json:"restore_id"`
+	RestoreMS             *int64     `json:"restore_ms,omitempty"`
+	ClaudeSessionUUID     string     `json:"claude_session_uuid,omitempty"`
+	CreatedAt             time.Time  `json:"created_at"`
+	UpdatedAt             time.Time  `json:"updated_at"`
+	ExpiresAt             *time.Time `json:"expires_at,omitempty"`
+	EndedAt               *time.Time `json:"ended_at,omitempty"`
+	LastActivityAt        *time.Time `json:"last_activity_at,omitempty"`
+	CheckpointPath        string     `json:"checkpoint_path,omitempty"`
+	AutoCheckpointEnabled bool       `json:"auto_checkpoint_enabled"`
+	FailureReason         string     `json:"failure_reason,omitempty"`
+	ErrorClass            string     `json:"error_class,omitempty"`
 }
 
 type Message struct {
@@ -141,25 +142,27 @@ func (s *Store) CreateSession(ctx context.Context, session Session) error {
 	}
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO sessions (
-  id, user_id, status, agent, workspace, agent_home_path, restore_id, claude_session_uuid, created_at, updated_at, expires_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  id, user_id, status, agent, workspace, agent_home_path, restore_id, claude_session_uuid,
+  created_at, updated_at, expires_at, auto_checkpoint_enabled
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		session.ID, session.UserID, session.Status, session.Agent, session.Workspace, nullableString(session.AgentHomePath),
 		session.RestoreID, nullableString(session.ClaudeSessionUUID),
 		formatTime(session.CreatedAt), formatTime(session.UpdatedAt), formatOptionalTime(session.ExpiresAt),
+		boolInt(session.AutoCheckpointEnabled),
 	)
 	return err
 }
 
 func (s *Store) GetSession(ctx context.Context, id string) (Session, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT id, user_id, status, agent, workspace, agent_home_path, active_generation_id, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path, failure_reason, error_class
+SELECT id, user_id, status, agent, workspace, agent_home_path, active_generation_id, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path, auto_checkpoint_enabled, failure_reason, error_class
 FROM sessions WHERE id = ?`, id)
 	return scanSession(row)
 }
 
 func (s *Store) ListSessions(ctx context.Context) ([]Session, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, user_id, status, agent, workspace, agent_home_path, active_generation_id, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path, failure_reason, error_class
+SELECT id, user_id, status, agent, workspace, agent_home_path, active_generation_id, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path, auto_checkpoint_enabled, failure_reason, error_class
 FROM sessions ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -415,10 +418,11 @@ func scanSession(row scanner) (Session, error) {
 	var createdAt, updatedAt string
 	var expiresAt, endedAt, lastActivityAt sql.NullString
 	var checkpointPath, failureReason, errorClass sql.NullString
+	var autoCheckpointEnabled int
 	err := row.Scan(
 		&session.ID, &session.UserID, &session.Status, &session.Agent, &session.Workspace, &agentHomePath,
 		&activeGenerationID, &session.RestoreID, &restoreMS, &claudeUUID, &createdAt, &updatedAt,
-		&expiresAt, &endedAt, &lastActivityAt, &checkpointPath, &failureReason, &errorClass,
+		&expiresAt, &endedAt, &lastActivityAt, &checkpointPath, &autoCheckpointEnabled, &failureReason, &errorClass,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, err
@@ -455,6 +459,7 @@ func scanSession(row scanner) (Session, error) {
 	if checkpointPath.Valid {
 		session.CheckpointPath = checkpointPath.String
 	}
+	session.AutoCheckpointEnabled = autoCheckpointEnabled != 0
 	if failureReason.Valid {
 		session.FailureReason = failureReason.String
 	}
@@ -517,7 +522,7 @@ func (s *Store) ListSessionsByStatus(ctx context.Context, status string) ([]Sess
 		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, user_id, status, agent, workspace, agent_home_path, active_generation_id, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path, failure_reason, error_class
+SELECT id, user_id, status, agent, workspace, agent_home_path, active_generation_id, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path, auto_checkpoint_enabled, failure_reason, error_class
 FROM sessions WHERE status = ? ORDER BY last_activity_at ASC`, status)
 	if err != nil {
 		return nil, err

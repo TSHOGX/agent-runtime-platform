@@ -76,6 +76,10 @@ type RuntimeGenerationDetails struct {
 	BridgeDirPath                   string
 	LogDirPath                      string
 	ControlManifestDigest           string
+	ProjectedControlManifestDigest  string
+	BundleDigest                    string
+	RuntimeConfigDigest             string
+	SpecDigest                      string
 	RunscVersion                    string
 	CheckpointNetworkProfileID      string
 	CheckpointAgentRuntimeProfileID string
@@ -105,6 +109,7 @@ type RuntimeGenerationDetails struct {
 	DorisPorts                      string
 	DNSPolicy                       string
 	NetworkAllocationState          string
+	AutoCheckpointEnabled           bool
 	Agent                           string
 	Model                           string
 	OutputFormat                    string
@@ -120,6 +125,25 @@ type BridgePollGeneration struct {
 	SessionID     string
 	GenerationID  string
 	BridgeDirPath string
+}
+
+type CheckpointCandidate struct {
+	SessionID     string
+	GenerationID  string
+	BridgeDirPath string
+}
+
+type CompleteCheckpointParams struct {
+	SessionID                       string
+	GenerationID                    string
+	Owner                           string
+	CheckpointPath                  string
+	RunscPlatform                   string
+	RunscVersion                    string
+	CheckpointBundleDigest          string
+	CheckpointRuntimeConfigDigest   string
+	CheckpointControlManifestDigest string
+	Now                             time.Time
 }
 
 type ColdFallbackSession struct {
@@ -158,6 +182,15 @@ type RenewLiveGenerationsParams struct {
 	Owner    string
 	LeaseTTL time.Duration
 	Now      time.Time
+}
+
+type GenerationRuntimeArtifactDigests struct {
+	ControlManifestDigest          string
+	ProjectedControlManifestDigest string
+	BundleDigest                   string
+	RuntimeConfigDigest            string
+	SpecDigest                     string
+	RunscVersion                   string
 }
 
 type ResourceQuota struct {
@@ -285,9 +318,11 @@ ON CONFLICT(egress_policy_id) DO NOTHING`,
 INSERT INTO runtime_generations (
   generation_id, session_id, status, network_profile_id,
   agent_runtime_profile_id, runsc_platform, lease_owner,
-  lease_expires_at, last_seen_at
-) VALUES (?, ?, 'allocating', ?, ?, 'systrap', ?, ?, ?)`,
-		generationID, p.SessionID, networkProfileID, agentRuntimeProfileID, p.Owner, formatTime(leaseExpires), now); err != nil {
+  lease_expires_at, last_seen_at, auto_checkpoint_enabled
+) VALUES (?, ?, 'allocating', ?, ?, 'systrap', ?, ?, ?, COALESCE((
+  SELECT auto_checkpoint_enabled FROM sessions WHERE id = ?
+), 0))`,
+		generationID, p.SessionID, networkProfileID, agentRuntimeProfileID, p.Owner, formatTime(leaseExpires), now, p.SessionID); err != nil {
 		return GenerationAllocation{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -1016,6 +1051,279 @@ WHERE allocation_state != 'destroyed'`).Scan(&quota.AllocatedPoolSlots)
 	return quota, err
 }
 
+func (s *Store) ListAutoCheckpointCandidates(ctx context.Context, owner string, now time.Time, idleThreshold time.Duration) ([]CheckpointCandidate, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	if strings.TrimSpace(owner) == "" {
+		return nil, fmt.Errorf("owner is required")
+	}
+	if idleThreshold < 0 {
+		return nil, fmt.Errorf("idle threshold must be >= 0")
+	}
+	cutoff := now.Add(-idleThreshold)
+	rows, err := s.db.QueryContext(ctx, `
+SELECT s.id, g.generation_id, r.bridge_dir_path
+FROM sessions s
+JOIN runtime_generations g ON g.generation_id = s.active_generation_id
+  AND g.session_id = s.id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE s.status = 'running_idle'
+  AND s.auto_checkpoint_enabled = 1
+  AND s.last_activity_at IS NOT NULL
+  AND s.last_activity_at <= ?
+  AND g.status = 'idle'
+  AND g.auto_checkpoint_enabled = 1
+  AND g.lease_owner = ?
+  AND g.lease_expires_at > ?
+  AND g.runsc_version IS NOT NULL
+  AND g.runsc_platform IS NOT NULL
+  AND r.resource_state = 'live'
+  AND r.checkpoint_path IS NOT NULL
+  AND r.control_manifest_digest IS NOT NULL
+  AND r.projected_control_manifest_digest IS NOT NULL
+  AND r.bundle_digest IS NOT NULL
+  AND r.runtime_config_digest IS NOT NULL
+  AND r.spec_digest IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM turns t
+    WHERE t.session_id = s.id
+      AND t.status IN ('queued', 'leased', 'running')
+  )
+ORDER BY s.last_activity_at ASC`, formatTime(cutoff), owner, formatTime(now))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var candidates []CheckpointCandidate
+	for rows.Next() {
+		var candidate CheckpointCandidate
+		if err := rows.Scan(&candidate.SessionID, &candidate.GenerationID, &candidate.BridgeDirPath); err != nil {
+			return nil, err
+		}
+		candidates = append(candidates, candidate)
+	}
+	return candidates, rows.Err()
+}
+
+func (s *Store) BeginGenerationCheckpoint(ctx context.Context, sessionID, generationID, owner string, now time.Time) error {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `
+UPDATE runtime_generations
+SET status = 'checkpointing',
+    last_seen_at = ?
+WHERE generation_id = ?
+  AND session_id = ?
+  AND status = 'idle'
+  AND auto_checkpoint_enabled = 1
+  AND lease_owner = ?
+  AND lease_expires_at > ?
+  AND runsc_version IS NOT NULL
+  AND runsc_platform IS NOT NULL
+  AND EXISTS (
+    SELECT 1 FROM sessions
+    WHERE id = ?
+      AND active_generation_id = ?
+      AND status = 'running_idle'
+      AND auto_checkpoint_enabled = 1
+  )
+  AND EXISTS (
+    SELECT 1 FROM runtime_generation_resources r
+    WHERE r.generation_id = runtime_generations.generation_id
+      AND r.resource_state = 'live'
+      AND r.checkpoint_path IS NOT NULL
+      AND r.control_manifest_digest IS NOT NULL
+      AND r.projected_control_manifest_digest IS NOT NULL
+      AND r.bundle_digest IS NOT NULL
+      AND r.runtime_config_digest IS NOT NULL
+      AND r.spec_digest IS NOT NULL
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM turns
+    WHERE session_id = ?
+      AND status IN ('queued', 'leased', 'running')
+  )`, formatTime(now), generationID, sessionID, owner, formatTime(now), sessionID, generationID, sessionID)
+	if err != nil {
+		return err
+	}
+	if affected, err := res.RowsAffected(); err != nil {
+		return err
+	} else if affected != 1 {
+		return fmt.Errorf("generation checkpoint begin CAS failed")
+	}
+	res, err = tx.ExecContext(ctx, `
+UPDATE sessions
+SET status = 'checkpointing',
+    updated_at = ?
+WHERE id = ?
+  AND status = 'running_idle'
+  AND active_generation_id = ?
+  AND auto_checkpoint_enabled = 1`, formatTime(now), sessionID, generationID)
+	if err != nil {
+		return err
+	}
+	if affected, err := res.RowsAffected(); err != nil {
+		return err
+	} else if affected != 1 {
+		return fmt.Errorf("session checkpoint begin CAS failed")
+	}
+	return tx.Commit()
+}
+
+func (s *Store) AbortGenerationCheckpoint(ctx context.Context, sessionID, generationID, owner string, now time.Time) error {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `
+UPDATE runtime_generations
+SET status = 'idle',
+    last_seen_at = ?
+WHERE generation_id = ?
+  AND session_id = ?
+  AND status = 'checkpointing'
+  AND lease_owner = ?
+  AND lease_expires_at > ?`, formatTime(now), generationID, sessionID, owner, formatTime(now))
+	if err != nil {
+		return err
+	}
+	if affected, err := res.RowsAffected(); err != nil {
+		return err
+	} else if affected != 1 {
+		return fmt.Errorf("generation checkpoint abort CAS failed")
+	}
+	res, err = tx.ExecContext(ctx, `
+UPDATE sessions
+SET status = 'running_idle',
+    updated_at = ?
+WHERE id = ?
+  AND status = 'checkpointing'
+  AND active_generation_id = ?`, formatTime(now), sessionID, generationID)
+	if err != nil {
+		return err
+	}
+	if affected, err := res.RowsAffected(); err != nil {
+		return err
+	} else if affected != 1 {
+		return fmt.Errorf("session checkpoint abort CAS failed")
+	}
+	return tx.Commit()
+}
+
+func (s *Store) CompleteGenerationCheckpoint(ctx context.Context, p CompleteCheckpointParams) error {
+	if p.Now.IsZero() {
+		p.Now = time.Now().UTC()
+	}
+	if strings.TrimSpace(p.CheckpointPath) == "" {
+		return fmt.Errorf("checkpoint path is required")
+	}
+	if strings.TrimSpace(p.CheckpointBundleDigest) == "" {
+		return fmt.Errorf("checkpoint bundle digest is required")
+	}
+	if strings.TrimSpace(p.CheckpointRuntimeConfigDigest) == "" {
+		return fmt.Errorf("checkpoint runtime config digest is required")
+	}
+	if strings.TrimSpace(p.CheckpointControlManifestDigest) == "" {
+		return fmt.Errorf("checkpoint control manifest digest is required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `
+UPDATE runtime_generations
+SET status = 'checkpointed',
+    checkpoint_created_at = ?,
+    checkpoint_network_profile_id = network_profile_id,
+    checkpoint_agent_runtime_profile_id = agent_runtime_profile_id,
+    checkpoint_runsc_version = COALESCE(?, runsc_version),
+    checkpoint_runsc_platform = COALESCE(?, runsc_platform),
+    checkpoint_bundle_digest = ?,
+    checkpoint_runtime_config_digest = ?,
+    checkpoint_control_manifest_digest = ?,
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    last_seen_at = ?
+WHERE generation_id = ?
+  AND session_id = ?
+  AND status = 'checkpointing'
+  AND lease_owner = ?
+  AND lease_expires_at > ?
+  AND EXISTS (
+    SELECT 1 FROM sessions
+    WHERE id = ?
+      AND active_generation_id = ?
+      AND status = 'checkpointing'
+  )`, formatTime(p.Now), nullableString(p.RunscVersion), nullableString(p.RunscPlatform),
+		p.CheckpointBundleDigest, p.CheckpointRuntimeConfigDigest, p.CheckpointControlManifestDigest,
+		formatTime(p.Now), p.GenerationID, p.SessionID, p.Owner, formatTime(p.Now), p.SessionID, p.GenerationID)
+	if err != nil {
+		return err
+	}
+	if affected, err := res.RowsAffected(); err != nil {
+		return err
+	} else if affected != 1 {
+		return fmt.Errorf("generation checkpoint complete CAS failed")
+	}
+	res, err = tx.ExecContext(ctx, `
+UPDATE network_profiles
+SET allocation_state = 'reserved_checkpointed'
+WHERE generation_id = ?
+  AND session_id = ?
+  AND allocation_state = 'live'`, p.GenerationID, p.SessionID)
+	if err != nil {
+		return err
+	}
+	if affected, err := res.RowsAffected(); err != nil {
+		return err
+	} else if affected != 1 {
+		return fmt.Errorf("network checkpoint complete CAS failed")
+	}
+	res, err = tx.ExecContext(ctx, `
+UPDATE runtime_generation_resources
+SET resource_state = 'reserved_checkpointed',
+    checkpoint_path = ?
+WHERE generation_id = ?
+  AND resource_state = 'live'`, p.CheckpointPath, p.GenerationID)
+	if err != nil {
+		return err
+	}
+	if affected, err := res.RowsAffected(); err != nil {
+		return err
+	} else if affected != 1 {
+		return fmt.Errorf("resource checkpoint complete CAS failed")
+	}
+	res, err = tx.ExecContext(ctx, `
+UPDATE sessions
+SET status = 'checkpointed',
+    checkpoint_path = ?,
+    updated_at = ?
+WHERE id = ?
+  AND status = 'checkpointing'
+  AND active_generation_id = ?`, p.CheckpointPath, formatTime(p.Now), p.SessionID, p.GenerationID)
+	if err != nil {
+		return err
+	}
+	if affected, err := res.RowsAffected(); err != nil {
+		return err
+	} else if affected != 1 {
+		return fmt.Errorf("session checkpoint complete CAS failed")
+	}
+	return tx.Commit()
+}
+
 func (s *Store) GetRuntimeGenerationDetails(ctx context.Context, sessionID, generationID string) (RuntimeGenerationDetails, error) {
 	row := s.db.QueryRowContext(ctx, `
 SELECT
@@ -1033,6 +1341,10 @@ SELECT
   r.bridge_dir_path,
   r.log_dir_path,
   COALESCE(r.control_manifest_digest, ''),
+  COALESCE(r.projected_control_manifest_digest, ''),
+  COALESCE(r.bundle_digest, ''),
+  COALESCE(r.runtime_config_digest, ''),
+  COALESCE(r.spec_digest, ''),
   COALESCE(r.runsc_version, ''),
   COALESCE(g.checkpoint_network_profile_id, ''),
   COALESCE(g.checkpoint_agent_runtime_profile_id, ''),
@@ -1062,6 +1374,7 @@ SELECT
   n.doris_ports,
   n.dns_policy,
   n.allocation_state,
+  g.auto_checkpoint_enabled,
   a.agent,
   COALESCE(a.model, ''),
   a.output_format,
@@ -1079,7 +1392,7 @@ JOIN agent_runtime_profiles a ON a.agent_runtime_profile_id = g.agent_runtime_pr
 WHERE g.session_id = ?
   AND g.generation_id = ?`, sessionID, generationID)
 	var details RuntimeGenerationDetails
-	var disableNonessentialTraffic, requiresSecretDrop int
+	var disableNonessentialTraffic, requiresSecretDrop, autoCheckpointEnabled int
 	if err := row.Scan(
 		&details.SessionID,
 		&details.GenerationID,
@@ -1095,6 +1408,10 @@ WHERE g.session_id = ?
 		&details.BridgeDirPath,
 		&details.LogDirPath,
 		&details.ControlManifestDigest,
+		&details.ProjectedControlManifestDigest,
+		&details.BundleDigest,
+		&details.RuntimeConfigDigest,
+		&details.SpecDigest,
 		&details.RunscVersion,
 		&details.CheckpointNetworkProfileID,
 		&details.CheckpointAgentRuntimeProfileID,
@@ -1124,6 +1441,7 @@ WHERE g.session_id = ?
 		&details.DorisPorts,
 		&details.DNSPolicy,
 		&details.NetworkAllocationState,
+		&autoCheckpointEnabled,
 		&details.Agent,
 		&details.Model,
 		&details.OutputFormat,
@@ -1138,10 +1456,18 @@ WHERE g.session_id = ?
 	}
 	details.DisableNonessentialTraffic = disableNonessentialTraffic != 0
 	details.RequiresSecretDrop = requiresSecretDrop != 0
+	details.AutoCheckpointEnabled = autoCheckpointEnabled != 0
 	return details, nil
 }
 
 func (s *Store) RecordGenerationRuntimeArtifacts(ctx context.Context, generationID, controlManifestDigest, runscVersion string) error {
+	return s.RecordGenerationRuntimeArtifactDigests(ctx, generationID, GenerationRuntimeArtifactDigests{
+		ControlManifestDigest: controlManifestDigest,
+		RunscVersion:          runscVersion,
+	})
+}
+
+func (s *Store) RecordGenerationRuntimeArtifactDigests(ctx context.Context, generationID string, digests GenerationRuntimeArtifactDigests) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -1150,14 +1476,25 @@ func (s *Store) RecordGenerationRuntimeArtifacts(ctx context.Context, generation
 	if _, err := tx.ExecContext(ctx, `
 UPDATE runtime_generation_resources
 SET control_manifest_digest = ?,
+    projected_control_manifest_digest = COALESCE(?, projected_control_manifest_digest),
+    bundle_digest = COALESCE(?, bundle_digest),
+    runtime_config_digest = COALESCE(?, runtime_config_digest),
+    spec_digest = COALESCE(?, spec_digest),
     runsc_version = COALESCE(?, runsc_version)
-WHERE generation_id = ?`, controlManifestDigest, nullableString(runscVersion), generationID); err != nil {
+WHERE generation_id = ?`,
+		digests.ControlManifestDigest,
+		nullableString(digests.ProjectedControlManifestDigest),
+		nullableString(digests.BundleDigest),
+		nullableString(digests.RuntimeConfigDigest),
+		nullableString(digests.SpecDigest),
+		nullableString(digests.RunscVersion),
+		generationID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE runtime_generations
 SET runsc_version = COALESCE(?, runsc_version)
-WHERE generation_id = ?`, nullableString(runscVersion), generationID); err != nil {
+WHERE generation_id = ?`, nullableString(digests.RunscVersion), generationID); err != nil {
 		return err
 	}
 	return tx.Commit()

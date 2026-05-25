@@ -41,7 +41,6 @@ const (
 	idleCheckpointInterval  = 5 * time.Minute
 	idleCheckpointThreshold = 30 * time.Minute
 	checkpointTimeout       = 2 * time.Minute
-	autoCheckpointEnabled   = false
 )
 
 var errGenerationBusy = errors.New("generation lifecycle is busy")
@@ -62,7 +61,7 @@ type runtimeDriver interface {
 	PrepareGeneration(context.Context, runtime.StartRequest) (runtime.GenerationArtifacts, error)
 	Destroy(context.Context, string) error
 	Interrupt(string) error
-	Checkpoint(context.Context, string) error
+	Checkpoint(context.Context, runtime.CheckpointRequest) error
 }
 
 type bridgeStore interface {
@@ -259,16 +258,17 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 	expiresAt := now.Add(s.cfg.SessionTTL)
 	session := store.Session{
-		ID:                id,
-		UserID:            labUserID,
-		Status:            string(sessionstate.Created),
-		Agent:             req.Agent,
-		Workspace:         filepath.Join(s.cfg.SessionsRoot, id),
-		RestoreID:         "phase3-" + id,
-		ClaudeSessionUUID: uuid.NewString(),
-		CreatedAt:         now,
-		UpdatedAt:         now,
-		ExpiresAt:         &expiresAt,
+		ID:                    id,
+		UserID:                labUserID,
+		Status:                string(sessionstate.Created),
+		Agent:                 req.Agent,
+		Workspace:             filepath.Join(s.cfg.SessionsRoot, id),
+		RestoreID:             "phase3-" + id,
+		ClaudeSessionUUID:     uuid.NewString(),
+		AutoCheckpointEnabled: s.cfg.Phase7.Checkpoint.AutoEnabled,
+		CreatedAt:             now,
+		UpdatedAt:             now,
+		ExpiresAt:             &expiresAt,
 	}
 	if err := os.MkdirAll(session.Workspace, 0o755); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -394,7 +394,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			s.failGenerationBeforeTurn(session.ID, allocation.GenerationID, allocation.Owner, err)
 			return err
 		}
-		if err := s.store.RecordGenerationRuntimeArtifacts(ctx, allocation.GenerationID, preparedArtifacts.ManifestDigest, preparedArtifacts.RunscVersion); err != nil {
+		if err := s.store.RecordGenerationRuntimeArtifactDigests(ctx, allocation.GenerationID, runtimeArtifactDigests(preparedArtifacts)); err != nil {
 			s.failGenerationBeforeTurn(session.ID, allocation.GenerationID, allocation.Owner, err)
 			return err
 		}
@@ -601,11 +601,26 @@ func (s *Server) runtimeStartRequest(session store.Session, generationID string,
 
 func runtimeArtifactsFromDetails(details store.RuntimeGenerationDetails) runtime.GenerationArtifacts {
 	return runtime.GenerationArtifacts{
-		BundleDir:      details.BundleDirPath,
-		SpecPath:       details.SpecPath,
-		ManifestPath:   details.ControlManifestPath,
-		ManifestDigest: details.ControlManifestDigest,
-		RunscVersion:   details.RunscVersion,
+		BundleDir:               details.BundleDirPath,
+		SpecPath:                details.SpecPath,
+		ManifestPath:            details.ControlManifestPath,
+		ManifestDigest:          details.ControlManifestDigest,
+		ProjectedManifestDigest: details.ProjectedControlManifestDigest,
+		BundleDigest:            details.BundleDigest,
+		RuntimeConfigDigest:     details.RuntimeConfigDigest,
+		SpecDigest:              details.SpecDigest,
+		RunscVersion:            details.RunscVersion,
+	}
+}
+
+func runtimeArtifactDigests(artifacts runtime.GenerationArtifacts) store.GenerationRuntimeArtifactDigests {
+	return store.GenerationRuntimeArtifactDigests{
+		ControlManifestDigest:          artifacts.ManifestDigest,
+		ProjectedControlManifestDigest: artifacts.ProjectedManifestDigest,
+		BundleDigest:                   artifacts.BundleDigest,
+		RuntimeConfigDigest:            artifacts.RuntimeConfigDigest,
+		SpecDigest:                     artifacts.SpecDigest,
+		RunscVersion:                   artifacts.RunscVersion,
 	}
 }
 
@@ -1381,123 +1396,153 @@ func (s *Server) MonitorIdleSessions(ctx context.Context) error {
 		s.log.Info("idle checkpoint monitor disabled because runsc host network is not checkpointable")
 		return nil
 	}
-
-	if err := s.reconcileCheckpointingSessions(ctx); err != nil {
-		s.log.Warn("failed to reconcile checkpointing sessions", "error", err)
-	}
-	if err := s.reconcileCheckpointedSessions(ctx); err != nil {
-		s.log.Warn("failed to reconcile checkpointed sessions", "error", err)
-	}
-	if !autoCheckpointEnabled {
-		s.log.Info("idle checkpoint monitor disabled because runsc restore cannot reconnect agent stdin")
+	if !s.cfg.Phase7.Checkpoint.AutoEnabled {
+		s.log.Info("idle checkpoint monitor disabled by policy")
 		return nil
 	}
+	if strings.TrimSpace(s.ownerUUID) == "" {
+		return fmt.Errorf("idle checkpoint monitor requires owner uuid")
+	}
 
-	ticker := time.NewTicker(idleCheckpointInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			if err := s.reconcileCheckpointingSessions(ctx); err != nil {
-				s.log.Warn("failed to reconcile checkpointing sessions", "error", err)
+	owner := store.GenerationLeaseOwner(s.ownerUUID)
+	interval := s.cfg.Phase7.Checkpoint.MonitorInterval.Duration
+	if interval <= 0 {
+		interval = idleCheckpointInterval
+	}
+	idleThreshold := s.cfg.Phase7.Checkpoint.IdleThreshold.Duration
+	if idleThreshold < 0 {
+		idleThreshold = idleCheckpointThreshold
+	}
+	heartbeatInterval := s.cfg.Phase7.Bridge.HeartbeatInterval.Duration
+	if heartbeatInterval <= 0 {
+		heartbeatInterval = 30 * time.Second
+	}
+	tick := func(now time.Time) {
+		candidates, err := s.store.ListAutoCheckpointCandidates(ctx, owner, now, idleThreshold)
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				s.log.Warn("failed to list auto checkpoint candidates", "error", err)
 			}
-			if err := s.reconcileCheckpointedSessions(ctx); err != nil {
-				s.log.Warn("failed to reconcile checkpointed sessions", "error", err)
-			}
-			sessions, err := s.store.ListSessionsByStatus(ctx, string(sessionstate.RunningIdle))
-			if err != nil {
-				s.log.Warn("failed to list idle sessions", "error", err)
+			return
+		}
+		for _, candidate := range candidates {
+			if !bridgeCheckpointReady(candidate.BridgeDirPath, now, heartbeatInterval) {
 				continue
 			}
-			for _, session := range sessions {
-				if session.LastActivityAt != nil && time.Since(*session.LastActivityAt) > idleCheckpointThreshold {
-					go s.checkpointSession(ctx, session)
-				}
+			if err := s.checkpointGeneration(ctx, candidate, owner, now); err != nil && !errors.Is(err, context.Canceled) {
+				s.log.Warn("auto checkpoint failed", "session_id", candidate.SessionID, "generation_id", candidate.GenerationID, "error", err)
 			}
+		}
+	}
+
+	tick(time.Now().UTC())
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case now := <-ticker.C:
+			tick(now.UTC())
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
 }
 
-func (s *Server) checkpointSession(ctx context.Context, session store.Session) {
-	s.log.Info("checkpointing idle session", "session_id", session.ID)
-
-	if err := s.store.UpdateSessionStatus(ctx, session.ID, string(sessionstate.Checkpointing), nil); err != nil {
-		s.log.Warn("failed to update session status to checkpointing", "session_id", session.ID, "error", err)
-		return
+func (s *Server) checkpointGeneration(ctx context.Context, candidate store.CheckpointCandidate, owner string, now time.Time) error {
+	if err := s.store.BeginGenerationCheckpoint(ctx, candidate.SessionID, candidate.GenerationID, owner, now); err != nil {
+		return err
 	}
-
+	details, err := s.store.GetRuntimeGenerationDetails(ctx, candidate.SessionID, candidate.GenerationID)
+	if err != nil {
+		abortNow := time.Now().UTC()
+		if abortErr := s.store.AbortGenerationCheckpoint(ctx, candidate.SessionID, candidate.GenerationID, owner, abortNow); abortErr != nil {
+			s.log.Warn("failed to abort generation checkpoint after metadata load failure", "session_id", candidate.SessionID, "generation_id", candidate.GenerationID, "error", abortErr)
+		}
+		return err
+	}
 	checkpointCtx, cancel := context.WithTimeout(ctx, checkpointTimeout)
 	defer cancel()
-	if err := s.runtime.Checkpoint(checkpointCtx, session.ID); err != nil {
-		s.log.Warn("checkpoint failed", "session_id", session.ID, "error", err)
-		if updateErr := s.store.UpdateSessionStatus(ctx, session.ID, string(sessionstate.RunningIdle), nil); updateErr != nil {
-			s.log.Warn("failed to revert session status after checkpoint error", "session_id", session.ID, "error", updateErr)
+	err = s.runtime.Checkpoint(checkpointCtx, runtime.CheckpointRequest{
+		SessionID:      candidate.SessionID,
+		GenerationID:   candidate.GenerationID,
+		CheckpointPath: details.CheckpointPath,
+	})
+	if err != nil {
+		abortNow := time.Now().UTC()
+		if abortErr := s.store.AbortGenerationCheckpoint(ctx, candidate.SessionID, candidate.GenerationID, owner, abortNow); abortErr != nil {
+			s.log.Warn("failed to abort generation checkpoint", "session_id", candidate.SessionID, "generation_id", candidate.GenerationID, "error", abortErr)
 		} else {
-			s.hub.Publish(events.Event{Type: "session." + string(sessionstate.RunningIdle), SessionID: session.ID, Payload: map[string]string{"checkpoint_error": err.Error()}})
+			s.hub.Publish(events.Event{Type: "session." + string(sessionstate.RunningIdle), SessionID: candidate.SessionID, GenerationID: candidate.GenerationID, Payload: map[string]string{"checkpoint_error": err.Error()}})
 		}
-		return
-	}
-
-	if err := s.store.UpdateSessionStatus(ctx, session.ID, string(sessionstate.Checkpointed), nil); err != nil {
-		s.log.Warn("failed to update session status to checkpointed", "session_id", session.ID, "error", err)
-		return
-	}
-
-	s.hub.Publish(events.Event{Type: "session." + string(sessionstate.Checkpointed), SessionID: session.ID})
-}
-
-func (s *Server) reconcileCheckpointingSessions(ctx context.Context) error {
-	sessions, err := s.store.ListSessionsByStatus(ctx, string(sessionstate.Checkpointing))
-	if err != nil {
 		return err
 	}
-	for _, session := range sessions {
-		checkpointPath := filepath.Join(s.cfg.CheckpointsRoot, session.ID)
-		if hasCheckpointImage(checkpointPath) {
-			if err := s.store.UpdateSessionStatus(ctx, session.ID, string(sessionstate.Checkpointed), nil); err != nil {
-				s.log.Warn("failed to mark recovered checkpointed session", "session_id", session.ID, "error", err)
-				continue
-			}
-			s.hub.Publish(events.Event{Type: "session." + string(sessionstate.Checkpointed), SessionID: session.ID, Payload: map[string]string{"recovered": "true"}})
-			continue
-		}
-		if time.Since(session.UpdatedAt) < checkpointTimeout {
-			continue
-		}
-		if err := s.store.UpdateSessionStatus(ctx, session.ID, string(sessionstate.RunningIdle), nil); err != nil {
-			s.log.Warn("failed to revert stale checkpointing session", "session_id", session.ID, "error", err)
-			continue
-		}
-		s.hub.Publish(events.Event{Type: "session." + string(sessionstate.RunningIdle), SessionID: session.ID, Payload: map[string]string{"checkpoint_recovered": "false"}})
+	completeNow := time.Now().UTC()
+	if err := s.store.CompleteGenerationCheckpoint(ctx, store.CompleteCheckpointParams{
+		SessionID:                       candidate.SessionID,
+		GenerationID:                    candidate.GenerationID,
+		Owner:                           owner,
+		CheckpointPath:                  details.CheckpointPath,
+		RunscPlatform:                   details.RunscPlatform,
+		RunscVersion:                    details.RunscVersion,
+		CheckpointBundleDigest:          details.BundleDigest,
+		CheckpointRuntimeConfigDigest:   details.RuntimeConfigDigest,
+		CheckpointControlManifestDigest: details.ProjectedControlManifestDigest,
+		Now:                             completeNow,
+	}); err != nil {
+		return err
 	}
+	s.hub.Publish(events.Event{Type: "session." + string(sessionstate.Checkpointed), SessionID: candidate.SessionID, GenerationID: candidate.GenerationID})
 	return nil
 }
 
-func (s *Server) reconcileCheckpointedSessions(ctx context.Context) error {
-	sessions, err := s.store.ListSessionsByStatus(ctx, string(sessionstate.Checkpointed))
-	if err != nil {
-		return err
+func bridgeCheckpointReady(root string, now time.Time, heartbeatInterval time.Duration) bool {
+	if strings.TrimSpace(root) == "" {
+		return false
 	}
-	for _, session := range sessions {
-		if err := s.store.UpdateSessionStatus(ctx, session.ID, string(sessionstate.RunningIdle), nil); err != nil {
-			s.log.Warn("failed to re-enable checkpointed session", "session_id", session.ID, "error", err)
-			continue
-		}
-		s.hub.Publish(events.Event{Type: "session." + string(sessionstate.RunningIdle), SessionID: session.ID, Payload: map[string]string{"checkpoint_recovered": "disabled"}})
+	if now.IsZero() {
+		now = time.Now().UTC()
 	}
-	return nil
+	if heartbeatInterval <= 0 {
+		heartbeatInterval = 30 * time.Second
+	}
+	maxAge := heartbeatInterval * 2
+	if maxAge < heartbeatInterval+5*time.Second {
+		maxAge = heartbeatInterval + 5*time.Second
+	}
+	heartbeatPath := filepath.Join(root, bridge.HeartbeatDir, bridge.BridgeHeartbeatFile)
+	readyPath := filepath.Join(root, bridge.HeartbeatDir, bridge.CheckpointReadyFile)
+	return controlFileFresh(heartbeatPath, now, maxAge) && controlFileFresh(readyPath, now, maxAge)
 }
 
-func hasCheckpointImage(path string) bool {
-	required := []string{"checkpoint.img", "pages.img", "pages_meta.img"}
-	for _, name := range required {
-		info, err := os.Stat(filepath.Join(path, name))
-		if err != nil || info.IsDir() || info.Size() == 0 {
-			return false
-		}
+func controlFileFresh(path string, now time.Time, maxAge time.Duration) bool {
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return false
 	}
-	return true
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	timestamp, ok := parseBridgeControlTimestamp(strings.TrimSpace(string(data)))
+	if !ok {
+		timestamp = info.ModTime()
+	}
+	if timestamp.After(now.Add(5 * time.Second)) {
+		return false
+	}
+	return now.Sub(timestamp) <= maxAge
+}
+
+func parseBridgeControlTimestamp(raw string) (time.Time, bool) {
+	if raw == "" {
+		return time.Time{}, false
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return parsed.UTC(), true
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(0, value).UTC(), true
 }

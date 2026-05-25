@@ -132,6 +132,16 @@ class BridgeClientTest(unittest.TestCase):
             messages = [envelope for _, _, envelope in outbox.read_all()]
             self.assertEqual(messages[-1]["type"], "heartbeat")
 
+    def test_checkpoint_ready_marker_is_written_and_cleared(self):
+        with tempfile.TemporaryDirectory() as root:
+            client = bridge.BridgeClient(root, "sess", "gen", "claude", poll_interval=0.001)
+            client.mark_checkpoint_ready()
+            ready = Path(root) / bridge.HEARTBEAT / bridge.CHECKPOINT_READY
+            self.assertTrue(ready.exists())
+            self.assertTrue(ready.read_text(encoding="ascii").strip().isdigit())
+            client.clear_checkpoint_ready()
+            self.assertFalse(ready.exists())
+
     def test_heartbeat_loop_uses_configured_interval(self):
         with tempfile.TemporaryDirectory() as root:
             args = argparse_namespace(
@@ -224,6 +234,8 @@ class BridgeClientTest(unittest.TestCase):
             self.assertEqual(output["turn_id"], 9)
             self.assertEqual(output["payload"]["output_sequence"], 1)
             self.assertEqual(output["payload"]["payload"]["line"], '{"type":"harness.shell_output","text":"ok"}')
+            ready = Path(root) / bridge.HEARTBEAT / bridge.CHECKPOINT_READY
+            self.assertTrue(ready.exists())
 
     def test_claim_loop_resumes_leased_turn_from_hello_ack(self):
         with tempfile.TemporaryDirectory() as root:
@@ -349,6 +361,7 @@ class BridgeClientTest(unittest.TestCase):
             run_network_probe.assert_not_called()
             self.assertEqual([message["type"] for message in sent if message["type"] in {"hello", "probe_network"}], ["hello", "probe_network"])
             self.assertTrue((Path(root) / bridge.HEARTBEAT / bridge.BRIDGE_HEARTBEAT).exists())
+            self.assertTrue((Path(root) / bridge.HEARTBEAT / bridge.CHECKPOINT_READY).exists())
 
     def test_configured_secret_reads_materialized_secret(self):
         with tempfile.TemporaryDirectory() as root:
