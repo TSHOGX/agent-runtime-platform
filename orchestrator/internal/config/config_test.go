@@ -195,11 +195,46 @@ func TestValidatePhase7Config(t *testing.T) {
 		want   string
 	}{
 		{
+			name: "run dir",
+			mutate: func(cfg *Phase7Config) {
+				cfg.RunDir = ""
+			},
+			want: "harness.run_dir is required",
+		},
+		{
 			name: "session ttl",
 			mutate: func(cfg *Phase7Config) {
 				cfg.SessionTTL.Duration = 0
 			},
 			want: "harness.session_ttl must be > 0",
+		},
+		{
+			name: "max sessions",
+			mutate: func(cfg *Phase7Config) {
+				cfg.MaxSessions = 0
+			},
+			want: "harness.max_sessions must be > 0",
+		},
+		{
+			name: "missing cidr",
+			mutate: func(cfg *Phase7Config) {
+				cfg.Network.CIDRPool.Prefix = netip.Prefix{}
+			},
+			want: "harness.network.cidr_pool is required",
+		},
+		{
+			name: "ipv6 cidr",
+			mutate: func(cfg *Phase7Config) {
+				cfg.Network.CIDRPool.Prefix = netip.MustParsePrefix("fd00::/120")
+			},
+			want: "harness.network.cidr_pool must be IPv4",
+		},
+		{
+			name: "too narrow cidr",
+			mutate: func(cfg *Phase7Config) {
+				cfg.Network.CIDRPool.Prefix = netip.MustParsePrefix("10.0.0.0/31")
+			},
+			want: "harness.network.cidr_pool prefix length must be <= 30",
 		},
 		{
 			name: "cidr capacity",
@@ -217,6 +252,27 @@ func TestValidatePhase7Config(t *testing.T) {
 			want: "doris_fe_hosts must be non-empty",
 		},
 		{
+			name: "missing doris be hosts",
+			mutate: func(cfg *Phase7Config) {
+				cfg.Network.Egress.DorisBEHosts = nil
+			},
+			want: "doris_be_hosts must be non-empty",
+		},
+		{
+			name: "missing doris ports",
+			mutate: func(cfg *Phase7Config) {
+				cfg.Network.Egress.DorisPorts = nil
+			},
+			want: "doris_ports must be non-empty",
+		},
+		{
+			name: "invalid doris port",
+			mutate: func(cfg *Phase7Config) {
+				cfg.Network.Egress.DorisPorts = []int{0}
+			},
+			want: "doris_ports contains invalid port 0",
+		},
+		{
 			name: "hostname needs dns",
 			mutate: func(cfg *Phase7Config) {
 				cfg.Network.Egress.DorisFEHosts = []string{"doris-fe.local"}
@@ -232,12 +288,82 @@ func TestValidatePhase7Config(t *testing.T) {
 			want: "get_healthz must be non-empty",
 		},
 		{
+			name: "missing unauthorized probe statuses",
+			mutate: func(cfg *Phase7Config) {
+				cfg.Probe.AcceptStatus.PostV1Messages.Unauthorized = nil
+			},
+			want: "post_v1_messages.unauthorized must be non-empty",
+		},
+		{
+			name: "missing malformed probe statuses",
+			mutate: func(cfg *Phase7Config) {
+				cfg.Probe.AcceptStatus.PostV1Messages.MalformedAuthenticated = nil
+			},
+			want: "post_v1_messages.malformed_authenticated must be non-empty",
+		},
+		{
+			name: "pre start attempts",
+			mutate: func(cfg *Phase7Config) {
+				cfg.Probe.PreStartAttempts = 0
+			},
+			want: "pre_start_attempts must be > 0",
+		},
+		{
+			name: "pre start interval",
+			mutate: func(cfg *Phase7Config) {
+				cfg.Probe.PreStartInterval.Duration = 0
+			},
+			want: "pre_start_interval must be > 0",
+		},
+		{
+			name: "post start attempts",
+			mutate: func(cfg *Phase7Config) {
+				cfg.Probe.PostStartAttempts = 0
+			},
+			want: "post_start_attempts must be > 0",
+		},
+		{
+			name: "post start interval",
+			mutate: func(cfg *Phase7Config) {
+				cfg.Probe.PostStartInterval.Duration = 0
+			},
+			want: "post_start_interval must be > 0",
+		},
+		{
+			name: "lease ttl",
+			mutate: func(cfg *Phase7Config) {
+				cfg.Bridge.LeaseTTL.Duration = 0
+			},
+			want: "lease_ttl must be > 0",
+		},
+		{
 			name: "heartbeat lease",
 			mutate: func(cfg *Phase7Config) {
 				cfg.Bridge.LeaseTTL.Duration = 30 * time.Second
 				cfg.Bridge.HeartbeatInterval.Duration = 30 * time.Second
 			},
 			want: "heartbeat_interval must be > 0 and <",
+		},
+		{
+			name: "poll interval",
+			mutate: func(cfg *Phase7Config) {
+				cfg.Bridge.PollInterval.Duration = 0
+			},
+			want: "poll_interval must be > 0",
+		},
+		{
+			name: "ack grace positive",
+			mutate: func(cfg *Phase7Config) {
+				cfg.Bridge.AckStartedGrace.Duration = 0
+			},
+			want: "ack_started_grace must be > 0",
+		},
+		{
+			name: "reconnect grace",
+			mutate: func(cfg *Phase7Config) {
+				cfg.Bridge.ReconnectGrace.Duration = -time.Second
+			},
+			want: "reconnect_grace must be >= 0",
 		},
 		{
 			name: "ack reconnect grace",
@@ -254,6 +380,34 @@ func TestValidatePhase7Config(t *testing.T) {
 				cfg.Events.RetentionRows = 0
 			},
 			want: "cannot both be zero",
+		},
+		{
+			name: "negative event retention window",
+			mutate: func(cfg *Phase7Config) {
+				cfg.Events.RetentionWindow.Duration = -time.Second
+			},
+			want: "retention_window must be >= 0",
+		},
+		{
+			name: "negative event retention rows",
+			mutate: func(cfg *Phase7Config) {
+				cfg.Events.RetentionRows = -1
+			},
+			want: "retention_rows must be >= 0",
+		},
+		{
+			name: "emit output batch rows",
+			mutate: func(cfg *Phase7Config) {
+				cfg.Events.EmitOutputBatchMaxRows = 0
+			},
+			want: "emit_output_batch_max_rows must be > 0",
+		},
+		{
+			name: "emit output batch age",
+			mutate: func(cfg *Phase7Config) {
+				cfg.Events.EmitOutputBatchMaxAge.Duration = 0
+			},
+			want: "emit_output_batch_max_age must be > 0",
 		},
 		{
 			name: "checkpoint monitor",
@@ -277,6 +431,38 @@ func TestValidatePhase7Config(t *testing.T) {
 			want: "failed_retention must be >= 0",
 		},
 		{
+			name: "secrets root required",
+			mutate: func(cfg *Phase7Config) {
+				cfg.Secrets.Root = ""
+			},
+			want: "harness.secrets.root is required",
+		},
+		{
+			name: "secrets readers gid",
+			mutate: func(cfg *Phase7Config) {
+				cfg.Secrets.ReadersGID = 0
+			},
+			want: "harness.secrets.readers_gid must be > 0",
+		},
+		{
+			name: "secrets root missing",
+			mutate: func(cfg *Phase7Config) {
+				cfg.Secrets.Root = filepath.Join(t.TempDir(), "missing")
+			},
+			want: "must exist",
+		},
+		{
+			name: "secrets root file",
+			mutate: func(cfg *Phase7Config) {
+				path := filepath.Join(t.TempDir(), "secrets-file")
+				if err := os.WriteFile(path, []byte("not a directory"), 0o640); err != nil {
+					t.Fatalf("write secrets file: %v", err)
+				}
+				cfg.Secrets.Root = path
+			},
+			want: "must be a directory",
+		},
+		{
 			name: "secrets root mode",
 			mutate: func(cfg *Phase7Config) {
 				dir := t.TempDir()
@@ -288,6 +474,13 @@ func TestValidatePhase7Config(t *testing.T) {
 				cfg.Secrets.ReadersGID = 1234
 			},
 			want: "must have mode 0750",
+		},
+		{
+			name: "secrets root group",
+			mutate: func(cfg *Phase7Config) {
+				cfg.Secrets.ReadersGID = 4321
+			},
+			want: "must have group 4321",
 		},
 	}
 
