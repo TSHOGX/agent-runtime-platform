@@ -84,6 +84,7 @@ The main difference from the current architecture is the **Agent Bridge**: inste
 6. [checkpoint-restore.md](./checkpoint-restore.md) — Claude logical resume, physical checkpoint/restore, digest equivalence rules, `unknown_after_ack_started` UX.
 7. [implementation-plan.md](./implementation-plan.md) — Phase 7 configuration schema, Step 1–10 PR boundaries with prerequisites and acceptance signals, operational notes.
 8. [test-matrix.md](./test-matrix.md) — observable assertions that make every invariant a runtime guarantee. Cross-references every other file.
+9. [release-qualification.md](./release-qualification.md) — release-only gates for the pinned proxy contract, gVisor bridge durability lab, and live turn-start latency benchmark.
 
 ## Out of scope (deferred to Phase 8)
 
