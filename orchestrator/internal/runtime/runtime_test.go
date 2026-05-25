@@ -766,6 +766,9 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndSecrets(t *testing.T
 	if manifest.GenerationID != details.GenerationID || manifest.NetworkProfileID != details.NetworkProfileID || manifest.AgentRuntimeProfileID != details.AgentRuntimeProfileID {
 		t.Fatalf("manifest missing identity: %+v", manifest)
 	}
+	if manifest.ManifestVersion != 1 {
+		t.Fatalf("manifest_version=%d want 1", manifest.ManifestVersion)
+	}
 	if manifest.WorkspacePath != "/sessions/sess_1" || manifest.AgentHomePath != "/agent-homes/sess_1" {
 		t.Fatalf("unexpected workspace/home paths: %+v", manifest)
 	}
@@ -819,6 +822,7 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndSecrets(t *testing.T
 	env := specEnv(spec.Process.Env)
 	if env["HARNESS_BRIDGE_DIR"] != "/harness-control/bridge" ||
 		env["HARNESS_BRIDGE_MODE"] != "claim-loop" ||
+		env["HARNESS_EXPECTED_MANIFEST_VERSION"] != "1" ||
 		env["HARNESS_BRIDGE_HEARTBEAT_INTERVAL"] != "20" ||
 		env["HARNESS_PROBE_HEALTHZ_STATUSES"] != "200" ||
 		env["HARNESS_PROBE_MESSAGE_STATUSES"] != "400" {
