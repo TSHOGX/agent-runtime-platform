@@ -65,7 +65,7 @@ Passing condition: a fsynced sandbox-side bridge message remains visible to the 
 
 The live release benchmark measures `POST /api/sessions/{id}/messages` enqueue to committed `ack_turn_started` under lab load. The bridge must already be connected and probed so the measurement covers turn-start control-plane latency, not cold sandbox startup.
 
-Run from the repository root with one or more prewarmed `running_idle` sessions:
+Run from the repository root with one or more prewarmed `running_idle` sessions. When multiple session IDs are provided, the tool posts to them concurrently and reports per-session samples plus p50/p95/p99/max:
 
 ```bash
 PHASE7_LATENCY_SESSION_IDS=sess_a,sess_b tools/phase7/live-turn-start-latency.py

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import concurrent.futures
 import http.cookiejar
 import json
 import math
@@ -80,6 +81,10 @@ def login_if_needed(opener, base_url, shared_secret, cookie):
         raise RuntimeError(f"login failed: status={status} body={body}")
 
 
+def cookie_header_from_jar(jar):
+    return "; ".join(f"{cookie.name}={cookie.value}" for cookie in jar)
+
+
 def open_db(path):
     uri = "file:" + urllib.parse.quote(path) + "?mode=ro"
     return sqlite3.connect(uri, uri=True, timeout=1)
@@ -132,54 +137,69 @@ def percentile(values, pct):
     return ordered[min(index, len(ordered) - 1)]
 
 
+def measure_session(args, base_url, session_id, cookie_header):
+    conn = open_db(args.db)
+    try:
+        nonce = uuid.uuid4().hex
+        content = args.content_template.replace("{session_id}", session_id).replace("{nonce}", nonce)
+        deadline = time.monotonic() + args.timeout_s
+        opener = urllib.request.build_opener()
+        start = time.monotonic()
+        status, body = http_json(
+            opener,
+            "POST",
+            f"{base_url}/api/sessions/{urllib.parse.quote(session_id)}/messages",
+            {"content": content},
+            cookie=cookie_header,
+        )
+        if status != 202:
+            raise RuntimeError(f"POST message failed for {session_id}: status={status} body={body}")
+        turn_id = wait_for_turn(conn, session_id, content, deadline, args.poll_ms / 1000.0)
+        event_id = wait_for_ack(conn, turn_id, deadline, args.poll_ms / 1000.0)
+        elapsed_ms = (time.monotonic() - start) * 1000.0
+        return {
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "ack_event_id": event_id,
+            "latency_ms": elapsed_ms,
+        }
+    finally:
+        conn.close()
+
+
 def main():
     args = parse_args()
     session_ids = [part.strip() for part in args.session_ids.split(",") if part.strip()]
     if not session_ids:
         raise SystemExit("provide --session-ids or PHASE7_LATENCY_SESSION_IDS")
-    poll_s = args.poll_ms / 1000.0
     base_url = args.url.rstrip("/")
 
     jar = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
     login_if_needed(opener, base_url, args.shared_secret, args.cookie)
+    cookie_header = args.cookie or cookie_header_from_jar(jar)
 
     conn = open_db(args.db)
-    samples = []
     try:
         for session_id in session_ids:
             require_idle_session(conn, session_id)
-        for session_id in session_ids:
-            nonce = uuid.uuid4().hex
-            content = args.content_template.replace("{session_id}", session_id).replace("{nonce}", nonce)
-            deadline = time.monotonic() + args.timeout_s
-            start = time.monotonic()
-            status, body = http_json(
-                opener,
-                "POST",
-                f"{base_url}/api/sessions/{urllib.parse.quote(session_id)}/messages",
-                {"content": content},
-                cookie=args.cookie,
-            )
-            if status != 202:
-                raise RuntimeError(f"POST message failed for {session_id}: status={status} body={body}")
-            turn_id = wait_for_turn(conn, session_id, content, deadline, poll_s)
-            event_id = wait_for_ack(conn, turn_id, deadline, poll_s)
-            elapsed_ms = (time.monotonic() - start) * 1000.0
-            samples.append(
-                {
-                    "session_id": session_id,
-                    "turn_id": turn_id,
-                    "ack_event_id": event_id,
-                    "latency_ms": elapsed_ms,
-                }
-            )
     finally:
         conn.close()
+
+    samples = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(session_ids)) as executor:
+        futures = [
+            executor.submit(measure_session, args, base_url, session_id, cookie_header)
+            for session_id in session_ids
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            samples.append(future.result())
+    samples.sort(key=lambda sample: sample["session_id"])
 
     latencies = [sample["latency_ms"] for sample in samples]
     summary = {
         "budget_ms": args.budget_ms,
+        "concurrent_sessions": len(session_ids),
         "samples": samples,
         "p50_ms": percentile(latencies, 50),
         "p95_ms": percentile(latencies, 95),
