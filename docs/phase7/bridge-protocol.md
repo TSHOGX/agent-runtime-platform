@@ -150,9 +150,9 @@ The same logic applies to a bridge that did not crash but momentarily lost trans
 
 Claude completion: stream-json `result success`, `result non-success`, or `error`. Shell completion: `harness.turn_done`. Completion is written to the durable turn ledger before the session is marked idle.
 
-## SSE Wire Protocol (Step 8)
+## SSE Wire Protocol
 
-Step 8 promotes the existing global SSE endpoint at `/api/events/stream` from `data:`-only frames to a typed protocol with `id:` (host event_id) and `event:` (event type) lines. The frontend reconnects with `Last-Event-ID` and the server replays missed events from the durable event log.
+The global SSE endpoint at `/api/events/stream` emits typed frames with `id:` (host event_id) and `event:` (event type) lines. The frontend reconnects with `Last-Event-ID` when the browser supplies it and also passes `?last_event_id=` as a query-string fallback when it recreates the stream; the server replays missed events from the durable event log.
 
 ### Why a global stream
 
@@ -160,9 +160,9 @@ The orchestrator exposes one global SSE endpoint that the frontend opens once pe
 
 For the global stream to work, **`event_id` must be globally monotonic per orchestrator process**, not per session. The host event store assigns `event_id` from a single sequence; the SQL is `INSERT INTO events (...) RETURNING event_id` against an `INTEGER PRIMARY KEY AUTOINCREMENT` column under the orchestrator's single-writer SQLite. `Last-Event-ID` on the global stream is therefore one cursor that survives session selection changes. A cursor captured under one `?session_id=` filter may only be reused with the same filter; widening to a different filter, or to the global stream, starts from a fresh cursor.
 
-### Phase 7a vs 7b scoping
+### Implementation scope
 
-Phase 7a lands the `events` table and indexes only (Step 1) and continues to use the existing `data:`-only SSE writer in `orchestrator/internal/server/server.go` and the existing `EventSource(url)` consumer in `frontend/components/harness-provider.tsx`. The typed `id:`/`event:` wire format, `Last-Event-ID` handling, the `?last_event_id=` query-string fallback, and the `replay_gap` synthetic event all land at **Step 8 (Phase 7b)** together with the replay support and retention enforcement on the existing global `/api/events/stream` endpoint, since they require the bridge to be the executor and the host event store to be the source of truth for `event_id`. The contract below is the Step 8 deliverable; it is written up front because Step 1 must already allocate `event_id` as the cursor.
+The durable event table and global `event_id` cursor are live in the orchestrator. `orchestrator/internal/server/server.go` writes `id:` and `event:` SSE lines, parses `Last-Event-ID` with `?last_event_id=` fallback, and emits the `replay_gap` synthetic event when retention prevents a lossless replay. `frontend/components/harness-provider.tsx` subscribes once to the global stream, tracks the last seen global event id, registers typed listeners, and refreshes state after a replay gap.
 
 ### Wire format
 
@@ -217,6 +217,6 @@ data: {"requested_last_event_id": 482917, "oldest_available": 600000,
 
 `session_id_filter` echoes the active `?session_id=` filter (or null if no filter is in effect). The server resumes from the oldest retained event matching the filter; it never reuses a filtered cursor across a different filter scope. The frontend treats `replay_gap` as a directive to drop its in-memory hub state and refetch via `/api/sessions` (and per-session `/api/sessions/{id}` for the currently-selected session) and the polling endpoint, then re-attach the SSE stream from the gap event's id forward. This is also the contract for the rare case where a client's first event is older than retention because of an unusually long-lived idle session — the gap event still fires.
 
-### Frontend implementation note (Step 8)
+### Frontend implementation note
 
-`frontend/components/harness-provider.tsx` currently constructs `new EventSource(buildEventsStreamUrl())` without retaining the last seen id, and the orchestrator handler in `orchestrator/internal/server/server.go` writes `data:` frames only. Step 8 updates both: the server's SSE writer emits `id:` and `event:` lines (and a `replay_gap` synthetic event when needed), and the provider tracks the last seen id (a single integer in the global cursor space) to populate the query-string fallback when the browser does not send `Last-Event-ID` on the wire (e.g., across a navigation that recreates the EventSource). Tests assert (a) reconnect after a server restart resumes from `Last-Event-ID + 1` with no duplicates and no gaps across all sessions in the stream, (b) reconnect with a stale id past retention triggers exactly one `replay_gap` event followed by live tail, (c) typed listeners on the client receive `emit_output` frames as that event type, not as the default `message` channel, and (d) lifecycle frames for non-selected sessions arrive on the global stream and the sidebar's session list re-converges from those frames after a transient disconnect.
+`frontend/components/harness-provider.tsx` keeps one global `EventSource` open through the same-origin proxy and demultiplexes events client-side. The provider tracks the last seen id (a single integer in the global cursor space) to populate the query-string fallback when the browser does not send `Last-Event-ID` on the wire, such as across a navigation that recreates the EventSource. Server tests assert replay from `Last-Event-ID + 1`, header precedence over the query fallback, typed `event:` frames, session-filtered replay semantics, and `replay_gap` emission when retention has pruned the requested cursor.

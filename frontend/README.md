@@ -60,7 +60,7 @@ Environment overrides:
 
 - The UI checks `/api/healthz` first.
 - If the real backend is unavailable or a proxied HTTP request fails, the app shows the backend-unreachable state instead of a mock workspace.
-- Live events come from `GET /api/events/stream?session_id=<id>` through the frontend proxy.
+- Live events come from the global `GET /api/events/stream` SSE endpoint through the frontend proxy, with `last_event_id` replay fallback when the stream reconnects.
 - The stream renders `agent.delta`, `agent.message`, `agent.output`, `system.status`, and session lifecycle events.
 - After a successful message post, the provider also polls session/messages/artifacts for a short period so the view can recover from missed events.
 - The same-origin SSE path replaced the earlier direct browser WebSocket connection.
@@ -73,6 +73,6 @@ Environment overrides:
 - `Agent` maps to Claude Code; `Shell` maps to the PTY-backed shell session.
 - Send a task prompt through `POST /api/sessions/:id/messages`.
 - Interrupt a running shell session through `POST /api/sessions/:id/interrupt`.
-- The orchestrator currently keeps a session alive across turns once the sandbox is running.
-- Automatic idle checkpointing is currently disabled; session recovery work is tracked in the Phase 7 checkpoint-safe control-plane design.
+- The orchestrator keeps per-generation resources alive across turns once the sandbox is running.
+- Automatic idle checkpointing is a default-off Phase 7 policy; `HARNESS_AUTO_CHECKPOINT_ENABLED=true` enables it for newly created sessions in lab/test environments.
 - `sh` remains useful for smoke tests and shell-style debugging.
