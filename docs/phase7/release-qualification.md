@@ -65,6 +65,20 @@ Passing condition: a fsynced sandbox-side bridge message remains visible to the 
 
 The live release benchmark measures `POST /api/sessions/{id}/messages` enqueue to committed `ack_turn_started` under lab load. The bridge must already be connected and probed so the measurement covers turn-start control-plane latency, not cold sandbox startup.
 
+Run from the repository root with one or more prewarmed `running_idle` sessions:
+
+```bash
+PHASE7_LATENCY_SESSION_IDS=sess_a,sess_b tools/phase7/live-turn-start-latency.py
+```
+
+Useful overrides:
+
+- `PHASE7_ORCHESTRATOR_URL` defaults to `http://127.0.0.1:8090`.
+- `PHASE7_DB` defaults to `/var/lib/harness/sessions/orchestrator.db`.
+- `PHASE7_SHARED_SECRET` logs in through `/login` when orchestrator auth is enabled.
+- `PHASE7_AUTH_COOKIE` sends an existing raw `Cookie` header instead of logging in.
+- `PHASE7_LATENCY_CONTENT` changes the message body; `{session_id}` and `{nonce}` are replaced per sample.
+
 Required evidence:
 
 - Candidate git commit.
