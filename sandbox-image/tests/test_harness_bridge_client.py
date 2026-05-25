@@ -242,6 +242,81 @@ class BridgeClientTest(unittest.TestCase):
             ready = Path(root) / bridge.HEARTBEAT / bridge.CHECKPOINT_READY
             self.assertTrue(ready.exists())
 
+    def test_claim_loop_handles_multiple_turns(self):
+        with tempfile.TemporaryDirectory() as root:
+            args = argparse_namespace(
+                bridge_dir=root,
+                session_id="sess",
+                generation_id="gen",
+                agent="sh",
+                poll_interval=0.001,
+                timeout=0.1,
+                base_url="",
+                healthz_statuses="200",
+                message_statuses="400",
+                http_timeout=0.1,
+                heartbeat_interval=60,
+                idle_interval=0.001,
+                max_turns=2,
+                max_empty_polls=0,
+            )
+            grants = [
+                {"turn_id": 9, "sequence": 1, "content": "first"},
+                {"turn_id": 10, "sequence": 2, "content": "second"},
+            ]
+            inbox = bridge.Queue(root, bridge.INBOX)
+            original_write = bridge.Queue.write
+
+            def write_and_respond(queue, envelope):
+                message_type = envelope.get("type")
+                request_id = envelope.get("request_id")
+                if queue.name == bridge.OUTBOX and message_type in {"hello", "probe_network", "claim_next_turn"}:
+                    response_type = "no_work"
+                    payload = {}
+                    if message_type == "hello":
+                        response_type = "hello_ack"
+                        payload = {"last_output_sequence_by_turn": {}}
+                    elif message_type == "claim_next_turn" and grants:
+                        response_type = "grant"
+                        payload = grants.pop(0)
+                    inbox.write(
+                        {
+                            "message_id": f"host_{message_type}_{request_id}",
+                            "request_id": request_id,
+                            "type": response_type,
+                            "session_id": "sess",
+                            "generation_id": "gen",
+                            "payload": payload,
+                        }
+                    )
+                return original_write(queue, envelope)
+
+            class FakeRunner:
+                def __init__(self):
+                    self.contents = []
+
+                def run_turn(self, content, emit):
+                    self.contents.append(content)
+                    emit("stdout", content + " output")
+                    return "completed", "", ""
+
+                def close(self):
+                    pass
+
+            runner = FakeRunner()
+            with mock.patch.object(bridge.Queue, "write", write_and_respond):
+                with mock.patch.object(bridge, "sandbox_source_ip", return_value="10.240.0.2"):
+                    bridge.run_claim_loop(args, runner=runner)
+
+            self.assertEqual(runner.contents, ["first", "second"])
+            messages = [envelope for _, _, envelope in bridge.Queue(root, bridge.OUTBOX).read_all()]
+            self.assertEqual([message["type"] for message in messages].count("claim_next_turn"), 2)
+            self.assertEqual([message["turn_id"] for message in messages if message["type"] == "ack_turn_started"], [9, 10])
+            self.assertEqual([message["turn_id"] for message in messages if message["type"] == "ack_turn_completed"], [9, 10])
+            outputs = [message for message in messages if message["type"] == "emit_output"]
+            self.assertEqual([message["turn_id"] for message in outputs], [9, 10])
+            self.assertEqual([message["payload"]["output_sequence"] for message in outputs], [1, 1])
+
     def test_claim_loop_resumes_leased_turn_from_hello_ack(self):
         with tempfile.TemporaryDirectory() as root:
             args = argparse_namespace(
@@ -445,6 +520,55 @@ class BridgeClientTest(unittest.TestCase):
         self.assertIn("/usr/local/bin/claude", command)
         self.assertNotIn("ANTHROPIC_API_KEY", captured["env"])
         self.assertIn('"text":"hello"', captured["process"].stdin.writes[0])
+
+    def test_claude_runner_resumes_after_first_turn(self):
+        class FakeStdin:
+            def write(self, value):
+                pass
+
+            def close(self):
+                pass
+
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = FakeStdin()
+                self.stdout = iter(['{"type":"result","result":"ok"}\n'])
+
+            def wait(self):
+                return 0
+
+        commands = []
+
+        def popen(command, **kwargs):
+            commands.append(command)
+            return FakeProcess()
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "CLAUDE_SESSION_UUID": "11111111-2222-3333-4444-555555555555",
+                "SESSION_ID": "sess",
+                "HARNESS_AGENT_HOME": "/agent-homes/sess",
+                "HARNESS_AGENT_UID": "65534",
+                "HARNESS_AGENT_GID": "65534",
+                "HARNESS_SECRET_READERS_GID": "12345",
+                "ANTHROPIC_BASE_URL": "http://10.240.0.1:8082",
+                "SECRET_MOUNT_PATH": "/harness-secrets",
+                "ANTHROPIC_API_KEY_SECRET_ID": "anthropic_api_key",
+                "ANTHROPIC_AUTH_TOKEN_SECRET_ID": "anthropic_auth_token",
+                "SECRET_VERSION": "local",
+            },
+            clear=True,
+        ):
+            with mock.patch.object(bridge.subprocess, "Popen", side_effect=popen):
+                runner = bridge.ClaudeTurnRunner()
+                runner.run_turn("first", lambda stream, line: None)
+                runner.run_turn("second", lambda stream, line: None)
+
+        self.assertIn("--session-id", commands[0])
+        self.assertNotIn("--resume", commands[0])
+        self.assertIn("--resume", commands[1])
+        self.assertNotIn("--session-id", commands[1])
 
 
 class EntrypointStaticTest(unittest.TestCase):
