@@ -837,6 +837,137 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ne
 	}
 }
 
+func TestClaimNextTurnPreservesSequenceOrderingAfterRecoveryRequeue(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	cfg := testAllocatorConfig(t)
+	cfg.CIDRPool = netip.MustParsePrefix("10.240.0.0/27")
+	now := time.Now().UTC()
+	ownerLease := GenerationLeaseOwner(owner.UUID)
+
+	for _, tc := range []struct {
+		name              string
+		requeuedSequence  int64
+		freshSequence     int64
+		wantContent       string
+		wantAttempt       int
+		wantRequeuedClaim bool
+	}{
+		{
+			name:              "requeued lower sequence wins",
+			requeuedSequence:  10,
+			freshSequence:     20,
+			wantContent:       "retry me",
+			wantAttempt:       1,
+			wantRequeuedClaim: true,
+		},
+		{
+			name:              "fresh lower sequence wins",
+			requeuedSequence:  20,
+			freshSequence:     10,
+			wantContent:       "fresh work",
+			wantAttempt:       0,
+			wantRequeuedClaim: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sessionID := "sess_order_" + strings.NewReplacer(" ", "_").Replace(tc.name)
+			createStoreSession(t, ctx, st, sessionID)
+			oldAllocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+				SessionID: sessionID,
+				Owner:     ownerLease,
+				LeaseTTL:  time.Minute,
+				Now:       now.Add(-3 * time.Minute),
+				Config:    cfg,
+			})
+			if err != nil {
+				t.Fatalf("allocate old generation: %v", err)
+			}
+			if err := st.MarkGenerationResourcesLive(ctx, sessionID, oldAllocation.GenerationID, oldAllocation.Owner, now.Add(-3*time.Minute+time.Second)); err != nil {
+				t.Fatalf("mark old generation live: %v", err)
+			}
+			requeuedTurnID, err := st.EnqueueTurn(ctx, sessionID, "retry me", now.Add(-3*time.Minute+2*time.Second))
+			if err != nil {
+				t.Fatalf("enqueue requeued turn: %v", err)
+			}
+			if grant, ok, err := st.ClaimNextTurn(ctx, ClaimNextTurnParams{
+				SessionID:    sessionID,
+				GenerationID: oldAllocation.GenerationID,
+				Owner:        oldAllocation.Owner,
+				RequestID:    "req_old_" + sessionID,
+				LeaseTTL:     30 * time.Second,
+				Now:          now.Add(-3*time.Minute + 3*time.Second),
+			}); err != nil || !ok || grant.TurnID != requeuedTurnID {
+				t.Fatalf("claim old turn setup: ok=%v grant=%+v err=%v", ok, grant, err)
+			}
+
+			recovered, err := st.RecoverAllocations(ctx, StartupRecoveryParams{
+				OwnerUUID:       owner.UUID,
+				Now:             now,
+				LeaseTTL:        time.Minute,
+				ReconnectGrace:  time.Minute,
+				AckStartedGrace: 2 * time.Minute,
+			})
+			if err != nil {
+				t.Fatalf("recover allocations: %v", err)
+			}
+			if recovered.ExpiredLeasedRequeued != 1 {
+				t.Fatalf("unexpected recovery result: %+v", recovered)
+			}
+
+			freshTurnID, err := st.EnqueueTurn(ctx, sessionID, "fresh work", now.Add(time.Second))
+			if err != nil {
+				t.Fatalf("enqueue fresh turn: %v", err)
+			}
+			if _, err := st.db.ExecContext(ctx, `UPDATE turns SET sequence = ? WHERE id = ?`, tc.requeuedSequence, requeuedTurnID); err != nil {
+				t.Fatalf("set requeued sequence: %v", err)
+			}
+			if _, err := st.db.ExecContext(ctx, `UPDATE turns SET sequence = ? WHERE id = ?`, tc.freshSequence, freshTurnID); err != nil {
+				t.Fatalf("set fresh sequence: %v", err)
+			}
+
+			newAllocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+				SessionID: sessionID,
+				ExpectedGenerationID: sql.NullString{
+					String: oldAllocation.GenerationID,
+					Valid:  true,
+				},
+				Owner:    ownerLease,
+				LeaseTTL: time.Minute,
+				Now:      now.Add(2 * time.Second),
+				Config:   cfg,
+			})
+			if err != nil {
+				t.Fatalf("allocate new generation: %v", err)
+			}
+			if err := st.MarkGenerationResourcesLive(ctx, sessionID, newAllocation.GenerationID, newAllocation.Owner, now.Add(3*time.Second)); err != nil {
+				t.Fatalf("mark new generation live: %v", err)
+			}
+
+			grant, ok, err := st.ClaimNextTurn(ctx, ClaimNextTurnParams{
+				SessionID:    sessionID,
+				GenerationID: newAllocation.GenerationID,
+				Owner:        newAllocation.Owner,
+				RequestID:    "req_new_" + sessionID,
+				LeaseTTL:     time.Minute,
+				Now:          now.Add(4 * time.Second),
+			})
+			if err != nil {
+				t.Fatalf("claim next turn: %v", err)
+			}
+			if !ok {
+				t.Fatal("expected claim grant")
+			}
+			if grant.Content != tc.wantContent || grant.Attempt != tc.wantAttempt {
+				t.Fatalf("unexpected grant: %+v want content=%q attempt=%d", grant, tc.wantContent, tc.wantAttempt)
+			}
+			if gotRequeued := grant.TurnID == requeuedTurnID; gotRequeued != tc.wantRequeuedClaim {
+				t.Fatalf("claimed requeued=%v want %v grant=%+v requeued=%d fresh=%d", gotRequeued, tc.wantRequeuedClaim, grant, requeuedTurnID, freshTurnID)
+			}
+		})
+	}
+}
+
 func TestRecoverAllocationsLeavesAckStartedTurnDuringGrace(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
