@@ -15,6 +15,7 @@ Run from the repository root:
 
 ```bash
 python3 -m unittest sandbox-image/tests/test_harness_bridge_client.py
+python3 -m unittest tools/phase7/test_live_turn_start_latency.py
 ```
 
 The `phase7bench` gate measures the in-repo control-plane path from HTTP enqueue to committed `ack_turn_started` with a connected and probed bridge. It is not a replacement for the live lab load measurement below.
