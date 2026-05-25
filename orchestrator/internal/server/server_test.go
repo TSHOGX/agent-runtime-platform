@@ -1162,6 +1162,7 @@ func TestRuntimeFailureClassDetectsManifestFailures(t *testing.T) {
 	}{
 		{"shell_secret_disallowed", "shell_secret_disallowed"},
 		{"runsc run: exit status 1: control manifest digest mismatch", "manifest_digest_mismatch"},
+		{"runsc run: exit status 1: expected session_id=sess_a got sess_b", "manifest_digest_mismatch"},
 		{"runsc run: exit status 1: expected generation_id=gen_a got gen_b", "manifest_digest_mismatch"},
 		{"runsc run: exit status 1: expected network_profile_id=net_a got net_b", "manifest_digest_mismatch"},
 		{"runsc run: exit status 1: expected agent_runtime_profile_id=arp_a got arp_b", "manifest_digest_mismatch"},

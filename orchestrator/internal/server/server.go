@@ -641,6 +641,7 @@ func runtimeFailureClass(message string) string {
 	}
 	if strings.Contains(message, "control manifest digest mismatch") ||
 		strings.Contains(message, "expected manifest_") ||
+		strings.Contains(message, "expected session_id") ||
 		strings.Contains(message, "expected generation_id") ||
 		strings.Contains(message, "expected network_profile_id") ||
 		strings.Contains(message, "expected agent_runtime_profile_id") ||

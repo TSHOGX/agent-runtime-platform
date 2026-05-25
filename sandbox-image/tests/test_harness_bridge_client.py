@@ -624,6 +624,11 @@ class EntrypointStaticTest(unittest.TestCase):
         self.assertIn("/usr/local/bin/harness-bridge-client probe", text)
         self.assertIn("/usr/local/bin/harness-bridge-client heartbeat-loop &", text)
 
+    def test_entrypoint_expected_mismatch_message_matches_host_classifier(self):
+        entrypoint = SCRIPT.with_name("harness-agent-entrypoint")
+        text = entrypoint.read_text(encoding="utf-8")
+        self.assertIn('expected ${label}=${expected} got ${actual}', text)
+
     def test_claim_loop_starts_after_workspace_and_agent_home_setup(self):
         entrypoint = SCRIPT.with_name("harness-agent-entrypoint")
         text = entrypoint.read_text(encoding="utf-8")

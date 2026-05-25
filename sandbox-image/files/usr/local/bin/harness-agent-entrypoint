@@ -83,7 +83,7 @@ check_expected() {
   expected="$2"
   label="$3"
   if [ -n "$expected" ] && [ "$actual" != "$expected" ]; then
-    echo "[entrypoint] ${label} mismatch" >&2
+    echo "[entrypoint] expected ${label}=${expected} got ${actual}" >&2
     exit 65
   fi
 }
