@@ -158,7 +158,7 @@ Each step lists its PR boundary, prerequisites, and acceptance signal. Behaviora
 
 **PR boundary.** Per-generation bundle, spec, and control manifest. Remove `phase2-template` from live path.
 
-**Acceptance.** Per-generation `config.json` + control dir; static rootfs/base reused without copy; atomic `session.json` write; entrypoint validates identity + JCS digest; entrypoint resolves `anthropic_api_key` / `anthropic_auth_token` from `${SECRET_DIR}/<secret_id>/<secret_version>` (manifest carries no plaintext credential field, no fallback to host-level Claude config); concurrent session startup writes to distinct `control_manifest_path` values.
+**Acceptance.** Per-generation `config.json` + control dir; static rootfs/base reused without copy; atomic `session.json` write; entrypoint validates identity + canonical manifest digest; entrypoint resolves `anthropic_api_key` / `anthropic_auth_token` from `${SECRET_DIR}/<secret_id>/<secret_version>` (manifest carries no plaintext credential field, no fallback to host-level Claude config); concurrent session startup writes to distinct `control_manifest_path` values.
 
 **Detail:** [runtime-resources.md](./runtime-resources.md#control-manifest), [runtime-resources.md](./runtime-resources.md#secret-materialization).
 

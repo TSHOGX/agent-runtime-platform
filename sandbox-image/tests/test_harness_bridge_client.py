@@ -13,6 +13,11 @@ spec = importlib.util.spec_from_loader("harness_bridge_client", SourceFileLoader
 bridge = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bridge)
 
+MANIFEST_LIB = SCRIPT.parents[1] / "lib" / "harness_manifest.py"
+manifest_spec = importlib.util.spec_from_loader("harness_manifest", SourceFileLoader("harness_manifest", str(MANIFEST_LIB)))
+manifest = importlib.util.module_from_spec(manifest_spec)
+manifest_spec.loader.exec_module(manifest)
+
 
 class BridgeClientTest(unittest.TestCase):
     def test_queue_write_orders_numeric_sequence(self):
@@ -443,6 +448,24 @@ class BridgeClientTest(unittest.TestCase):
 
 
 class EntrypointStaticTest(unittest.TestCase):
+    def test_manifest_digest_matches_host_fixture(self):
+        fixture = Path(__file__).resolve().parents[2] / "docs" / "phase7" / "fixtures" / "control-manifest-payload.json"
+        payload = json.loads(fixture.read_text(encoding="utf-8"))
+        digest = "9458fdd58b3315147cf8321bd4ba3fa130a6c880aee2daa108342400eac440e4"
+
+        self.assertEqual(manifest.manifest_digest(payload), digest)
+        with tempfile.TemporaryDirectory() as root:
+            control_file = Path(root) / "session.json"
+            control_file.write_text(json.dumps({"payload": payload, "digest": digest}), encoding="utf-8")
+            self.assertEqual(manifest.load_control_manifest(control_file), payload)
+
+            payload["generation_id"] = "gen_tampered"
+            tampered_file = Path(root) / "tampered-session.json"
+            tampered_file.write_text(json.dumps({"payload": payload, "digest": digest}), encoding="utf-8")
+            with self.assertRaises(SystemExit) as raised:
+                manifest.load_control_manifest(tampered_file)
+            self.assertEqual(str(raised.exception), "control manifest digest mismatch")
+
     def test_entrypoint_has_probe_mode(self):
         entrypoint = SCRIPT.with_name("harness-agent-entrypoint")
         text = entrypoint.read_text(encoding="utf-8")

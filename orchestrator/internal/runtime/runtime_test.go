@@ -137,6 +137,26 @@ func TestProjectedControlManifestDigestIgnoresRegenerableFields(t *testing.T) {
 	}
 }
 
+func TestCanonicalManifestDigestMatchesSandboxFixture(t *testing.T) {
+	data := mustReadFile(t, filepath.Join("..", "..", "..", "docs", "phase7", "fixtures", "control-manifest-payload.json"))
+	var payload any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("read canonical manifest fixture: %v", err)
+	}
+	canonical, err := canonicalJSON(payload)
+	if err != nil {
+		t.Fatalf("canonicalize manifest fixture: %v", err)
+	}
+	const wantCanonical = `{"agent":"sh","agent_home_path":"/agent-homes/sess_fixture","agent_runtime_profile_id":"arp_fixture","attempt_id":"attempt_fixture","bridge_dir_path":"/run/bridge/gen_fixture","bundle_digest":"bundle_digest_fixture","claude_code_disable_nonessential_traffic":true,"created_at":"2026-05-25T00:00:00Z","egress_policy_digest":"egress_digest_fixture","generation_id":"gen_fixture","host_gateway_ip":"10.240.0.1","host_hostname":"host-fixture","manifest_version":1,"netns_name":"hns-fixture","network_profile_id":"net_fixture","output_format":"stream-json","proxy_bind_url":"http://10.240.0.1:8082","resume_claude":false,"runsc_platform":"systrap","runsc_version":"runsc release-20260511.0","runtime_config_digest":"runtime_config_digest_fixture","session_id":"sess_fixture","spec_digest":"spec_digest_fixture","workspace_path":"/sessions/sess_fixture"}`
+	const wantDigest = "9458fdd58b3315147cf8321bd4ba3fa130a6c880aee2daa108342400eac440e4"
+	if string(canonical) != wantCanonical {
+		t.Fatalf("canonical fixture mismatch:\ngot  %s\nwant %s", canonical, wantCanonical)
+	}
+	if got := digestHex(canonical); got != wantDigest {
+		t.Fatalf("canonical fixture digest=%s want %s", got, wantDigest)
+	}
+}
+
 func TestValidateCheckpointRestoreRejectsMetadataMismatch(t *testing.T) {
 	dir := t.TempDir()
 	checkpointPath := filepath.Join(dir, "checkpoint")

@@ -29,27 +29,13 @@ if [ "$CONTROL_FORMAT" = "json" ]; then
   # shellcheck disable=SC2016
   CONTROL_EXPORTS="$(
     python3 - "$CONTROL_FILE" <<'PY'
-import hashlib
-import hmac
-import json
 import shlex
 import sys
 
-with open(sys.argv[1], "r", encoding="utf-8") as f:
-    raw = json.load(f)
+sys.path.insert(0, "/usr/local/lib")
+from harness_manifest import load_control_manifest
 
-if not isinstance(raw, dict) or "payload" not in raw or "digest" not in raw:
-    raise SystemExit("control manifest must be {payload,digest}")
-
-payload = raw["payload"]
-digest = raw["digest"]
-computed = hashlib.sha256(
-    json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-).hexdigest()
-if not hmac.compare_digest(computed, str(digest)):
-    raise SystemExit("control manifest digest mismatch")
-
-data = payload
+data = load_control_manifest(sys.argv[1])
 
 def emit(key, value):
     if value is None or value == "":

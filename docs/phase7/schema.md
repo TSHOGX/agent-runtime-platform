@@ -258,7 +258,7 @@ agent_runtime_profile_id   -- FK; redundant with runtime_generations for join sp
 
 control_dir_path           -- per-generation control dir (Control Manifest)
 control_manifest_path      -- absolute path to session.json under control_dir
-control_manifest_digest    -- JCS digest the entrypoint validates against
+control_manifest_digest    -- canonical manifest digest the entrypoint validates against
 projected_control_manifest_digest
                            -- restore/checkpoint digest after removing regenerable fields
 bundle_digest              -- digest of the generated runsc bundle
