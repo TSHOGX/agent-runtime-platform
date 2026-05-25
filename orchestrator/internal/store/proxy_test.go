@@ -13,10 +13,10 @@ func TestProxyRequestStartResolvesActiveContextAndIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
 	now := time.Now().UTC()
-	allocation, turnID := createRunningProxyTurn(t, ctx, st, owner.UUID, "sess_proxy_start", "10.240.0.2", now)
+	allocation, turnID, sandboxSourceIP := createRunningProxyTurn(t, ctx, st, owner.UUID, "sess_proxy_start", now)
 
 	started, err := st.StartProxyRequest(ctx, StartProxyRequestParams{
-		SandboxSourceIP: "10.240.0.2",
+		SandboxSourceIP: sandboxSourceIP,
 		ProxyRequestID:  "proxy_start_1",
 		UpstreamModel:   "claude-sonnet",
 		UpstreamBaseURL: "https://api.anthropic.test",
@@ -31,7 +31,7 @@ func TestProxyRequestStartResolvesActiveContextAndIsIdempotent(t *testing.T) {
 	}
 
 	replayed, err := st.StartProxyRequest(ctx, StartProxyRequestParams{
-		SandboxSourceIP: "10.240.0.2",
+		SandboxSourceIP: sandboxSourceIP,
 		ProxyRequestID:  "proxy_start_1",
 		UpstreamModel:   "ignored-on-replay",
 		Now:             now.Add(6 * time.Second),
@@ -44,7 +44,7 @@ func TestProxyRequestStartResolvesActiveContextAndIsIdempotent(t *testing.T) {
 	}
 
 	second, err := st.StartProxyRequest(ctx, StartProxyRequestParams{
-		SandboxSourceIP: "10.240.0.2",
+		SandboxSourceIP: sandboxSourceIP,
 		ProxyRequestID:  "proxy_start_2",
 		Now:             now.Add(7 * time.Second),
 	})
@@ -59,7 +59,7 @@ func TestProxyRequestStartResolvesActiveContextAndIsIdempotent(t *testing.T) {
 	if err := st.db.QueryRowContext(ctx, `
 SELECT next_request_sequence
 FROM active_model_request_contexts
-WHERE sandbox_source_ip = '10.240.0.2'`).Scan(&nextSequence); err != nil {
+WHERE sandbox_source_ip = ?`, sandboxSourceIP).Scan(&nextSequence); err != nil {
 		t.Fatalf("query next request sequence: %v", err)
 	}
 	if nextSequence != 3 {
@@ -108,10 +108,10 @@ func TestProxyRequestStartRejectsExpiredContext(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
 	now := time.Now().UTC()
-	createRunningProxyTurn(t, ctx, st, owner.UUID, "sess_proxy_expired", "10.240.0.3", now)
+	_, _, sandboxSourceIP := createRunningProxyTurn(t, ctx, st, owner.UUID, "sess_proxy_expired", now)
 
 	_, err := st.StartProxyRequest(ctx, StartProxyRequestParams{
-		SandboxSourceIP: "10.240.0.3",
+		SandboxSourceIP: sandboxSourceIP,
 		ProxyRequestID:  "proxy_expired",
 		Now:             now.Add(2 * time.Minute),
 	})
@@ -124,24 +124,24 @@ func TestProxyRequestFinishUsesDurableStartEvent(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
 	now := time.Now().UTC()
-	allocation, turnID := createRunningProxyTurn(t, ctx, st, owner.UUID, "sess_proxy_finish", "10.240.0.4", now)
+	allocation, turnID, sandboxSourceIP := createRunningProxyTurn(t, ctx, st, owner.UUID, "sess_proxy_finish", now)
 
 	if _, err := st.StartProxyRequest(ctx, StartProxyRequestParams{
-		SandboxSourceIP: "10.240.0.4",
+		SandboxSourceIP: sandboxSourceIP,
 		ProxyRequestID:  "proxy_finish_ok",
 		Now:             now.Add(5 * time.Second),
 	}); err != nil {
 		t.Fatalf("start ok request: %v", err)
 	}
 	if _, err := st.StartProxyRequest(ctx, StartProxyRequestParams{
-		SandboxSourceIP: "10.240.0.4",
+		SandboxSourceIP: sandboxSourceIP,
 		ProxyRequestID:  "proxy_finish_timeout",
 		Now:             now.Add(6 * time.Second),
 	}); err != nil {
 		t.Fatalf("start timeout request: %v", err)
 	}
 	if _, err := st.StartProxyRequest(ctx, StartProxyRequestParams{
-		SandboxSourceIP: "10.240.0.4",
+		SandboxSourceIP: sandboxSourceIP,
 		ProxyRequestID:  "proxy_finish_invalid",
 		Now:             now.Add(7 * time.Second),
 	}); err != nil {
@@ -240,13 +240,13 @@ func TestProxyRequestFinishRecordsTimeoutObservabilityFields(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
 	now := time.Now().UTC()
-	allocation, turnID := createRunningProxyTurn(t, ctx, st, owner.UUID, "sess_proxy_timeout_fields", "10.240.0.8", now)
+	allocation, turnID, sandboxSourceIP := createRunningProxyTurn(t, ctx, st, owner.UUID, "sess_proxy_timeout_fields", now)
 
 	timeoutKinds := []string{"connect", "first_byte", "total", "idle_stream"}
 	for i, timeoutKind := range timeoutKinds {
 		proxyRequestID := "proxy_timeout_" + timeoutKind
 		if _, err := st.StartProxyRequest(ctx, StartProxyRequestParams{
-			SandboxSourceIP: "10.240.0.8",
+			SandboxSourceIP: sandboxSourceIP,
 			ProxyRequestID:  proxyRequestID,
 			Now:             now.Add(time.Duration(5+i) * time.Second),
 		}); err != nil {
@@ -308,7 +308,67 @@ func TestProxyRequestFinishRecordsTimeoutObservabilityFields(t *testing.T) {
 	}
 }
 
-func createRunningProxyTurn(t *testing.T, ctx context.Context, st *Store, ownerUUID, sessionID, sandboxSourceIP string, now time.Time) (GenerationAllocation, int64) {
+func TestAckTurnStartedRejectsMismatchedSandboxSourceIP(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	now := time.Now().UTC()
+	cfg := testAllocatorConfig(t)
+	createStoreSession(t, ctx, st, "sess_proxy_ip_mismatch")
+	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_proxy_ip_mismatch",
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       now,
+		Config:    cfg,
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, "sess_proxy_ip_mismatch", allocation.GenerationID, allocation.Owner, now.Add(time.Second)); err != nil {
+		t.Fatalf("mark resources live: %v", err)
+	}
+	turnID, err := st.EnqueueTurn(ctx, "sess_proxy_ip_mismatch", "bad source ip", now.Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("enqueue turn: %v", err)
+	}
+	if grant, ok, err := st.ClaimNextTurn(ctx, ClaimNextTurnParams{
+		SessionID:    "sess_proxy_ip_mismatch",
+		GenerationID: allocation.GenerationID,
+		Owner:        allocation.Owner,
+		RequestID:    "claim_proxy_ip_mismatch",
+		LeaseTTL:     time.Minute,
+		Now:          now.Add(3 * time.Second),
+	}); err != nil || !ok || grant.TurnID != turnID {
+		t.Fatalf("claim setup: ok=%v grant=%+v err=%v", ok, grant, err)
+	}
+
+	_, err = st.AckTurnStarted(ctx, AckStartedParams{
+		SessionID:       "sess_proxy_ip_mismatch",
+		GenerationID:    allocation.GenerationID,
+		TurnID:          turnID,
+		Owner:           allocation.Owner,
+		SandboxSourceIP: "10.240.0.99",
+		LeaseTTL:        time.Minute,
+		Now:             now.Add(4 * time.Second),
+	})
+	if err == nil || !strings.Contains(err.Error(), "sandbox_source_ip mismatch") {
+		t.Fatalf("mismatched sandbox source ip err=%v, want mismatch", err)
+	}
+
+	var turnStatus string
+	var contexts int
+	if err := st.db.QueryRowContext(ctx, `SELECT status FROM turns WHERE id = ?`, turnID).Scan(&turnStatus); err != nil {
+		t.Fatalf("query turn status: %v", err)
+	}
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM active_model_request_contexts`).Scan(&contexts); err != nil {
+		t.Fatalf("query active contexts: %v", err)
+	}
+	if turnStatus != "leased" || contexts != 0 {
+		t.Fatalf("mismatched ack mutated state: turn=%s contexts=%d", turnStatus, contexts)
+	}
+}
+
+func createRunningProxyTurn(t *testing.T, ctx context.Context, st *Store, ownerUUID, sessionID string, now time.Time) (GenerationAllocation, int64, string) {
 	t.Helper()
 	cfg := testAllocatorConfig(t)
 	createStoreSession(t, ctx, st, sessionID)
@@ -341,6 +401,7 @@ func createRunningProxyTurn(t *testing.T, ctx context.Context, st *Store, ownerU
 	if err != nil || !ok || grant.TurnID != turnID {
 		t.Fatalf("claim setup: ok=%v grant=%+v err=%v", ok, grant, err)
 	}
+	sandboxSourceIP := sandboxSourceIPForGeneration(t, ctx, st, allocation.GenerationID)
 	if _, err := st.AckTurnStarted(ctx, AckStartedParams{
 		SessionID:       sessionID,
 		GenerationID:    allocation.GenerationID,
@@ -352,5 +413,21 @@ func createRunningProxyTurn(t *testing.T, ctx context.Context, st *Store, ownerU
 	}); err != nil {
 		t.Fatalf("ack turn started: %v", err)
 	}
-	return allocation, turnID
+	return allocation, turnID, sandboxSourceIP
+}
+
+func sandboxSourceIPForGeneration(t *testing.T, ctx context.Context, st *Store, generationID string) string {
+	t.Helper()
+	var sandboxCIDR string
+	if err := st.db.QueryRowContext(ctx, `
+SELECT sandbox_ip_cidr
+FROM network_profiles
+WHERE generation_id = ?`, generationID).Scan(&sandboxCIDR); err != nil {
+		t.Fatalf("query sandbox ip cidr: %v", err)
+	}
+	parts := strings.SplitN(sandboxCIDR, "/", 2)
+	if len(parts) != 2 || parts[0] == "" {
+		t.Fatalf("unexpected sandbox ip cidr: %q", sandboxCIDR)
+	}
+	return parts[0]
 }

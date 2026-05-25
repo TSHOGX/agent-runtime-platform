@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -418,7 +419,7 @@ WHERE g.session_id = ?
 		GenerationID:    generationID,
 		TurnID:          firstTurnID,
 		Owner:           leaseOwner,
-		SandboxSourceIP: "10.241.0.2",
+		SandboxSourceIP: serverSandboxSourceIPForGeneration(t, ctx, st, generationID),
 		LeaseTTL:        time.Minute,
 		Now:             time.Now().UTC(),
 	}); err != nil {
@@ -1160,6 +1161,7 @@ func TestRunPhase7MaintenancePublishesBridgeOutputAndCompletion(t *testing.T) {
 	if err != nil || !ok || grant.TurnID != turnID {
 		t.Fatalf("claim setup: ok=%v grant=%+v err=%v", ok, grant, err)
 	}
+	sandboxSourceIP := serverSandboxSourceIPForGeneration(t, ctx, st, allocation.GenerationID)
 	outbox, err := bridge.OpenQueue(details.BridgeDirPath, bridge.OutboxDir)
 	if err != nil {
 		t.Fatalf("open outbox: %v", err)
@@ -1170,7 +1172,7 @@ func TestRunPhase7MaintenancePublishesBridgeOutputAndCompletion(t *testing.T) {
 		SessionID:    session.ID,
 		GenerationID: allocation.GenerationID,
 		TurnID:       &turnID,
-		Payload:      json.RawMessage(`{"sandbox_source_ip":"10.240.0.2"}`),
+		Payload:      json.RawMessage(fmt.Sprintf(`{"sandbox_source_ip":%q}`, sandboxSourceIP)),
 	}); err != nil {
 		t.Fatalf("write started: %v", err)
 	}
@@ -1340,7 +1342,7 @@ func TestInternalProxyRequestEndpointsPublishDurableEvents(t *testing.T) {
 	st, owner := openServerOwnedStore(t, ctx, dir)
 	cfg := testServerConfig(dir)
 	now := time.Now().UTC()
-	allocation, turnID := createServerRunningProxyTurn(t, ctx, st, cfg, owner.UUID, dir, "sess_proxy_http", "10.240.0.2", now)
+	allocation, turnID, sandboxSourceIP := createServerRunningProxyTurn(t, ctx, st, cfg, owner.UUID, dir, "sess_proxy_http", now)
 
 	hub := events.NewHub()
 	eventsCh, cancelEvents := hub.Subscribe("sess_proxy_http")
@@ -1354,7 +1356,7 @@ func TestInternalProxyRequestEndpointsPublishDurableEvents(t *testing.T) {
 		log:     slog.Default(),
 	}
 
-	blocked := httptest.NewRequest(http.MethodPost, "/internal/proxy/requests/start", strings.NewReader(`{"sandbox_source_ip":"10.240.0.2","proxy_request_id":"proxy_blocked"}`))
+	blocked := httptest.NewRequest(http.MethodPost, "/internal/proxy/requests/start", strings.NewReader(fmt.Sprintf(`{"sandbox_source_ip":%q,"proxy_request_id":"proxy_blocked"}`, sandboxSourceIP)))
 	blocked.RemoteAddr = "203.0.113.7:5000"
 	blockedRec := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(blockedRec, blocked)
@@ -1362,12 +1364,12 @@ func TestInternalProxyRequestEndpointsPublishDurableEvents(t *testing.T) {
 		t.Fatalf("non-loopback proxy request status=%d body=%s", blockedRec.Code, blockedRec.Body.String())
 	}
 
-	startReq := httptest.NewRequest(http.MethodPost, "/internal/proxy/requests/start", strings.NewReader(`{
-		"sandbox_source_ip":"10.240.0.2",
+	startReq := httptest.NewRequest(http.MethodPost, "/internal/proxy/requests/start", strings.NewReader(fmt.Sprintf(`{
+		"sandbox_source_ip":%q,
 		"proxy_request_id":"proxy_http_1",
 		"upstream_model":"claude-sonnet",
 		"upstream_base_url":"https://api.anthropic.test"
-	}`))
+	}`, sandboxSourceIP)))
 	startReq.RemoteAddr = "127.0.0.1:5001"
 	startRec := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(startRec, startReq)
@@ -2073,7 +2075,7 @@ func int64sEqual(a, b []int64) bool {
 	return true
 }
 
-func createServerRunningProxyTurn(t *testing.T, ctx context.Context, st *store.Store, cfg config.Config, ownerUUID, dir, sessionID, sandboxSourceIP string, now time.Time) (store.GenerationAllocation, int64) {
+func createServerRunningProxyTurn(t *testing.T, ctx context.Context, st *store.Store, cfg config.Config, ownerUUID, dir, sessionID string, now time.Time) (store.GenerationAllocation, int64, string) {
 	t.Helper()
 	createServerTestSession(t, ctx, st, dir, sessionID, string(sessionstate.RunningActive), now, nil)
 	owner := store.GenerationLeaseOwner(ownerUUID)
@@ -2105,6 +2107,7 @@ func createServerRunningProxyTurn(t *testing.T, ctx context.Context, st *store.S
 	if err != nil || !ok || grant.TurnID != turnID {
 		t.Fatalf("claim setup: ok=%v grant=%+v err=%v", ok, grant, err)
 	}
+	sandboxSourceIP := serverSandboxSourceIPForGeneration(t, ctx, st, allocation.GenerationID)
 	if _, err := st.AckTurnStarted(ctx, store.AckStartedParams{
 		SessionID:       sessionID,
 		GenerationID:    allocation.GenerationID,
@@ -2116,7 +2119,23 @@ func createServerRunningProxyTurn(t *testing.T, ctx context.Context, st *store.S
 	}); err != nil {
 		t.Fatalf("ack turn started: %v", err)
 	}
-	return allocation, turnID
+	return allocation, turnID, sandboxSourceIP
+}
+
+func serverSandboxSourceIPForGeneration(t *testing.T, ctx context.Context, st *store.Store, generationID string) string {
+	t.Helper()
+	var sandboxCIDR string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT sandbox_ip_cidr
+FROM network_profiles
+WHERE generation_id = ?`, generationID).Scan(&sandboxCIDR); err != nil {
+		t.Fatalf("query sandbox ip cidr: %v", err)
+	}
+	parts := strings.SplitN(sandboxCIDR, "/", 2)
+	if len(parts) != 2 || parts[0] == "" {
+		t.Fatalf("unexpected sandbox ip cidr: %q", sandboxCIDR)
+	}
+	return parts[0]
 }
 
 func waitForHubEvent(t *testing.T, ch <-chan events.Event, eventType string) events.Event {

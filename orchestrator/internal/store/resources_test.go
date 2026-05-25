@@ -1570,12 +1570,13 @@ func createExpiredAckStartedTurn(t *testing.T, ctx context.Context, st *Store, o
 	}); err != nil || !ok || grant.TurnID != turnID {
 		t.Fatalf("claim setup: ok=%v grant=%+v err=%v", ok, grant, err)
 	}
+	sandboxSourceIP := sandboxSourceIPForGeneration(t, ctx, st, allocation.GenerationID)
 	if _, err := st.AckTurnStarted(ctx, AckStartedParams{
 		SessionID:       sessionID,
 		GenerationID:    allocation.GenerationID,
 		TurnID:          turnID,
 		Owner:           allocation.Owner,
-		SandboxSourceIP: "10.240.0.2",
+		SandboxSourceIP: sandboxSourceIP,
 		LeaseTTL:        30 * time.Second,
 		Now:             claimAt.Add(time.Second),
 	}); err != nil {

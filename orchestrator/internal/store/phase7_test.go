@@ -356,7 +356,7 @@ func TestTurnHelperClaimAckComplete(t *testing.T) {
 		GenerationID:    "gen_turn",
 		TurnID:          grant.TurnID,
 		Owner:           "owner",
-		SandboxSourceIP: "10.0.0.2",
+		SandboxSourceIP: "10.240.0.2",
 		LeaseTTL:        time.Minute,
 		Now:             now.Add(time.Second),
 	}); err != nil {
@@ -1086,15 +1086,56 @@ func createActiveGeneration(t *testing.T, ctx context.Context, st *Store, sessio
 	t.Helper()
 	now := time.Now().UTC()
 	expires := now.Add(time.Minute)
-	if _, err := st.db.ExecContext(ctx, `
-INSERT INTO runtime_generations (generation_id, session_id, status, lease_owner, lease_expires_at, last_seen_at)
-VALUES (?, ?, 'idle', ?, ?, ?)`, generationID, sessionID, owner, formatTime(expires), formatTime(now)); err != nil {
+	networkProfileID := "net_" + generationID
+	agentRuntimeProfileID := "arp_" + generationID
+	egressPolicyID := "egress_" + generationID
+	tx, err := st.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin generation helper tx: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO egress_policies (
+  egress_policy_id, policy_digest, allowed_egress_rules,
+  doris_fe_hosts, doris_be_hosts, doris_ports, dns_policy, created_at
+) VALUES (?, ?, '[]', '[]', '[]', '[]', 'off', ?)`, egressPolicyID, egressPolicyID, formatTime(now)); err != nil {
+		t.Fatalf("insert egress policy: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO agent_runtime_profiles (
+  agent_runtime_profile_id, agent, output_format, disable_nonessential_traffic, requires_secret_drop, created_at
+) VALUES (?, 'claude', 'stream-json', 1, 0, ?)`, agentRuntimeProfileID, formatTime(now)); err != nil {
+		t.Fatalf("insert agent runtime profile: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO runtime_generations (
+  generation_id, session_id, status, network_profile_id, agent_runtime_profile_id,
+  lease_owner, lease_expires_at, last_seen_at
+) VALUES (?, ?, 'idle', ?, ?, ?, ?, ?)`,
+		generationID, sessionID, networkProfileID, agentRuntimeProfileID, owner, formatTime(expires), formatTime(now)); err != nil {
 		t.Fatalf("insert generation: %v", err)
 	}
-	if err := st.UpdateSessionActiveGeneration(ctx, SessionActiveGenerationCASParams{
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO network_profiles (
+  network_profile_id, session_id, generation_id,
+  host_proxy_bind_url, proxy_port, host_gateway_ip, sandbox_base_url, probe_url,
+  netns_name, netns_path, host_veth, sandbox_veth, sandbox_ip_cidr,
+  egress_policy_id, allowed_egress_rules, doris_fe_hosts, doris_be_hosts,
+  doris_ports, dns_policy, host_side_cidr, allocation_state, created_at
+) VALUES (?, ?, ?, '127.0.0.1:8082', 8082, '10.240.0.1', 'http://10.240.0.1:8082', 'http://10.240.0.1:8082',
+  ?, ?, ?, ?, '10.240.0.2/30', ?, '[]', '[]', '[]', '[]', 'off', '10.240.0.0/30', 'live', ?)`,
+		networkProfileID, sessionID, generationID,
+		"hns-"+generationID, "/run/netns/hns-"+generationID, "hv-"+generationID, "sv-"+generationID,
+		egressPolicyID, formatTime(now)); err != nil {
+		t.Fatalf("insert network profile: %v", err)
+	}
+	if err := updateSessionActiveGenerationTx(ctx, tx, SessionActiveGenerationCASParams{
 		SessionID:        sessionID,
 		NextGenerationID: generationID,
 	}); err != nil {
 		t.Fatalf("activate generation: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit generation helper tx: %v", err)
 	}
 }
