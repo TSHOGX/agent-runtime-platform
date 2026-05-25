@@ -400,10 +400,26 @@ class BridgeClientTest(unittest.TestCase):
             )
 
         self.assertEqual(http_status.call_count, 2)
+        health_call = http_status.call_args_list[0]
+        self.assertEqual(health_call.args[0], "http://10.240.0.1:8082/healthz")
         message_call = http_status.call_args_list[1]
+        self.assertEqual(message_call.args[0], "http://10.240.0.1:8082/v1/messages")
         self.assertEqual(message_call.kwargs["method"], "POST")
+        self.assertEqual(message_call.kwargs["body"], b"")
+        self.assertEqual(message_call.kwargs["headers"]["content-type"], "application/json")
+        self.assertEqual(message_call.kwargs["headers"]["anthropic-version"], "2023-06-01")
         self.assertEqual(message_call.kwargs["headers"]["x-api-key"], "test-key")
         self.assertEqual(message_call.kwargs["headers"]["authorization"], "Bearer test-token")
+
+    def test_network_probe_rejects_unaccepted_statuses(self):
+        with mock.patch.object(bridge, "http_status", return_value=204):
+            with self.assertRaisesRegex(RuntimeError, r"probe GET /healthz returned 204"):
+                bridge.run_network_probe("http://10.240.0.1:8082", {200}, {400}, 0.1, "test-key")
+
+        statuses = iter([200, 422])
+        with mock.patch.object(bridge, "http_status", side_effect=lambda *args, **kwargs: next(statuses)):
+            with self.assertRaisesRegex(RuntimeError, r"probe POST /v1/messages returned 422"):
+                bridge.run_network_probe("http://10.240.0.1:8082", {200}, {400}, 0.1, "test-key")
 
     def test_shell_probe_skips_proxy_http_probe(self):
         with tempfile.TemporaryDirectory() as root:
