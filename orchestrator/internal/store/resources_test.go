@@ -120,12 +120,18 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ne
 	if err != nil {
 		t.Fatalf("allocate second generation: %v", err)
 	}
-	var nextCIDR string
-	if err := st.db.QueryRowContext(ctx, `SELECT host_side_cidr FROM network_profiles WHERE generation_id = ?`, next.GenerationID).Scan(&nextCIDR); err != nil {
-		t.Fatalf("query next cidr: %v", err)
+	var firstNetns, nextCIDR, nextNetns string
+	if err := st.db.QueryRowContext(ctx, `SELECT netns_name FROM network_profiles WHERE generation_id = ?`, allocation.GenerationID).Scan(&firstNetns); err != nil {
+		t.Fatalf("query first netns: %v", err)
+	}
+	if err := st.db.QueryRowContext(ctx, `SELECT host_side_cidr, netns_name FROM network_profiles WHERE generation_id = ?`, next.GenerationID).Scan(&nextCIDR, &nextNetns); err != nil {
+		t.Fatalf("query next network identity: %v", err)
 	}
 	if nextCIDR != "10.240.0.4/30" {
 		t.Fatalf("expected reclaimable first slot to remain reserved, got next cidr %s", nextCIDR)
+	}
+	if nextNetns == firstNetns {
+		t.Fatalf("expected reclaimable first netns to remain reserved, got %s", nextNetns)
 	}
 }
 
