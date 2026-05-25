@@ -24,7 +24,7 @@ The allocator's uniqueness constraint over every non-destroyed network row (`net
 
 Phase 8 turns the same fields into per-tenant policy: tenant-scoped Doris ACLs, per-session egress quotas, and rotation of the host-firewall enforcement layer. The schema is identical between 7a and 8; what changes in 8 is the *source* of the values (per-tenant policy rows feeding `egress_policies` instead of a single host-config block) and the enforcement strength (host firewall + nft chains rather than just per-netns nft rules).
 
-Schema-only fields not yet wired are not silently optional — the test matrix asserts that on 7a, every `network_profiles` row is populated with the lab-wide Doris/DNS values exactly as configured (not NULL), and that `egress_policies` rows materialize the corresponding allow-rules. An accidental partial implementation that leaves Doris fields empty fails loudly.
+The allocator persists those fields into every `network_profiles` row and materializes the matching `egress_policies` row. Tests assert the Doris/DNS values are populated from `harness.network.egress` and that the generated nft rules allow only the proxy, configured Doris targets, DNS when needed, and established return traffic.
 
 ## Network Path
 
@@ -38,7 +38,7 @@ Claude Code inside sandbox
   -> upstream model provider
 ```
 
-In the lab today `{allocated_host_gateway_ip}` resolves to `10.200.1.1` because the netns is fixed; under the target architecture it is generation-scoped allocation data per the network profile fields above.
+`{allocated_host_gateway_ip}` is generation-scoped allocation data from the network profile. It is not derived from a shared `phase1-demo` netns or from a process-wide constant.
 
 ## Probes
 
