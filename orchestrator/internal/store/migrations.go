@@ -108,6 +108,7 @@ func defaultMigrations(options Options) []migration {
 		{version: 5, name: "phase7_indexes", fn: migrateV5Phase7Indexes},
 		{version: 6, name: "phase7_legacy_session_backfill", fn: migrateV6Phase7LegacySessionBackfill},
 		{version: 7, name: "phase7_proxy_event_uniqueness", fn: migrateV7Phase7ProxyEventUniqueness},
+		{version: 8, name: "phase7_event_retention_index", fn: migrateV8Phase7EventRetentionIndex},
 	}
 }
 
@@ -541,6 +542,55 @@ CREATE UNIQUE INDEX IF NOT EXISTS events_proxy_finished_request_uq
   ON events (proxy_request_id)
   WHERE proxy_request_id IS NOT NULL
     AND type IN ('proxy.request.completed', 'proxy.request.failed');
+`)
+	return err
+}
+
+func migrateV8Phase7EventRetentionIndex(ctx context.Context, tx dbRunner) error {
+	rows, err := tx.QueryContext(ctx, `SELECT event_id, created_at FROM events`)
+	if err != nil {
+		return err
+	}
+	type eventTimeUpdate struct {
+		eventID   int64
+		createdAt string
+	}
+	var updates []eventTimeUpdate
+	for rows.Next() {
+		var eventID int64
+		var createdAt string
+		if err := rows.Scan(&eventID, &createdAt); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		parsed, err := time.Parse(time.RFC3339Nano, createdAt)
+		if err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("parse event %d created_at: %w", eventID, err)
+		}
+		formatted := formatEventTime(parsed)
+		if formatted != createdAt {
+			updates = append(updates, eventTimeUpdate{eventID: eventID, createdAt: formatted})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, update := range updates {
+		if _, err := tx.ExecContext(ctx, `
+UPDATE events
+SET created_at = ?
+WHERE event_id = ?`, update.createdAt, update.eventID); err != nil {
+			return err
+		}
+	}
+	_, err = tx.ExecContext(ctx, `
+CREATE INDEX IF NOT EXISTS events_created_at_idx
+  ON events (created_at);
 `)
 	return err
 }

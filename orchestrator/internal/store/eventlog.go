@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -25,6 +26,12 @@ type ListEventsParams struct {
 	AfterEventID int64
 	SessionID    string
 	Limit        int
+}
+
+type PruneEventsParams struct {
+	RetentionWindow time.Duration
+	RetentionRows   int64
+	Now             time.Time
 }
 
 func (s *Store) GetEvent(ctx context.Context, eventID int64) (EventRecord, bool, error) {
@@ -91,6 +98,57 @@ func (s *Store) OldestEventID(ctx context.Context, sessionID string) (int64, boo
 		return 0, false, nil
 	}
 	return oldest.Int64, true, nil
+}
+
+func (s *Store) PruneEvents(ctx context.Context, p PruneEventsParams) (int64, error) {
+	if p.Now.IsZero() {
+		p.Now = time.Now().UTC()
+	}
+	if p.RetentionWindow < 0 {
+		return 0, fmt.Errorf("event retention window must be >= 0")
+	}
+	if p.RetentionRows < 0 {
+		return 0, fmt.Errorf("event retention rows must be >= 0")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var deleted int64
+	if p.RetentionWindow > 0 {
+		res, err := tx.ExecContext(ctx, `
+DELETE FROM events
+WHERE created_at < ?`, formatEventTime(p.Now.Add(-p.RetentionWindow)))
+		if err != nil {
+			return 0, err
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
+		deleted += affected
+	}
+	if p.RetentionRows > 0 {
+		res, err := tx.ExecContext(ctx, `
+DELETE FROM events
+WHERE event_id NOT IN (
+  SELECT event_id
+  FROM events
+  ORDER BY event_id DESC
+  LIMIT ?
+)`, p.RetentionRows)
+		if err != nil {
+			return 0, err
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
+		deleted += affected
+	}
+	return deleted, tx.Commit()
 }
 
 type eventScanner interface {

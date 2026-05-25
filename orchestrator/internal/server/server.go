@@ -642,6 +642,13 @@ func (s *Server) RunPhase7Maintenance(ctx context.Context) error {
 		}); err != nil && !errors.Is(err, context.Canceled) {
 			s.log.Warn("phase7 resource reaper failed", "error", err)
 		}
+		if _, err := s.store.PruneEvents(ctx, store.PruneEventsParams{
+			RetentionWindow: s.cfg.Phase7.Events.RetentionWindow.Duration,
+			RetentionRows:   s.cfg.Phase7.Events.RetentionRows,
+			Now:             now,
+		}); err != nil && !errors.Is(err, context.Canceled) {
+			s.log.Warn("phase7 event retention prune failed", "error", err)
+		}
 	}
 	pollBridge := func(now time.Time) {
 		generations, err := s.store.ListBridgePollGenerations(ctx, owner, now, s.cfg.Phase7.Bridge.AckStartedGrace.Duration)

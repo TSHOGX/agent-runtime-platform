@@ -255,7 +255,7 @@ INSERT OR IGNORE INTO events (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		nullableString(p.SessionID), nullableInt64Ptr(p.TurnID), nullableString(p.GenerationID),
 		nullableInt64Ptr(p.OutputSequence), nullableString(p.DedupeKey), nullableString(p.ProxyRequestID),
-		nullableString(p.Stream), nullableString(p.Severity), p.Type, string(payload), formatTime(p.Now))
+		nullableString(p.Stream), nullableString(p.Severity), p.Type, string(payload), formatEventTime(p.Now))
 	if err != nil {
 		return 0, err
 	}

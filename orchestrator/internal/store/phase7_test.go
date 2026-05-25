@@ -31,7 +31,7 @@ func TestPhase7MigrationsCreateSchemaAndBackfillLegacySessions(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	assertMigrationVersions(t, st.db, 7)
+	assertMigrationVersions(t, st.db, 8)
 	for _, table := range []string{
 		"runtime_generations", "runtime_generation_resources", "turns", "events",
 		"active_model_request_contexts", "network_profiles", "agent_runtime_profiles",
@@ -42,7 +42,7 @@ func TestPhase7MigrationsCreateSchemaAndBackfillLegacySessions(t *testing.T) {
 	for _, column := range []string{"active_generation_id", "agent_home_path", "failure_reason", "error_class"} {
 		assertColumnExists(t, st.db, "sessions", column)
 	}
-	for _, index := range []string{"events_proxy_started_request_uq", "events_proxy_finished_request_uq"} {
+	for _, index := range []string{"events_proxy_started_request_uq", "events_proxy_finished_request_uq", "events_created_at_idx"} {
 		assertIndexExists(t, st.db, index)
 	}
 
@@ -98,7 +98,7 @@ func TestPhase7MigrationsAreIdempotent(t *testing.T) {
 	if err := st.migrate(ctx); err != nil {
 		t.Fatalf("rerun migrate: %v", err)
 	}
-	assertMigrationVersions(t, st.db, 7)
+	assertMigrationVersions(t, st.db, 8)
 	_ = st.Close()
 
 	st, err = Open(ctx, path)
@@ -106,7 +106,140 @@ func TestPhase7MigrationsAreIdempotent(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	assertMigrationVersions(t, st.db, 7)
+	assertMigrationVersions(t, st.db, 8)
+}
+
+func TestPhase7EventTimeMigrationNormalizesLegacyTimestamps(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", filepath.Join(dir, "legacy-events.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+
+	st := &Store{db: db, options: Options{AgentHomesRoot: filepath.Join(dir, "agent-homes")}}
+	migrations := defaultMigrations(st.options)
+	if err := st.runMigrations(ctx, migrations[:7]); err != nil {
+		t.Fatalf("run migrations through v7: %v", err)
+	}
+	legacyTime := "2026-05-25T10:00:00.1Z"
+	if _, err := st.db.ExecContext(ctx, `
+INSERT INTO events (type, payload, created_at)
+VALUES ('legacy.event', '{}', ?)`, legacyTime); err != nil {
+		t.Fatalf("insert legacy event: %v", err)
+	}
+	if err := st.runMigration(ctx, migrations[7]); err != nil {
+		t.Fatalf("run v8 migration: %v", err)
+	}
+
+	var createdAt string
+	if err := st.db.QueryRowContext(ctx, `SELECT created_at FROM events WHERE type = 'legacy.event'`).Scan(&createdAt); err != nil {
+		t.Fatalf("query normalized event time: %v", err)
+	}
+	want := formatEventTime(parseTime(legacyTime))
+	if createdAt != want {
+		t.Fatalf("created_at=%q want %q", createdAt, want)
+	}
+	assertIndexExists(t, st.db, "events_created_at_idx")
+	assertMigrationVersions(t, st.db, 8)
+}
+
+func TestPruneEventsAppliesRetentionWindowAndRows(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 5, 25, 10, 0, 0, 123456789, time.UTC)
+
+	t.Run("rows", func(t *testing.T) {
+		st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		t.Cleanup(func() { _ = st.Close() })
+		createStoreSession(t, ctx, st, "sess_a")
+		createStoreSession(t, ctx, st, "sess_b")
+		firstID := appendStoreTestEvent(t, ctx, st, "sess_a", "first", base)
+		secondID := appendStoreTestEvent(t, ctx, st, "sess_b", "second", base.Add(time.Second))
+		thirdID := appendStoreTestEvent(t, ctx, st, "sess_a", "third", base.Add(2*time.Second))
+		fourthID := appendStoreTestEvent(t, ctx, st, "sess_b", "fourth", base.Add(3*time.Second))
+
+		deleted, err := st.PruneEvents(ctx, PruneEventsParams{
+			RetentionRows: 2,
+			Now:           base.Add(4 * time.Second),
+		})
+		if err != nil {
+			t.Fatalf("prune by rows: %v", err)
+		}
+		if deleted != 2 {
+			t.Fatalf("deleted=%d want 2", deleted)
+		}
+		records, err := st.ListEvents(ctx, ListEventsParams{})
+		if err != nil {
+			t.Fatalf("list events: %v", err)
+		}
+		if got := eventIDs(records); len(got) != 2 || got[0] != thirdID || got[1] != fourthID {
+			t.Fatalf("retained ids=%v want [%d %d] after deleting %d/%d", got, thirdID, fourthID, firstID, secondID)
+		}
+		oldest, ok, err := st.OldestEventID(ctx, "")
+		if err != nil || !ok || oldest != thirdID {
+			t.Fatalf("oldest global=%d ok=%v err=%v want %d", oldest, ok, err, thirdID)
+		}
+		oldest, ok, err = st.OldestEventID(ctx, "sess_b")
+		if err != nil || !ok || oldest != fourthID {
+			t.Fatalf("oldest sess_b=%d ok=%v err=%v want %d", oldest, ok, err, fourthID)
+		}
+	})
+
+	t.Run("window", func(t *testing.T) {
+		st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		t.Cleanup(func() { _ = st.Close() })
+		createStoreSession(t, ctx, st, "sess_a")
+		createStoreSession(t, ctx, st, "sess_b")
+		firstID := appendStoreTestEvent(t, ctx, st, "sess_a", "first", base)
+		secondID := appendStoreTestEvent(t, ctx, st, "sess_b", "second", base.Add(time.Second))
+		thirdID := appendStoreTestEvent(t, ctx, st, "sess_a", "third", base.Add(2*time.Second))
+		fourthID := appendStoreTestEvent(t, ctx, st, "sess_b", "fourth", base.Add(3*time.Second))
+
+		deleted, err := st.PruneEvents(ctx, PruneEventsParams{
+			RetentionWindow: 2 * time.Second,
+			Now:             base.Add(4 * time.Second),
+		})
+		if err != nil {
+			t.Fatalf("prune by window: %v", err)
+		}
+		if deleted != 2 {
+			t.Fatalf("deleted=%d want 2", deleted)
+		}
+		records, err := st.ListEvents(ctx, ListEventsParams{})
+		if err != nil {
+			t.Fatalf("list events: %v", err)
+		}
+		if got := eventIDs(records); len(got) != 2 || got[0] != thirdID || got[1] != fourthID {
+			t.Fatalf("retained ids=%v want [%d %d] after deleting %d/%d", got, thirdID, fourthID, firstID, secondID)
+		}
+		oldest, ok, err := st.OldestEventID(ctx, "")
+		if err != nil || !ok || oldest != thirdID {
+			t.Fatalf("oldest global=%d ok=%v err=%v want %d", oldest, ok, err, thirdID)
+		}
+	})
+
+	t.Run("invalid params", func(t *testing.T) {
+		st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		t.Cleanup(func() { _ = st.Close() })
+		if _, err := st.PruneEvents(ctx, PruneEventsParams{RetentionWindow: -time.Second}); err == nil {
+			t.Fatalf("negative retention window should fail")
+		}
+		if _, err := st.PruneEvents(ctx, PruneEventsParams{RetentionRows: -1}); err == nil {
+			t.Fatalf("negative retention rows should fail")
+		}
+	})
 }
 
 func TestRuntimeGenerationPartialUniqueIndex(t *testing.T) {
@@ -657,6 +790,28 @@ func createStoreSession(t *testing.T, ctx context.Context, st *Store, id string)
 	}); err != nil {
 		t.Fatalf("create session %s: %v", id, err)
 	}
+}
+
+func appendStoreTestEvent(t *testing.T, ctx context.Context, st *Store, sessionID, name string, now time.Time) int64 {
+	t.Helper()
+	eventID, err := st.AppendEvent(ctx, AppendEventParams{
+		SessionID: sessionID,
+		Type:      "test.event",
+		Payload:   map[string]string{"name": name},
+		Now:       now,
+	})
+	if err != nil {
+		t.Fatalf("append event %s: %v", name, err)
+	}
+	return eventID
+}
+
+func eventIDs(records []EventRecord) []int64 {
+	ids := make([]int64, 0, len(records))
+	for _, record := range records {
+		ids = append(ids, record.EventID)
+	}
+	return ids
 }
 
 func createActiveGeneration(t *testing.T, ctx context.Context, st *Store, sessionID, generationID, owner string) {

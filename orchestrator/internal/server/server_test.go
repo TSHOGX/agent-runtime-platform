@@ -996,6 +996,70 @@ WHERE session_id = ?
 	}
 }
 
+func TestRunPhase7MaintenancePrunesRetainedEvents(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	now := time.Now().UTC()
+	createServerTestSession(t, ctx, st, dir, "sess_events_a", string(sessionstate.Created), now, nil)
+	createServerTestSession(t, ctx, st, dir, "sess_events_b", string(sessionstate.Created), now, nil)
+	firstID, err := st.AppendEvent(ctx, store.AppendEventParams{
+		SessionID: "sess_events_a",
+		Type:      "test.event",
+		Payload:   map[string]string{"name": "first"},
+		Now:       now.Add(-3 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("append first event: %v", err)
+	}
+	secondID, err := st.AppendEvent(ctx, store.AppendEventParams{
+		SessionID: "sess_events_b",
+		Type:      "test.event",
+		Payload:   map[string]string{"name": "second"},
+		Now:       now.Add(-2 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("append second event: %v", err)
+	}
+	thirdID, err := st.AppendEvent(ctx, store.AppendEventParams{
+		SessionID: "sess_events_a",
+		Type:      "test.event",
+		Payload:   map[string]string{"name": "third"},
+		Now:       now.Add(-time.Second),
+	})
+	if err != nil {
+		t.Fatalf("append third event: %v", err)
+	}
+
+	cfg := testServerConfig(dir)
+	cfg.Phase7.Events.RetentionWindow = config.Duration{Duration: time.Hour}
+	cfg.Phase7.Events.RetentionRows = 2
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: instantRuntime{},
+		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+	done := make(chan error, 1)
+	go func() {
+		done <- srv.RunPhase7Maintenance(runCtx)
+	}()
+	waitForEventIDs(t, runCtx, st, []int64{secondID, thirdID})
+	cancel()
+	err = <-done
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("maintenance exit err=%v, want context canceled", err)
+	}
+	if _, ok, err := st.GetEvent(ctx, firstID); err != nil || ok {
+		t.Fatalf("first event retained ok=%v err=%v", ok, err)
+	}
+}
+
 func TestSendMessageRejectsExpiredSessionBeforeAllocation(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -1230,6 +1294,56 @@ func TestEventsStreamReplaysDurableEventsAfterLastEventID(t *testing.T) {
 	if err != nil || !ok || lastEventID != thirdID {
 		t.Fatalf("header Last-Event-ID should win: id=%d ok=%v err=%v", lastEventID, ok, err)
 	}
+
+	deleted, err := st.PruneEvents(ctx, store.PruneEventsParams{
+		RetentionRows: 2,
+		Now:           now.Add(3 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("prune replay events: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted=%d want 1", deleted)
+	}
+
+	gap := httptest.NewRecorder()
+	replayedThrough, err = srv.writeSSEReplay(req.Context(), gap, gap, "", 0)
+	if err != nil {
+		t.Fatalf("write gap replay: %v", err)
+	}
+	if replayedThrough != thirdID {
+		t.Fatalf("gap replayed through=%d want %d", replayedThrough, thirdID)
+	}
+	gapBody := gap.Body.String()
+	assertContains(t, gapBody, "id: "+strconv.FormatInt(secondID-1, 10)+"\n")
+	assertContains(t, gapBody, "event: replay_gap\n")
+	assertContains(t, gapBody, `"requested_last_event_id":0`)
+	assertContains(t, gapBody, `"oldest_available":`+strconv.FormatInt(secondID, 10))
+	assertContains(t, gapBody, `"session_id_filter":null`)
+	assertContains(t, gapBody, `"reason":"retention_window_exceeded"`)
+	assertContains(t, gapBody, "id: "+strconv.FormatInt(secondID, 10)+"\n")
+	assertContains(t, gapBody, "id: "+strconv.FormatInt(thirdID, 10)+"\n")
+	if strings.Contains(gapBody, `"payload":{"phase":"first"}`) {
+		t.Fatalf("gap replay included pruned event: %s", gapBody)
+	}
+
+	filteredGap := httptest.NewRecorder()
+	replayedThrough, err = srv.writeSSEReplay(req.Context(), filteredGap, filteredGap, "sess_a", 0)
+	if err != nil {
+		t.Fatalf("write filtered gap replay: %v", err)
+	}
+	if replayedThrough != thirdID {
+		t.Fatalf("filtered gap replayed through=%d want %d", replayedThrough, thirdID)
+	}
+	filteredGapBody := filteredGap.Body.String()
+	assertContains(t, filteredGapBody, "id: "+strconv.FormatInt(thirdID-1, 10)+"\n")
+	assertContains(t, filteredGapBody, "event: replay_gap\n")
+	assertContains(t, filteredGapBody, `"oldest_available":`+strconv.FormatInt(thirdID, 10))
+	assertContains(t, filteredGapBody, `"session_id_filter":"sess_a"`)
+	assertContains(t, filteredGapBody, "id: "+strconv.FormatInt(thirdID, 10)+"\n")
+	if strings.Contains(filteredGapBody, `"payload":{"line":"second"}`) {
+		t.Fatalf("filtered gap replay included another session: %s", filteredGapBody)
+	}
 }
 
 func waitForBridgeInboxResponse(t *testing.T, ctx context.Context, root, responseType, requestID string) bridge.Envelope {
@@ -1461,6 +1575,15 @@ func testServerConfig(dir string) config.Config {
 			Bridge: config.BridgeConfig{
 				LeaseTTL:          config.Duration{Duration: time.Minute},
 				HeartbeatInterval: config.Duration{Duration: 10 * time.Millisecond},
+				PollInterval:      config.Duration{Duration: 10 * time.Millisecond},
+				AckStartedGrace:   config.Duration{Duration: 90 * time.Second},
+				ReconnectGrace:    config.Duration{Duration: 30 * time.Second},
+			},
+			Events: config.EventsConfig{
+				RetentionWindow:        config.Duration{Duration: time.Hour},
+				RetentionRows:          1_000,
+				EmitOutputBatchMaxRows: 64,
+				EmitOutputBatchMaxAge:  config.Duration{Duration: 100 * time.Millisecond},
 			},
 			Reaper: config.ReaperConfig{
 				FailedRetention: config.Duration{Duration: 0},
@@ -1509,6 +1632,50 @@ func waitForSessionStatus(t *testing.T, ctx context.Context, st *store.Store, se
 	}
 	data, _ := json.Marshal(got)
 	t.Fatalf("session did not reach %s: %s", want, data)
+}
+
+func waitForEventIDs(t *testing.T, ctx context.Context, st *store.Store, want []int64) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		records, err := st.ListEvents(ctx, store.ListEventsParams{})
+		if err != nil {
+			t.Fatalf("list events: %v", err)
+		}
+		got := make([]int64, 0, len(records))
+		for _, record := range records {
+			got = append(got, record.EventID)
+		}
+		if int64sEqual(got, want) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("context canceled before retained events reached %v", want)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	records, err := st.ListEvents(context.Background(), store.ListEventsParams{})
+	if err != nil {
+		t.Fatalf("list final events: %v", err)
+	}
+	got := make([]int64, 0, len(records))
+	for _, record := range records {
+		got = append(got, record.EventID)
+	}
+	t.Fatalf("event ids=%v want %v", got, want)
+}
+
+func int64sEqual(a, b []int64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func createServerRunningProxyTurn(t *testing.T, ctx context.Context, st *store.Store, cfg config.Config, ownerUUID, dir, sessionID, sandboxSourceIP string, now time.Time) (store.GenerationAllocation, int64) {
