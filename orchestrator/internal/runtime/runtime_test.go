@@ -798,6 +798,10 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndSecrets(t *testing.T
 	if mountSource(spec.Mounts, "/harness-secrets") != details.SecretsDirPath {
 		t.Fatalf("secret mount = %q, want %q", mountSource(spec.Mounts, "/harness-secrets"), details.SecretsDirPath)
 	}
+	secretMount := mountByDestination(spec.Mounts, "/harness-secrets")
+	if secretMount == nil || strings.Join(secretMount.Options, ",") != "rbind,ro,nosuid,nodev,noexec" {
+		t.Fatalf("secret mount missing read-only hardening options: %+v", secretMount)
+	}
 	if _, err := os.Stat(filepath.Join(details.SecretsDirPath, "anthropic_api_key", "local")); err != nil {
 		t.Fatalf("materialized api key secret: %v", err)
 	}
