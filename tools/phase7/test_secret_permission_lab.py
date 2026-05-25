@@ -31,6 +31,35 @@ harness:
             self.assertEqual(root, "/var/lib/harness/secrets")
             self.assertEqual(gid, 65501)
 
+    def test_load_secret_config_ignores_non_harness_secrets_sections(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "harness.yaml"
+            config.write_text(
+                """
+legacy:
+  secrets:
+    root: /wrong/before
+    readers_gid: 1
+harness:
+  run_dir: /var/lib/harness/run
+  secrets:
+    root: /var/lib/harness/secrets
+    readers_gid: 65501
+  nested:
+    secrets:
+      root: /wrong/nested
+      readers_gid: 2
+other:
+  secrets:
+    root: /wrong/after
+    readers_gid: 3
+""",
+                encoding="utf-8",
+            )
+            root, gid = MODULE.load_secret_config(config)
+            self.assertEqual(root, "/var/lib/harness/secrets")
+            self.assertEqual(gid, 65501)
+
 
 if __name__ == "__main__":
     unittest.main()

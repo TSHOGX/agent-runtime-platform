@@ -33,6 +33,9 @@ def parse_args():
 def load_secret_config(config_path):
     root = ""
     readers_gid = 0
+    in_harness = False
+    harness_indent = None
+    harness_child_indent = None
     in_secrets = False
     secrets_indent = None
     with open(config_path, encoding="utf-8") as handle:
@@ -42,7 +45,22 @@ def load_secret_config(config_path):
                 continue
             stripped = line.strip()
             indent = len(line) - len(line.lstrip(" "))
-            if stripped == "secrets:":
+
+            if stripped == "harness:":
+                in_harness = True
+                harness_indent = indent
+                harness_child_indent = None
+                in_secrets = False
+                secrets_indent = None
+                continue
+            if in_harness and indent <= harness_indent:
+                in_harness = False
+                in_secrets = False
+            if not in_harness:
+                continue
+            if harness_child_indent is None and indent > harness_indent:
+                harness_child_indent = indent
+            if stripped == "secrets:" and indent == harness_child_indent:
                 in_secrets = True
                 secrets_indent = indent
                 continue
