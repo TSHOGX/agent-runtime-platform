@@ -569,13 +569,13 @@ WHERE session_id = ?
 	return grant, true, tx.Commit()
 }
 
-func (s *Store) AckTurnStarted(ctx context.Context, p AckStartedParams) error {
+func (s *Store) AckTurnStarted(ctx context.Context, p AckStartedParams) (int64, error) {
 	if p.Now.IsZero() {
 		p.Now = time.Now().UTC()
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
 	expiresAt := p.Now.Add(p.LeaseTTL)
@@ -591,7 +591,7 @@ WHERE id = ?
   AND lease_owner = ?
   AND lease_expires_at > ?`,
 		p.TurnID, p.SessionID, p.GenerationID, p.Owner, formatTime(p.Now)).Scan(&alreadyRunning); err != nil {
-		return err
+		return 0, err
 	}
 	res, err := tx.ExecContext(ctx, `
 UPDATE turns
@@ -606,12 +606,12 @@ WHERE id = ?
   AND lease_expires_at > ?`,
 		formatTime(p.Now), formatTime(p.Now), p.TurnID, p.SessionID, p.GenerationID, p.Owner, formatTime(p.Now))
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if affected, err := res.RowsAffected(); err != nil {
-		return err
+		return 0, err
 	} else if affected != 1 && alreadyRunning != 1 {
-		return fmt.Errorf("turn ack_started CAS failed")
+		return 0, fmt.Errorf("turn ack_started CAS failed")
 	}
 	startedNow := alreadyRunning != 1
 	res, err = tx.ExecContext(ctx, `
@@ -628,12 +628,12 @@ WHERE generation_id = ?
       AND active_generation_id = ?
   )`, formatTime(p.Now), p.GenerationID, p.SessionID, p.Owner, formatTime(p.Now), p.SessionID, p.GenerationID)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if affected, err := res.RowsAffected(); err != nil {
-		return err
+		return 0, err
 	} else if affected != 1 {
-		return fmt.Errorf("generation ack_started CAS failed")
+		return 0, fmt.Errorf("generation ack_started CAS failed")
 	}
 	if startedNow {
 		_, err = tx.ExecContext(ctx, `
@@ -651,11 +651,12 @@ INSERT INTO active_model_request_contexts (
   updated_at = excluded.updated_at`,
 			p.SandboxSourceIP, p.SessionID, p.GenerationID, p.TurnID, p.Owner, formatTime(expiresAt), formatTime(p.Now), formatTime(p.Now))
 		if err != nil {
-			return err
+			return 0, err
 		}
 	}
+	var eventID int64
 	if p.EventType != "" {
-		if _, err := appendEventTx(ctx, tx, AppendEventParams{
+		eventID, err = appendEventTx(ctx, tx, AppendEventParams{
 			SessionID:    p.SessionID,
 			TurnID:       &p.TurnID,
 			GenerationID: p.GenerationID,
@@ -663,25 +664,26 @@ INSERT INTO active_model_request_contexts (
 			Type:         p.EventType,
 			Payload:      p.EventPayload,
 			Now:          p.Now,
-		}); err != nil {
-			return err
+		})
+		if err != nil {
+			return 0, err
 		}
 	}
-	return tx.Commit()
+	return eventID, tx.Commit()
 }
 
-func (s *Store) CompleteTurn(ctx context.Context, p CompleteTurnParams) error {
+func (s *Store) CompleteTurn(ctx context.Context, p CompleteTurnParams) (int64, error) {
 	if p.Now.IsZero() {
 		p.Now = time.Now().UTC()
 	}
 	switch p.TerminalStatus {
 	case "completed", "failed", "canceled":
 	default:
-		return fmt.Errorf("invalid terminal turn status %q", p.TerminalStatus)
+		return 0, fmt.Errorf("invalid terminal turn status %q", p.TerminalStatus)
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
 	var alreadyTerminal int
@@ -694,7 +696,7 @@ WHERE id = ?
   AND generation_id = ?
   AND completed_by_generation = ?`,
 		p.TurnID, p.TerminalStatus, p.SessionID, p.GenerationID, p.GenerationID).Scan(&alreadyTerminal); err != nil {
-		return err
+		return 0, err
 	}
 	res, err := tx.ExecContext(ctx, `
 UPDATE turns
@@ -712,16 +714,16 @@ WHERE id = ?
 		p.TerminalStatus, formatTime(p.Now), p.GenerationID, nullableString(p.ErrorClass), nullableString(p.Error),
 		p.TurnID, p.SessionID, p.GenerationID, p.Owner, formatTime(p.Now))
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if affected, err := res.RowsAffected(); err != nil {
-		return err
+		return 0, err
 	} else if affected != 1 && alreadyTerminal != 1 {
-		return fmt.Errorf("turn completion CAS failed")
+		return 0, fmt.Errorf("turn completion CAS failed")
 	}
 	if alreadyTerminal != 1 {
 		if err := markGenerationIdleIfNoInflight(ctx, tx, p.SessionID, p.GenerationID, p.Owner, p.Now); err != nil {
-			return err
+			return 0, err
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -729,10 +731,11 @@ DELETE FROM active_model_request_contexts
 WHERE session_id = ?
   AND generation_id = ?
   AND turn_id = ?`, p.SessionID, p.GenerationID, p.TurnID); err != nil {
-		return err
+		return 0, err
 	}
+	var eventID int64
 	if p.EventType != "" {
-		if _, err := appendEventTx(ctx, tx, AppendEventParams{
+		eventID, err = appendEventTx(ctx, tx, AppendEventParams{
 			SessionID:    p.SessionID,
 			TurnID:       &p.TurnID,
 			GenerationID: p.GenerationID,
@@ -740,11 +743,12 @@ WHERE session_id = ?
 			Type:         p.EventType,
 			Payload:      p.EventPayload,
 			Now:          p.Now,
-		}); err != nil {
-			return err
+		})
+		if err != nil {
+			return 0, err
 		}
 	}
-	return tx.Commit()
+	return eventID, tx.Commit()
 }
 
 func (s *Store) RenewGenerationHeartbeat(ctx context.Context, p RenewHeartbeatParams) error {

@@ -1,4 +1,4 @@
-export function buildEventsStreamUrl(sessionId?: string) {
+export function buildEventsStreamUrl(sessionId?: string, lastEventId?: number | null) {
   const base =
     typeof window !== "undefined"
       ? window.location.origin
@@ -6,6 +6,9 @@ export function buildEventsStreamUrl(sessionId?: string) {
   const url = new URL("/api/events/stream", base);
   if (sessionId) {
     url.searchParams.set("session_id", sessionId);
+  }
+  if (lastEventId !== undefined && lastEventId !== null) {
+    url.searchParams.set("last_event_id", String(lastEventId));
   }
   return url.toString();
 }

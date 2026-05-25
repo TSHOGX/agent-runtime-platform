@@ -16,8 +16,8 @@ type Store interface {
 	RenewGenerationHeartbeat(context.Context, store.RenewHeartbeatParams) error
 	ClaimNextTurn(context.Context, store.ClaimNextTurnParams) (store.TurnGrant, bool, error)
 	ResumeTurn(context.Context, store.ResumeTurnParams) (store.TurnGrant, bool, error)
-	AckTurnStarted(context.Context, store.AckStartedParams) error
-	CompleteTurn(context.Context, store.CompleteTurnParams) error
+	AckTurnStarted(context.Context, store.AckStartedParams) (int64, error)
+	CompleteTurn(context.Context, store.CompleteTurnParams) (int64, error)
 	AppendEvent(context.Context, store.AppendEventParams) (int64, error)
 }
 
@@ -28,7 +28,7 @@ type Processor struct {
 	AckStartedGrace time.Duration
 	Now             func() time.Time
 	ProbeHandler    func(context.Context, Envelope) error
-	AfterCommit     func(context.Context, Envelope)
+	AfterCommit     func(context.Context, Envelope, int64)
 	connected       map[string]bridgeState
 }
 
@@ -226,7 +226,7 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 		if strings.TrimSpace(sandboxSourceIP) == "" {
 			return protocolErrorf("ack_turn_started requires sandbox_source_ip")
 		}
-		if err := p.Store.AckTurnStarted(ctx, store.AckStartedParams{
+		eventID, err := p.Store.AckTurnStarted(ctx, store.AckStartedParams{
 			SessionID:       envelope.SessionID,
 			GenerationID:    envelope.GenerationID,
 			TurnID:          *envelope.TurnID,
@@ -237,10 +237,13 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 			EventDedupeKey:  fmt.Sprintf("ack_started:%s:%d", envelope.GenerationID, *envelope.TurnID),
 			EventPayload:    jsonPayload(envelope.Payload),
 			Now:             now,
-		}); err != nil {
+		})
+		if err != nil {
 			return err
 		}
-		p.afterCommit(ctx, envelope)
+		if eventID != 0 {
+			p.afterCommit(ctx, envelope, eventID)
+		}
 		return nil
 	case TypeEmitOutput:
 		if envelope.TurnID == nil {
@@ -265,7 +268,7 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 			Now:            now,
 		})
 		if err == nil && eventID != 0 {
-			p.afterCommit(ctx, envelope)
+			p.afterCommit(ctx, envelope, eventID)
 		}
 		return err
 	case TypeAckTurnCompleted:
@@ -279,7 +282,7 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 		if payload.Status == "" {
 			payload.Status = "completed"
 		}
-		if err := p.Store.CompleteTurn(ctx, store.CompleteTurnParams{
+		eventID, err := p.Store.CompleteTurn(ctx, store.CompleteTurnParams{
 			SessionID:      envelope.SessionID,
 			GenerationID:   envelope.GenerationID,
 			TurnID:         *envelope.TurnID,
@@ -291,10 +294,13 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 			EventDedupeKey: fmt.Sprintf("ack_completed:%s:%d", envelope.GenerationID, *envelope.TurnID),
 			EventPayload:   payload,
 			Now:            now,
-		}); err != nil {
+		})
+		if err != nil {
 			return err
 		}
-		p.afterCommit(ctx, envelope)
+		if eventID != 0 {
+			p.afterCommit(ctx, envelope, eventID)
+		}
 		return nil
 	default:
 		return protocolErrorf("unsupported bridge message type %q", envelope.Type)
@@ -317,9 +323,9 @@ func (p *Processor) writeResponse(ctx context.Context, inbox Queue, request Enve
 	return err
 }
 
-func (p *Processor) afterCommit(ctx context.Context, envelope Envelope) {
+func (p *Processor) afterCommit(ctx context.Context, envelope Envelope, eventID int64) {
 	if p.AfterCommit != nil {
-		p.AfterCommit(ctx, envelope)
+		p.AfterCommit(ctx, envelope, eventID)
 	}
 }
 

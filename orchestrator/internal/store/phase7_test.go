@@ -208,7 +208,7 @@ func TestTurnHelperClaimAckComplete(t *testing.T) {
 	if !ok || !replay.Replayed || replay.TurnID != grant.TurnID {
 		t.Fatalf("unexpected replay grant: ok=%v replay=%+v", ok, replay)
 	}
-	if err := st.AckTurnStarted(ctx, AckStartedParams{
+	if _, err := st.AckTurnStarted(ctx, AckStartedParams{
 		SessionID:       "sess_turn",
 		GenerationID:    "gen_turn",
 		TurnID:          grant.TurnID,
@@ -219,7 +219,7 @@ func TestTurnHelperClaimAckComplete(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("ack started: %v", err)
 	}
-	if err := st.CompleteTurn(ctx, CompleteTurnParams{
+	if _, err := st.CompleteTurn(ctx, CompleteTurnParams{
 		SessionID:      "sess_turn",
 		GenerationID:   "gen_turn",
 		TurnID:         grant.TurnID,

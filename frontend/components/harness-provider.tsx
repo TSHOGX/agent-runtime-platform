@@ -84,6 +84,31 @@ const SESSION_EVENT_STATUSES = new Set<SessionStatus>([
 ]);
 const MESSAGE_POLL_INTERVAL_MS = 1000;
 const MESSAGE_POLL_TIMEOUT_MS = 120_000;
+const SSE_TYPED_EVENT_TYPES = [
+  "session.created",
+  "session.running_active",
+  "session.running_idle",
+  "session.checkpointing",
+  "session.checkpointed",
+  "session.failed",
+  "session.destroyed",
+  "message.created",
+  "agent.message",
+  "agent.delta",
+  "agent.output",
+  "system.status",
+  "session.error",
+  "artifact.updated",
+  "artifact.deleted",
+  "ack_turn_started",
+  "emit_output",
+  "ack_turn_completed",
+  "proxy.request.started",
+  "proxy.request.completed",
+  "proxy.request.failed",
+  "replay_gap",
+  "error"
+] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -169,6 +194,7 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
   const aliveRef = useRef(true);
   const pollingRef = useRef<Set<string>>(new Set());
   const connectedOnceRef = useRef(false);
+  const lastEventIDRef = useRef<number | null>(null);
 
   useEffect(() => {
     stateRef.current = state;
@@ -452,7 +478,7 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
 
     let source: EventSource;
     try {
-      source = new EventSource(buildEventsStreamUrl());
+      source = new EventSource(buildEventsStreamUrl(undefined, lastEventIDRef.current));
     } catch {
       const failureTimer = setTimeout(() => {
         if (!cleanedUp) {
@@ -476,9 +502,20 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
       }
     };
 
-    source.onmessage = (ev) => {
+    const handleSourceEvent = (ev: MessageEvent) => {
       try {
         const data = JSON.parse(typeof ev.data === "string" ? ev.data : "");
+        const eventID =
+          data && typeof data.event_id === "number"
+            ? data.event_id
+            : Number.parseInt(ev.lastEventId, 10);
+        if (Number.isFinite(eventID) && eventID > 0) {
+          lastEventIDRef.current = eventID;
+        }
+        if (data && data.type === "replay_gap") {
+          void refresh();
+          return;
+        }
         if (data && typeof data.type === "string") {
           handleEventRef.current(data as HarnessEvent);
         }
@@ -486,6 +523,10 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
         // ignore malformed frames
       }
     };
+    source.onmessage = handleSourceEvent;
+    for (const eventType of SSE_TYPED_EVENT_TYPES) {
+      source.addEventListener(eventType, handleSourceEvent);
+    }
 
     source.onerror = () => {
       if (cleanedUp) return;
@@ -504,6 +545,9 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
       cleanedUp = true;
       aliveRef.current = false;
       clearTimeout(bootTimer);
+      for (const eventType of SSE_TYPED_EVENT_TYPES) {
+        source.removeEventListener(eventType, handleSourceEvent);
+      }
       source.close();
     };
   }, [refresh]);

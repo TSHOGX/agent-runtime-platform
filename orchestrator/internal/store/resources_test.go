@@ -969,7 +969,7 @@ func createExpiredAckStartedTurn(t *testing.T, ctx context.Context, st *Store, o
 	}); err != nil || !ok || grant.TurnID != turnID {
 		t.Fatalf("claim setup: ok=%v grant=%+v err=%v", ok, grant, err)
 	}
-	if err := st.AckTurnStarted(ctx, AckStartedParams{
+	if _, err := st.AckTurnStarted(ctx, AckStartedParams{
 		SessionID:       sessionID,
 		GenerationID:    allocation.GenerationID,
 		TurnID:          turnID,

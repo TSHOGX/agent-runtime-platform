@@ -319,7 +319,7 @@ func TestProcessorResumesAckStartedTurnDuringGrace(t *testing.T) {
 	if err != nil || !ok || grant.TurnID != turnID {
 		t.Fatalf("claim setup: ok=%v grant=%+v err=%v", ok, grant, err)
 	}
-	if err := st.AckTurnStarted(ctx, store.AckStartedParams{
+	if _, err := st.AckTurnStarted(ctx, store.AckStartedParams{
 		SessionID:       sessionID,
 		GenerationID:    allocation.GenerationID,
 		TurnID:          turnID,
@@ -730,12 +730,12 @@ func (s storeFailure) ResumeTurn(context.Context, store.ResumeTurnParams) (store
 	return store.TurnGrant{}, false, errors.New("unexpected ResumeTurn")
 }
 
-func (s storeFailure) AckTurnStarted(context.Context, store.AckStartedParams) error {
-	return errors.New("unexpected AckTurnStarted")
+func (s storeFailure) AckTurnStarted(context.Context, store.AckStartedParams) (int64, error) {
+	return 0, errors.New("unexpected AckTurnStarted")
 }
 
-func (s storeFailure) CompleteTurn(context.Context, store.CompleteTurnParams) error {
-	return errors.New("unexpected CompleteTurn")
+func (s storeFailure) CompleteTurn(context.Context, store.CompleteTurnParams) (int64, error) {
+	return 0, errors.New("unexpected CompleteTurn")
 }
 
 func (s storeFailure) AppendEvent(context.Context, store.AppendEventParams) (int64, error) {

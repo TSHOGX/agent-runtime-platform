@@ -57,8 +57,15 @@ export type DeltaPayload = {
 };
 
 export type HarnessEvent = {
+  event_id?: number;
   type: string;
   session_id?: string;
+  turn_id?: number;
+  generation_id?: string;
+  output_sequence?: number;
+  proxy_request_id?: string;
+  stream?: string;
+  severity?: string;
   time?: string;
   payload?: unknown;
 };
