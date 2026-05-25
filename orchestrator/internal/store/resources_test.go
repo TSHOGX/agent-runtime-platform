@@ -1728,6 +1728,110 @@ func TestUpdateSessionStatusDoesNotResurrectDestroyedSession(t *testing.T) {
 	}
 }
 
+func TestDestroySessionCancelsPendingTurnsAndReclaimsGeneration(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	sessionID := "sess_destroy_pending"
+	createStoreSession(t, ctx, st, sessionID)
+	now := time.Now().UTC()
+	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: sessionID,
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       now,
+		Config:    testAllocatorConfig(t),
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, sessionID, allocation.GenerationID, allocation.Owner, now.Add(time.Second)); err != nil {
+		t.Fatalf("mark generation live: %v", err)
+	}
+	enqueued, err := st.EnqueueTurnMessage(ctx, EnqueueTurnMessageParams{
+		SessionID: sessionID,
+		Content:   "hello",
+		Now:       now.Add(2 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("enqueue turn: %v", err)
+	}
+
+	destroyedAt := now.Add(3 * time.Second)
+	if err := st.DestroySession(ctx, sessionID, destroyedAt); err != nil {
+		t.Fatalf("destroy session: %v", err)
+	}
+
+	var sessionStatus, turnStatus, turnErrorClass, generationStatus, generationErrorClass, networkState, resourceState string
+	if err := st.db.QueryRowContext(ctx, `
+SELECT s.status, t.status, COALESCE(t.error_class, ''), g.status, COALESCE(g.error_class, ''),
+       n.allocation_state, r.resource_state
+FROM sessions s
+JOIN turns t ON t.session_id = s.id
+JOIN runtime_generations g ON g.session_id = s.id
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE s.id = ?
+  AND t.id = ?`, sessionID, enqueued.TurnID).Scan(
+		&sessionStatus,
+		&turnStatus,
+		&turnErrorClass,
+		&generationStatus,
+		&generationErrorClass,
+		&networkState,
+		&resourceState,
+	); err != nil {
+		t.Fatalf("query destroyed state: %v", err)
+	}
+	if sessionStatus != string(sessionstate.Destroyed) ||
+		turnStatus != "canceled" ||
+		turnErrorClass != "session_destroyed" ||
+		generationStatus != "failed" ||
+		generationErrorClass != "session_destroyed" ||
+		networkState != "reclaimable" ||
+		resourceState != "reclaimable" {
+		t.Fatalf("unexpected destroyed state: session=%s turn=%s turn_error=%s generation=%s generation_error=%s network=%s resource=%s",
+			sessionStatus, turnStatus, turnErrorClass, generationStatus, generationErrorClass, networkState, resourceState)
+	}
+}
+
+func TestCancelTerminalSessionPendingTurnsRepairsTerminalQueue(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openOwnedStore(t, ctx)
+	sessionID := "sess_terminal_queue"
+	createStoreSession(t, ctx, st, sessionID)
+	now := time.Now().UTC()
+	enqueued, err := st.EnqueueTurnMessage(ctx, EnqueueTurnMessageParams{
+		SessionID: sessionID,
+		Content:   "hello",
+		Now:       now,
+	})
+	if err != nil {
+		t.Fatalf("enqueue turn: %v", err)
+	}
+	if err := st.UpdateSessionStatus(ctx, sessionID, string(sessionstate.Destroyed), nil); err != nil {
+		t.Fatalf("destroy session: %v", err)
+	}
+
+	canceled, err := st.CancelTerminalSessionPendingTurns(ctx, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("cancel terminal pending turns: %v", err)
+	}
+	if canceled != 1 {
+		t.Fatalf("canceled=%d want 1", canceled)
+	}
+
+	var status, errorClass, errText string
+	if err := st.db.QueryRowContext(ctx, `
+SELECT status, COALESCE(error_class, ''), COALESCE(error, '')
+FROM turns
+WHERE id = ?`, enqueued.TurnID).Scan(&status, &errorClass, &errText); err != nil {
+		t.Fatalf("query turn: %v", err)
+	}
+	if status != "canceled" || errorClass != "session_destroyed" || errText != "session_destroyed" {
+		t.Fatalf("unexpected repaired turn: status=%s error_class=%s error=%s", status, errorClass, errText)
+	}
+}
+
 func checkpointedGeneration(t *testing.T, ctx context.Context, st *Store, sessionID, generationID string, now time.Time) {
 	t.Helper()
 	if _, err := st.db.ExecContext(ctx, `

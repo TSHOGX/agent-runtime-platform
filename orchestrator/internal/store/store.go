@@ -215,6 +215,114 @@ WHERE id = ?`
 	return err
 }
 
+func (s *Store) DestroySession(ctx context.Context, id string, now time.Time) error {
+	if strings.TrimSpace(id) == "" {
+		return fmt.Errorf("session id is required")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	generationIDs, err := queryStringColumnTx(ctx, tx, `
+SELECT generation_id
+FROM runtime_generations
+WHERE session_id = ?`, id)
+	if err != nil {
+		return err
+	}
+
+	nowString := formatTime(now)
+	if _, err := tx.ExecContext(ctx, `
+UPDATE sessions
+SET status = 'destroyed',
+    updated_at = ?,
+    ended_at = COALESCE(ended_at, ?)
+WHERE id = ?`, nowString, nowString, id); err != nil {
+		return err
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+UPDATE turns
+SET status = 'canceled',
+    completed_at = ?,
+    completed_by_generation = COALESCE(completed_by_generation, generation_id),
+    error_class = 'session_destroyed',
+    error = 'session_destroyed',
+    lease_owner = NULL,
+    lease_expires_at = NULL
+WHERE session_id = ?
+  AND status IN ('queued', 'leased', 'running')`, nowString, id); err != nil {
+		return err
+	}
+
+	if len(generationIDs) > 0 {
+		args := []any{nowString}
+		args = appendStringIDs(args, generationIDs)
+		if _, err := tx.ExecContext(ctx, `
+UPDATE runtime_generations
+SET status = 'failed',
+    error_class = COALESCE(error_class, 'session_destroyed'),
+    failure_reason = COALESCE(failure_reason, 'session_destroyed'),
+    ended_at = COALESCE(ended_at, ?),
+    lease_owner = NULL
+WHERE generation_id IN (`+sqlPlaceholders(len(generationIDs))+`)
+  AND status NOT IN ('failed', 'destroyed')`, args...); err != nil {
+			return err
+		}
+		if err := markAllocationsReclaimableTx(ctx, tx, generationIDs); err != nil {
+			return err
+		}
+		if err := deleteActiveContextsForGenerationsTx(ctx, tx, generationIDs); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (s *Store) CancelTerminalSessionPendingTurns(ctx context.Context, now time.Time) (int64, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	res, err := s.db.ExecContext(ctx, `
+UPDATE turns
+SET status = 'canceled',
+    completed_at = ?,
+    completed_by_generation = COALESCE(completed_by_generation, generation_id),
+    error_class = COALESCE(
+      (SELECT NULLIF(sessions.error_class, '') FROM sessions WHERE sessions.id = turns.session_id),
+      CASE (SELECT sessions.status FROM sessions WHERE sessions.id = turns.session_id)
+        WHEN 'destroyed' THEN 'session_destroyed'
+        ELSE 'session_failed'
+      END
+    ),
+    error = COALESCE(
+      (SELECT NULLIF(sessions.failure_reason, '') FROM sessions WHERE sessions.id = turns.session_id),
+      CASE (SELECT sessions.status FROM sessions WHERE sessions.id = turns.session_id)
+        WHEN 'destroyed' THEN 'session_destroyed'
+        ELSE 'session_failed'
+      END
+    ),
+    lease_owner = NULL,
+    lease_expires_at = NULL
+WHERE status IN ('queued', 'leased', 'running')
+  AND EXISTS (
+    SELECT 1
+    FROM sessions
+    WHERE sessions.id = turns.session_id
+      AND sessions.status IN ('failed', 'destroyed')
+  )`, formatTime(now))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 func (s *Store) UpdateSessionActiveGeneration(ctx context.Context, p SessionActiveGenerationCASParams) error {
 	if strings.TrimSpace(p.SessionID) == "" {
 		return fmt.Errorf("session id is required")

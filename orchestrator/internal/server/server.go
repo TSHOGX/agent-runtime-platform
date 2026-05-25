@@ -785,6 +785,9 @@ func (s *Server) RunPhase7Maintenance(ctx context.Context) error {
 		if _, err := s.store.SweepExpiredSessions(ctx, now); err != nil && !errors.Is(err, context.Canceled) {
 			s.log.Warn("phase7 expired-session sweep failed", "error", err)
 		}
+		if _, err := s.store.CancelTerminalSessionPendingTurns(ctx, now); err != nil && !errors.Is(err, context.Canceled) {
+			s.log.Warn("phase7 terminal-session turn cleanup failed", "error", err)
+		}
 		if _, err := s.store.RecoverAllocations(ctx, store.StartupRecoveryParams{
 			OwnerUUID:       s.ownerUUID,
 			Now:             now,
@@ -1160,7 +1163,7 @@ func (s *Server) destroySession(w http.ResponseWriter, r *http.Request, sessionI
 	if err := s.runtime.Destroy(r.Context(), session.RestoreID); err != nil {
 		s.log.Warn("runtime destroy returned error", "session_id", sessionID, "error", err)
 	}
-	if err := s.store.UpdateSessionStatus(r.Context(), sessionID, string(sessionstate.Destroyed), nil); err != nil {
+	if err := s.store.DestroySession(r.Context(), sessionID, time.Now().UTC()); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
