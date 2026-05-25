@@ -1115,22 +1115,41 @@ func TestSendMessageRuntimeStartFailureMarksGenerationFailedAndReclaimable(t *te
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("expected status 500, got %d body %s", rec.Code, rec.Body.String())
 	}
-	var generationStatus, errorClass, networkState, resourceState, sessionStatus string
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body["error_class"] != "probe_failed_pre_start" ||
+		body["error"] != "sandbox network probe failed before start" {
+		t.Fatalf("unexpected response body: %v", body)
+	}
+	var generationStatus, errorClass, networkState, resourceState, sessionStatus, sessionErrorClass, sessionFailureReason string
 	if err := st.DBForTest().QueryRowContext(ctx, `
-SELECT g.status, COALESCE(g.error_class, ''), n.allocation_state, r.resource_state, s.status
+SELECT g.status, COALESCE(g.error_class, ''), n.allocation_state, r.resource_state, s.status,
+       COALESCE(s.error_class, ''), COALESCE(s.failure_reason, '')
 FROM runtime_generations g
 JOIN network_profiles n ON n.generation_id = g.generation_id
 JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
 JOIN sessions s ON s.active_generation_id = g.generation_id
-WHERE g.session_id = ?`, session.ID).Scan(&generationStatus, &errorClass, &networkState, &resourceState, &sessionStatus); err != nil {
+WHERE g.session_id = ?`, session.ID).Scan(
+		&generationStatus,
+		&errorClass,
+		&networkState,
+		&resourceState,
+		&sessionStatus,
+		&sessionErrorClass,
+		&sessionFailureReason,
+	); err != nil {
 		t.Fatalf("query generation state: %v", err)
 	}
 	if generationStatus != "failed" ||
 		errorClass != "probe_failed_pre_start" ||
 		networkState != "reclaimable" ||
 		resourceState != "reclaimable" ||
-		sessionStatus != string(sessionstate.Failed) {
-		t.Fatalf("unexpected failed generation state: generation=%s class=%s network=%s resource=%s session=%s", generationStatus, errorClass, networkState, resourceState, sessionStatus)
+		sessionStatus != string(sessionstate.Failed) ||
+		sessionErrorClass != "probe_failed_pre_start" ||
+		sessionFailureReason != "pre-start sandbox network probe failed" {
+		t.Fatalf("unexpected failed generation state: generation=%s class=%s network=%s resource=%s session=%s session_class=%s session_reason=%s", generationStatus, errorClass, networkState, resourceState, sessionStatus, sessionErrorClass, sessionFailureReason)
 	}
 	var turns int
 	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM turns WHERE session_id = ?`, session.ID).Scan(&turns); err != nil {
@@ -1204,22 +1223,41 @@ func TestSendMessagePrepareFailureMarksGenerationFailedAndReclaimable(t *testing
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("expected status 500, got %d body %s", rec.Code, rec.Body.String())
 	}
-	var generationStatus, errorClass, networkState, resourceState, sessionStatus string
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body["error_class"] != "probe_failed_pre_start" ||
+		body["error"] != "sandbox network probe failed before start" {
+		t.Fatalf("unexpected response body: %v", body)
+	}
+	var generationStatus, errorClass, networkState, resourceState, sessionStatus, sessionErrorClass, sessionFailureReason string
 	if err := st.DBForTest().QueryRowContext(ctx, `
-SELECT g.status, COALESCE(g.error_class, ''), n.allocation_state, r.resource_state, s.status
+SELECT g.status, COALESCE(g.error_class, ''), n.allocation_state, r.resource_state, s.status,
+       COALESCE(s.error_class, ''), COALESCE(s.failure_reason, '')
 FROM runtime_generations g
 JOIN network_profiles n ON n.generation_id = g.generation_id
 JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
 JOIN sessions s ON s.active_generation_id = g.generation_id
-WHERE g.session_id = ?`, session.ID).Scan(&generationStatus, &errorClass, &networkState, &resourceState, &sessionStatus); err != nil {
+WHERE g.session_id = ?`, session.ID).Scan(
+		&generationStatus,
+		&errorClass,
+		&networkState,
+		&resourceState,
+		&sessionStatus,
+		&sessionErrorClass,
+		&sessionFailureReason,
+	); err != nil {
 		t.Fatalf("query generation state: %v", err)
 	}
 	if generationStatus != "failed" ||
 		errorClass != "probe_failed_pre_start" ||
 		networkState != "reclaimable" ||
 		resourceState != "reclaimable" ||
-		sessionStatus != string(sessionstate.Failed) {
-		t.Fatalf("unexpected failed generation state: generation=%s class=%s network=%s resource=%s session=%s", generationStatus, errorClass, networkState, resourceState, sessionStatus)
+		sessionStatus != string(sessionstate.Failed) ||
+		sessionErrorClass != "probe_failed_pre_start" ||
+		sessionFailureReason != "pre-start sandbox network probe failed" {
+		t.Fatalf("unexpected failed generation state: generation=%s class=%s network=%s resource=%s session=%s session_class=%s session_reason=%s", generationStatus, errorClass, networkState, resourceState, sessionStatus, sessionErrorClass, sessionFailureReason)
 	}
 	var turns int
 	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM turns WHERE session_id = ?`, session.ID).Scan(&turns); err != nil {

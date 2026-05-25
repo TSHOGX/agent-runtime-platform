@@ -351,7 +351,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, sessionID s
 	}
 	if err := s.startEnsuredGeneration(r.Context(), session, ensured); err != nil {
 		if !ensured.RestoreFromCheckpoint {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeRuntimeStartError(w, err)
 			return
 		}
 		ensured, err = s.ensureActiveGeneration(r.Context(), session, leaseOwner)
@@ -368,7 +368,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, sessionID s
 			return
 		}
 		if err := s.startEnsuredGeneration(r.Context(), session, ensured); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeRuntimeStartError(w, err)
 			return
 		}
 	}
@@ -442,6 +442,7 @@ func (s *Server) failGenerationBeforeTurn(sessionID, generationID, owner string,
 	if failure != nil {
 		reason = failure.Error()
 	}
+	errorClass := runtimeFailureClass(reason)
 	now := time.Now().UTC()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -449,16 +450,25 @@ func (s *Server) failGenerationBeforeTurn(sessionID, generationID, owner string,
 		SessionID:    sessionID,
 		GenerationID: generationID,
 		Owner:        owner,
-		ErrorClass:   runtimeFailureClass(reason),
+		ErrorClass:   errorClass,
 		Reason:       reason,
 		Now:          now,
 	}); err != nil {
 		s.log.Warn("failed to fail generation before turn start", "session_id", sessionID, "generation_id", generationID, "error", err)
 	}
-	if err := s.store.UpdateSessionStatusAndActivity(ctx, sessionID, string(sessionstate.Failed), nil, now); err != nil {
+	if err := s.store.FailSession(ctx, store.FailSessionParams{
+		SessionID:    sessionID,
+		ErrorClass:   errorClass,
+		Reason:       reason,
+		LastActivity: now,
+		Now:          now,
+	}); err != nil {
 		s.log.Warn("failed to mark session failed before turn start", "session_id", sessionID, "generation_id", generationID, "error", err)
 	}
-	s.hub.Publish(events.Event{Type: "session.error", SessionID: sessionID, Payload: map[string]string{"error": reason}})
+	s.hub.Publish(events.Event{Type: "session.error", SessionID: sessionID, Payload: map[string]string{
+		"error_class": errorClass,
+		"error":       runtimeFailureMessage(errorClass, reason),
+	}})
 	s.hub.Publish(events.Event{Type: "session." + string(sessionstate.Failed), SessionID: sessionID})
 }
 
@@ -664,6 +674,35 @@ func runtimeFailureClass(message string) string {
 		return "network_setup_failed"
 	}
 	return "runtime_failed"
+}
+
+func runtimeFailureMessage(errorClass, reason string) string {
+	switch errorClass {
+	case "probe_failed_pre_start":
+		return "sandbox network probe failed before start"
+	case "probe_failed_post_start":
+		return "sandbox network probe failed after start"
+	case "manifest_digest_mismatch":
+		return "runtime manifest validation failed"
+	case "network_setup_failed":
+		return "sandbox network setup failed"
+	case "shell_secret_disallowed":
+		return "shell agent cannot mount model secrets"
+	default:
+		if strings.TrimSpace(reason) != "" {
+			return reason
+		}
+		return "runtime failed"
+	}
+}
+
+func writeRuntimeStartError(w http.ResponseWriter, err error) {
+	reason := ""
+	if err != nil {
+		reason = err.Error()
+	}
+	errorClass := runtimeFailureClass(reason)
+	writeErrorClass(w, http.StatusInternalServerError, errorClass, runtimeFailureMessage(errorClass, reason))
 }
 
 func (s *Server) runtimeGenerationDetails(ctx context.Context, sessionID, generationID string) (store.RuntimeGenerationDetails, error) {

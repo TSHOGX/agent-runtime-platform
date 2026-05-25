@@ -517,6 +517,47 @@ WHERE id = ?`
 	return err
 }
 
+type FailSessionParams struct {
+	SessionID    string
+	ErrorClass   string
+	Reason       string
+	LastActivity time.Time
+	Now          time.Time
+}
+
+func (s *Store) FailSession(ctx context.Context, p FailSessionParams) error {
+	if strings.TrimSpace(p.SessionID) == "" {
+		return fmt.Errorf("session id is required")
+	}
+	now := p.Now
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	lastActivity := p.LastActivity
+	if lastActivity.IsZero() {
+		lastActivity = now
+	}
+	nowString := formatTime(now)
+	_, err := s.db.ExecContext(ctx, `
+UPDATE sessions
+SET status = 'failed',
+    updated_at = ?,
+    ended_at = COALESCE(ended_at, ?),
+    last_activity_at = ?,
+    error_class = ?,
+    failure_reason = ?
+WHERE id = ?
+  AND status != 'destroyed'`,
+		nowString,
+		nowString,
+		formatTime(lastActivity),
+		nullableString(p.ErrorClass),
+		nullableString(p.Reason),
+		p.SessionID,
+	)
+	return err
+}
+
 func (s *Store) ListSessionsByStatus(ctx context.Context, status string) ([]Session, error) {
 	if err := sessionstate.Validate(status); err != nil {
 		return nil, err

@@ -122,6 +122,57 @@ func TestUpdateSessionStatusAndActivity(t *testing.T) {
 	}
 }
 
+func TestFailSessionStoresTypedFailure(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	ctx := context.Background()
+	st, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	now := time.Now().UTC()
+	session := Session{
+		ID:        "sess_fail",
+		UserID:    "lab",
+		Status:    string(sessionstate.Created),
+		Agent:     "claude",
+		Workspace: dir,
+		RestoreID: "phase3-sess_fail",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := st.CreateSession(ctx, session); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	failedAt := now.Add(10 * time.Second)
+	if err := st.FailSession(ctx, FailSessionParams{
+		SessionID:    session.ID,
+		ErrorClass:   "probe_failed_pre_start",
+		Reason:       "pre-start sandbox network probe failed",
+		LastActivity: failedAt,
+		Now:          failedAt,
+	}); err != nil {
+		t.Fatalf("fail session: %v", err)
+	}
+
+	got, err := st.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if got.Status != string(sessionstate.Failed) ||
+		got.ErrorClass != "probe_failed_pre_start" ||
+		got.FailureReason != "pre-start sandbox network probe failed" {
+		t.Fatalf("unexpected failed session: %+v", got)
+	}
+	if got.EndedAt == nil {
+		t.Fatalf("ended_at should be set")
+	}
+}
+
 func TestEnqueueTurnMessageCreatesQueuedTurnMessageAndActivatesSession(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
