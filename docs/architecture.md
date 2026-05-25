@@ -1,23 +1,23 @@
 # Harness Platform Architecture
 
-> Last updated: 2026-05-22
+> Last updated: 2026-05-25
 
 ## Overview
 
-Harness Platform runs one AI data-analysis agent per gVisor sandbox session. The orchestrator owns session state, starts the sandbox, bridges user turns through stdin/PTY, parses agent stdout/stderr, persists messages, and publishes events to the frontend.
+Harness Platform runs one AI data-analysis agent per gVisor sandbox session. The orchestrator owns session state, starts per-generation sandboxes, routes user turns through the Agent Bridge claim/ack protocol, persists durable turn and event records, correlates model proxy requests, and publishes events to the frontend.
 
 The current baseline uses:
 
 - gVisor `runsc` with the `systrap` platform.
-- A baked OCI bundle under `bundle/out/phase2-template-bundle`.
-- Long-lived per-session containers while the conversation is active.
-- Checkpoint/restore primitives, with automatic idle checkpointing disabled until the turn channel is checkpoint-safe.
+- Per-generation OCI specs, bundles, control manifests, bridge dirs, and network profiles under `harness.run_dir`.
+- Long-lived active runtime generations while the conversation is active.
+- Checkpoint/restore primitives behind the Phase 7 control plane, with automatic idle checkpointing disabled by the checked-in policy.
 - Same-origin Server-Sent Events for the browser event path.
-- Per-container `OutputHub` for multi-turn output routing.
-- PTY-backed shell sessions with interrupt support.
+- Durable `events` table replay for multi-turn output routing.
+- Bridge-backed Claude and shell sessions with interrupt support.
 - Explicit local Claude proxy configuration loaded from `config/harness.yaml`.
 
-The target checkpoint-safe architecture is tracked separately in [phase7/README.md](./phase7/README.md).
+The checkpoint-safe architecture is tracked in [phase7/README.md](./phase7/README.md).
 
 ## Component Model
 
@@ -35,13 +35,15 @@ Go orchestrator
   |-- SQLite Store
   |-- Artifact Watcher
   `-- Runtime
-        |-- active container map
-        |-- per-container OutputHub
+        |-- runtime generation manager
+        |-- resource allocator/reaper
+        |-- bridge processor
         `-- runsc run / restore / checkpoint / delete
               |
               v
         gVisor sandbox
           |-- harness-agent-entrypoint
+          |-- harness-bridge-client
           |-- Claude Code / PTY-backed shell agent
           |-- /workspace -> /var/lib/harness/sessions/<session_id>
           `-- /agent-homes/<session_id> -> /var/lib/harness/agent-homes/<session_id>
@@ -95,13 +97,13 @@ Input is accepted only in `created`, `running_idle`, and `checkpointed`. `runnin
 
 `Runtime.Start()` chooses one of three paths:
 
-1. **Hot path**: if `containers[sessionID]` exists, subscribe to that container's `OutputHub`, write the user turn to stdin, and forward output until the parser marks the turn complete.
-2. **Opt-in restore path**: if `RestoreFromCheckpoint` is explicitly enabled and a checkpoint exists under `HARNESS_CHECKPOINTS_ROOT/<session_id>`, run `runsc restore`, recreate stdio pipes, create a new `OutputHub`, then write the user turn. The production path does not enable this by default.
-3. **Cold path**: run `runsc run` from `HARNESS_BUNDLE_ROOT/phase2-template-bundle`, create stdio pipes, create a new `OutputHub`, then write the first user turn.
+1. **Live path**: if the session has an active live generation, enqueue the turn and let the bridge claim it.
+2. **Restore path**: if the session is `checkpointed`, claim the checkpointed generation for restore, recreate compatible resources, validate checkpoint metadata, run `runsc restore`, and require the bridge probe before claim.
+3. **Cold path**: allocate a new runtime generation, render per-generation resources, run the host-side proxy probe, start `runsc`, require the in-sandbox bridge probe, then let the bridge claim turns.
 
 The active Go runtime now drives `runsc` directly. `bundle/restore-sandbox.sh` remains valuable for Phase 2 smoke tests and restore experiments, but it is no longer the primary request path.
 
-Current limitation: stdin/PTY is still the lower-level turn transport. It is reliable for live multi-turn containers, but it is not a checkpoint-safe control plane because a restored container cannot rely on the original host pipe still being logically connected.
+The bridge is the lower-level turn transport. It uses a file-backed queue so reconnect and checkpoint/restore do not depend on a live host pipe.
 
 ## Output Routing
 
@@ -142,7 +144,7 @@ The stream parser marks a turn complete when it sees:
 
 For shell sessions, the `harness-shell-agent` shim runs a PTY-backed shell and emits `harness.shell_output` frames for command output plus `harness.turn_done` when the prompt returns. The orchestrator persists shell output as assistant text, publishes it as `agent.output`, and exposes `POST /api/sessions/{id}/interrupt` for the running turn.
 
-For other future agent adapters, stdin is still the lower-level fallback. Those adapters need their own completion contract before they are first-class multi-turn citizens.
+For future agent adapters, the bridge remains the session-level transport. Each adapter still needs its own completion/output contract before it is a first-class multi-turn citizen.
 
 ## Event Model
 
@@ -316,9 +318,7 @@ The current Go runtime launches `runsc` with `-network sandbox -overlay2 none`. 
 
 ## Checkpointing
 
-`MonitorIdleSessions()` currently performs startup reconciliation and then exits because `autoCheckpointEnabled` is false. It recovers stale `checkpointing` rows and re-enables `checkpointed` rows as `running_idle`, so the UI/API do not stay stuck in checkpoint states after a restart.
-
-Automatic idle checkpointing is disabled because `runsc restore` can restore the container while the long-lived stdin turn channel used by the agent entrypoint is no longer reliably reconnectable.
+`MonitorIdleSessions()` performs startup reconciliation and then obeys the checkpoint policy. The checked-in lab config has `harness.checkpoint.auto_enabled: false`, so automatic checkpointing is disabled by policy, not because the turn transport is still stdin-coupled.
 
 The checkpoint code still exists for experiments:
 
@@ -326,9 +326,9 @@ The checkpoint code still exists for experiments:
 running_idle -> checkpointing -> checkpointed
 ```
 
-`Runtime.Checkpoint()` keeps the active container in the map until `runsc checkpoint -overlay2 <mode> -image-path` succeeds, then deletes the runtime container. On failure the container stays live and the session falls back to `running_idle`, so a later idle pass can retry in a checkpointable mode.
+`Runtime.Checkpoint()` writes a checkpoint image manifest and persists the runtime artifact digests needed for restore validation. On failure the generation returns to `running_idle`, so a later idle pass can retry if policy permits it.
 
-The intended future path is Phase 7:
+The Phase 7 path is:
 
 ```text
 durable turn ledger
@@ -339,15 +339,15 @@ durable turn ledger
   -> claim next turn
 ```
 
-Until that control plane exists, checkpoint/restore should be treated as experimental and opt-in.
+Checkpoint/restore remains policy-gated. Operators should enable automatic checkpointing only after restore behavior, resource retention, and SLOs are acceptable for the target deployment.
 
 ## Current Limitations
 
 - Additional agent adapters beyond Claude Code and the shell shim need their own completion contract before they are first-class multi-turn citizens.
 - Artifact browsing is read-only. File creation, renaming, and deletion should still happen through the sandbox agent or shell session, with the UI reflecting those changes through metadata events.
-- Resource limits and egress policy are not yet documented as production-ready defaults.
+- Tenant-level resource limits and production egress policy management are Phase 8 work.
 - The current output hub intentionally drops lines for slow subscribers; that is acceptable for UI logs but should be revisited before using the stream as an audit log.
-- Automatic checkpoint/restore is not a default resource-release path until the Phase 7 checkpoint-safe control plane is implemented.
+- Automatic checkpoint/restore is not enabled by default in the lab config; it is a policy decision on top of the Phase 7 control plane.
 
 ## File Map
 

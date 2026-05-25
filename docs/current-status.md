@@ -1,7 +1,7 @@
 # Current Status
 
-> Last updated: 2026-05-22
-> Scope: current baseline after the stream routing, explicit proxy config, sandbox network, checkpoint-safety changes, and Phase 6 artifact browser hardening.
+> Last updated: 2026-05-25
+> Scope: current baseline after the Phase 7 checkpoint-safe control-plane refactor and release qualification.
 
 ## Baseline
 
@@ -9,14 +9,15 @@ Harness Platform now has a working end-to-end lab stack:
 
 - Next.js frontend workbench on port `8000`.
 - Go orchestrator API on port `8090`.
-- gVisor `runsc` runtime using the baked Phase 2 OCI bundle.
-- SQLite persistence for sessions, messages, and artifact metadata.
+- gVisor `runsc` runtime using per-generation OCI specs, control manifests, bridge dirs, and network profiles.
+- SQLite persistence for sessions, messages, runtime generations, turns, durable events, proxy request context, resources, and artifact metadata.
 - Per-session workspace under `/var/lib/harness/sessions/<session_id>`.
 - Per-session Claude HOME under `/var/lib/harness/agent-homes/<session_id>`, mounted in gVisor as `/agent-homes/<session_id>` and kept outside `/workspace`.
-- Claude Code stream-json parsing into persisted assistant messages and live UI deltas.
-- PTY-backed shell sessions through `harness-shell-agent`, with shell output persisted as assistant messages and interrupt support for running turns.
-- Phase 7 typed `config/harness.yaml` is loaded with strict YAML validation; the current runtime still uses the local Claude proxy defaults with sandbox networking as the default path.
-- Checkpoint/restore primitives remain in the codebase, but automatic idle checkpointing is disabled until the turn channel is checkpoint-safe.
+- Claude Code stream-json parsing into durable `emit_output` events, persisted assistant messages, and live UI deltas.
+- Shell sessions through the bridge-aware shell shim, with shell output persisted as assistant messages and interrupt support for running turns.
+- Phase 7 typed `config/harness.yaml` is loaded with strict YAML validation and drives per-generation network, probe, bridge, reaper, checkpoint, and secret settings.
+- Agent Bridge claim/ack is the live turn execution path. Turns transition through `queued`, `leased`, `running`, and terminal states with CAS fencing and durable events.
+- Checkpoint/restore primitives are behind the Phase 7 control plane. Automatic idle checkpointing is policy-gated and disabled in the checked-in lab config.
 - Artifact browsing is a metadata-backed live file tree with search, safe downloads, delete/rename event handling, and richer previews for Markdown, code, text, images, JSON, CSV/TSV, and PDF.
 
 ## Recent Commits
@@ -63,7 +64,7 @@ The frontend now exposes `Shell` as a first-class session mode instead of a smok
 The orchestrator no longer treats automatic idle checkpoint/restore as the default path:
 
 - `MonitorIdleSessions()` reconciles `checkpointing` and `checkpointed` sessions on startup.
-- Automatic idle checkpointing is disabled because `runsc restore` cannot reliably reconnect the long-lived stdin turn channel.
+- At that point, automatic idle checkpointing was disabled because `runsc restore` could not reliably reconnect the long-lived stdin turn channel. Phase 7 replaces that turn channel with the Agent Bridge.
 - `Runtime.Start()` only restores from checkpoint when `RestoreFromCheckpoint` is explicitly enabled.
 - Replacement container cleanup only removes the current container instance, avoiding stale cleanup races.
 
@@ -83,6 +84,10 @@ Artifact handling moved from a flat metadata list to a read-only file browser:
 
 The current codebase loads `config/harness.yaml` through the Phase 7 typed `harness:` schema. The full file shape and per-field semantics live in [architecture.md → Configuration](./architecture.md#configuration). Legacy `runtime:` / `claude:`-only files still parse during the cutover, but cannot be mixed with `harness:`.
 
+### Phase 7 Release Candidate
+
+Phase 7 release qualification is evidence-producing. The current candidate records deterministic repo gates, the pinned `claude-code-proxy` contract, the gVisor bridge durability lab, the secret permission lab, and live turn-start latency. The latest evidence file is `/tmp/harness-phase7-external-gates.json`.
+
 ## Current Flow
 
 ```text
@@ -92,19 +97,21 @@ POST /api/sessions
 POST /api/sessions/<id>/messages
   -> persist user message
   -> status: running_active
-  -> Runtime.Start()
-     -> hot path: existing container + stdin write
-     -> opt-in resume path: runsc restore from checkpoint only when explicitly enabled
-     -> cold path: runsc run from OCI bundle
-  -> stream parser persists assistant message
+  -> ensure active runtime generation
+     -> cold path: allocate per-generation resources and runsc run
+     -> restore path: recreate compatible resources and runsc restore
+     -> live path: reuse the active bridge generation
+  -> bridge claim_next_turn / ack_turn_started
+  -> bridge emit_output / ack_turn_completed
+  -> stream parser persists assistant message from durable output
   -> artifact watcher scans workspace
   -> status: running_idle
 
-Shell turns follow the same session lifecycle, but they complete on `harness.turn_done` and can be interrupted with `POST /api/sessions/<id>/interrupt`.
+Shell turns follow the same bridge lifecycle, but they complete through the shell runner and can be interrupted with `POST /api/sessions/<id>/interrupt`.
 
 Idle monitor
   -> reconcile stale checkpointing/checkpointed rows
-  -> exit because automatic checkpointing is disabled
+  -> checkpoint eligible idle generations only when policy is enabled
 ```
 
 Canonical session statuses and per-state semantics live in [architecture.md → Session State Machine](./architecture.md#session-state-machine). Note: `running`, `idle`, and `completed` are not current session statuses.
@@ -119,14 +126,14 @@ HTTP routes, SSE/WebSocket endpoints, and the canonical event-name set are docum
 - `Shell` is the supported interactive command path and has its own `turn_done`/`interrupt` contract; future adapters still need their own completion protocol before they are first-class multi-turn citizens.
 - The active Go runtime launches `runsc` directly. `bundle/restore-sandbox.sh` remains a useful Phase 2 smoke tool, not the main orchestrator runtime path.
 - The current Go runtime uses `runsc -network sandbox -overlay2 none` with per-generation network profiles. The runtime creates the allocated netns/veth pair, configures host and sandbox addresses from the persisted `/30`, applies the static lab egress allow-list, probes the local proxy, and writes the generation-specific sandbox-visible Anthropic base URL into the control manifest. The local proxy key remains `123` for the lab path.
-- Automatic idle checkpointing is disabled. Checkpoint/restore must move behind the Phase 7 checkpoint-safe control plane before it becomes the default resource-release path.
-- Current live multi-turn behavior still depends on a container-local stdin/PTY turn channel. It is reliable for active containers, but not enough for robust restore/reconnect semantics.
+- Automatic idle checkpointing is disabled by the checked-in policy. It can be enabled only after operators accept the measured restore/resource-retention behavior for the lab.
+- Reclaimable runtime resources are retained for `harness.reaper.failed_retention` before physical cleanup, so recently failed/destroyed generations can remain visible briefly by design.
 - Artifact metadata is recorded by host-side scanning/watching and rendered as a read-only live file tree. Direct file mutation operations remain outside the UI; use the sandbox agent or shell path to create, rename, or delete files.
 - Auth is lab shared-password cookie auth when `HARNESS_LAB_PASSWORD` is set.
 
 ## Next Architecture Target
 
-The next major architecture phase is [phase7/README.md](./phase7/README.md). The target is to add runtime generations, durable turns, durable events, explicit network profiles, and a reconnectable agent bridge so sessions can be added, checkpointed, restored, reconnected, and continued across multiple turns without depending on one live host pipe.
+The next major architecture phase is Phase 8: production auth/authorization, real secret storage and rotation, tenant-level egress policy, resource limits, observability, and multi-orchestrator HA.
 
 ## Checks
 
