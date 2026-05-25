@@ -208,7 +208,7 @@ Each step lists its PR boundary, prerequisites, and acceptance signal. Behaviora
 
 **Depends on:** 6.
 
-**PR boundary.** Durable event log + SSE replay on the existing `/api/events/stream` endpoint, plus the proxy observability boundary: orchestrator implements `/internal/proxy/requests/start` and `/finish`, and the pinned `claude-code-proxy` build used by the lab calls them. If the proxy is released separately, Step 8 depends on that pinned version and is not accepted until the contract test passes.
+**PR boundary.** Durable event log + SSE replay on the existing `/api/events/stream` endpoint, plus the proxy observability boundary: orchestrator implements `/internal/proxy/requests/start` and `/finish`, and the pinned `claude-code-proxy` build used by the lab calls them. If the proxy is released separately, Step 8 depends on that pinned version and is not accepted until the contract test passes. Add the event/proxy follow-on migrations from [schema.md](./schema.md#required-migrations): v7 for proxy request idempotency and v8 for event-retention indexing.
 
 **Acceptance.** Replay-from-`last_event_id` against the global stream, retention, proxy correlation join; host assigns `event_id` (globally monotonic per orchestrator), bridge owns per-turn `output_sequence`; proxy request IDs joined through the active-context API backed by `active_model_request_contexts`, with TTL cleanup on heartbeat/terminal turn/restart. SSE frames emit `id:` (host event_id) and `event:` (event type) lines; server honors the `Last-Event-ID` HTTP header and the `?last_event_id=` query-string fallback; the optional `?session_id=` filter narrows replay/live frames, but the cursor is only valid for the same filter value; retention-gap reconnects produce a single `replay_gap` synthetic event before the live tail resumes.
 
@@ -228,9 +228,9 @@ Each step lists its PR boundary, prerequisites, and acceptance signal. Behaviora
 
 **Depends on:** 9.
 
-**PR boundary.** Automatic checkpoint policy.
+**PR boundary.** Automatic checkpoint policy, including the v9 checkpoint-policy migration from [schema.md](./schema.md#required-migrations).
 
-**Acceptance.** Triggers only on idle generation with empty turn queue, bridge checkpoint-ready, output flushed; `autoCheckpointEnabled` promoted from Go const to a per-session policy (default off during 7b validation, on for the lab profile after Step 10). The policy gates whether the next idle generation of a session is eligible for auto-checkpoint, not the in-flight generation. Config lives under `harness.checkpoint` (`auto_enabled`, `idle_threshold`, `monitor_interval`), with `HARNESS_AUTO_CHECKPOINT_ENABLED` as the lab override for newly created sessions. Checkpoint remains an executor optimization, not a correctness mechanism.
+**Acceptance.** Triggers only on idle generation with empty turn queue, bridge checkpoint-ready, output flushed; `autoCheckpointEnabled` promoted from Go const to a persisted per-session policy (`sessions.auto_checkpoint_enabled`) that is snapshotted onto newly allocated generations (`runtime_generations.auto_checkpoint_enabled`). The policy gates whether the next idle generation of a session is eligible for auto-checkpoint, not the in-flight generation. Config lives under `harness.checkpoint` (`auto_enabled`, `idle_threshold`, `monitor_interval`), with `HARNESS_AUTO_CHECKPOINT_ENABLED` as the lab override for newly created sessions. Runtime artifact digests needed for checkpoint metadata are persisted on `runtime_generation_resources`; checkpoint remains an executor optimization, not a correctness mechanism.
 
 **Detail:** [checkpoint-restore.md](./checkpoint-restore.md#checkpoint-policy).
 
