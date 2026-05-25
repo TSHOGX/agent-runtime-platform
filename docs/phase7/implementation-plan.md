@@ -53,7 +53,7 @@ harness:
     lease_ttl: 60s
     heartbeat_interval: 30s                # nominal half-life; warn above half,
                                            # reject at >= lease_ttl
-    poll_interval: 10ms                    # queue poll cadence for inbox/outbox
+    poll_interval: 5ms                     # queue poll cadence for inbox/outbox
     ack_started_grace: 90s                 # after lease expiry, only for
                                            # ack_started running turns
     reconnect_grace: 30s                   # after lease expiry, only when

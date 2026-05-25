@@ -115,7 +115,7 @@ harness:
     emit_output_batch_max_rows: 64
     emit_output_batch_max_age: 100ms
   bridge:
-    poll_interval: 10ms
+    poll_interval: 5ms
     lease_ttl: 60s
     ack_started_grace: 90s
   secrets:
@@ -127,7 +127,7 @@ harness:
 
             values = MODULE.load_release_config(config)
 
-            self.assertEqual(values["harness.bridge.poll_interval"], "10ms")
+            self.assertEqual(values["harness.bridge.poll_interval"], "5ms")
             self.assertEqual(values["harness.events.emit_output_batch_max_rows"], "64")
             self.assertEqual(values["harness.secrets.readers_gid"], "65501")
 

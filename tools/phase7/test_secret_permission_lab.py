@@ -23,7 +23,7 @@ harness:
     root: /var/lib/harness/secrets
     readers_gid: 65501
   bridge:
-    poll_interval: 10ms
+    poll_interval: 5ms
 """,
                 encoding="utf-8",
             )

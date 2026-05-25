@@ -84,7 +84,7 @@ harness:
   bridge:
     lease_ttl: 60s
     heartbeat_interval: 30s
-    poll_interval: 10ms
+    poll_interval: 5ms
     ack_started_grace: 90s
     reconnect_grace: 30s
   checkpoint:

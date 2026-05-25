@@ -382,7 +382,7 @@ func defaultPhase7Config() Phase7Config {
 		Bridge: BridgeConfig{
 			LeaseTTL:          Duration{Duration: time.Minute},
 			HeartbeatInterval: Duration{Duration: 30 * time.Second},
-			PollInterval:      Duration{Duration: 10 * time.Millisecond},
+			PollInterval:      Duration{Duration: 5 * time.Millisecond},
 			AckStartedGrace:   Duration{Duration: 90 * time.Second},
 			ReconnectGrace:    Duration{Duration: 30 * time.Second},
 		},

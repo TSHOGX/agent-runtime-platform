@@ -711,13 +711,14 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndSecrets(t *testing.T
 	dir := t.TempDir()
 	secretsRoot := filepath.Join(dir, "secrets")
 	rt := New(Config{
-		SessionsRoot:     filepath.Join(dir, "sessions"),
-		AgentHomesRoot:   filepath.Join(dir, "agent-homes"),
-		BundleRoot:       filepath.Join(dir, "bundle", "out"),
-		RootFSPath:       filepath.Join(dir, "rootfs"),
-		SecretsRoot:      secretsRoot,
-		SecretReadersGID: testSecretReadersGID(),
-		BridgeHeartbeat:  20 * time.Second,
+		SessionsRoot:       filepath.Join(dir, "sessions"),
+		AgentHomesRoot:     filepath.Join(dir, "agent-homes"),
+		BundleRoot:         filepath.Join(dir, "bundle", "out"),
+		RootFSPath:         filepath.Join(dir, "rootfs"),
+		SecretsRoot:        secretsRoot,
+		SecretReadersGID:   testSecretReadersGID(),
+		BridgeHeartbeat:    20 * time.Second,
+		BridgePollInterval: 5 * time.Millisecond,
 		Claude: ClaudeConfig{
 			ProxyBindURL:               "http://0.0.0.0:8082",
 			APIKey:                     "123",
@@ -824,6 +825,8 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndSecrets(t *testing.T
 		env["HARNESS_BRIDGE_MODE"] != "claim-loop" ||
 		env["HARNESS_EXPECTED_MANIFEST_VERSION"] != "1" ||
 		env["HARNESS_BRIDGE_HEARTBEAT_INTERVAL"] != "20" ||
+		env["HARNESS_BRIDGE_POLL_INTERVAL"] != "0.005" ||
+		env["HARNESS_BRIDGE_IDLE_INTERVAL"] != "0.005" ||
 		env["HARNESS_PROBE_HEALTHZ_STATUSES"] != "200" ||
 		env["HARNESS_PROBE_MESSAGE_STATUSES"] != "400" {
 		t.Fatalf("runtime spec missing bridge/probe env: %+v", env)

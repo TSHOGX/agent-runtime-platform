@@ -46,6 +46,7 @@ type Config struct {
 	ProbeHealthzStatuses  []int
 	ProbeMessageStatuses  []int
 	BridgeHeartbeat       time.Duration
+	BridgePollInterval    time.Duration
 	BridgeMode            string
 	CommandRunner         CommandRunner
 }
@@ -947,6 +948,8 @@ func (r *Runtime) renderRuntimeSpec(req StartRequest) (runtimeSpec, string, erro
 		"HARNESS_BRIDGE_DIR="+bridge.BridgeMountDestination,
 		"HARNESS_BRIDGE_MODE="+defaultString(r.cfg.BridgeMode, "claim-loop"),
 		"HARNESS_BRIDGE_HEARTBEAT_INTERVAL="+formatSeconds(defaultDuration(r.cfg.BridgeHeartbeat, 30*time.Second)),
+		"HARNESS_BRIDGE_POLL_INTERVAL="+formatSeconds(defaultDuration(r.cfg.BridgePollInterval, 5*time.Millisecond)),
+		"HARNESS_BRIDGE_IDLE_INTERVAL="+formatSeconds(defaultDuration(r.cfg.BridgePollInterval, 5*time.Millisecond)),
 		"HARNESS_PROBE_HEALTHZ_STATUSES="+joinInts(defaultIntSlice(r.cfg.ProbeHealthzStatuses, []int{200})),
 		"HARNESS_PROBE_MESSAGE_STATUSES="+joinInts(defaultIntSlice(r.cfg.ProbeMessageStatuses, []int{400})),
 	)

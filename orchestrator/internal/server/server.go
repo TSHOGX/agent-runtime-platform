@@ -765,7 +765,7 @@ func (s *Server) RunPhase7Maintenance(ctx context.Context) error {
 	}
 	pollInterval := s.cfg.Phase7.Bridge.PollInterval.Duration
 	if pollInterval <= 0 {
-		pollInterval = 10 * time.Millisecond
+		pollInterval = 5 * time.Millisecond
 	}
 	owner := store.GenerationLeaseOwner(s.ownerUUID)
 	processor := &bridge.Processor{
