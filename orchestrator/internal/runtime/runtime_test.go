@@ -1220,6 +1220,36 @@ func assertPathGID(t *testing.T, info os.FileInfo, path string, want int) {
 	}
 }
 
+func TestEnsureSecretDirPreservesExistingOwner(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to set up non-current owner")
+	}
+	dir := t.TempDir()
+	secretsRoot := filepath.Join(dir, "secrets")
+	if err := os.Mkdir(secretsRoot, 0o750); err != nil {
+		t.Fatalf("mkdir secrets root: %v", err)
+	}
+	const ownerUID = 12345
+	readersGID := testSecretReadersGID()
+	if err := os.Chown(secretsRoot, ownerUID, readersGID); err != nil {
+		t.Fatalf("chown secrets root: %v", err)
+	}
+	if err := ensureSecretDir(filepath.Join(secretsRoot, "secret_id"), readersGID); err != nil {
+		t.Fatalf("ensure secret dir: %v", err)
+	}
+	info, err := os.Stat(secretsRoot)
+	if err != nil {
+		t.Fatalf("stat secrets root: %v", err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("stat ownership unavailable for %s", secretsRoot)
+	}
+	if int(stat.Uid) != ownerUID {
+		t.Fatalf("secrets root uid=%d want preserved uid %d", stat.Uid, ownerUID)
+	}
+}
+
 func closedDone() <-chan struct{} {
 	done := make(chan struct{})
 	close(done)

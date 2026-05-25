@@ -719,10 +719,10 @@ func chownPathIfNeeded(path string, readersGID int) error {
 	if !ok {
 		return fmt.Errorf("stat ownership unavailable for %s", path)
 	}
-	if int(stat.Uid) == os.Getuid() && int(stat.Gid) == readersGID {
+	if int(stat.Gid) == readersGID {
 		return nil
 	}
-	return os.Chown(path, os.Getuid(), readersGID)
+	return os.Chown(path, int(stat.Uid), readersGID)
 }
 
 func validateSecretVersion(path string, readersGID int) error {
