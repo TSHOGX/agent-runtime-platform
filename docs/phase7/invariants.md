@@ -110,7 +110,7 @@ During 7a the runtime-manager goroutine itself remains the lease renewer on the 
 
 The one consequence worth calling out: a 7a deploy that crashes mid-turn cannot recover the in-flight turn from the ledger — the existing stdin path owns it. This is unchanged from the pre-Phase-7 behavior; restart recovery on the 7a ledger only reconciles `queued` rows and timestamps. 7b is what makes turn recovery durable.
 
-The lab today violates these rules with three legacy patterns that must be gone before checkpoint/restore is treated as a normal path: the fixed shared netns `/run/netns/phase1-demo`, the shared writable control manifest `/var/lib/harness/control/phase2-template/session.json`, and the shared static runtime spec under `bundle/out/phase2-template-bundle/config.json` reused as live mutable state. Plaintext `anthropic_api_key` / `anthropic_auth_token` in the manifest is tolerated only because the lab proxy key is the literal `123` with no upstream value; Phase 7 ships the `secret_id`/`secret_version` indirection, Phase 8 wires it to a real secret store.
+The pre-Phase-7 lab violated these rules with three legacy patterns: the fixed shared netns `/run/netns/phase1-demo`, the shared writable control manifest `/var/lib/harness/control/phase2-template/session.json`, and the shared static runtime spec under `bundle/out/phase2-template-bundle/config.json` reused as live mutable state. The runtime hot path now renders per-generation netns/spec/control paths; tests assert those legacy identifiers do not reappear. Phase 7 also ships the `secret_id`/`secret_version` indirection so the manifest does not carry plaintext upstream credentials; Phase 8 wires that contract to a real secret store.
 
 ## Lease And CAS Fencing
 
