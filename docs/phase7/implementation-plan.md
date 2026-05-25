@@ -212,7 +212,7 @@ Each step lists its PR boundary, prerequisites, and acceptance signal. Behaviora
 
 **Acceptance.** Replay-from-`last_event_id` against the global stream, retention, proxy correlation join; host assigns `event_id` (globally monotonic per orchestrator), bridge owns per-turn `output_sequence`; proxy request IDs joined through the active-context API backed by `active_model_request_contexts`, with TTL cleanup on heartbeat/terminal turn/restart. SSE frames emit `id:` (host event_id) and `event:` (event type) lines; server honors the `Last-Event-ID` HTTP header and the `?last_event_id=` query-string fallback; the optional `?session_id=` filter narrows replay/live frames, but the cursor is only valid for the same filter value; retention-gap reconnects produce a single `replay_gap` synthetic event before the live tail resumes.
 
-**Detail:** [bridge-protocol.md](./bridge-protocol.md#sse-wire-protocol-step-8), [network-and-probes.md](./network-and-probes.md#proxy-and-upstream-observability).
+**Detail:** [bridge-protocol.md](./bridge-protocol.md#sse-wire-protocol), [network-and-probes.md](./network-and-probes.md#proxy-and-upstream-observability).
 
 ### Step 9 — Checkpoint-safe restore
 

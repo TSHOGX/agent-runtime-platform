@@ -87,7 +87,7 @@ State meanings:
 | `running_active` | A user turn is being processed. |
 | `running_idle` | The container is still alive and ready for another turn. |
 | `checkpointing` | Legacy/experimental busy state for a checkpoint in progress. Startup reconciliation recovers stale rows. |
-| `checkpointed` | Legacy/experimental state for persisted runtime images. Startup reconciliation currently re-enables these sessions as `running_idle`. |
+| `checkpointed` | A generation has a persisted checkpoint and reserved allocation identity. The next accepted turn claims it for restore, validates metadata, recreates resources, and requires a bridge probe before claiming work. Legacy pre-Phase-7 checkpoint rows are fenced by migration as unrestorable. |
 | `failed` | Runtime or parser error. |
 | `destroyed` | User or API explicitly ended the session. |
 
@@ -184,7 +184,7 @@ HTTP:
 Phase 7 adds:
 
 - `GET /api/quota`
-- JSON envelope `{"error_class":"...","error":"..."}` for new typed failures; existing handlers still return `{"error":"..."}` until that cutover lands.
+- JSON envelope `{"error_class":"...","error":"..."}` for typed runtime/control-plane failures such as pool exhaustion or probe failure. Generic validation and not-found handlers may still return `{"error":"..."}`.
 
 Events:
 
@@ -283,6 +283,10 @@ harness:
     poll_interval: 5ms
     ack_started_grace: 90s
     reconnect_grace: 30s
+  checkpoint:
+    auto_enabled: false
+    idle_threshold: 30m
+    monitor_interval: 5m
   reaper:
     failed_retention: 10m
   secrets:

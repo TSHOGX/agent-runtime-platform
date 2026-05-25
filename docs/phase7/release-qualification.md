@@ -34,8 +34,28 @@ The wrapper records the candidate commit, dirty worktree status, selected Phase 
 External gates are opt-in so the wrapper never touches live lab state by default:
 
 ```bash
-tools/phase7/release-gates.py --include-proxy --include-bridge-lab --output /tmp/harness-phase7-external-gates.json
+tools/phase7/release-gates.py \
+  --include-proxy \
+  --include-bridge-lab \
+  --include-secret-lab \
+  --include-live-latency \
+  --output /tmp/harness-phase7-external-gates.json
 ```
+
+`--include-live-latency` requires `PHASE7_LATENCY_SESSION_IDS` to name one or more prewarmed `running_idle` sessions. Without that environment variable, run only the deterministic/proxy/bridge/secret gates or prewarm a session first.
+
+## Latest Lab Evidence
+
+The latest qualified lab evidence on this host is `/tmp/harness-phase7-external-gates.json`.
+
+Last observed result:
+
+- commit: `d0cdaf608b9397e5bcae7f93daf2b6550a5654c5`
+- result: `passed`
+- worktree: clean
+- `harness.bridge.poll_interval`: `5ms`
+- live turn-start max: `27.284 ms`
+- included external gates: pinned proxy contract, gVisor bridge durability lab, secret permission lab, live turn-start latency
 
 ## Pinned Proxy Contract
 

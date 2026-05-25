@@ -58,7 +58,7 @@ Bullets are observable assertions; rules and rationale live in the linked sectio
 ## Multi-Turn And Restart Recovery
 
 - Claude and shell sessions both handle multiple turns through bridge claim/ack; active generation transitions active <-> idle without losing generation identity.
-- Slow SSE subscribers do not block durable event recording; frontend reconnect replays from `last_event_id` on the global stream without duplicating completed events. (See [SSE Wire Protocol](./bridge-protocol.md#sse-wire-protocol-step-8).)
+- Slow SSE subscribers do not block durable event recording; frontend reconnect replays from `last_event_id` on the global stream without duplicating completed events. (See [SSE Wire Protocol](./bridge-protocol.md#sse-wire-protocol).)
 - Restart during `checkpointing` leaves the generation recoverable or reclaimable; restart after `checkpointed` preserves the reserved allocation identity for restore.
 
 ## Cold Resume

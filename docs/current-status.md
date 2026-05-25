@@ -20,7 +20,19 @@ Harness Platform now has a working end-to-end lab stack:
 - Checkpoint/restore primitives are behind the Phase 7 control plane. Automatic idle checkpointing is policy-gated and disabled in the checked-in lab config.
 - Artifact browsing is a metadata-backed live file tree with search, safe downloads, delete/rename event handling, and richer previews for Markdown, code, text, images, JSON, CSV/TSV, and PDF.
 
-## Recent Commits
+## Notable Commits And Qualification
+
+### Phase 7 Release Qualification - `d0cdaf6`
+
+The Phase 7 lab candidate is qualified at `d0cdaf6` after these final follow-up commits:
+
+- `a7754da fix(runtime): tune bridge polling for live latency` - passes the 5 ms bridge poll interval through to sandbox bridge clients and keeps live turn-start latency under the 50 ms budget.
+- `108aa65 docs(plan): mark phase7 qualified` - updates the roadmap/status docs from pre-Phase-7 wording to the qualified Phase 7 baseline.
+- `d0cdaf6 fix(runtime): preserve secret root owner` - preserves the existing owner of `/var/lib/harness/secrets` while correcting the readers group, preventing root-started orchestrator runs from undoing the `orchestrator:harness-secret-readers` bootstrap ownership.
+
+Latest release evidence: `/tmp/harness-phase7-external-gates.json`.
+
+Last observed result on this host: `passed`, clean worktree, commit `d0cdaf608b9397e5bcae7f93daf2b6550a5654c5`, live turn-start max `27.284 ms`.
 
 ### `e8b84f0` - Same-Origin SSE Event Stream
 
@@ -84,9 +96,9 @@ Artifact handling moved from a flat metadata list to a read-only file browser:
 
 The current codebase loads `config/harness.yaml` through the Phase 7 typed `harness:` schema. The full file shape and per-field semantics live in [architecture.md → Configuration](./architecture.md#configuration). Legacy `runtime:` / `claude:`-only files still parse during the cutover, but cannot be mixed with `harness:`.
 
-### Phase 7 Release Candidate
+### Phase 7 Release Qualification
 
-Phase 7 release qualification is evidence-producing. The current candidate records deterministic repo gates, the pinned `claude-code-proxy` contract, the gVisor bridge durability lab, the secret permission lab, and live turn-start latency. The latest evidence file is `/tmp/harness-phase7-external-gates.json`.
+Phase 7 release qualification is evidence-producing. The current candidate records deterministic repo gates, the pinned `claude-code-proxy` contract, the gVisor bridge durability lab, the secret permission lab, and live turn-start latency. The latest evidence file is `/tmp/harness-phase7-external-gates.json` and is tied to commit `d0cdaf608b9397e5bcae7f93daf2b6550a5654c5`.
 
 ## Current Flow
 
@@ -151,4 +163,17 @@ cd frontend
 npm run lint
 npm run typecheck
 npm run build
+```
+
+Phase 7 release gates:
+
+```bash
+PHASE7_LATENCY_SESSION_IDS=<prewarmed_running_idle_session> \
+PHASE7_LATENCY_CONTENT='Reply exactly OK. Probe {nonce}' \
+tools/phase7/release-gates.py \
+  --include-proxy \
+  --include-bridge-lab \
+  --include-secret-lab \
+  --include-live-latency \
+  --output /tmp/harness-phase7-external-gates.json
 ```

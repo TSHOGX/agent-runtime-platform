@@ -3,7 +3,7 @@
 > 日期：2026-05-19
 > 决策人：项目主理 + 本机 Phase 0 排查
 > 状态：✅ 已生效，PLAN.md 已按此重写
-> 当前注记：gVisor 运行时选择仍然有效；checkpoint-safe 会话恢复的后续架构见 [`phase7/README.md`](./phase7/README.md)。
+> 当前注记：gVisor 运行时选择仍然有效；Phase 7 已在 `runsc` + bridge/control-plane 路径上完成 checkpoint-safe 基线，详见 [`phase7/README.md`](./phase7/README.md)。
 
 ## 1. 上下文
 
@@ -105,7 +105,7 @@ my-sandbox/
 
 ## 7. 决策
 
-✅ **本项目第一阶段（Phase 1–6）使用 gVisor `runsc` + `systrap` 平台 + 手工 rootfs 目录 + 无 Docker。**
+✅ **本项目第一阶段（Phase 1–7）使用 gVisor `runsc` + `systrap` 平台 + 手工 rootfs 目录 + 无 Docker。**
 
 迁移路径预留：
 

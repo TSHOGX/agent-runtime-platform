@@ -2,6 +2,7 @@
 
 > Date: 2026-05-19
 > Scope: manual `runsc` + rootfs + single sandbox end-to-end smoke test.
+> Current reading note: this is a historical Phase 1 smoke-test record. Current runtime/network behavior is documented in [architecture.md](./architecture.md) and the Phase 7 docs; the blocker below reflects the Phase 1 Doris account state at the time of that smoke test.
 
 ## Completed
 

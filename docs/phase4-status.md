@@ -2,7 +2,7 @@
 
 > Last updated: 2026-05-21 Asia/Shanghai
 > Scope guard: only frontend Phase 4 files and this status file were changed in this round.
-> Current reading note: this is a historical frontend round log. The active runtime has automatic idle checkpointing disabled, and Phase 7 will add checkpoint-safe recovery semantics behind the same frontend API surface.
+> Current reading note: this is a historical frontend round log. The active runtime uses the Phase 7 bridge/control-plane path behind the same frontend API surface, and automatic idle checkpointing is disabled by policy.
 
 ## Current Note
 

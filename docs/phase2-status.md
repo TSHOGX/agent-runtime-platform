@@ -2,7 +2,7 @@
 
 > Date: 2026-05-19
 > Scope: scripted rootfs build, OCI bundle baking, checkpoint/restore sandbox startup.
-> Current reading note: this is a Phase 2 restore smoke-test record. The active orchestrator keeps live containers across turns, and automatic idle checkpointing is disabled until the Phase 7 checkpoint-safe control plane is implemented.
+> Current reading note: this is a historical Phase 2 restore smoke-test record. The active orchestrator now uses the Phase 7 bridge/control-plane path; automatic idle checkpointing is disabled by policy, not because Phase 7 is missing.
 
 ## Completed
 
@@ -48,7 +48,7 @@ Result:
 - `runsc checkpoint` on this host does not support `--network=host`, so Phase 2 defaults to `RUNSC_NETWORK=sandbox`.
 - `runsc restore` failed with the default `overlay2=root:self`, so Phase 2 explicitly uses `RUNSC_OVERLAY2=none`.
 - The `<100 ms` warm restore gate should now be approached with pool-based reuse and restore tuning; the official release no longer has warm sentry, and current standard restore on this host is about `124 ms`.
-- A successful `runsc restore` smoke test does not by itself prove that the current stdin-based turn channel can resume safely after checkpoint/restore.
+- A successful `runsc restore` smoke test did not by itself prove that the old stdin-based turn channel could resume safely after checkpoint/restore. Phase 7 addresses that gap with bridge claim/ack, durable events, metadata validation, and cold fallback.
 
 ## Next Step
 
