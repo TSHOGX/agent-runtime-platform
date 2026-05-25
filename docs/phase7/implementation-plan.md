@@ -4,7 +4,7 @@ This file owns the Phase 7 configuration schema (Step 0 prerequisite), the 10-st
 
 ## Phase 7 Configuration Schema
 
-Phase 7 introduces a non-trivial set of operator-facing configuration keys that the current `config/harness.yaml` loader does not yet expose. The current loader in `orchestrator/internal/config/config.go:108` is a hand-rolled "section header + scalar key/value" scanner: it understands one level of indentation, only top-level scalars under a section, and only the known `runtime.*` / `claude.*` keys it switch-matches. It cannot parse the Phase 7 schema below, which uses nested maps (`harness.network.egress.*`, `harness.probe.accept_status.*`, `harness.bridge.*`), lists (`doris_fe_hosts`, `doris_be_hosts`, `doris_ports`, accepted-status arrays), durations (`session_ttl`, `lease_ttl`, `failed_retention`), CIDRs, and string-enum fields (`dns_policy`).
+Phase 7 introduces a non-trivial set of operator-facing configuration keys that the current `config/harness.yaml` loader does not yet expose. The current loader in `orchestrator/internal/config/config.go:108` is a hand-rolled "section header + scalar key/value" scanner: it understands one level of indentation, only top-level scalars under a section, and only the known `runtime.*` / `claude.*` keys it switch-matches. It cannot parse the Phase 7 schema below, which uses nested maps (`harness.network.egress.*`, `harness.probe.accept_status.*`, `harness.bridge.*`, `harness.checkpoint.*`), lists (`doris_fe_hosts`, `doris_be_hosts`, `doris_ports`, accepted-status arrays), durations (`session_ttl`, `lease_ttl`, `failed_retention`), CIDRs, booleans, and string-enum fields (`dns_policy`).
 
 Phase 7a therefore replaces the hand-rolled scanner with a real YAML parser. The chosen parser is `gopkg.in/yaml.v3` (well-tested, supports strict-mode unknown-key detection); it is fed into a typed `Phase7Config` struct with `yaml` tags. The unmarshaler runs in strict mode (`KnownFields(true)`) so any key not present in the struct fails the load with a typed error pointing at the file/line — the previous `unknown config key` behavior is preserved. Durations decode through a custom `Duration` wrapper that wraps `time.ParseDuration`; CIDRs decode through `net/netip.ParsePrefix`; `dns_policy` decodes through a typed `DnsPolicy` enum. Tests pass a constructed struct rather than a YAML fixture, so config drift between code and doc is caught at compile time.
 
@@ -59,6 +59,14 @@ harness:
     reconnect_grace: 30s                   # after lease expiry, only when
                                            # no ack_started turn is running
 
+  checkpoint:
+    auto_enabled: false                    # per-session policy default; env override
+                                           # HARNESS_AUTO_CHECKPOINT_ENABLED applies
+                                           # only to newly created sessions
+    idle_threshold: 30m                    # running_idle age before eligibility; 0
+                                           # means immediately eligible
+    monitor_interval: 5m                   # host-side candidate scan cadence
+
   reaper:
     failed_retention: 10m
 
@@ -99,6 +107,11 @@ Enforced by the loader, asserted by unit tests:
 - probe.accept_status.get_healthz, probe.accept_status.post_v1_messages.unauthorized,
   and probe.accept_status.post_v1_messages.malformed_authenticated must each be
   non-empty.
+- checkpoint.idle_threshold must be >= 0. A zero value is valid and makes
+  eligible idle generations checkpointable on the next monitor tick.
+- checkpoint.monitor_interval must be > 0. checkpoint.auto_enabled defaults
+  false during 7b validation and can be overridden for newly created sessions
+  with HARNESS_AUTO_CHECKPOINT_ENABLED.
 - events.retention_window and events.retention_rows must both be set;
   the earlier-hit bound governs trim. Setting one to zero disables
   that bound; setting both to zero is rejected.
