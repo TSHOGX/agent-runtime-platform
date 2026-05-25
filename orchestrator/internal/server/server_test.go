@@ -1028,6 +1028,117 @@ func TestSendMessageRejectsExpiredSessionBeforeAllocation(t *testing.T) {
 	}
 }
 
+func TestInternalProxyRequestEndpointsPublishDurableEvents(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	cfg := testServerConfig(dir)
+	now := time.Now().UTC()
+	allocation, turnID := createServerRunningProxyTurn(t, ctx, st, cfg, owner.UUID, dir, "sess_proxy_http", "10.240.0.2", now)
+
+	hub := events.NewHub()
+	eventsCh, cancelEvents := hub.Subscribe("sess_proxy_http")
+	defer cancelEvents()
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: instantRuntime{},
+		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, hub, slog.Default()),
+		hub:     hub,
+		log:     slog.Default(),
+	}
+
+	blocked := httptest.NewRequest(http.MethodPost, "/internal/proxy/requests/start", strings.NewReader(`{"sandbox_source_ip":"10.240.0.2","proxy_request_id":"proxy_blocked"}`))
+	blocked.RemoteAddr = "203.0.113.7:5000"
+	blockedRec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(blockedRec, blocked)
+	if blockedRec.Code != http.StatusForbidden {
+		t.Fatalf("non-loopback proxy request status=%d body=%s", blockedRec.Code, blockedRec.Body.String())
+	}
+
+	startReq := httptest.NewRequest(http.MethodPost, "/internal/proxy/requests/start", strings.NewReader(`{
+		"sandbox_source_ip":"10.240.0.2",
+		"proxy_request_id":"proxy_http_1",
+		"upstream_model":"claude-sonnet",
+		"upstream_base_url":"https://api.anthropic.test"
+	}`))
+	startReq.RemoteAddr = "127.0.0.1:5001"
+	startRec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(startRec, startReq)
+	if startRec.Code != http.StatusOK {
+		t.Fatalf("start status=%d body=%s", startRec.Code, startRec.Body.String())
+	}
+	var startResp struct {
+		SessionID       string `json:"session_id"`
+		TurnID          int64  `json:"turn_id"`
+		GenerationID    string `json:"generation_id"`
+		RequestSequence int64  `json:"request_sequence"`
+		EventID         int64  `json:"event_id"`
+		Replayed        bool   `json:"replayed"`
+	}
+	if err := json.Unmarshal(startRec.Body.Bytes(), &startResp); err != nil {
+		t.Fatalf("decode start response: %v", err)
+	}
+	if startResp.SessionID != "sess_proxy_http" || startResp.GenerationID != allocation.GenerationID ||
+		startResp.TurnID != turnID || startResp.RequestSequence != 1 || startResp.EventID == 0 || startResp.Replayed {
+		t.Fatalf("unexpected start response: %+v allocation=%+v turn=%d", startResp, allocation, turnID)
+	}
+	startEvent := waitForHubEvent(t, eventsCh, "proxy.request.started")
+	if startEvent.EventID != startResp.EventID || startEvent.ProxyRequestID != "proxy_http_1" ||
+		startEvent.SessionID != "sess_proxy_http" {
+		t.Fatalf("unexpected start hub event: %+v response=%+v", startEvent, startResp)
+	}
+
+	finishReq := httptest.NewRequest(http.MethodPost, "/internal/proxy/requests/finish", strings.NewReader(`{
+		"proxy_request_id":"proxy_http_1",
+		"http_status":200,
+		"upstream_total_latency_ms":321,
+		"retry_count":0
+	}`))
+	finishReq.RemoteAddr = "[::1]:5002"
+	finishRec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(finishRec, finishReq)
+	if finishRec.Code != http.StatusOK {
+		t.Fatalf("finish status=%d body=%s", finishRec.Code, finishRec.Body.String())
+	}
+	var finishResp struct {
+		Status       string `json:"status"`
+		EventID      int64  `json:"event_id"`
+		EventType    string `json:"event_type"`
+		SessionID    string `json:"session_id"`
+		TurnID       int64  `json:"turn_id"`
+		GenerationID string `json:"generation_id"`
+		Replayed     bool   `json:"replayed"`
+	}
+	if err := json.Unmarshal(finishRec.Body.Bytes(), &finishResp); err != nil {
+		t.Fatalf("decode finish response: %v", err)
+	}
+	if finishResp.Status != "accepted" || finishResp.EventType != "proxy.request.completed" ||
+		finishResp.SessionID != "sess_proxy_http" || finishResp.GenerationID != allocation.GenerationID ||
+		finishResp.TurnID != turnID || finishResp.EventID <= startResp.EventID || finishResp.Replayed {
+		t.Fatalf("unexpected finish response: %+v start=%+v", finishResp, startResp)
+	}
+	finishEvent := waitForHubEvent(t, eventsCh, "proxy.request.completed")
+	if finishEvent.EventID != finishResp.EventID || finishEvent.ProxyRequestID != "proxy_http_1" {
+		t.Fatalf("unexpected finish hub event: %+v response=%+v", finishEvent, finishResp)
+	}
+
+	unknownReq := httptest.NewRequest(http.MethodPost, "/internal/proxy/requests/finish", strings.NewReader(`{"proxy_request_id":"proxy_missing"}`))
+	unknownReq.RemoteAddr = "127.0.0.1:5003"
+	unknownRec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(unknownRec, unknownReq)
+	if unknownRec.Code != http.StatusOK {
+		t.Fatalf("unknown finish status=%d body=%s", unknownRec.Code, unknownRec.Body.String())
+	}
+	var unknownResp map[string]string
+	if err := json.Unmarshal(unknownRec.Body.Bytes(), &unknownResp); err != nil {
+		t.Fatalf("decode unknown finish response: %v", err)
+	}
+	if unknownResp["status"] != "stale_unknown_request" {
+		t.Fatalf("unexpected unknown finish response: %v", unknownResp)
+	}
+}
+
 func TestEventsStreamReplaysDurableEventsAfterLastEventID(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -1398,6 +1509,67 @@ func waitForSessionStatus(t *testing.T, ctx context.Context, st *store.Store, se
 	}
 	data, _ := json.Marshal(got)
 	t.Fatalf("session did not reach %s: %s", want, data)
+}
+
+func createServerRunningProxyTurn(t *testing.T, ctx context.Context, st *store.Store, cfg config.Config, ownerUUID, dir, sessionID, sandboxSourceIP string, now time.Time) (store.GenerationAllocation, int64) {
+	t.Helper()
+	createServerTestSession(t, ctx, st, dir, sessionID, string(sessionstate.RunningActive), now, nil)
+	owner := store.GenerationLeaseOwner(ownerUUID)
+	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: sessionID,
+		Owner:     owner,
+		LeaseTTL:  time.Minute,
+		Now:       now,
+		Config:    serverTestAllocatorConfig(cfg, "claude"),
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, sessionID, allocation.GenerationID, allocation.Owner, now.Add(time.Second)); err != nil {
+		t.Fatalf("mark resources live: %v", err)
+	}
+	turnID, err := st.EnqueueTurn(ctx, sessionID, "proxy observed turn", now.Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("enqueue turn: %v", err)
+	}
+	grant, ok, err := st.ClaimNextTurn(ctx, store.ClaimNextTurnParams{
+		SessionID:    sessionID,
+		GenerationID: allocation.GenerationID,
+		Owner:        allocation.Owner,
+		RequestID:    "claim_" + sessionID,
+		LeaseTTL:     time.Minute,
+		Now:          now.Add(3 * time.Second),
+	})
+	if err != nil || !ok || grant.TurnID != turnID {
+		t.Fatalf("claim setup: ok=%v grant=%+v err=%v", ok, grant, err)
+	}
+	if _, err := st.AckTurnStarted(ctx, store.AckStartedParams{
+		SessionID:       sessionID,
+		GenerationID:    allocation.GenerationID,
+		TurnID:          turnID,
+		Owner:           allocation.Owner,
+		SandboxSourceIP: sandboxSourceIP,
+		LeaseTTL:        time.Minute,
+		Now:             now.Add(4 * time.Second),
+	}); err != nil {
+		t.Fatalf("ack turn started: %v", err)
+	}
+	return allocation, turnID
+}
+
+func waitForHubEvent(t *testing.T, ch <-chan events.Event, eventType string) events.Event {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case event := <-ch:
+			if event.Type == eventType {
+				return event
+			}
+		case <-deadline:
+			t.Fatalf("timeout waiting for hub event %s", eventType)
+		}
+	}
 }
 
 func assertContains(t *testing.T, value, want string) {

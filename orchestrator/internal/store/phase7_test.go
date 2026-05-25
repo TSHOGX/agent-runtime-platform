@@ -31,7 +31,7 @@ func TestPhase7MigrationsCreateSchemaAndBackfillLegacySessions(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	assertMigrationVersions(t, st.db, 6)
+	assertMigrationVersions(t, st.db, 7)
 	for _, table := range []string{
 		"runtime_generations", "runtime_generation_resources", "turns", "events",
 		"active_model_request_contexts", "network_profiles", "agent_runtime_profiles",
@@ -41,6 +41,9 @@ func TestPhase7MigrationsCreateSchemaAndBackfillLegacySessions(t *testing.T) {
 	}
 	for _, column := range []string{"active_generation_id", "agent_home_path", "failure_reason", "error_class"} {
 		assertColumnExists(t, st.db, "sessions", column)
+	}
+	for _, index := range []string{"events_proxy_started_request_uq", "events_proxy_finished_request_uq"} {
+		assertIndexExists(t, st.db, index)
 	}
 
 	created, err := st.GetSession(ctx, "sess_created")
@@ -95,7 +98,7 @@ func TestPhase7MigrationsAreIdempotent(t *testing.T) {
 	if err := st.migrate(ctx); err != nil {
 		t.Fatalf("rerun migrate: %v", err)
 	}
-	assertMigrationVersions(t, st.db, 6)
+	assertMigrationVersions(t, st.db, 7)
 	_ = st.Close()
 
 	st, err = Open(ctx, path)
@@ -103,7 +106,7 @@ func TestPhase7MigrationsAreIdempotent(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	assertMigrationVersions(t, st.db, 6)
+	assertMigrationVersions(t, st.db, 7)
 }
 
 func TestRuntimeGenerationPartialUniqueIndex(t *testing.T) {
@@ -601,6 +604,15 @@ func assertTableExists(t *testing.T, db *sql.DB, table string) {
 	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&name)
 	if err != nil {
 		t.Fatalf("table %s missing: %v", table, err)
+	}
+}
+
+func assertIndexExists(t *testing.T, db *sql.DB, index string) {
+	t.Helper()
+	var name string
+	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?`, index).Scan(&name)
+	if err != nil {
+		t.Fatalf("index %s missing: %v", index, err)
 	}
 }
 

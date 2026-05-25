@@ -50,6 +50,7 @@ type AppendEventParams struct {
 	Owner          string
 	OutputSequence *int64
 	DedupeKey      string
+	ProxyRequestID string
 	Stream         string
 	Severity       string
 	Type           string
@@ -250,11 +251,11 @@ func appendEventTx(ctx context.Context, tx *sql.Tx, p AppendEventParams) (int64,
 	res, err := tx.ExecContext(ctx, `
 INSERT OR IGNORE INTO events (
   session_id, turn_id, generation_id, output_sequence, dedupe_key,
-  stream, severity, type, payload, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  proxy_request_id, stream, severity, type, payload, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		nullableString(p.SessionID), nullableInt64Ptr(p.TurnID), nullableString(p.GenerationID),
-		nullableInt64Ptr(p.OutputSequence), nullableString(p.DedupeKey), nullableString(p.Stream),
-		nullableString(p.Severity), p.Type, string(payload), formatTime(p.Now))
+		nullableInt64Ptr(p.OutputSequence), nullableString(p.DedupeKey), nullableString(p.ProxyRequestID),
+		nullableString(p.Stream), nullableString(p.Severity), p.Type, string(payload), formatTime(p.Now))
 	if err != nil {
 		return 0, err
 	}

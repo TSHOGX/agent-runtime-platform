@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/netip"
 	"os"
@@ -100,6 +101,8 @@ func (s *Server) SetOwnerUUID(ownerUUID string) {
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
+	mux.HandleFunc("POST /internal/proxy/requests/start", s.internalProxyRequestStart)
+	mux.HandleFunc("POST /internal/proxy/requests/finish", s.internalProxyRequestFinish)
 	mux.HandleFunc("POST /api/login", s.login)
 	mux.Handle("/api/", s.requireAuth(http.HandlerFunc(s.api)))
 	mux.Handle("/artifacts/", s.requireAuth(http.HandlerFunc(s.downloadArtifact)))
@@ -761,6 +764,103 @@ func (s *Server) handleBridgeCompletion(ctx context.Context, envelope bridge.Env
 	s.hub.Publish(events.Event{Type: "session." + status, SessionID: envelope.SessionID})
 }
 
+func (s *Server) internalProxyRequestStart(w http.ResponseWriter, r *http.Request) {
+	if !isLoopbackRemoteAddr(r.RemoteAddr) {
+		writeError(w, http.StatusForbidden, "internal proxy endpoint is localhost-only")
+		return
+	}
+	var req struct {
+		SandboxSourceIP string `json:"sandbox_source_ip"`
+		ProxyRequestID  string `json:"proxy_request_id"`
+		UpstreamModel   string `json:"upstream_model"`
+		UpstreamBaseURL string `json:"upstream_base_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	result, err := s.store.StartProxyRequest(r.Context(), store.StartProxyRequestParams{
+		SandboxSourceIP: req.SandboxSourceIP,
+		ProxyRequestID:  req.ProxyRequestID,
+		UpstreamModel:   req.UpstreamModel,
+		UpstreamBaseURL: req.UpstreamBaseURL,
+		Now:             time.Now().UTC(),
+	})
+	if errors.Is(err, store.ErrProxyContextUnavailable) {
+		writeErrorClass(w, http.StatusNotFound, "active_context_unavailable", "proxy active context unavailable")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !result.Replayed {
+		s.publishDurableEvent(r.Context(), result.EventID)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"session_id":       result.SessionID,
+		"turn_id":          result.TurnID,
+		"generation_id":    result.GenerationID,
+		"request_sequence": result.RequestSequence,
+		"event_id":         result.EventID,
+		"replayed":         result.Replayed,
+	})
+}
+
+func (s *Server) internalProxyRequestFinish(w http.ResponseWriter, r *http.Request) {
+	if !isLoopbackRemoteAddr(r.RemoteAddr) {
+		writeError(w, http.StatusForbidden, "internal proxy endpoint is localhost-only")
+		return
+	}
+	var req struct {
+		ProxyRequestID             string `json:"proxy_request_id"`
+		ProxyConnectLatencyMS      *int64 `json:"proxy_connect_latency_ms"`
+		UpstreamFirstByteLatencyMS *int64 `json:"upstream_first_byte_latency_ms"`
+		UpstreamTotalLatencyMS     *int64 `json:"upstream_total_latency_ms"`
+		RetryCount                 *int64 `json:"retry_count"`
+		TimeoutKind                string `json:"timeout_kind"`
+		HTTPStatus                 *int64 `json:"http_status"`
+		ErrorClass                 string `json:"error_class"`
+		Error                      string `json:"error"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	result, err := s.store.FinishProxyRequest(r.Context(), store.FinishProxyRequestParams{
+		ProxyRequestID:             req.ProxyRequestID,
+		ProxyConnectLatencyMS:      req.ProxyConnectLatencyMS,
+		UpstreamFirstByteLatencyMS: req.UpstreamFirstByteLatencyMS,
+		UpstreamTotalLatencyMS:     req.UpstreamTotalLatencyMS,
+		RetryCount:                 req.RetryCount,
+		TimeoutKind:                req.TimeoutKind,
+		HTTPStatus:                 req.HTTPStatus,
+		ErrorClass:                 req.ErrorClass,
+		Error:                      req.Error,
+		Now:                        time.Now().UTC(),
+	})
+	if errors.Is(err, store.ErrProxyRequestUnknown) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "stale_unknown_request"})
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !result.Replayed {
+		s.publishDurableEvent(r.Context(), result.EventID)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":        "accepted",
+		"event_id":      result.EventID,
+		"event_type":    result.EventType,
+		"session_id":    result.SessionID,
+		"turn_id":       result.TurnID,
+		"generation_id": result.GenerationID,
+		"replayed":      result.Replayed,
+	})
+}
+
 func (s *Server) interruptSession(w http.ResponseWriter, r *http.Request, sessionID string) {
 	session, err := s.store.GetSession(r.Context(), sessionID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1167,6 +1267,18 @@ func writeError(w http.ResponseWriter, status int, message string) {
 
 func writeErrorClass(w http.ResponseWriter, status int, class, message string) {
 	writeJSON(w, status, map[string]string{"error_class": class, "error": message})
+}
+
+func isLoopbackRemoteAddr(remoteAddr string) bool {
+	if addrPort, err := netip.ParseAddrPort(remoteAddr); err == nil {
+		return addrPort.Addr().IsLoopback()
+	}
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err == nil {
+		remoteAddr = host
+	}
+	addr, err := netip.ParseAddr(remoteAddr)
+	return err == nil && addr.IsLoopback()
 }
 
 func (s *Server) MonitorIdleSessions(ctx context.Context) error {

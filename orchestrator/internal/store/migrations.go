@@ -107,6 +107,7 @@ func defaultMigrations(options Options) []migration {
 		}},
 		{version: 5, name: "phase7_indexes", fn: migrateV5Phase7Indexes},
 		{version: 6, name: "phase7_legacy_session_backfill", fn: migrateV6Phase7LegacySessionBackfill},
+		{version: 7, name: "phase7_proxy_event_uniqueness", fn: migrateV7Phase7ProxyEventUniqueness},
 	}
 }
 
@@ -526,6 +527,21 @@ SET status = ?,
 WHERE status IN (?, ?)
   AND ended_at IS NULL`,
 		string(sessionstate.Failed), now, now, string(sessionstate.RunningActive), string(sessionstate.RunningIdle))
+	return err
+}
+
+func migrateV7Phase7ProxyEventUniqueness(ctx context.Context, tx dbRunner) error {
+	_, err := tx.ExecContext(ctx, `
+CREATE UNIQUE INDEX IF NOT EXISTS events_proxy_started_request_uq
+  ON events (proxy_request_id)
+  WHERE proxy_request_id IS NOT NULL
+    AND type = 'proxy.request.started';
+
+CREATE UNIQUE INDEX IF NOT EXISTS events_proxy_finished_request_uq
+  ON events (proxy_request_id)
+  WHERE proxy_request_id IS NOT NULL
+    AND type IN ('proxy.request.completed', 'proxy.request.failed');
+`)
 	return err
 }
 
