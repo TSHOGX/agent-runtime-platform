@@ -41,6 +41,14 @@ Any proxy behavior drift blocks the release until the proxy is re-pinned or the 
 
 This gate must run on the target lab host with the pinned `runsc` build. It verifies the bridge mount's `file-access=exclusive` durability contract that unit tests can only inspect structurally.
 
+Run from the repository root:
+
+```bash
+tools/phase7/bridge-durability-lab.sh
+```
+
+The script writes an OCI bundle under a temporary workdir, starts a minimal `runsc` sandbox, writes one bridge heartbeat envelope from inside the sandbox using file `fsync`, rename into `outbox/`, and directory `fsync`, then starts the host-side bridge queue reader after the sandbox writer exits. This models a host bridge process restart before the message is read and leaves `evidence.json`, sandbox stdout/stderr, and host-reader logs in the workdir.
+
 Required evidence:
 
 - Candidate git commit.
