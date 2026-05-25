@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -789,6 +790,79 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndSecrets(t *testing.T
 	assertSecretPath(t, details.SecretsDirPath)
 	assertSecretPath(t, filepath.Join(details.SecretsDirPath, "anthropic_api_key"))
 	assertSecretFile(t, filepath.Join(details.SecretsDirPath, "anthropic_api_key", "local"))
+}
+
+func TestPrepareGenerationConcurrentSessionsUseDistinctControlManifests(t *testing.T) {
+	dir := t.TempDir()
+	rt := New(Config{
+		SessionsRoot:     filepath.Join(dir, "sessions"),
+		AgentHomesRoot:   filepath.Join(dir, "agent-homes"),
+		BundleRoot:       filepath.Join(dir, "bundle", "out"),
+		RootFSPath:       filepath.Join(dir, "rootfs"),
+		SecretsRoot:      filepath.Join(dir, "secrets"),
+		SecretReadersGID: testSecretReadersGID(),
+		Claude: ClaudeConfig{
+			APIKey:    "123",
+			AuthToken: "123",
+		},
+	})
+	type prepareCase struct {
+		sessionID string
+		details   store.RuntimeGenerationDetails
+	}
+	cases := []prepareCase{
+		{sessionID: "sess_a", details: testGenerationDetails(dir, "gen_a")},
+		{sessionID: "sess_b", details: testGenerationDetails(dir, "gen_b")},
+	}
+	cases[0].details.SessionID = cases[0].sessionID
+	cases[1].details.SessionID = cases[1].sessionID
+
+	var wg sync.WaitGroup
+	errs := make(chan error, len(cases))
+	for _, tc := range cases {
+		tc := tc
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := rt.PrepareGeneration(context.Background(), StartRequest{
+				SessionID:    tc.sessionID,
+				GenerationID: tc.details.GenerationID,
+				Agent:        "claude",
+				Generation:   tc.details,
+			})
+			if err != nil {
+				errs <- fmt.Errorf("prepare %s: %w", tc.sessionID, err)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if cases[0].details.ControlManifestPath == cases[1].details.ControlManifestPath {
+		t.Fatalf("control manifest paths must be distinct: %s", cases[0].details.ControlManifestPath)
+	}
+	for _, tc := range cases {
+		var manifestFile controlManifestFile
+		if err := json.Unmarshal(mustReadFile(t, tc.details.ControlManifestPath), &manifestFile); err != nil {
+			t.Fatalf("read manifest %s: %v", tc.details.ControlManifestPath, err)
+		}
+		if manifestFile.Payload.SessionID != tc.sessionID ||
+			manifestFile.Payload.GenerationID != tc.details.GenerationID ||
+			manifestFile.Payload.NetworkProfileID != tc.details.NetworkProfileID ||
+			manifestFile.Payload.AgentRuntimeProfileID != tc.details.AgentRuntimeProfileID {
+			t.Fatalf("manifest %s has wrong identity: %+v want session=%s generation=%s network=%s runtime=%s",
+				tc.details.ControlManifestPath,
+				manifestFile.Payload,
+				tc.sessionID,
+				tc.details.GenerationID,
+				tc.details.NetworkProfileID,
+				tc.details.AgentRuntimeProfileID)
+		}
+	}
 }
 
 func TestPublishLocalSecretVersionDoesNotOverwriteExistingVersion(t *testing.T) {

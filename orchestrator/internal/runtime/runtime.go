@@ -52,6 +52,7 @@ type Config struct {
 const controlFileName = "session.json"
 const checkpointImageManifestFileName = "harness-checkpoint-manifest.json"
 const checkpointImageManifestVersion = 1
+const secretPublishValidationWait = 500 * time.Millisecond
 
 var requiredCheckpointImageFiles = []string{"checkpoint.img", "pages.img", "pages_meta.img"}
 
@@ -528,7 +529,7 @@ func publishLocalSecretVersion(path, value string, readersGID int) error {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o440)
 	if err != nil {
 		if os.IsExist(err) {
-			return validateSecretVersion(path, readersGID)
+			return waitForSecretVersion(path, readersGID, secretPublishValidationWait)
 		}
 		return fmt.Errorf("publish secret version: %w", err)
 	}
@@ -549,7 +550,7 @@ func publishLocalSecretVersion(path, value string, readersGID int) error {
 	if err := os.Chmod(path, 0o440); err != nil {
 		return fmt.Errorf("chmod secret version: %w", err)
 	}
-	return nil
+	return validateSecretVersion(path, readersGID)
 }
 
 func materializeSecretVersion(src, dst string, readersGID int) error {
@@ -569,7 +570,7 @@ func materializeSecretVersion(src, dst string, readersGID int) error {
 	if err := os.Link(src, dst); err == nil {
 		return validateSecretVersion(dst, readersGID)
 	} else if os.IsExist(err) {
-		return validateSecretVersion(dst, readersGID)
+		return waitForSecretVersion(dst, readersGID, secretPublishValidationWait)
 	}
 	in, err := os.Open(src)
 	if err != nil {
@@ -579,7 +580,7 @@ func materializeSecretVersion(src, dst string, readersGID int) error {
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o440)
 	if err != nil {
 		if os.IsExist(err) {
-			return validateSecretVersion(dst, readersGID)
+			return waitForSecretVersion(dst, readersGID, secretPublishValidationWait)
 		}
 		return fmt.Errorf("create materialized secret: %w", err)
 	}
@@ -601,6 +602,22 @@ func materializeSecretVersion(src, dst string, readersGID int) error {
 		return fmt.Errorf("chmod materialized secret: %w", err)
 	}
 	return validateSecretVersion(dst, readersGID)
+}
+
+func waitForSecretVersion(path string, readersGID int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		if err := validateSecretVersion(path, readersGID); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		if time.Now().After(deadline) {
+			return lastErr
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func ensureSecretDir(path string, readersGID int) error {
