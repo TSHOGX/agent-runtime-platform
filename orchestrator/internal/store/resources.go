@@ -1817,16 +1817,45 @@ func allowedEgressRules(hostGatewayIP string, cfg ResourceAllocatorConfig) []str
 			rules = append(rules, fmt.Sprintf("tcp:%s:%d", host, port))
 		}
 	}
-	if cfg.EgressDNSPolicy != "" && cfg.EgressDNSPolicy != "off" {
+	if egressAllowsDNS(cfg) {
 		rules = append(rules, "udp:53", "tcp:53")
 	}
 	return rules
 }
 
+func egressAllowsDNS(cfg ResourceAllocatorConfig) bool {
+	switch cfg.EgressDNSPolicy {
+	case "always":
+		return true
+	case "hostnames_only":
+		return egressUsesHostnames(cfg)
+	default:
+		return false
+	}
+}
+
+func egressUsesHostnames(cfg ResourceAllocatorConfig) bool {
+	return containsHostname(cfg.EgressDorisFEHosts) || containsHostname(cfg.EgressDorisBEHosts)
+}
+
+func containsHostname(hosts []string) bool {
+	for _, host := range hosts {
+		trimmed := strings.TrimSpace(host)
+		if trimmed == "" {
+			return true
+		}
+		if _, err := netip.ParseAddr(trimmed); err != nil {
+			return true
+		}
+	}
+	return false
+}
+
 func egressPolicyID(cfg ResourceAllocatorConfig) string {
 	payload := strings.Join(cfg.EgressDorisFEHosts, ",") + "|" +
 		strings.Join(cfg.EgressDorisBEHosts, ",") + "|" +
-		fmt.Sprint(cfg.EgressDorisPorts) + "|" + cfg.EgressDNSPolicy
+		fmt.Sprint(cfg.EgressDorisPorts) + "|" + cfg.EgressDNSPolicy + "|" +
+		fmt.Sprintf("dns_allowed=%t", egressAllowsDNS(cfg))
 	return "egress_" + strings.ReplaceAll(payload, " ", "_")
 }
 

@@ -3,9 +3,11 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net/netip"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -133,6 +135,125 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ne
 	if nextNetns == firstNetns {
 		t.Fatalf("expected reclaimable first netns to remain reserved, got %s", nextNetns)
 	}
+}
+
+func TestAllowedEgressRulesHonorsDNSPolicy(t *testing.T) {
+	base := testAllocatorConfig(t)
+	base.EgressDorisPorts = []int{9030}
+
+	tests := []struct {
+		name   string
+		policy string
+		fe     []string
+		be     []string
+		want   []string
+	}{
+		{
+			name:   "hostnames_only skips DNS for ip only Doris hosts",
+			policy: "hostnames_only",
+			fe:     []string{"172.16.0.138"},
+			be:     []string{"172.16.0.139"},
+			want: []string{
+				"tcp:10.240.0.1:8082",
+				"tcp:172.16.0.138:9030",
+				"tcp:172.16.0.139:9030",
+			},
+		},
+		{
+			name:   "hostnames_only allows DNS for Doris hostnames",
+			policy: "hostnames_only",
+			fe:     []string{"doris-fe.local"},
+			be:     []string{"172.16.0.139"},
+			want: []string{
+				"tcp:10.240.0.1:8082",
+				"tcp:doris-fe.local:9030",
+				"tcp:172.16.0.139:9030",
+				"udp:53",
+				"tcp:53",
+			},
+		},
+		{
+			name:   "always allows DNS for ip only Doris hosts",
+			policy: "always",
+			fe:     []string{"172.16.0.138"},
+			be:     []string{"172.16.0.139"},
+			want: []string{
+				"tcp:10.240.0.1:8082",
+				"tcp:172.16.0.138:9030",
+				"tcp:172.16.0.139:9030",
+				"udp:53",
+				"tcp:53",
+			},
+		},
+		{
+			name:   "off skips DNS even when given a hostname",
+			policy: "off",
+			fe:     []string{"doris-fe.local"},
+			be:     []string{"172.16.0.139"},
+			want: []string{
+				"tcp:10.240.0.1:8082",
+				"tcp:doris-fe.local:9030",
+				"tcp:172.16.0.139:9030",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base
+			cfg.EgressDNSPolicy = tt.policy
+			cfg.EgressDorisFEHosts = tt.fe
+			cfg.EgressDorisBEHosts = tt.be
+
+			got := allowedEgressRules("10.240.0.1", cfg)
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("allowed egress rules = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAllocateGenerationPersistsHostnameOnlyDNSPolicy(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	createStoreSession(t, ctx, st, "sess_dns_policy")
+	cfg := testAllocatorConfig(t)
+	cfg.EgressDorisPorts = []int{9030}
+	now := time.Now().UTC()
+
+	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_dns_policy",
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       now,
+		Config:    cfg,
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+
+	want := []string{
+		"tcp:10.240.0.1:8082",
+		"tcp:172.16.0.138:9030",
+		"tcp:172.16.0.139:9030",
+	}
+	details, err := st.GetRuntimeGenerationDetails(ctx, "sess_dns_policy", allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get runtime generation details: %v", err)
+	}
+	assertJSONStrings(t, details.AllowedEgressRules, want)
+	if !strings.Contains(details.EgressPolicyID, "dns_allowed=false") {
+		t.Fatalf("egress policy id %q should include derived DNS allowance", details.EgressPolicyID)
+	}
+
+	var policyRules string
+	if err := st.db.QueryRowContext(ctx, `
+SELECT allowed_egress_rules
+FROM egress_policies
+WHERE egress_policy_id = ?`, details.EgressPolicyID).Scan(&policyRules); err != nil {
+		t.Fatalf("query egress policy rules: %v", err)
+	}
+	assertJSONStrings(t, policyRules, want)
 }
 
 func TestAllocateGenerationSnapshotsSessionAutoCheckpointPolicy(t *testing.T) {
@@ -1785,5 +1906,16 @@ func testAllocatorConfig(t *testing.T) ResourceAllocatorConfig {
 		AgentModel:                 "sonnet",
 		AgentOutputFormat:          "stream-json",
 		DisableNonessentialTraffic: true,
+	}
+}
+
+func assertJSONStrings(t *testing.T, raw string, want []string) {
+	t.Helper()
+	var got []string
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("parse JSON string list %q: %v", raw, err)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("JSON string list = %#v, want %#v", got, want)
 	}
 }
