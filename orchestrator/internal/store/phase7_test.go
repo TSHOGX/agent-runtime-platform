@@ -392,6 +392,84 @@ func TestTurnHelperClaimAckComplete(t *testing.T) {
 	}
 }
 
+func TestTurnHelperTerminalFailureAndCancelKeepGenerationCacheConsistent(t *testing.T) {
+	for _, terminalStatus := range []string{"failed", "canceled"} {
+		t.Run(terminalStatus, func(t *testing.T) {
+			ctx := context.Background()
+			st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+			if err != nil {
+				t.Fatalf("open: %v", err)
+			}
+			t.Cleanup(func() { _ = st.Close() })
+
+			sessionID := "sess_terminal_" + terminalStatus
+			generationID := "gen_terminal_" + terminalStatus
+			createStoreSession(t, ctx, st, sessionID)
+			createActiveGeneration(t, ctx, st, sessionID, generationID, "owner")
+			turnID, err := st.EnqueueTurn(ctx, sessionID, terminalStatus+" turn", time.Now().UTC())
+			if err != nil {
+				t.Fatalf("enqueue: %v", err)
+			}
+
+			now := time.Now().UTC()
+			grant, ok, err := st.ClaimNextTurn(ctx, ClaimNextTurnParams{
+				SessionID:    sessionID,
+				GenerationID: generationID,
+				Owner:        "owner",
+				RequestID:    "req-" + terminalStatus,
+				LeaseTTL:     time.Minute,
+				Now:          now,
+			})
+			if err != nil || !ok || grant.TurnID != turnID {
+				t.Fatalf("claim: ok=%v grant=%+v err=%v", ok, grant, err)
+			}
+			if _, err := st.AckTurnStarted(ctx, AckStartedParams{
+				SessionID:       sessionID,
+				GenerationID:    generationID,
+				TurnID:          turnID,
+				Owner:           "owner",
+				SandboxSourceIP: "10.240.0.2",
+				LeaseTTL:        time.Minute,
+				Now:             now.Add(time.Second),
+			}); err != nil {
+				t.Fatalf("ack started: %v", err)
+			}
+
+			if _, err := st.CompleteTurn(ctx, CompleteTurnParams{
+				SessionID:      sessionID,
+				GenerationID:   generationID,
+				TurnID:         turnID,
+				Owner:          "owner",
+				TerminalStatus: terminalStatus,
+				ErrorClass:     "test_" + terminalStatus,
+				Error:          "terminal " + terminalStatus,
+				Now:            now.Add(2 * time.Second),
+			}); err != nil {
+				t.Fatalf("complete %s: %v", terminalStatus, err)
+			}
+
+			var turnStatus, turnErrorClass, generationStatus string
+			if err := st.db.QueryRowContext(ctx, `
+SELECT t.status, COALESCE(t.error_class, ''), g.status
+FROM turns t
+JOIN runtime_generations g ON g.generation_id = t.generation_id
+WHERE t.id = ?`, turnID).Scan(&turnStatus, &turnErrorClass, &generationStatus); err != nil {
+				t.Fatalf("query terminal state: %v", err)
+			}
+			if turnStatus != terminalStatus || turnErrorClass != "test_"+terminalStatus || generationStatus != "idle" {
+				t.Fatalf("unexpected terminal state: turn=%s error=%s generation=%s", turnStatus, turnErrorClass, generationStatus)
+			}
+			var contexts int
+			if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM active_model_request_contexts`).Scan(&contexts); err != nil {
+				t.Fatalf("context count: %v", err)
+			}
+			if contexts != 0 {
+				t.Fatalf("expected active proxy context cleanup, got %d", contexts)
+			}
+		})
+	}
+}
+
 func TestClaimNextTurnConcurrentAttemptsOnlyOneWins(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
