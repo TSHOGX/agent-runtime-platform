@@ -16,6 +16,7 @@ Run from the repository root:
 ```bash
 python3 -m unittest sandbox-image/tests/test_harness_bridge_client.py
 python3 -m unittest tools/phase7/test_live_turn_start_latency.py
+python3 -m unittest tools/phase7/test_secret_permission_bootstrap.py
 python3 -m unittest tools/phase7/test_secret_permission_lab.py
 ```
 
@@ -70,6 +71,19 @@ This gate must run as root on the target lab host. It verifies the rootful deplo
 Run from the repository root:
 
 ```bash
+tools/phase7/secret-permission-lab.py
+```
+
+If the target host has not been bootstrapped yet, preview the required system changes first:
+
+```bash
+tools/phase7/bootstrap-secret-permissions.py
+```
+
+Apply them only during a maintenance window, then rerun the lab:
+
+```bash
+tools/phase7/bootstrap-secret-permissions.py --apply
 tools/phase7/secret-permission-lab.py
 ```
 
