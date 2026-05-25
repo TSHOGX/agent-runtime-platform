@@ -631,6 +631,104 @@ WHERE session_id = ?
 	}
 }
 
+func TestSendMessageFallsBackWhenCheckpointRestoreFails(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_restore_fallback", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
+	cfg := testServerConfig(dir)
+	cfg.Phase7.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
+	leaseOwner := store.GenerationLeaseOwner(owner.UUID)
+	old, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     leaseOwner,
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    serverTestAllocatorConfig(cfg, "claude"),
+	})
+	if err != nil {
+		t.Fatalf("allocate checkpointed generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, session.ID, old.GenerationID, old.Owner, time.Now().UTC()); err != nil {
+		t.Fatalf("mark checkpointed generation live: %v", err)
+	}
+	if err := st.RecordGenerationRuntimeArtifacts(ctx, old.GenerationID, "restore_manifest_digest", "runsc restore-test"); err != nil {
+		t.Fatalf("record checkpointed artifacts: %v", err)
+	}
+	markServerGenerationCheckpointed(t, ctx, st, session.ID, old.GenerationID, time.Now().UTC())
+
+	rt := &restoreFailoverRuntime{err: errors.New("checkpoint_runsc_version mismatch")}
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: rt,
+		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(`{"content":"after restore fallback"}`))
+	rec := httptest.NewRecorder()
+	srv.sendMessage(rec, req, session.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status 202, got %d body %s", rec.Code, rec.Body.String())
+	}
+	gotSession, err := st.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("get fallback session: %v", err)
+	}
+	if gotSession.ActiveGenerationID == "" || gotSession.ActiveGenerationID == old.GenerationID || gotSession.Status != string(sessionstate.RunningActive) {
+		t.Fatalf("fallback did not replace active generation: %+v old=%s", gotSession, old.GenerationID)
+	}
+	var oldStatus, oldNetwork, oldResources, oldErrorClass, newStatus, newNetwork, newResources string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT g.status, n.allocation_state, r.resource_state, COALESCE(g.error_class, '')
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, old.GenerationID).Scan(&oldStatus, &oldNetwork, &oldResources, &oldErrorClass); err != nil {
+		t.Fatalf("query old generation: %v", err)
+	}
+	if oldStatus != "failed" || oldNetwork != "reclaimable" || oldResources != "reclaimable" || oldErrorClass != "runtime_failed" {
+		t.Fatalf("old generation not fenced after restore failure: status=%s network=%s resources=%s class=%s", oldStatus, oldNetwork, oldResources, oldErrorClass)
+	}
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT g.status, n.allocation_state, r.resource_state
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, gotSession.ActiveGenerationID).Scan(&newStatus, &newNetwork, &newResources); err != nil {
+		t.Fatalf("query fallback generation: %v", err)
+	}
+	if newStatus != "idle" || newNetwork != "live" || newResources != "live" {
+		t.Fatalf("fallback generation not live idle: status=%s network=%s resources=%s", newStatus, newNetwork, newResources)
+	}
+	var queuedTurns int
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM turns
+WHERE session_id = ?
+  AND status = 'queued'
+  AND generation_id IS NULL
+  AND content = 'after restore fallback'`, session.ID).Scan(&queuedTurns); err != nil {
+		t.Fatalf("count fallback queued turns: %v", err)
+	}
+	if queuedTurns != 1 {
+		t.Fatalf("queued fallback turn count=%d want 1", queuedTurns)
+	}
+	prepareRequests, startRequests := rt.requests()
+	if len(prepareRequests) != 1 || len(startRequests) != 2 {
+		t.Fatalf("runtime calls prepare=%d start=%d", len(prepareRequests), len(startRequests))
+	}
+	if !startRequests[0].RestoreFromCheckpoint || startRequests[0].GenerationID != old.GenerationID {
+		t.Fatalf("first start was not restore: %+v", startRequests[0])
+	}
+	if startRequests[1].RestoreFromCheckpoint || startRequests[1].GenerationID != gotSession.ActiveGenerationID {
+		t.Fatalf("second start was not cold fallback: %+v", startRequests[1])
+	}
+}
+
 func TestColdFallbackMaintenanceStartsReplacementForQueuedTurn(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -1569,6 +1667,21 @@ func (r *recordingRuntime) requests() ([]runtime.StartRequest, []runtime.StartRe
 	prepares := append([]runtime.StartRequest(nil), r.prepareRequests...)
 	starts := append([]runtime.StartRequest(nil), r.startRequests...)
 	return prepares, starts
+}
+
+type restoreFailoverRuntime struct {
+	recordingRuntime
+	err error
+}
+
+func (r *restoreFailoverRuntime) Start(_ context.Context, req runtime.StartRequest, _ func(runtime.Output)) runtime.Result {
+	r.mu.Lock()
+	r.startRequests = append(r.startRequests, req)
+	r.mu.Unlock()
+	if req.RestoreFromCheckpoint {
+		return runtime.Result{Err: r.err}
+	}
+	return runtime.Result{ControlManifestDigest: req.PreparedArtifacts.ManifestDigest, RunscVersion: req.PreparedArtifacts.RunscVersion}
 }
 
 type failingRuntime struct {

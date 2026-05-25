@@ -339,8 +339,27 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, sessionID s
 		return
 	}
 	if err := s.startEnsuredGeneration(r.Context(), session, ensured); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+		if !ensured.RestoreFromCheckpoint {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		ensured, err = s.ensureActiveGeneration(r.Context(), session, leaseOwner)
+		if errors.Is(err, store.ErrPoolExhausted) {
+			writeErrorClass(w, http.StatusServiceUnavailable, "pool_exhausted", "resource pool exhausted")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if !ensured.IsNew {
+			writeError(w, http.StatusInternalServerError, "restore fallback did not allocate a replacement generation")
+			return
+		}
+		if err := s.startEnsuredGeneration(r.Context(), session, ensured); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}
 	runningStatus := string(sessionstate.RunningActive)
 	enqueue, err := s.store.EnqueueTurnMessage(r.Context(), store.EnqueueTurnMessageParams{
@@ -388,6 +407,10 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 	startReq.RestoreFromCheckpoint = ensured.RestoreFromCheckpoint
 	result := s.runtime.Start(ctx, startReq, nil)
 	if result.Err != nil {
+		if ensured.RestoreFromCheckpoint {
+			s.failGenerationForRestoreFallback(session.ID, allocation.GenerationID, allocation.Owner, result.Err)
+			return result.Err
+		}
 		s.failGenerationBeforeTurn(session.ID, allocation.GenerationID, allocation.Owner, result.Err)
 		return result.Err
 	}
@@ -396,7 +419,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			if destroyErr := s.runtime.Destroy(ctx, session.ID); destroyErr != nil && !errors.Is(destroyErr, context.Canceled) {
 				s.log.Warn("failed to destroy runtime after restore live CAS failure", "session_id", session.ID, "generation_id", allocation.GenerationID, "error", destroyErr)
 			}
-			s.failGenerationBeforeTurn(session.ID, allocation.GenerationID, allocation.Owner, err)
+			s.failGenerationForRestoreFallback(session.ID, allocation.GenerationID, allocation.Owner, err)
 			return err
 		}
 	}
@@ -426,6 +449,26 @@ func (s *Server) failGenerationBeforeTurn(sessionID, generationID, owner string,
 	}
 	s.hub.Publish(events.Event{Type: "session.error", SessionID: sessionID, Payload: map[string]string{"error": reason}})
 	s.hub.Publish(events.Event{Type: "session." + string(sessionstate.Failed), SessionID: sessionID})
+}
+
+func (s *Server) failGenerationForRestoreFallback(sessionID, generationID, owner string, failure error) {
+	reason := ""
+	if failure != nil {
+		reason = failure.Error()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.store.FailGeneration(ctx, store.FailGenerationParams{
+		SessionID:    sessionID,
+		GenerationID: generationID,
+		Owner:        owner,
+		ErrorClass:   runtimeFailureClass(reason),
+		Reason:       reason,
+		Now:          time.Now().UTC(),
+	}); err != nil {
+		s.log.Warn("failed to fail generation before restore fallback", "session_id", sessionID, "generation_id", generationID, "error", err)
+	}
+	s.hub.Publish(events.Event{Type: "session.error", SessionID: sessionID, Payload: map[string]string{"error": reason, "fallback": "cold"}})
 }
 
 func (s *Server) ensureActiveGeneration(ctx context.Context, session store.Session, owner string) (ensuredGeneration, error) {
