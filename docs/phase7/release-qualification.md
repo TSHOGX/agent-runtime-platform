@@ -16,11 +16,24 @@ Run from the repository root:
 ```bash
 python3 -m unittest sandbox-image/tests/test_harness_bridge_client.py
 python3 -m unittest tools/phase7/test_live_turn_start_latency.py
+python3 -m unittest tools/phase7/test_release_gates.py
 python3 -m unittest tools/phase7/test_secret_permission_bootstrap.py
 python3 -m unittest tools/phase7/test_secret_permission_lab.py
 ```
 
 The `phase7bench` gate measures the in-repo control-plane path from HTTP enqueue to committed `ack_turn_started` with a connected and probed bridge. It is not a replacement for the live lab load measurement below.
+
+The deterministic gates can also be run through the evidence-producing wrapper:
+
+```bash
+tools/phase7/release-gates.py --output /tmp/harness-phase7-release-gates.json
+```
+
+External gates are opt-in so the wrapper never touches live lab state by default:
+
+```bash
+tools/phase7/release-gates.py --include-proxy --include-bridge-lab --output /tmp/harness-phase7-external-gates.json
+```
 
 ## Pinned Proxy Contract
 
