@@ -16,6 +16,7 @@ Run from the repository root:
 ```bash
 python3 -m unittest sandbox-image/tests/test_harness_bridge_client.py
 python3 -m unittest tools/phase7/test_live_turn_start_latency.py
+python3 -m unittest tools/phase7/test_secret_permission_lab.py
 ```
 
 The `phase7bench` gate measures the in-repo control-plane path from HTTP enqueue to committed `ack_turn_started` with a connected and probed bridge. It is not a replacement for the live lab load measurement below.
@@ -61,6 +62,25 @@ Required evidence:
 - After restart, the host observes and commits the message exactly once.
 
 Passing condition: a fsynced sandbox-side bridge message remains visible to the host after host-process restart and is processed through the normal idempotent queue path. Losing the message, double-processing it, or needing a manual repair fails the gate.
+
+## Secret Permission Lab
+
+This gate must run as root on the target lab host. It verifies the rootful deployment model that portable tests cannot prove: `harness.secrets.root` is owned by the orchestrator user, belongs to the `harness-secret-readers` group, UID `65534` can read through that group, unrelated host UIDs cannot read, and the same secret file is readable from a gVisor sandbox with the pinned rootfs.
+
+Run from the repository root:
+
+```bash
+tools/phase7/secret-permission-lab.py
+```
+
+Useful overrides:
+
+- `PHASE7_SECRET_OWNER` defaults to `orchestrator`.
+- `PHASE7_SECRET_READERS_GROUP` defaults to `harness-secret-readers`.
+- `PHASE7_SECRET_READERS_GID` and `PHASE7_SECRETS_ROOT` override `config/harness.yaml`.
+- `PHASE7_LAB_ROOTFS` defaults to `sandbox-image/rootfs`.
+
+Passing condition: the tool prints `{"result": "passed", ...}`. A missing user/group, wrong mode/owner/group, extra readers-group member, failed UID `65534` read, successful unrelated-UID read, or failed sandbox read blocks the release.
 
 ## Live Turn-Start Latency
 
