@@ -568,8 +568,35 @@ func TestGenerationHeartbeatAndFailureCAS(t *testing.T) {
 	t.Cleanup(func() { _ = st.Close() })
 	createStoreSession(t, ctx, st, "sess_hb")
 	createActiveGeneration(t, ctx, st, "sess_hb", "gen_hb", "owner")
+	turnID, err := st.EnqueueTurn(ctx, "sess_hb", "heartbeat turn", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("enqueue heartbeat turn: %v", err)
+	}
 
 	now := time.Now().UTC()
+	grant, ok, err := st.ClaimNextTurn(ctx, ClaimNextTurnParams{
+		SessionID:    "sess_hb",
+		GenerationID: "gen_hb",
+		Owner:        "owner",
+		RequestID:    "req_hb",
+		LeaseTTL:     time.Minute,
+		Now:          now.Add(-2 * time.Second),
+	})
+	if err != nil || !ok || grant.TurnID != turnID {
+		t.Fatalf("claim heartbeat turn: ok=%v grant=%+v err=%v", ok, grant, err)
+	}
+	if _, err := st.AckTurnStarted(ctx, AckStartedParams{
+		SessionID:       "sess_hb",
+		GenerationID:    "gen_hb",
+		TurnID:          turnID,
+		Owner:           "owner",
+		SandboxSourceIP: "10.240.0.2",
+		LeaseTTL:        time.Minute,
+		Now:             now.Add(-time.Second),
+	}); err != nil {
+		t.Fatalf("ack heartbeat turn started: %v", err)
+	}
+
 	if err := st.RenewGenerationHeartbeat(ctx, RenewHeartbeatParams{
 		SessionID:    "sess_hb",
 		GenerationID: "gen_hb",
@@ -585,6 +612,26 @@ func TestGenerationHeartbeatAndFailureCAS(t *testing.T) {
 	}
 	if leaseExpires == "" {
 		t.Fatalf("expected renewed lease expiry")
+	}
+	wantExpires := now.Add(time.Minute)
+	if got := parseTime(leaseExpires); !got.Equal(wantExpires) {
+		t.Fatalf("generation lease_expires_at=%s want %s", got, wantExpires)
+	}
+	var turnExpires, contextExpires, contextOwner string
+	if err := st.db.QueryRowContext(ctx, `SELECT lease_expires_at FROM turns WHERE id = ?`, turnID).Scan(&turnExpires); err != nil {
+		t.Fatalf("query turn lease expiry: %v", err)
+	}
+	if err := st.db.QueryRowContext(ctx, `
+SELECT expires_at, lease_owner
+FROM active_model_request_contexts
+WHERE sandbox_source_ip = '10.240.0.2'`).Scan(&contextExpires, &contextOwner); err != nil {
+		t.Fatalf("query active proxy context expiry: %v", err)
+	}
+	if got := parseTime(turnExpires); !got.Equal(wantExpires) {
+		t.Fatalf("turn lease_expires_at=%s want %s", got, wantExpires)
+	}
+	if got := parseTime(contextExpires); !got.Equal(wantExpires) || contextOwner != "owner" {
+		t.Fatalf("context expires_at=%s owner=%s want %s/owner", got, contextOwner, wantExpires)
 	}
 
 	if err := st.FailGeneration(ctx, FailGenerationParams{
