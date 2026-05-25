@@ -70,7 +70,7 @@ Bullets are observable assertions; rules and rationale live in the linked sectio
 ## Checkpoint/Restore
 
 - Checkpoint preconditions and recorded fields match [Checkpoint Policy](./checkpoint-restore.md#checkpoint-policy).
-- Restore moves generation status `checkpointed -> restoring -> active` while the underlying allocation_state moves `reserved_checkpointed -> recreating -> ready -> live`; pre/post probes both pass before `claim_next_turn`.
+- Restore moves generation status `checkpointed -> restoring -> active` while the underlying allocation_state moves `reserved_checkpointed -> recreating -> live`; pre/post probes both pass before `claim_next_turn`.
 - Mismatched `runsc version` / platform / `manifest_digest` or a partial checkpoint image (verified against the recorded image manifest, not just file presence) is rejected through the lifecycle failure CAS; generation moves to `failed`, resource rows move to `reclaimable`, and cold fallback starts N+1. A stale restored generation cannot write events once a newer generation exists. (See [Digest Equivalence Rules](./checkpoint-restore.md#digest-equivalence-rules).)
 
 ## Proxy Observability

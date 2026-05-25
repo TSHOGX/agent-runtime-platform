@@ -241,7 +241,7 @@ Each `runtime_generations` row references exactly one `network_profile_id` and o
 
 `claude` profiles carry `requires_secret_drop = true` and non-null secret refs. `sh` profiles carry `requires_secret_drop = false`, null secret refs, and no upstream credential dependency.
 
-The single exception that reuses host resources is **physical restore of the same `generation_id`** ([invariants.md](./invariants.md#hard-invariants), [runtime-resources.md](./runtime-resources.md#resource-allocation-lifecycle)): the same generation row's allocation transitions `reserved_checkpointed -> recreating -> ready -> live` while keeping its `network_profile_id` and `agent_runtime_profile_id` bindings; it is not "another generation" and therefore not subject to the no-reuse rule.
+The single exception that reuses host resources is **physical restore of the same `generation_id`** ([invariants.md](./invariants.md#hard-invariants), [runtime-resources.md](./runtime-resources.md#resource-allocation-lifecycle)): the same generation row's allocation transitions `reserved_checkpointed -> recreating -> live` while keeping its `network_profile_id` and `agent_runtime_profile_id` bindings; it is not "another generation" and therefore not subject to the no-reuse rule.
 
 `manifest_anthropic_base_url` is templated from `host_gateway_ip` at manifest emission — the agent inside the sandbox sees only the gateway IP, never `0.0.0.0`.
 
