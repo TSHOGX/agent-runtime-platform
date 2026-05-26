@@ -13,14 +13,14 @@
 - [x] **Phase 6**: artifact UX hardening, live file tree, and richer previews
 - [x] **Phase 7a**: control-plane skeleton — per-generation resources, durable schema, per-generation network and bundle, no shared `phase1-demo` / `phase2-template` state.
 - [x] **Phase 7b**: turn execution refactor — Agent Bridge claim/ack, durable turn ledger with `ack_started_at` semantics, durable event log, cold Claude resume, checkpoint-safe restore, and checkpoint policy.
-- [ ] **P0 fixes**: rename `harness.session_ttl` to `harness.session_retention` with `0s = no expiry` as default, decouple retryable runtime/turn failures from terminal session failure, add checkpoint image retention, and close the generation cleanup/quota documentation gaps.
+- [x] **P0 fixes**: rename `harness.session_ttl` to `harness.session_retention` with `0s = no expiry` as default, decouple retryable runtime/turn failures from terminal session failure, add checkpoint image retention, and close the generation cleanup/quota documentation gaps.
 - [ ] **Phase 9**: configurable harness system prompt, proactive context compaction driven by proxy-reported token usage, system-skills mount, harness-managed Claude Code settings (hooks + remote MCP).
 - [ ] **Phase 10**: multi-user auth, credential storage/rotation/GC, tenant egress policy enforcement, cgroup limits, observability, multi-orchestrator HA.
 - [ ] **Phase 11** (future, design only): trajectory → memory → skill pipeline.
 
 ## Current Target
 
-The checkpoint-safe Phase 7 baseline is qualified. Active engineering work is the P0 lifetime fix, then Phase 9. Phase 10 (production operations) follows Phase 9. Phase 11 is design-only for now.
+The checkpoint-safe Phase 7 baseline and P0 lifetime separation are qualified. Active engineering work is Phase 9. Phase 10 (production operations) follows Phase 9. Phase 11 is design-only for now.
 
 ### P0: session and runtime lifetime separation
 
