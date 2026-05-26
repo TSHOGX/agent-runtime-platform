@@ -225,7 +225,7 @@ Orchestrator:
 | `HARNESS_ORCHESTRATOR_ADDR` | `:8090` | HTTP bind address |
 | `HARNESS_LAB_PASSWORD` | empty | Enables shared-password auth when set |
 | `HARNESS_COOKIE_NAME` | `harness_auth` | Auth cookie name |
-| `HARNESS_SESSION_TTL` | `harness.session_ttl` (`2h`) | Session expiry horizon |
+| `HARNESS_SESSION_RETENTION` | `harness.session_retention` (`0s`) | Session/history retention horizon; `0s` disables automatic expiry |
 | `HARNESS_REPO_ROOT` | repo root | Repository root used to derive bundle paths |
 | `HARNESS_SESSIONS_ROOT` | `/var/lib/harness/sessions` | Host workspace root |
 | `HARNESS_AGENT_HOMES_ROOT` | `/var/lib/harness/agent-homes` | Host root for per-session agent HOME state, mounted outside `/workspace` |
@@ -244,16 +244,16 @@ Project config:
 | --- | --- |
 | `config/harness.yaml` | Phase 7 typed control-plane schema and explicit lab runtime profile. |
 
-The config loader reads `config/harness.yaml` through a strict `gopkg.in/yaml.v3` decoder. The primary shape is the Phase 7 `harness:` schema: `run_dir`, `session_ttl`, `max_sessions`, nested network egress, event retention, probe status, bridge lease, reaper, and secret-root settings are decoded into typed config and validated before startup. Legacy files containing only top-level `runtime:` / `claude:` sections still load during the cutover, but mixing legacy sections with `harness:` is rejected.
+The config loader reads `config/harness.yaml` through a strict `gopkg.in/yaml.v3` decoder. The primary shape is the Phase 7 `harness:` schema: `run_dir`, `session_retention`, `max_sessions`, nested network egress, event retention, probe status, bridge lease, reaper, and secret-root settings are decoded into typed config and validated before startup. Legacy files containing only top-level `runtime:` / `claude:` sections still load during the cutover, but mixing legacy sections with `harness:` is rejected.
 
-General orchestrator paths such as session roots and DB path still use the environment variables above. `HARNESS_SESSION_TTL` and `HARNESS_MAX_SESSIONS` remain compatibility overrides and are revalidated against the Phase 7 CIDR pool.
+General orchestrator paths such as session roots and DB path still use the environment variables above. `HARNESS_SESSION_RETENTION` and `HARNESS_MAX_SESSIONS` override their `harness:` values and are revalidated against the Phase 7 schema. `HARNESS_SESSION_TTL` is obsolete and fails startup if present so deployments do not silently switch to no-expiry retention.
 
 Current `config/harness.yaml` values:
 
 ```yaml
 harness:
   run_dir: /var/lib/harness/run
-  session_ttl: 2h
+  session_retention: 0s
   max_sessions: 30
   network:
     cidr_pool: 10.200.0.0/16

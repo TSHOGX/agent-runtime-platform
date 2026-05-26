@@ -40,7 +40,7 @@ Useful environment variables:
 - `HARNESS_ORCHESTRATOR_ADDR` defaults to `:8090`.
 - `HARNESS_LAB_PASSWORD` enables shared-password auth. Leave empty for local no-auth smoke tests.
 - `HARNESS_COOKIE_NAME` defaults to `harness_auth`.
-- `HARNESS_SESSION_TTL` defaults to `2h`.
+- `HARNESS_SESSION_RETENTION` defaults to `0s`; `0s` disables automatic session expiry.
 - `HARNESS_REPO_ROOT` defaults to the repository root.
 - `HARNESS_SESSIONS_ROOT` defaults to `/var/lib/harness/sessions`.
 - `HARNESS_AGENT_HOMES_ROOT` defaults to `/var/lib/harness/agent-homes`.
@@ -52,12 +52,14 @@ Useful environment variables:
 - `RUNSC_ROOT` defaults to `/var/lib/harness/runsc`.
 - `HARNESS_RESTORE_SCRIPT` is loaded for compatibility, but the current direct `runsc` path does not execute it.
 
+`HARNESS_SESSION_TTL` is obsolete and fails startup if present; use `HARNESS_SESSION_RETENTION`.
+
 Runtime network and Claude proxy settings are explicit in `config/harness.yaml`:
 
 ```yaml
 harness:
   run_dir: /var/lib/harness/run
-  session_ttl: 2h
+  session_retention: 0s
   max_sessions: 30
   network:
     cidr_pool: 10.200.0.0/16

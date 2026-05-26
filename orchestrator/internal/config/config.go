@@ -18,25 +18,25 @@ import (
 )
 
 type Config struct {
-	Addr            string
-	SharedSecret    string
-	CookieName      string
-	SessionTTL      time.Duration
-	RepoRoot        string
-	RestoreScript   string
-	RunscRoot       string
-	SessionsRoot    string
-	AgentHomesRoot  string
-	CheckpointsRoot string
-	BundleRoot      string
-	DBPath          string
-	DefaultAgent    string
-	MaxSessions     int
-	RunscNetwork    string
-	RunscOverlay2   string
-	Claude          ClaudeConfig
-	Phase7          Phase7Config
-	Warnings        []string
+	Addr             string
+	SharedSecret     string
+	CookieName       string
+	SessionRetention time.Duration
+	RepoRoot         string
+	RestoreScript    string
+	RunscRoot        string
+	SessionsRoot     string
+	AgentHomesRoot   string
+	CheckpointsRoot  string
+	BundleRoot       string
+	DBPath           string
+	DefaultAgent     string
+	MaxSessions      int
+	RunscNetwork     string
+	RunscOverlay2    string
+	Claude           ClaudeConfig
+	Phase7           Phase7Config
+	Warnings         []string
 }
 
 type ClaudeConfig struct {
@@ -50,16 +50,16 @@ type ClaudeConfig struct {
 }
 
 type Phase7Config struct {
-	RunDir      string           `yaml:"run_dir"`
-	SessionTTL  Duration         `yaml:"session_ttl"`
-	MaxSessions int              `yaml:"max_sessions"`
-	Network     NetworkConfig    `yaml:"network"`
-	Events      EventsConfig     `yaml:"events"`
-	Probe       ProbeConfig      `yaml:"probe"`
-	Bridge      BridgeConfig     `yaml:"bridge"`
-	Checkpoint  CheckpointConfig `yaml:"checkpoint"`
-	Reaper      ReaperConfig     `yaml:"reaper"`
-	Secrets     SecretsConfig    `yaml:"secrets"`
+	RunDir           string           `yaml:"run_dir"`
+	SessionRetention Duration         `yaml:"session_retention"`
+	MaxSessions      int              `yaml:"max_sessions"`
+	Network          NetworkConfig    `yaml:"network"`
+	Events           EventsConfig     `yaml:"events"`
+	Probe            ProbeConfig      `yaml:"probe"`
+	Bridge           BridgeConfig     `yaml:"bridge"`
+	Checkpoint       CheckpointConfig `yaml:"checkpoint"`
+	Reaper           ReaperConfig     `yaml:"reaper"`
+	Secrets          SecretsConfig    `yaml:"secrets"`
 }
 
 func (c Phase7Config) ControlRoot() string {
@@ -213,29 +213,32 @@ func Load() (Config, error) {
 	}
 
 	sessionsRoot := getenv("HARNESS_SESSIONS_ROOT", "/var/lib/harness/sessions")
-	sessionTTL := durationEnv("HARNESS_SESSION_TTL", projectConfig.Phase7.SessionTTL.Duration)
+	sessionRetention, err := sessionRetentionEnv(projectConfig.Phase7.SessionRetention.Duration)
+	if err != nil {
+		return Config{}, err
+	}
 	maxSessions := intEnv("HARNESS_MAX_SESSIONS", projectConfig.Phase7.MaxSessions)
 	cfg := Config{
-		Addr:            getenv("HARNESS_ORCHESTRATOR_ADDR", ":8090"),
-		SharedSecret:    os.Getenv("HARNESS_LAB_PASSWORD"),
-		CookieName:      getenv("HARNESS_COOKIE_NAME", "harness_auth"),
-		SessionTTL:      sessionTTL,
-		RepoRoot:        getenv("HARNESS_REPO_ROOT", repoRoot),
-		RestoreScript:   getenv("HARNESS_RESTORE_SCRIPT", filepath.Join(repoRoot, "bundle", "restore-sandbox.sh")),
-		RunscRoot:       getenv("RUNSC_ROOT", "/var/lib/harness/runsc"),
-		SessionsRoot:    sessionsRoot,
-		AgentHomesRoot:  getenv("HARNESS_AGENT_HOMES_ROOT", "/var/lib/harness/agent-homes"),
-		CheckpointsRoot: getenv("HARNESS_CHECKPOINTS_ROOT", "/var/lib/harness/checkpoints"),
-		BundleRoot:      getenv("HARNESS_BUNDLE_ROOT", filepath.Join(repoRoot, "bundle", "out")),
-		DBPath:          getenv("HARNESS_DB_PATH", filepath.Join(sessionsRoot, "orchestrator.db")),
-		DefaultAgent:    getenv("HARNESS_DEFAULT_AGENT", "claude"),
-		MaxSessions:     maxSessions,
-		RunscNetwork:    defaultString(projectConfig.Runtime.RunscNetwork, "sandbox"),
-		RunscOverlay2:   defaultString(projectConfig.Runtime.RunscOverlay2, "none"),
-		Claude:          projectConfig.Claude,
-		Phase7:          projectConfig.Phase7,
+		Addr:             getenv("HARNESS_ORCHESTRATOR_ADDR", ":8090"),
+		SharedSecret:     os.Getenv("HARNESS_LAB_PASSWORD"),
+		CookieName:       getenv("HARNESS_COOKIE_NAME", "harness_auth"),
+		SessionRetention: sessionRetention,
+		RepoRoot:         getenv("HARNESS_REPO_ROOT", repoRoot),
+		RestoreScript:    getenv("HARNESS_RESTORE_SCRIPT", filepath.Join(repoRoot, "bundle", "restore-sandbox.sh")),
+		RunscRoot:        getenv("RUNSC_ROOT", "/var/lib/harness/runsc"),
+		SessionsRoot:     sessionsRoot,
+		AgentHomesRoot:   getenv("HARNESS_AGENT_HOMES_ROOT", "/var/lib/harness/agent-homes"),
+		CheckpointsRoot:  getenv("HARNESS_CHECKPOINTS_ROOT", "/var/lib/harness/checkpoints"),
+		BundleRoot:       getenv("HARNESS_BUNDLE_ROOT", filepath.Join(repoRoot, "bundle", "out")),
+		DBPath:           getenv("HARNESS_DB_PATH", filepath.Join(sessionsRoot, "orchestrator.db")),
+		DefaultAgent:     getenv("HARNESS_DEFAULT_AGENT", "claude"),
+		MaxSessions:      maxSessions,
+		RunscNetwork:     defaultString(projectConfig.Runtime.RunscNetwork, "sandbox"),
+		RunscOverlay2:    defaultString(projectConfig.Runtime.RunscOverlay2, "none"),
+		Claude:           projectConfig.Claude,
+		Phase7:           projectConfig.Phase7,
 	}
-	cfg.Phase7.SessionTTL = Duration{Duration: sessionTTL}
+	cfg.Phase7.SessionRetention = Duration{Duration: sessionRetention}
 	cfg.Phase7.MaxSessions = maxSessions
 	if value, ok := boolEnv("HARNESS_AUTO_CHECKPOINT_ENABLED"); ok {
 		cfg.Phase7.Checkpoint.AutoEnabled = value
@@ -348,9 +351,9 @@ func inspectProjectConfigTopLevel(data []byte) (hasHarness bool, hasLegacy bool,
 
 func defaultPhase7Config() Phase7Config {
 	return Phase7Config{
-		RunDir:      "/var/lib/harness/run",
-		SessionTTL:  Duration{Duration: 2 * time.Hour},
-		MaxSessions: 30,
+		RunDir:           "/var/lib/harness/run",
+		SessionRetention: Duration{Duration: 0},
+		MaxSessions:      30,
 		Network: NetworkConfig{
 			CIDRPool: CIDRPrefix{Prefix: netip.MustParsePrefix("10.200.0.0/16")},
 			Egress: EgressConfig{
@@ -405,8 +408,8 @@ func validatePhase7Config(cfg Phase7Config) error {
 	if strings.TrimSpace(cfg.RunDir) == "" {
 		return fmt.Errorf("harness.run_dir is required")
 	}
-	if cfg.SessionTTL.Duration <= 0 {
-		return fmt.Errorf("harness.session_ttl must be > 0")
+	if cfg.SessionRetention.Duration < 0 {
+		return fmt.Errorf("harness.session_retention must be >= 0")
 	}
 	if cfg.MaxSessions <= 0 {
 		return fmt.Errorf("harness.max_sessions must be > 0")
@@ -629,14 +632,17 @@ func boolEnv(key string) (bool, bool) {
 	return parsed, true
 }
 
-func durationEnv(key string, fallback time.Duration) time.Duration {
-	value := os.Getenv(key)
-	if value == "" {
-		return fallback
+func sessionRetentionEnv(fallback time.Duration) (time.Duration, error) {
+	if _, ok := os.LookupEnv("HARNESS_SESSION_TTL"); ok {
+		return 0, fmt.Errorf("HARNESS_SESSION_TTL is obsolete; use HARNESS_SESSION_RETENTION")
 	}
-	duration, err := time.ParseDuration(value)
+	value, ok := os.LookupEnv("HARNESS_SESSION_RETENTION")
+	if !ok {
+		return fallback, nil
+	}
+	duration, err := time.ParseDuration(strings.TrimSpace(value))
 	if err != nil {
-		return fallback
+		return 0, fmt.Errorf("invalid HARNESS_SESSION_RETENTION duration %q: %w", value, err)
 	}
-	return duration
+	return duration, nil
 }

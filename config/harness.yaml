@@ -1,6 +1,6 @@
 harness:
   run_dir: /var/lib/harness/run
-  session_ttl: 2h
+  session_retention: 0s
   max_sessions: 30
 
   network:

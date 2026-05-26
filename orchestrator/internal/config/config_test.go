@@ -16,7 +16,7 @@ func TestLoadProjectConfigUsesPhase7HarnessSchema(t *testing.T) {
 	path := filepath.Join(dir, "harness.yaml")
 	if err := os.WriteFile(path, []byte(`harness:
   run_dir: /tmp/harness-run
-  session_ttl: 3h
+  session_retention: 3h
   max_sessions: 10
   network:
     cidr_pool: 10.210.0.0/24
@@ -68,8 +68,8 @@ func TestLoadProjectConfigUsesPhase7HarnessSchema(t *testing.T) {
 	if phase7.RunDir != "/tmp/harness-run" {
 		t.Fatalf("run_dir: %q", phase7.RunDir)
 	}
-	if phase7.SessionTTL.Duration != 3*time.Hour || phase7.MaxSessions != 10 {
-		t.Fatalf("unexpected ttl/max: %s %d", phase7.SessionTTL.Duration, phase7.MaxSessions)
+	if phase7.SessionRetention.Duration != 3*time.Hour || phase7.MaxSessions != 10 {
+		t.Fatalf("unexpected retention/max: %s %d", phase7.SessionRetention.Duration, phase7.MaxSessions)
 	}
 	if got := phase7.Network.CIDRPool.String(); got != "10.210.0.0/24" {
 		t.Fatalf("cidr_pool: %q", got)
@@ -173,7 +173,7 @@ func TestLoadProjectConfigRejectsUnknownKeys(t *testing.T) {
 	secretsRoot := prepareSecretsRoot(t, dir, 1234)
 	path := filepath.Join(dir, "harness.yaml")
 	if err := os.WriteFile(path, []byte(`harness:
-  session_ttl: 1h
+  session_retention: 1h
   surprise: true
   secrets:
     root: `+secretsRoot+`
@@ -185,6 +185,25 @@ func TestLoadProjectConfigRejectsUnknownKeys(t *testing.T) {
 	_, err := loadProjectConfig(path)
 	if err == nil || !strings.Contains(err.Error(), "field surprise not found") {
 		t.Fatalf("expected unknown field error, got %v", err)
+	}
+}
+
+func TestLoadProjectConfigRejectsObsoleteSessionTTLKey(t *testing.T) {
+	dir := t.TempDir()
+	secretsRoot := prepareSecretsRoot(t, dir, 1234)
+	path := filepath.Join(dir, "harness.yaml")
+	if err := os.WriteFile(path, []byte(`harness:
+  session_ttl: 1h
+  secrets:
+    root: `+secretsRoot+`
+    readers_gid: 1234
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := loadProjectConfig(path)
+	if err == nil || !strings.Contains(err.Error(), "field session_ttl not found") {
+		t.Fatalf("expected obsolete session_ttl error, got %v", err)
 	}
 }
 
@@ -202,11 +221,11 @@ func TestValidatePhase7Config(t *testing.T) {
 			want: "harness.run_dir is required",
 		},
 		{
-			name: "session ttl",
+			name: "session retention",
 			mutate: func(cfg *Phase7Config) {
-				cfg.SessionTTL.Duration = 0
+				cfg.SessionRetention.Duration = -time.Second
 			},
-			want: "harness.session_ttl must be > 0",
+			want: "harness.session_retention must be >= 0",
 		},
 		{
 			name: "max sessions",
@@ -500,6 +519,95 @@ func TestValidatePhase7Config(t *testing.T) {
 	}
 }
 
+func TestValidatePhase7ConfigAllowsZeroSessionRetention(t *testing.T) {
+	dir := t.TempDir()
+	cfg := defaultPhase7Config()
+	cfg.SessionRetention.Duration = 0
+	cfg.Secrets.Root = prepareSecretsRoot(t, dir, 1234)
+	cfg.Secrets.ReadersGID = 1234
+
+	if err := validatePhase7Config(cfg); err != nil {
+		t.Fatalf("zero session retention should be valid: %v", err)
+	}
+}
+
+func TestSessionRetentionEnvRejectsObsoleteSessionTTL(t *testing.T) {
+	unsetEnvForTest(t, "HARNESS_SESSION_RETENTION")
+	t.Setenv("HARNESS_SESSION_TTL", "2h")
+
+	_, err := sessionRetentionEnv(time.Hour)
+	if err == nil || !strings.Contains(err.Error(), "HARNESS_SESSION_TTL is obsolete; use HARNESS_SESSION_RETENTION") {
+		t.Fatalf("expected obsolete env error, got %v", err)
+	}
+}
+
+func TestSessionRetentionEnvRejectsObsoleteSessionTTLEvenWithReplacement(t *testing.T) {
+	t.Setenv("HARNESS_SESSION_TTL", "2h")
+	t.Setenv("HARNESS_SESSION_RETENTION", "720h")
+
+	_, err := sessionRetentionEnv(time.Hour)
+	if err == nil || !strings.Contains(err.Error(), "HARNESS_SESSION_TTL is obsolete") {
+		t.Fatalf("expected obsolete env error, got %v", err)
+	}
+}
+
+func TestSessionRetentionEnvStrictParsing(t *testing.T) {
+	unsetEnvForTest(t, "HARNESS_SESSION_TTL")
+	tests := []struct {
+		name  string
+		value string
+		want  time.Duration
+		err   string
+	}{
+		{name: "zero", value: "0s", want: 0},
+		{name: "normal", value: "720h", want: 720 * time.Hour},
+		{name: "days rejected", value: "30d", err: "invalid HARNESS_SESSION_RETENTION duration"},
+		{name: "typo rejected", value: "forever", err: "invalid HARNESS_SESSION_RETENTION duration"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HARNESS_SESSION_RETENTION", tt.value)
+			got, err := sessionRetentionEnv(time.Hour)
+			if tt.err != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.err) {
+					t.Fatalf("expected %q error, got %v", tt.err, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("session retention env: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("retention=%s want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsObsoleteSessionTTLEnv(t *testing.T) {
+	repo := writeMinimalLoadConfig(t)
+	chdirForLoadTest(t, repo)
+	t.Setenv("HARNESS_SESSION_TTL", "2h")
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "HARNESS_SESSION_TTL is obsolete; use HARNESS_SESSION_RETENTION") {
+		t.Fatalf("expected obsolete env load error, got %v", err)
+	}
+}
+
+func TestLoadRejectsInvalidSessionRetentionEnv(t *testing.T) {
+	repo := writeMinimalLoadConfig(t)
+	chdirForLoadTest(t, repo)
+	unsetEnvForTest(t, "HARNESS_SESSION_TTL")
+	t.Setenv("HARNESS_SESSION_RETENTION", "30d")
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "invalid HARNESS_SESSION_RETENTION duration") {
+		t.Fatalf("expected invalid retention env load error, got %v", err)
+	}
+}
+
 func TestLoadProjectConfigMissingFileUsesDefaults(t *testing.T) {
 	cfg, err := loadProjectConfig(filepath.Join(t.TempDir(), "missing.yaml"))
 	if err != nil {
@@ -513,6 +621,54 @@ func TestLoadProjectConfigMissingFileUsesDefaults(t *testing.T) {
 		cfg.Phase7.BridgeRoot() != "/var/lib/harness/run/bridge" {
 		t.Fatalf("unexpected derived roots: control=%s bundle=%s bridge=%s", cfg.Phase7.ControlRoot(), cfg.Phase7.BundleRoot(), cfg.Phase7.BridgeRoot())
 	}
+}
+
+func writeMinimalLoadConfig(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	configDir := filepath.Join(repo, "config")
+	if err := os.Mkdir(configDir, 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "harness.yaml"), []byte(`harness:
+  secrets:
+    root: `+prepareSecretsRoot(t, repo, 1234)+`
+    readers_gid: 1234
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	return repo
+}
+
+func chdirForLoadTest(t *testing.T, repo string) {
+	t.Helper()
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(repo); err != nil {
+		t.Fatalf("chdir repo: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(oldWD); err != nil {
+			t.Fatalf("restore wd: %v", err)
+		}
+	})
+}
+
+func unsetEnvForTest(t *testing.T, key string) {
+	t.Helper()
+	old, ok := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("unset %s: %v", key, err)
+	}
+	t.Cleanup(func() {
+		if ok {
+			_ = os.Setenv(key, old)
+		} else {
+			_ = os.Unsetenv(key)
+		}
+	})
 }
 
 func TestCheckedInHarnessConfigLoads(t *testing.T) {

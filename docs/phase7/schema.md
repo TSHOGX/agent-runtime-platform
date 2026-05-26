@@ -28,7 +28,7 @@ failure_reason
 error_class
 ```
 
-The session row must not imply that a specific process is alive. It only says whether the session is eligible to accept input and what recovery policy applies. `expires_at` is the absolute deadline beyond which the session moves to `destroyed` regardless of activity; it is set on session create as `created_at + harness.session_ttl` (the lab default surfaces as `HARNESS_SESSION_TTL=2h`) and refreshed on explicit user extension, not on every turn. A session whose `expires_at` is in the past is reaped on the next sweep alongside its allocations. That sweep rejects queued work on the expired session before any new generation is allocated; active turn deadlines are still governed by `turn.lease_expires_at`, not the session TTL.
+The session row must not imply that a specific process is alive. It only says whether the session is eligible to accept input and what recovery policy applies. `expires_at` is an optional session-retention deadline set only when `harness.session_retention > 0`; the default `0s` leaves it NULL so session rows, history, and workspace state do not expire automatically. A session whose non-NULL `expires_at` is in the past is reaped on the next sweep alongside its allocations. That sweep rejects queued work on the expired session before any new generation is allocated; active turn deadlines are still governed by `turn.lease_expires_at`, not session retention.
 
 `active_generation_id` is updated by CAS predicates (`update sessions set active_generation_id = :new where active_generation_id = :old_or_null`) so a buggy concurrent allocator collides on the row, not just on the partial unique index defined under `runtime_generations` below.
 

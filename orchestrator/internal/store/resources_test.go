@@ -1601,6 +1601,119 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ne
 	}
 }
 
+func TestSweepExpiredSessionsIgnoresNullExpiry(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openOwnedStore(t, ctx)
+	now := time.Now().UTC()
+	if err := st.CreateSession(ctx, Session{
+		ID:        "sess_no_expiry",
+		UserID:    "lab",
+		Status:    string(sessionstate.Created),
+		Agent:     "claude",
+		Workspace: filepath.Join(t.TempDir(), "sess_no_expiry"),
+		RestoreID: "phase3-sess_no_expiry",
+		CreatedAt: now.Add(-time.Hour),
+		UpdatedAt: now.Add(-time.Hour),
+		ExpiresAt: nil,
+	}); err != nil {
+		t.Fatalf("create no-expiry session: %v", err)
+	}
+
+	changed, err := st.SweepExpiredSessions(ctx, now.Add(24*time.Hour))
+	if err != nil {
+		t.Fatalf("sweep expired sessions: %v", err)
+	}
+	if changed != 0 {
+		t.Fatalf("expected no sessions swept, got %d", changed)
+	}
+	got, err := st.GetSession(ctx, "sess_no_expiry")
+	if err != nil {
+		t.Fatalf("get no-expiry session: %v", err)
+	}
+	if got.Status != string(sessionstate.Created) {
+		t.Fatalf("expected session to remain created, got %s", got.Status)
+	}
+}
+
+func TestClearActiveSessionExpiryClearsOnlyActiveSessions(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openOwnedStore(t, ctx)
+	now := time.Now().UTC()
+	expiredAt := now.Add(-time.Hour)
+	sessions := []Session{
+		{
+			ID:        "sess_active_legacy_expiry",
+			UserID:    "lab",
+			Status:    string(sessionstate.RunningIdle),
+			Agent:     "claude",
+			Workspace: filepath.Join(t.TempDir(), "sess_active_legacy_expiry"),
+			RestoreID: "phase3-sess_active_legacy_expiry",
+			CreatedAt: now.Add(-2 * time.Hour),
+			UpdatedAt: now.Add(-2 * time.Hour),
+			ExpiresAt: &expiredAt,
+		},
+		{
+			ID:        "sess_failed_legacy_expiry",
+			UserID:    "lab",
+			Status:    string(sessionstate.Failed),
+			Agent:     "claude",
+			Workspace: filepath.Join(t.TempDir(), "sess_failed_legacy_expiry"),
+			RestoreID: "phase3-sess_failed_legacy_expiry",
+			CreatedAt: now.Add(-2 * time.Hour),
+			UpdatedAt: now.Add(-2 * time.Hour),
+			ExpiresAt: &expiredAt,
+		},
+		{
+			ID:        "sess_destroyed_legacy_expiry",
+			UserID:    "lab",
+			Status:    string(sessionstate.Destroyed),
+			Agent:     "claude",
+			Workspace: filepath.Join(t.TempDir(), "sess_destroyed_legacy_expiry"),
+			RestoreID: "phase3-sess_destroyed_legacy_expiry",
+			CreatedAt: now.Add(-2 * time.Hour),
+			UpdatedAt: now.Add(-2 * time.Hour),
+			ExpiresAt: &expiredAt,
+		},
+	}
+	for _, session := range sessions {
+		if err := st.CreateSession(ctx, session); err != nil {
+			t.Fatalf("create session %s: %v", session.ID, err)
+		}
+	}
+
+	changed, err := st.ClearActiveSessionExpiry(ctx, now)
+	if err != nil {
+		t.Fatalf("clear active session expiry: %v", err)
+	}
+	if changed != 1 {
+		t.Fatalf("expected one active session cleared, got %d", changed)
+	}
+	changed, err = st.SweepExpiredSessions(ctx, now.Add(24*time.Hour))
+	if err != nil {
+		t.Fatalf("sweep after clear: %v", err)
+	}
+	if changed != 0 {
+		t.Fatalf("expected cleared active session to survive sweep, swept %d", changed)
+	}
+
+	var activeExpiry, failedExpiry, destroyedExpiry sql.NullString
+	if err := st.db.QueryRowContext(ctx, `SELECT expires_at FROM sessions WHERE id = 'sess_active_legacy_expiry'`).Scan(&activeExpiry); err != nil {
+		t.Fatalf("query active expiry: %v", err)
+	}
+	if err := st.db.QueryRowContext(ctx, `SELECT expires_at FROM sessions WHERE id = 'sess_failed_legacy_expiry'`).Scan(&failedExpiry); err != nil {
+		t.Fatalf("query failed expiry: %v", err)
+	}
+	if err := st.db.QueryRowContext(ctx, `SELECT expires_at FROM sessions WHERE id = 'sess_destroyed_legacy_expiry'`).Scan(&destroyedExpiry); err != nil {
+		t.Fatalf("query destroyed expiry: %v", err)
+	}
+	if activeExpiry.Valid {
+		t.Fatalf("expected active expiry cleared, got %s", activeExpiry.String)
+	}
+	if !failedExpiry.Valid || !destroyedExpiry.Valid {
+		t.Fatalf("expected terminal expiries preserved, failed=%v destroyed=%v", failedExpiry.Valid, destroyedExpiry.Valid)
+	}
+}
+
 func TestSweepExpiredSessionsCancelsUnstartedTurnsButPreservesAckStartedLease(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)

@@ -16,9 +16,8 @@ Treat the keys below as a contract between the architecture doc and the loader: 
 harness:
   run_dir: /var/lib/harness/run            # parent of orchestrator.pid and the
                                            # derived control/runtime/bridge roots
-  session_ttl: 2h                          # absolute deadline applied at session create;
-                                           # the session sweep reaps expired rows before
-                                           # the first turn, independently of lease_ttl
+  session_retention: 0s                    # session row/history/workspace retention;
+                                           # 0s means no automatic session expiry
   max_sessions: 30                         # soft policy ceiling reported by /api/quota;
                                            # must be < CIDR pool /30 capacity
 
@@ -86,8 +85,9 @@ Enforced by the loader, asserted by unit tests:
 - harness.network.cidr_pool must be a valid CIDR with prefix length <=
   30 and must be wide enough to host harness.max_sessions /30 slots
   (loader rejects if max_sessions exceeds the pool's /30 count).
-- harness.session_ttl must be > 0; the loader rejects `0` to prevent
-  sessions that are reaped before they accept their first turn.
+- harness.session_retention must be >= 0. `0s` leaves `sessions.expires_at`
+  NULL and disables automatic session expiry; positive values set an absolute
+  retention deadline when the session is created.
 - For 7a "production-like mode" (the only mode the lab supports),
   egress doris_fe_hosts / doris_be_hosts / doris_ports must be
   non-empty; the loader fails with a typed error if any is missing.

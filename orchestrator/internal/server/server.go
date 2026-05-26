@@ -267,7 +267,11 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 
 	id := newID("sess")
 	now := time.Now().UTC()
-	expiresAt := now.Add(s.cfg.SessionTTL)
+	var expiresAt *time.Time
+	if s.cfg.SessionRetention > 0 {
+		value := now.Add(s.cfg.SessionRetention)
+		expiresAt = &value
+	}
 	session := store.Session{
 		ID:                    id,
 		UserID:                labUserID,
@@ -279,7 +283,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		AutoCheckpointEnabled: s.cfg.Phase7.Checkpoint.AutoEnabled,
 		CreatedAt:             now,
 		UpdatedAt:             now,
-		ExpiresAt:             &expiresAt,
+		ExpiresAt:             expiresAt,
 	}
 	if err := os.MkdirAll(session.Workspace, 0o755); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -782,6 +786,11 @@ func (s *Server) RunPhase7Maintenance(ctx context.Context) error {
 	}
 
 	runMaintenance := func(now time.Time) {
+		if s.cfg.SessionRetention == 0 {
+			if _, err := s.store.ClearActiveSessionExpiry(ctx, now); err != nil && !errors.Is(err, context.Canceled) {
+				s.log.Warn("phase7 active-session expiry clear failed", "error", err)
+			}
+		}
 		if _, err := s.store.SweepExpiredSessions(ctx, now); err != nil && !errors.Is(err, context.Canceled) {
 			s.log.Warn("phase7 expired-session sweep failed", "error", err)
 		}

@@ -39,10 +39,10 @@ func TestCreateSessionRejectsUnsupportedAgent(t *testing.T) {
 
 	srv := &Server{
 		cfg: config.Config{
-			SessionsRoot: dir,
-			SessionTTL:   time.Hour,
-			MaxSessions:  10,
-			DefaultAgent: "claude",
+			SessionsRoot:     dir,
+			SessionRetention: time.Hour,
+			MaxSessions:      10,
+			DefaultAgent:     "claude",
 		},
 		store:   st,
 		runtime: runtime.New(runtime.Config{}),
@@ -76,10 +76,10 @@ func TestCreateSessionSoftLimitUsesPoolExhaustedEnvelope(t *testing.T) {
 
 	srv := &Server{
 		cfg: config.Config{
-			SessionsRoot: dir,
-			SessionTTL:   time.Hour,
-			MaxSessions:  1,
-			DefaultAgent: "claude",
+			SessionsRoot:     dir,
+			SessionRetention: time.Hour,
+			MaxSessions:      1,
+			DefaultAgent:     "claude",
 		},
 		store:   st,
 		runtime: runtime.New(runtime.Config{}),
@@ -101,6 +101,66 @@ func TestCreateSessionSoftLimitUsesPoolExhaustedEnvelope(t *testing.T) {
 	}
 	if body["error_class"] != "pool_exhausted" {
 		t.Fatalf("expected pool_exhausted, got %v", body)
+	}
+}
+
+func TestCreateSessionUsesNullExpiryWhenSessionRetentionDisabled(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	srv := &Server{
+		cfg: config.Config{
+			SessionsRoot:     dir,
+			SessionRetention: 0,
+			MaxSessions:      10,
+			DefaultAgent:     "claude",
+		},
+		store:   st,
+		runtime: runtime.New(runtime.Config{}),
+		watcher: artifacts.New(dir, st, events.NewHub(), slog.Default()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(`{"agent":"claude"}`))
+	rec := httptest.NewRecorder()
+	srv.createSession(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d body %s", rec.Code, rec.Body.String())
+	}
+	var created store.Session
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode session: %v", err)
+	}
+	if created.ExpiresAt != nil {
+		t.Fatalf("expected nil expires_at in response, got %v", created.ExpiresAt)
+	}
+	got, err := st.GetSession(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("get created session: %v", err)
+	}
+	if got.ExpiresAt != nil {
+		t.Fatalf("expected nil stored expires_at, got %v", got.ExpiresAt)
+	}
+	changed, err := st.SweepExpiredSessions(ctx, time.Now().Add(24*time.Hour))
+	if err != nil {
+		t.Fatalf("sweep sessions: %v", err)
+	}
+	if changed != 0 {
+		t.Fatalf("expected NULL expires_at session to be preserved, swept %d", changed)
+	}
+	got, err = st.GetSession(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("get session after sweep: %v", err)
+	}
+	if got.Status != string(sessionstate.Created) {
+		t.Fatalf("expected session to remain created, got %s", got.Status)
 	}
 }
 
@@ -2485,10 +2545,10 @@ WHERE generation_id = ?`, generationID); err != nil {
 
 func testServerConfig(dir string) config.Config {
 	return config.Config{
-		SessionsRoot: filepath.Join(dir, "sessions"),
-		SessionTTL:   time.Hour,
-		MaxSessions:  10,
-		DefaultAgent: "claude",
+		SessionsRoot:     filepath.Join(dir, "sessions"),
+		SessionRetention: time.Hour,
+		MaxSessions:      10,
+		DefaultAgent:     "claude",
 		Claude: config.ClaudeConfig{
 			ProxyBindURL:               "http://0.0.0.0:8082",
 			Model:                      "sonnet",

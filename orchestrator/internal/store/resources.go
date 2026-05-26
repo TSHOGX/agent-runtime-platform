@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"harness-platform/orchestrator/internal/sessionstate"
+
 	"github.com/google/uuid"
 )
 
@@ -651,6 +653,25 @@ WHERE generation_id IN (`+sqlPlaceholders(len(expiredGenerationIDs))+`)`, args..
 		return 0, err
 	}
 	return changed, nil
+}
+
+func (s *Store) ClearActiveSessionExpiry(ctx context.Context, now time.Time) (int64, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	activeStatuses := sessionstate.ActiveStatuses()
+	args := []any{formatTime(now)}
+	args = appendStringIDs(args, activeStatuses)
+	res, err := s.db.ExecContext(ctx, `
+UPDATE sessions
+SET expires_at = NULL,
+    updated_at = ?
+WHERE expires_at IS NOT NULL
+  AND status IN (`+sqlPlaceholders(len(activeStatuses))+`)`, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 func (s *Store) ReapResources(ctx context.Context, p ReaperParams) (ReaperResult, error) {

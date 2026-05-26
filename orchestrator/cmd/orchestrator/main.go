@@ -57,6 +57,16 @@ func main() {
 		log.Error("failed to write orchestrator owner", "error", err)
 		os.Exit(1)
 	}
+	if cfg.SessionRetention == 0 {
+		cleared, err := db.ClearActiveSessionExpiry(ctx, time.Now().UTC())
+		if err != nil {
+			log.Error("failed to clear active session expiry", "error", err)
+			os.Exit(1)
+		}
+		if cleared > 0 {
+			log.Info("cleared active session expiry", "sessions", cleared)
+		}
+	}
 	if _, err := db.RecoverAllocations(ctx, store.StartupRecoveryParams{
 		OwnerUUID:       owner.UUID,
 		Now:             time.Now().UTC(),
