@@ -289,6 +289,7 @@ harness:
     monitor_interval: 5m
   reaper:
     failed_retention: 10m
+    checkpoint_image_retention: 720h
   secrets:
     root: /var/lib/harness/secrets
     readers_gid: 65501

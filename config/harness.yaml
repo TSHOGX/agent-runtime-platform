@@ -48,6 +48,7 @@ harness:
 
   reaper:
     failed_retention: 10m
+    checkpoint_image_retention: 720h
 
   secrets:
     root: /var/lib/harness/secrets

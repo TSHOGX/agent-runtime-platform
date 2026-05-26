@@ -153,7 +153,8 @@ type CheckpointConfig struct {
 }
 
 type ReaperConfig struct {
-	FailedRetention Duration `yaml:"failed_retention"`
+	FailedRetention          Duration `yaml:"failed_retention"`
+	CheckpointImageRetention Duration `yaml:"checkpoint_image_retention"`
 }
 
 type SecretsConfig struct {
@@ -395,7 +396,8 @@ func defaultPhase7Config() Phase7Config {
 			MonitorInterval: Duration{Duration: 5 * time.Minute},
 		},
 		Reaper: ReaperConfig{
-			FailedRetention: Duration{Duration: 10 * time.Minute},
+			FailedRetention:          Duration{Duration: 10 * time.Minute},
+			CheckpointImageRetention: Duration{Duration: 720 * time.Hour},
 		},
 		Secrets: SecretsConfig{
 			Root:       "/var/lib/harness/secrets",
@@ -512,6 +514,9 @@ func validatePhase7Config(cfg Phase7Config) error {
 	}
 	if cfg.Reaper.FailedRetention.Duration < 0 {
 		return fmt.Errorf("harness.reaper.failed_retention must be >= 0")
+	}
+	if cfg.Reaper.CheckpointImageRetention.Duration < 0 {
+		return fmt.Errorf("harness.reaper.checkpoint_image_retention must be >= 0")
 	}
 	if strings.TrimSpace(cfg.Secrets.Root) == "" {
 		return fmt.Errorf("harness.secrets.root is required")

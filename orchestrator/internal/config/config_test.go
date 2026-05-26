@@ -52,6 +52,7 @@ func TestLoadProjectConfigUsesPhase7HarnessSchema(t *testing.T) {
     monitor_interval: 11s
   reaper:
     failed_retention: 0s
+    checkpoint_image_retention: 720h
   secrets:
     root: `+secretsRoot+`
     readers_gid: 1234
@@ -92,7 +93,8 @@ func TestLoadProjectConfigUsesPhase7HarnessSchema(t *testing.T) {
 	}
 	if phase7.Bridge.HeartbeatInterval.Duration != 20*time.Second ||
 		phase7.Bridge.ReconnectGrace.Duration != 25*time.Second ||
-		phase7.Reaper.FailedRetention.Duration != 0 {
+		phase7.Reaper.FailedRetention.Duration != 0 ||
+		phase7.Reaper.CheckpointImageRetention.Duration != 720*time.Hour {
 		t.Fatalf("unexpected bridge/reaper config: bridge=%+v reaper=%+v", phase7.Bridge, phase7.Reaper)
 	}
 	if !phase7.Checkpoint.AutoEnabled ||
@@ -450,6 +452,20 @@ func TestValidatePhase7Config(t *testing.T) {
 			want: "failed_retention must be >= 0",
 		},
 		{
+			name: "zero checkpoint image retention",
+			mutate: func(cfg *Phase7Config) {
+				cfg.Reaper.CheckpointImageRetention.Duration = 0
+			},
+			want: "",
+		},
+		{
+			name: "negative checkpoint image retention",
+			mutate: func(cfg *Phase7Config) {
+				cfg.Reaper.CheckpointImageRetention.Duration = -time.Second
+			},
+			want: "checkpoint_image_retention must be >= 0",
+		},
+		{
 			name: "secrets root required",
 			mutate: func(cfg *Phase7Config) {
 				cfg.Secrets.Root = ""
@@ -512,6 +528,12 @@ func TestValidatePhase7Config(t *testing.T) {
 			tt.mutate(&cfg)
 
 			err := validatePhase7Config(cfg)
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("expected valid config, got %v", err)
+				}
+				return
+			}
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("expected %q error, got %v", tt.want, err)
 			}
@@ -620,6 +642,9 @@ func TestLoadProjectConfigMissingFileUsesDefaults(t *testing.T) {
 		cfg.Phase7.BundleRoot() != "/var/lib/harness/run/runtime" ||
 		cfg.Phase7.BridgeRoot() != "/var/lib/harness/run/bridge" {
 		t.Fatalf("unexpected derived roots: control=%s bundle=%s bridge=%s", cfg.Phase7.ControlRoot(), cfg.Phase7.BundleRoot(), cfg.Phase7.BridgeRoot())
+	}
+	if cfg.Phase7.Reaper.CheckpointImageRetention.Duration != 720*time.Hour {
+		t.Fatalf("checkpoint image retention default=%s want 720h", cfg.Phase7.Reaper.CheckpointImageRetention.Duration)
 	}
 }
 

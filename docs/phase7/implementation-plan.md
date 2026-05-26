@@ -68,6 +68,8 @@ harness:
 
   reaper:
     failed_retention: 10m
+    checkpoint_image_retention: 720h        # checkpoint metadata/image age before
+                                           # retirement; 0 means immediate eligibility
 
   secrets:
     root: /var/lib/harness/secrets         # <host_secrets_root>; mode 0750
@@ -118,6 +120,9 @@ Enforced by the loader, asserted by unit tests:
 - reaper.failed_retention must be >= 0; 0 disables the inspection
   window and moves failed generations directly to `reclaimable` on the
   next sweep.
+- reaper.checkpoint_image_retention must be >= 0; 0 means checkpointed
+  generations are eligible for checkpoint-image retirement on the next
+  maintenance pass.
 - secrets.root must exist with mode 0750 and group readers_gid before
   the flock is taken; loader fails fast if not.
 ```
