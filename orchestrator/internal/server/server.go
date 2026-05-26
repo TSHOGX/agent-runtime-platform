@@ -46,6 +46,13 @@ const (
 
 var errGenerationBusy = errors.New("generation lifecycle is busy")
 
+type generationStartFailureMode int
+
+const (
+	startFailureInputAcceptable generationStartFailureMode = iota
+	startFailureInputBlocking
+)
+
 type Server struct {
 	cfg       config.Config
 	store     *store.Store
@@ -353,7 +360,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, sessionID s
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := s.startEnsuredGeneration(r.Context(), session, ensured); err != nil {
+	if err := s.startEnsuredGeneration(r.Context(), session, ensured, startFailureInputAcceptable); err != nil {
 		if !ensured.RestoreFromCheckpoint {
 			writeRuntimeStartError(w, err)
 			return
@@ -371,7 +378,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, sessionID s
 			writeError(w, http.StatusInternalServerError, "restore fallback did not allocate a replacement generation")
 			return
 		}
-		if err := s.startEnsuredGeneration(r.Context(), session, ensured); err != nil {
+		if err := s.startEnsuredGeneration(r.Context(), session, ensured, startFailureInputAcceptable); err != nil {
 			writeRuntimeStartError(w, err)
 			return
 		}
@@ -396,7 +403,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, sessionID s
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": runningStatus, "session_id": sessionID, "message": enqueue.Message})
 }
 
-func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Session, ensured ensuredGeneration) error {
+func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Session, ensured ensuredGeneration, failureMode generationStartFailureMode) error {
 	allocation := ensured.Allocation
 	generationDetails, err := s.runtimeGenerationDetails(ctx, session.ID, allocation.GenerationID)
 	if err != nil {
@@ -406,15 +413,15 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 	if ensured.IsNew {
 		preparedArtifacts, err = s.runtime.PrepareGeneration(ctx, s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, runtime.GenerationArtifacts{}))
 		if err != nil {
-			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err)
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 			return err
 		}
 		if err := s.store.RecordGenerationRuntimeArtifactDigests(ctx, allocation.GenerationID, runtimeArtifactDigests(preparedArtifacts)); err != nil {
-			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err)
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 			return err
 		}
 		if err := s.store.MarkGenerationResourcesLive(ctx, session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
-			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err)
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 			return err
 		}
 	}
@@ -426,7 +433,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			s.failGenerationForRestoreFallback(session.ID, allocation.GenerationID, allocation.Owner, result.Err)
 			return result.Err
 		}
-		s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, result.Err)
+		s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, result.Err, failureMode)
 		return result.Err
 	}
 	if ensured.RestoreFromCheckpoint {
@@ -441,7 +448,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 	return nil
 }
 
-func (s *Server) failGenerationBeforeTurn(session store.Session, generationID, owner string, failure error) {
+func (s *Server) failGenerationBeforeTurn(session store.Session, generationID, owner string, failure error, failureMode generationStartFailureMode) {
 	reason := ""
 	if failure != nil {
 		reason = failure.Error()
@@ -451,7 +458,9 @@ func (s *Server) failGenerationBeforeTurn(session store.Session, generationID, o
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	retryableStatus := string(sessionstate.RunningIdle)
-	if session.Status == string(sessionstate.Created) {
+	if failureMode == startFailureInputBlocking {
+		retryableStatus = string(sessionstate.RunningActive)
+	} else if session.Status == string(sessionstate.Created) {
 		retryableStatus = string(sessionstate.Created)
 	}
 	eventID, err := s.store.FailGenerationStart(ctx, store.FailGenerationStartParams{
@@ -739,7 +748,7 @@ func (s *Server) startColdFallbackSessions(ctx context.Context, owner string) {
 		if !ensured.IsNew {
 			continue
 		}
-		if err := s.startEnsuredGeneration(ctx, fallback.Session, ensured); err != nil {
+		if err := s.startEnsuredGeneration(ctx, fallback.Session, ensured, startFailureInputBlocking); err != nil {
 			if !errors.Is(err, context.Canceled) {
 				s.log.Warn("phase7 cold fallback start failed", "session_id", fallback.Session.ID, "old_generation_id", fallback.OldGeneration, "new_generation_id", ensured.Allocation.GenerationID, "error", err)
 			}

@@ -1035,6 +1035,109 @@ func TestColdFallbackMaintenanceStartsReplacementForQueuedTurn(t *testing.T) {
 	}
 }
 
+func TestColdFallbackMaintenanceStartFailureKeepsSessionInputBlocking(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_maintenance_fallback_fail", string(sessionstate.RunningActive), time.Now().UTC(), nil)
+	cfg := testServerConfig(dir)
+	cfg.Phase7.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
+	leaseOwner := store.GenerationLeaseOwner(owner.UUID)
+	old, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     leaseOwner,
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    serverTestAllocatorConfig(cfg, "claude"),
+	})
+	if err != nil {
+		t.Fatalf("allocate old generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, session.ID, old.GenerationID, old.Owner, time.Now().UTC()); err != nil {
+		t.Fatalf("mark old generation live: %v", err)
+	}
+	if err := st.FailGeneration(ctx, store.FailGenerationParams{
+		SessionID:    session.ID,
+		GenerationID: old.GenerationID,
+		Owner:        old.Owner,
+		ErrorClass:   "orchestrator_restart_reconnect_grace_expired",
+		Reason:       "orchestrator_restart_reconnect_grace_expired",
+		Now:          time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("fail old generation: %v", err)
+	}
+	turnID, err := st.EnqueueTurn(ctx, session.ID, "protected queued turn", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("enqueue queued turn: %v", err)
+	}
+
+	hub := events.NewHub()
+	eventsCh, cancelEvents := hub.Subscribe(session.ID)
+	defer cancelEvents()
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: failingRuntime{err: errors.New("pre-start sandbox network probe failed")},
+		hub:     hub,
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+	srv.startColdFallbackSessions(ctx, leaseOwner)
+
+	gotSession, err := st.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if gotSession.Status != string(sessionstate.RunningActive) ||
+		sessionstate.CanAcceptInput(gotSession.Status) ||
+		gotSession.ActiveGenerationID == "" ||
+		gotSession.ActiveGenerationID == old.GenerationID {
+		t.Fatalf("unexpected fallback-failure session state: %+v old=%s", gotSession, old.GenerationID)
+	}
+	var generationStatus, errorClass, networkState, resourceState string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT g.status, COALESCE(g.error_class, ''), n.allocation_state, r.resource_state
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, gotSession.ActiveGenerationID).Scan(&generationStatus, &errorClass, &networkState, &resourceState); err != nil {
+		t.Fatalf("query failed fallback generation: %v", err)
+	}
+	if generationStatus != "failed" ||
+		errorClass != "probe_failed_pre_start" ||
+		networkState != "reclaimable" ||
+		resourceState != "reclaimable" {
+		t.Fatalf("unexpected failed fallback generation: status=%s class=%s network=%s resource=%s", generationStatus, errorClass, networkState, resourceState)
+	}
+	var queuedStatus string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT status
+FROM turns
+WHERE id = ?`, turnID).Scan(&queuedStatus); err != nil {
+		t.Fatalf("query queued turn: %v", err)
+	}
+	if queuedStatus != "queued" {
+		t.Fatalf("queued turn status=%s want queued", queuedStatus)
+	}
+	seenGenerationError := false
+	for {
+		select {
+		case event := <-eventsCh:
+			switch event.Type {
+			case "generation.error":
+				seenGenerationError = true
+			case "session." + string(sessionstate.RunningIdle), "session." + string(sessionstate.Failed), "session.error":
+				t.Fatalf("unexpected terminal/input-acceptable event after fallback failure: %+v", event)
+			}
+		default:
+			if !seenGenerationError {
+				t.Fatalf("missing generation.error event")
+			}
+			return
+		}
+	}
+}
+
 func TestGetQuotaReportsSessionAndPoolCeilings(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
