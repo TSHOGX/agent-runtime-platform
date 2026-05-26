@@ -23,6 +23,7 @@ import {
   postMessage as apiPostMessage
 } from "@/lib/api";
 import type { RuntimeAgent } from "@/lib/agents";
+import { reduceSessionEvent } from "@/lib/session-events";
 import { buildEventsStreamUrl } from "@/lib/ws";
 import type {
   ApiArtifact,
@@ -74,14 +75,6 @@ const initialState: HarnessState = {
 };
 
 const RUNNING_STATUSES = new Set<SessionStatus>(["running_active"]);
-const SESSION_EVENT_STATUSES = new Set<SessionStatus>([
-  "running_active",
-  "running_idle",
-  "checkpointing",
-  "checkpointed",
-  "failed",
-  "destroyed"
-]);
 const MESSAGE_POLL_INTERVAL_MS = 1000;
 const MESSAGE_POLL_TIMEOUT_MS = 120_000;
 const SSE_TYPED_EVENT_TYPES = [
@@ -182,12 +175,6 @@ function pruneCommittedStreaming(
     }
   }
   return next;
-}
-
-function readSessionStatusEvent(type: string): SessionStatus | null {
-  if (!type.startsWith("session.")) return null;
-  const status = type.slice("session.".length) as SessionStatus;
-  return SESSION_EVENT_STATUSES.has(status) ? status : null;
 }
 
 export function HarnessProvider({ children }: { children: React.ReactNode }) {
@@ -303,6 +290,28 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
     (event: HarnessEvent) => {
       const sessionId = event.session_id;
       const time = event.time ?? new Date().toISOString();
+      const applySessionEvent = () => {
+        const preview = reduceSessionEvent(
+          { sessions: stateRef.current.sessions, conversations: stateRef.current.conversations },
+          event,
+          { emptyConversation: emptyConvo, time }
+        );
+        if (!preview.handled) return false;
+        for (const notification of preview.notifications) {
+          if (notification.level === "error") {
+            toast.error(notification.message, { duration: 6000 });
+          }
+        }
+        setState((p) => {
+          const next = reduceSessionEvent(
+            { sessions: p.sessions, conversations: p.conversations },
+            event,
+            { emptyConversation: emptyConvo, time }
+          );
+          return { ...p, sessions: next.sessions, conversations: next.conversations };
+        });
+        return true;
+      };
       switch (event.type) {
         case "session.created": {
           const sess = readSession(event.payload);
@@ -320,16 +329,7 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
         case "session.checkpointed":
         case "session.failed":
         case "session.destroyed": {
-          if (!sessionId) return;
-          const status = readSessionStatusEvent(event.type);
-          if (!status) return;
-          setState((p) => ({
-            ...p,
-            sessions: p.sessions.map((s) => (s.id === sessionId ? { ...s, status, updated_at: time } : s))
-          }));
-          if (status !== "running_active") {
-            upsertConvo(sessionId, (c) => ({ ...c, streaming: [] }));
-          }
+          applySessionEvent();
           return;
         }
         case "message.created": {
@@ -394,101 +394,20 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
           return;
         }
         case "session.error": {
-          if (!isRecord(event.payload)) return;
-          const error = typeof event.payload.error === "string" ? event.payload.error : "Session failed";
-          toast.error(error, { duration: 6000 });
-          if (sessionId) {
-            setState((p) => ({
-              ...p,
-              sessions: p.sessions.map((s) => (s.id === sessionId ? { ...s, status: "failed", updated_at: time } : s))
-            }));
-            upsertConvo(sessionId, (c) => ({ ...c, streaming: [] }));
-          }
+          applySessionEvent();
           return;
         }
         case "generation.error": {
-          if (!sessionId || !isRecord(event.payload)) return;
-          const error = typeof event.payload.error === "string" ? event.payload.error : "Runtime start failed";
-          const rawSessionStatus = event.payload.session_status;
-          const sessionStatus =
-            typeof rawSessionStatus === "string" && SESSION_EVENT_STATUSES.has(rawSessionStatus as SessionStatus)
-              ? (rawSessionStatus as SessionStatus)
-              : null;
-          const updatedAt =
-            typeof event.payload.session_updated_at === "string" ? event.payload.session_updated_at : time;
-          toast.error(error, { duration: 6000 });
-          setState((p) => ({
-            ...p,
-            sessions: sessionStatus
-              ? p.sessions.map((s) => (s.id === sessionId ? { ...s, status: sessionStatus, updated_at: updatedAt } : s))
-              : p.sessions,
-            conversations: {
-              ...p.conversations,
-              [sessionId]: { ...ensureConvo(p.conversations, sessionId)[sessionId], streaming: [] }
-            }
-          }));
+          applySessionEvent();
           return;
         }
         case "session.checkpoint_retired":
         case "session.restore_fallback_retired": {
-          if (!sessionId || !isRecord(event.payload)) return;
-          const rawSessionStatus = event.payload.session_status;
-          const sessionStatus =
-            typeof rawSessionStatus === "string" && SESSION_EVENT_STATUSES.has(rawSessionStatus as SessionStatus)
-              ? (rawSessionStatus as SessionStatus)
-              : "running_idle";
-          const updatedAt =
-            typeof event.payload.session_updated_at === "string" ? event.payload.session_updated_at : time;
-          const activeGenerationId =
-            typeof event.payload.active_generation_id === "string" ? event.payload.active_generation_id : undefined;
-          const lastActivityAt =
-            typeof event.payload.session_last_activity_at === "string" ? event.payload.session_last_activity_at : null;
-          setState((p) => ({
-            ...p,
-            sessions: p.sessions.map((s) =>
-              s.id === sessionId
-                ? {
-                    ...s,
-                    status: sessionStatus,
-                    updated_at: updatedAt,
-                    active_generation_id: activeGenerationId ?? s.active_generation_id,
-                    last_activity_at: lastActivityAt,
-                    checkpoint_path: null,
-                    restore_ms: null
-                  }
-                : s
-            )
-          }));
+          applySessionEvent();
           return;
         }
         case "ack_turn_completed": {
-          if (!sessionId || !isRecord(event.payload)) return;
-          const turnStatus = typeof event.payload.status === "string" ? event.payload.status : "completed";
-          const sessionStatus =
-            typeof event.payload.session_status === "string"
-              ? (event.payload.session_status as SessionStatus)
-              : null;
-          const updatedAt =
-            typeof event.payload.session_updated_at === "string" ? event.payload.session_updated_at : time;
-          if (turnStatus === "failed" || turnStatus === "canceled") {
-            const error =
-              typeof event.payload.error === "string" && event.payload.error
-                ? event.payload.error
-                : turnStatus === "canceled"
-                  ? "Turn canceled"
-                  : "Turn failed";
-            toast.error(error, { duration: 6000 });
-          }
-          setState((p) => ({
-            ...p,
-            sessions: sessionStatus
-              ? p.sessions.map((s) => (s.id === sessionId ? { ...s, status: sessionStatus, updated_at: updatedAt } : s))
-              : p.sessions,
-            conversations: {
-              ...p.conversations,
-              [sessionId]: { ...ensureConvo(p.conversations, sessionId)[sessionId], streaming: [] }
-            }
-          }));
+          applySessionEvent();
           return;
         }
         case "artifact.updated": {

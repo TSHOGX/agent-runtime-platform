@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start --hostname 0.0.0.0",
     "lint": "eslint . --max-warnings=0",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@tailwindcss/postcss": "^4.1.14",
@@ -32,6 +33,7 @@
     "eslint": "^9.39.1",
     "eslint-config-next": "^16.2.6",
     "postcss": "^8.4.47",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.7"
   }
 }
