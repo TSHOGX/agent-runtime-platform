@@ -403,6 +403,36 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
           }
           return;
         }
+        case "ack_turn_completed": {
+          if (!sessionId || !isRecord(event.payload)) return;
+          const turnStatus = typeof event.payload.status === "string" ? event.payload.status : "completed";
+          const sessionStatus =
+            typeof event.payload.session_status === "string"
+              ? (event.payload.session_status as SessionStatus)
+              : null;
+          const updatedAt =
+            typeof event.payload.session_updated_at === "string" ? event.payload.session_updated_at : time;
+          if (turnStatus === "failed" || turnStatus === "canceled") {
+            const error =
+              typeof event.payload.error === "string" && event.payload.error
+                ? event.payload.error
+                : turnStatus === "canceled"
+                  ? "Turn canceled"
+                  : "Turn failed";
+            toast.error(error, { duration: 6000 });
+          }
+          setState((p) => ({
+            ...p,
+            sessions: sessionStatus
+              ? p.sessions.map((s) => (s.id === sessionId ? { ...s, status: sessionStatus, updated_at: updatedAt } : s))
+              : p.sessions,
+            conversations: {
+              ...p.conversations,
+              [sessionId]: { ...ensureConvo(p.conversations, sessionId)[sessionId], streaming: [] }
+            }
+          }));
+          return;
+        }
         case "artifact.updated": {
           const artifact = readArtifact(event.payload);
           if (!artifact) return;

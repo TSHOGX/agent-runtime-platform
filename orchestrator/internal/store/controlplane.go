@@ -751,8 +751,10 @@ WHERE id = ?
 	} else if affected != 1 && alreadyTerminal != 1 {
 		return 0, fmt.Errorf("turn completion CAS failed")
 	}
+	sessionMarkedIdle := false
 	if alreadyTerminal != 1 {
-		if err := markGenerationIdleIfNoInflight(ctx, tx, p.SessionID, p.GenerationID, p.Owner, p.Now); err != nil {
+		sessionMarkedIdle, err = markGenerationAndSessionIdleIfNoInflight(ctx, tx, p.SessionID, p.GenerationID, p.TurnID, p.Owner, p.Now)
+		if err != nil {
 			return 0, err
 		}
 	}
@@ -765,13 +767,17 @@ WHERE session_id = ?
 	}
 	var eventID int64
 	if p.EventType != "" {
+		eventPayload, err := completeTurnEventPayload(p.EventPayload, p, sessionMarkedIdle)
+		if err != nil {
+			return 0, err
+		}
 		eventID, err = appendEventTx(ctx, tx, AppendEventParams{
 			SessionID:    p.SessionID,
 			TurnID:       &p.TurnID,
 			GenerationID: p.GenerationID,
 			DedupeKey:    p.EventDedupeKey,
 			Type:         p.EventType,
-			Payload:      p.EventPayload,
+			Payload:      eventPayload,
 			Now:          p.Now,
 		})
 		if err != nil {
@@ -779,6 +785,30 @@ WHERE session_id = ?
 		}
 	}
 	return eventID, tx.Commit()
+}
+
+func completeTurnEventPayload(base any, p CompleteTurnParams, sessionMarkedIdle bool) (map[string]any, error) {
+	payload := map[string]any{}
+	if base != nil {
+		raw, err := json.Marshal(base)
+		if err != nil {
+			return nil, err
+		}
+		if string(raw) != "null" {
+			if err := json.Unmarshal(raw, &payload); err != nil {
+				return nil, err
+			}
+		}
+	}
+	payload["session_marked_idle"] = sessionMarkedIdle
+	payload["session_terminal"] = false
+	if sessionMarkedIdle {
+		payload["session_status"] = "running_idle"
+		payload["session_updated_at"] = formatTime(p.Now)
+		payload["session_last_activity_at"] = formatTime(p.Now)
+		payload["active_generation_id"] = p.GenerationID
+	}
+	return payload, nil
 }
 
 func (s *Store) RenewGenerationHeartbeat(ctx context.Context, p RenewHeartbeatParams) error {
@@ -991,7 +1021,39 @@ SELECT MAX(sequence) + 1 FROM turns WHERE session_id = ?`, sessionID).Scan(&next
 	return next.Int64, nil
 }
 
-func markGenerationIdleIfNoInflight(ctx context.Context, tx *sql.Tx, sessionID, generationID, owner string, now time.Time) error {
+func markGenerationAndSessionIdleIfNoInflight(ctx context.Context, tx *sql.Tx, sessionID, generationID string, currentTurnID int64, owner string, now time.Time) (bool, error) {
+	var ownsActiveGeneration int
+	if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM runtime_generations g
+JOIN sessions s ON s.id = g.session_id
+WHERE g.generation_id = ?
+  AND g.session_id = ?
+  AND g.status = 'active'
+  AND g.lease_owner = ?
+  AND g.lease_expires_at > ?
+  AND s.id = ?
+  AND s.active_generation_id = ?`,
+		generationID, sessionID, owner, formatTime(now), sessionID, generationID).Scan(&ownsActiveGeneration); err != nil {
+		return false, err
+	}
+	if ownsActiveGeneration != 1 {
+		return false, fmt.Errorf("generation idle CAS failed")
+	}
+
+	var pendingTurns int
+	if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM turns
+WHERE session_id = ?
+  AND id <> ?
+  AND status IN ('queued', 'leased', 'running')`, sessionID, currentTurnID).Scan(&pendingTurns); err != nil {
+		return false, err
+	}
+	if pendingTurns != 0 {
+		return false, nil
+	}
+
 	res, err := tx.ExecContext(ctx, `
 UPDATE runtime_generations
 SET status = 'idle'
@@ -1007,18 +1069,43 @@ WHERE generation_id = ?
   )
   AND NOT EXISTS (
     SELECT 1 FROM turns
-    WHERE generation_id = ?
-      AND status IN ('leased', 'running')
-  )`, generationID, sessionID, owner, formatTime(now), sessionID, generationID, generationID)
+    WHERE session_id = ?
+      AND id <> ?
+      AND status IN ('queued', 'leased', 'running')
+  )`, generationID, sessionID, owner, formatTime(now), sessionID, generationID, sessionID, currentTurnID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	affected, err := res.RowsAffected()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if affected != 1 {
-		return fmt.Errorf("generation idle CAS failed")
+		return false, fmt.Errorf("generation idle CAS failed")
 	}
-	return nil
+	res, err = tx.ExecContext(ctx, `
+UPDATE sessions
+SET status = 'running_idle',
+    updated_at = ?,
+    last_activity_at = ?
+WHERE id = ?
+  AND status NOT IN ('failed', 'destroyed')
+  AND active_generation_id = ?
+  AND NOT EXISTS (
+    SELECT 1 FROM turns
+    WHERE session_id = ?
+      AND id <> ?
+      AND status IN ('queued', 'leased', 'running')
+  )`, formatTime(now), formatTime(now), sessionID, generationID, sessionID, currentTurnID)
+	if err != nil {
+		return false, err
+	}
+	affected, err = res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if affected != 1 {
+		return false, fmt.Errorf("session idle CAS failed")
+	}
+	return true, nil
 }

@@ -373,15 +373,64 @@ func TestTurnHelperClaimAckComplete(t *testing.T) {
 		t.Fatalf("complete: %v", err)
 	}
 
-	var turnStatus, generationStatus string
-	if err := st.db.QueryRowContext(ctx, `SELECT status FROM turns WHERE id = ?`, grant.TurnID).Scan(&turnStatus); err != nil {
-		t.Fatalf("turn status: %v", err)
+	var turnStatus, generationStatus, sessionStatus string
+	if err := st.db.QueryRowContext(ctx, `
+SELECT t.status, g.status, s.status
+FROM turns t
+JOIN runtime_generations g ON g.generation_id = t.generation_id
+JOIN sessions s ON s.id = t.session_id
+WHERE t.id = ?`, grant.TurnID).Scan(&turnStatus, &generationStatus, &sessionStatus); err != nil {
+		t.Fatalf("query completion state: %v", err)
 	}
-	if err := st.db.QueryRowContext(ctx, `SELECT status FROM runtime_generations WHERE generation_id = 'gen_turn'`).Scan(&generationStatus); err != nil {
-		t.Fatalf("generation status: %v", err)
+	if turnStatus != "completed" || generationStatus != "active" || sessionStatus == string(sessionstate.RunningIdle) {
+		t.Fatalf("unexpected statuses: turn=%s generation=%s session=%s", turnStatus, generationStatus, sessionStatus)
 	}
-	if turnStatus != "completed" || generationStatus != "idle" {
-		t.Fatalf("unexpected statuses: turn=%s generation=%s", turnStatus, generationStatus)
+
+	secondClaim := claim
+	secondClaim.RequestID = "req-2"
+	secondClaim.Now = now.Add(3 * time.Second)
+	secondGrant, ok, err := st.ClaimNextTurn(ctx, secondClaim)
+	if err != nil {
+		t.Fatalf("claim second: %v", err)
+	}
+	if !ok || secondGrant.Sequence != 2 || secondGrant.Content != "second" || secondGrant.Replayed {
+		t.Fatalf("unexpected second grant: ok=%v grant=%+v", ok, secondGrant)
+	}
+	if _, err := st.AckTurnStarted(ctx, AckStartedParams{
+		SessionID:       "sess_turn",
+		GenerationID:    "gen_turn",
+		TurnID:          secondGrant.TurnID,
+		Owner:           "owner",
+		SandboxSourceIP: "10.240.0.2",
+		LeaseTTL:        time.Minute,
+		Now:             now.Add(4 * time.Second),
+	}); err != nil {
+		t.Fatalf("ack second started: %v", err)
+	}
+	if _, err := st.CompleteTurn(ctx, CompleteTurnParams{
+		SessionID:      "sess_turn",
+		GenerationID:   "gen_turn",
+		TurnID:         secondGrant.TurnID,
+		Owner:          "owner",
+		TerminalStatus: "completed",
+		Now:            now.Add(5 * time.Second),
+	}); err != nil {
+		t.Fatalf("complete second: %v", err)
+	}
+
+	var lastActivityAt string
+	if err := st.db.QueryRowContext(ctx, `
+SELECT g.status, s.status, COALESCE(s.last_activity_at, '')
+FROM runtime_generations g
+JOIN sessions s ON s.active_generation_id = g.generation_id
+WHERE g.generation_id = ?`, "gen_turn").Scan(&generationStatus, &sessionStatus, &lastActivityAt); err != nil {
+		t.Fatalf("query final completion state: %v", err)
+	}
+	if generationStatus != "idle" || sessionStatus != string(sessionstate.RunningIdle) {
+		t.Fatalf("unexpected final statuses: generation=%s session=%s", generationStatus, sessionStatus)
+	}
+	if lastActivityAt != formatTime(now.Add(5*time.Second)) {
+		t.Fatalf("last_activity_at=%s want %s", lastActivityAt, formatTime(now.Add(5*time.Second)))
 	}
 	var contexts int
 	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM active_model_request_contexts`).Scan(&contexts); err != nil {
@@ -435,7 +484,7 @@ func TestTurnHelperTerminalFailureAndCancelKeepGenerationCacheConsistent(t *test
 				t.Fatalf("ack started: %v", err)
 			}
 
-			if _, err := st.CompleteTurn(ctx, CompleteTurnParams{
+			eventID, err := st.CompleteTurn(ctx, CompleteTurnParams{
 				SessionID:      sessionID,
 				GenerationID:   generationID,
 				TurnID:         turnID,
@@ -443,21 +492,45 @@ func TestTurnHelperTerminalFailureAndCancelKeepGenerationCacheConsistent(t *test
 				TerminalStatus: terminalStatus,
 				ErrorClass:     "test_" + terminalStatus,
 				Error:          "terminal " + terminalStatus,
-				Now:            now.Add(2 * time.Second),
-			}); err != nil {
+				EventType:      "ack_turn_completed",
+				EventDedupeKey: "ack_completed:" + generationID,
+				EventPayload: map[string]string{
+					"status":      terminalStatus,
+					"error_class": "test_" + terminalStatus,
+					"error":       "terminal " + terminalStatus,
+				},
+				Now: now.Add(2 * time.Second),
+			})
+			if err != nil {
 				t.Fatalf("complete %s: %v", terminalStatus, err)
 			}
+			if eventID == 0 {
+				t.Fatalf("expected completion event id")
+			}
 
-			var turnStatus, turnErrorClass, generationStatus string
+			var turnStatus, turnErrorClass, generationStatus, sessionStatus, eventPayload string
 			if err := st.db.QueryRowContext(ctx, `
-SELECT t.status, COALESCE(t.error_class, ''), g.status
+SELECT t.status, COALESCE(t.error_class, ''), g.status, s.status
 FROM turns t
 JOIN runtime_generations g ON g.generation_id = t.generation_id
-WHERE t.id = ?`, turnID).Scan(&turnStatus, &turnErrorClass, &generationStatus); err != nil {
+JOIN sessions s ON s.id = t.session_id
+WHERE t.id = ?`, turnID).Scan(&turnStatus, &turnErrorClass, &generationStatus, &sessionStatus); err != nil {
 				t.Fatalf("query terminal state: %v", err)
 			}
-			if turnStatus != terminalStatus || turnErrorClass != "test_"+terminalStatus || generationStatus != "idle" {
-				t.Fatalf("unexpected terminal state: turn=%s error=%s generation=%s", turnStatus, turnErrorClass, generationStatus)
+			if turnStatus != terminalStatus ||
+				turnErrorClass != "test_"+terminalStatus ||
+				generationStatus != "idle" ||
+				sessionStatus != string(sessionstate.RunningIdle) {
+				t.Fatalf("unexpected terminal state: turn=%s error=%s generation=%s session=%s", turnStatus, turnErrorClass, generationStatus, sessionStatus)
+			}
+			if err := st.db.QueryRowContext(ctx, `SELECT payload FROM events WHERE event_id = ?`, eventID).Scan(&eventPayload); err != nil {
+				t.Fatalf("query completion event payload: %v", err)
+			}
+			if !strings.Contains(eventPayload, `"status":"`+terminalStatus+`"`) ||
+				!strings.Contains(eventPayload, `"session_marked_idle":true`) ||
+				!strings.Contains(eventPayload, `"session_status":"running_idle"`) ||
+				!strings.Contains(eventPayload, `"session_terminal":false`) {
+				t.Fatalf("completion event payload missing session effect: %s", eventPayload)
 			}
 			var contexts int
 			if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM active_model_request_contexts`).Scan(&contexts); err != nil {

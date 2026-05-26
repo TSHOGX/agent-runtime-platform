@@ -1747,8 +1747,124 @@ WHERE session_id = ?
 	if assistantMessages != 1 {
 		t.Fatalf("assistant messages=%d want 1", assistantMessages)
 	}
-	if !drainHasEvent(eventsCh, "session."+string(sessionstate.RunningIdle)) {
-		t.Fatalf("missing running_idle hub event")
+	if !drainHasEvent(eventsCh, bridge.TypeAckTurnCompleted) {
+		t.Fatalf("missing durable completion hub event")
+	}
+}
+
+func TestBridgeFailedCompletionDoesNotFailSession(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_bridge_failed", string(sessionstate.RunningActive), time.Now().UTC(), nil)
+	cfg := testServerConfig(dir)
+	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     store.GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    serverTestAllocatorConfig(cfg, "claude"),
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
+		t.Fatalf("mark generation live: %v", err)
+	}
+	turnID, err := st.EnqueueTurn(ctx, session.ID, "run", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("enqueue turn: %v", err)
+	}
+	grant, ok, err := st.ClaimNextTurn(ctx, store.ClaimNextTurnParams{
+		SessionID:    session.ID,
+		GenerationID: allocation.GenerationID,
+		Owner:        allocation.Owner,
+		RequestID:    "req_failed",
+		LeaseTTL:     time.Minute,
+		Now:          time.Now().UTC(),
+	})
+	if err != nil || !ok || grant.TurnID != turnID {
+		t.Fatalf("claim setup: ok=%v grant=%+v err=%v", ok, grant, err)
+	}
+	if _, err := st.AckTurnStarted(ctx, store.AckStartedParams{
+		SessionID:       session.ID,
+		GenerationID:    allocation.GenerationID,
+		TurnID:          turnID,
+		Owner:           allocation.Owner,
+		SandboxSourceIP: serverSandboxSourceIPForGeneration(t, ctx, st, allocation.GenerationID),
+		LeaseTTL:        time.Minute,
+		Now:             time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("ack started: %v", err)
+	}
+	completionPayload := map[string]string{
+		"status":      "failed",
+		"error_class": "agent_error",
+		"error":       "agent exited 1",
+	}
+	eventID, err := st.CompleteTurn(ctx, store.CompleteTurnParams{
+		SessionID:      session.ID,
+		GenerationID:   allocation.GenerationID,
+		TurnID:         turnID,
+		Owner:          allocation.Owner,
+		TerminalStatus: "failed",
+		ErrorClass:     "agent_error",
+		Error:          "agent exited 1",
+		EventType:      bridge.TypeAckTurnCompleted,
+		EventDedupeKey: "ack_completed:" + allocation.GenerationID,
+		EventPayload:   completionPayload,
+		Now:            time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("complete failed turn: %v", err)
+	}
+
+	hub := events.NewHub()
+	eventsCh, cancelEvents := hub.Subscribe(session.ID)
+	defer cancelEvents()
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: instantRuntime{},
+		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, hub, slog.Default()),
+		hub:     hub,
+		log:     slog.Default(),
+	}
+	envelopePayload, err := json.Marshal(completionPayload)
+	if err != nil {
+		t.Fatalf("marshal completion payload: %v", err)
+	}
+	srv.handleBridgeCommittedEnvelope(ctx, bridge.Envelope{
+		Type:         bridge.TypeAckTurnCompleted,
+		SessionID:    session.ID,
+		GenerationID: allocation.GenerationID,
+		TurnID:       &turnID,
+		Payload:      envelopePayload,
+	}, eventID)
+
+	got, err := st.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if got.Status != string(sessionstate.RunningIdle) || !sessionstate.CanAcceptInput(got.Status) {
+		t.Fatalf("failed completion should leave session retryable, got %s", got.Status)
+	}
+	seenCompletion := false
+	for {
+		select {
+		case event := <-eventsCh:
+			switch event.Type {
+			case bridge.TypeAckTurnCompleted:
+				seenCompletion = true
+			case "session." + string(sessionstate.Failed), "session.error":
+				t.Fatalf("unexpected terminal event after failed completion: %+v", event)
+			}
+		default:
+			if !seenCompletion {
+				t.Fatalf("missing durable completion event")
+			}
+			return
+		}
 	}
 }
 

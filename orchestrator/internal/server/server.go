@@ -963,32 +963,10 @@ func (s *Server) handleBridgeOutput(ctx context.Context, envelope bridge.Envelop
 }
 
 func (s *Server) handleBridgeCompletion(ctx context.Context, envelope bridge.Envelope) {
-	var payload struct {
-		Status string `json:"status"`
-		Error  string `json:"error"`
-	}
-	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
-		s.log.Warn("failed to decode bridge completion payload", "session_id", envelope.SessionID, "generation_id", envelope.GenerationID, "error", err)
-		return
-	}
 	s.completeBridgeStreamParser(envelope)
-	status := string(sessionstate.RunningIdle)
-	if payload.Status == "failed" || payload.Status == "canceled" {
-		status = string(sessionstate.Failed)
-		if payload.Error != "" {
-			s.hub.Publish(events.Event{Type: "session.error", SessionID: envelope.SessionID, Payload: map[string]string{"error": payload.Error}})
-		}
-	}
-	if err := s.store.UpdateSessionStatusAndActivity(ctx, envelope.SessionID, status, nil, time.Now().UTC()); err != nil {
-		if !errors.Is(err, context.Canceled) {
-			s.log.Warn("failed to update bridge-completed session status", "session_id", envelope.SessionID, "generation_id", envelope.GenerationID, "error", err)
-		}
-		return
-	}
 	if err := s.watcher.ScanSession(ctx, envelope.SessionID); err != nil && !errors.Is(err, context.Canceled) {
 		s.log.Warn("failed to scan bridge-completed session artifacts", "session_id", envelope.SessionID, "error", err)
 	}
-	s.hub.Publish(events.Event{Type: "session." + status, SessionID: envelope.SessionID})
 }
 
 func (s *Server) bridgeStreamParser(envelope bridge.Envelope, agent string) *streamParser {
