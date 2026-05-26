@@ -57,63 +57,61 @@ func main() {
 		log.Error("failed to write orchestrator owner", "error", err)
 		os.Exit(1)
 	}
-	if cfg.SessionRetention == 0 {
-		cleared, err := db.ClearActiveSessionExpiry(ctx, time.Now().UTC())
-		if err != nil {
-			log.Error("failed to clear active session expiry", "error", err)
-			os.Exit(1)
-		}
-		if cleared > 0 {
-			log.Info("cleared active session expiry", "sessions", cleared)
-		}
-	}
-	rt := runtime.New(runtime.Config{
-		RestoreScript:         cfg.RestoreScript,
-		RunscRoot:             cfg.RunscRoot,
-		RunscNetwork:          cfg.RunscNetwork,
-		RunscOverlay2:         cfg.RunscOverlay2,
-		SessionsRoot:          cfg.SessionsRoot,
-		AgentHomesRoot:        cfg.AgentHomesRoot,
-		CheckpointsRoot:       cfg.CheckpointsRoot,
-		BundleRoot:            cfg.BundleRoot,
-		RootFSPath:            filepath.Join(cfg.RepoRoot, "sandbox-image", "rootfs"),
-		DefaultAgent:          cfg.DefaultAgent,
-		Phase7RunDir:          cfg.Phase7.RunDir,
-		SecretsRoot:           cfg.Phase7.Secrets.Root,
-		SecretReadersGID:      cfg.Phase7.Secrets.ReadersGID,
-		PreStartProbeAttempts: cfg.Phase7.Probe.PreStartAttempts,
-		PreStartProbeInterval: cfg.Phase7.Probe.PreStartInterval.Duration,
-		ProbeHealthzStatuses:  cfg.Phase7.Probe.AcceptStatus.GetHealthz,
-		ProbeMessageStatuses:  cfg.Phase7.Probe.AcceptStatus.PostV1Messages.MalformedAuthenticated,
-		BridgeHeartbeat:       cfg.Phase7.Bridge.HeartbeatInterval.Duration,
-		BridgePollInterval:    cfg.Phase7.Bridge.PollInterval.Duration,
-		Claude: runtime.ClaudeConfig{
-			ProxyBindURL:               cfg.Claude.ProxyBindURL,
-			APIKey:                     cfg.Claude.APIKey,
-			AuthToken:                  cfg.Claude.AuthToken,
-			Model:                      cfg.Claude.Model,
-			OutputFormat:               cfg.Claude.OutputFormat,
-			DisableNonessentialTraffic: cfg.Claude.DisableNonessentialTraffic,
+	var app *server.Server
+	var watcher *artifacts.Watcher
+	startup, err := runStartupRuntimeRecovery(ctx, cfg, owner.UUID, startupRuntimeRecoveryHooks{
+		ClearActiveSessionExpiry: db.ClearActiveSessionExpiry,
+		ConstructRuntime: func() error {
+			rt := runtime.New(runtime.Config{
+				RestoreScript:         cfg.RestoreScript,
+				RunscRoot:             cfg.RunscRoot,
+				RunscNetwork:          cfg.RunscNetwork,
+				RunscOverlay2:         cfg.RunscOverlay2,
+				SessionsRoot:          cfg.SessionsRoot,
+				AgentHomesRoot:        cfg.AgentHomesRoot,
+				CheckpointsRoot:       cfg.CheckpointsRoot,
+				BundleRoot:            cfg.BundleRoot,
+				RootFSPath:            filepath.Join(cfg.RepoRoot, "sandbox-image", "rootfs"),
+				DefaultAgent:          cfg.DefaultAgent,
+				Phase7RunDir:          cfg.Phase7.RunDir,
+				SecretsRoot:           cfg.Phase7.Secrets.Root,
+				SecretReadersGID:      cfg.Phase7.Secrets.ReadersGID,
+				PreStartProbeAttempts: cfg.Phase7.Probe.PreStartAttempts,
+				PreStartProbeInterval: cfg.Phase7.Probe.PreStartInterval.Duration,
+				ProbeHealthzStatuses:  cfg.Phase7.Probe.AcceptStatus.GetHealthz,
+				ProbeMessageStatuses:  cfg.Phase7.Probe.AcceptStatus.PostV1Messages.MalformedAuthenticated,
+				BridgeHeartbeat:       cfg.Phase7.Bridge.HeartbeatInterval.Duration,
+				BridgePollInterval:    cfg.Phase7.Bridge.PollInterval.Duration,
+				Claude: runtime.ClaudeConfig{
+					ProxyBindURL:               cfg.Claude.ProxyBindURL,
+					APIKey:                     cfg.Claude.APIKey,
+					AuthToken:                  cfg.Claude.AuthToken,
+					Model:                      cfg.Claude.Model,
+					OutputFormat:               cfg.Claude.OutputFormat,
+					DisableNonessentialTraffic: cfg.Claude.DisableNonessentialTraffic,
+				},
+			})
+			hub := events.NewHub()
+			watcher = artifacts.New(cfg.SessionsRoot, db, hub, log)
+			app = server.New(cfg, db, rt, watcher, hub, log)
+			app.SetOwnerUUID(owner.UUID)
+			return nil
+		},
+		RecoverExpiredRuntimeResources: func(ctx context.Context, now time.Time) (store.StartupRecoveryResult, error) {
+			return app.RecoverExpiredRuntimeResources(ctx, now)
+		},
+		ReapResources: db.ReapResources,
+		DestroyReclaimableGenerationResources: func(ctx context.Context, now time.Time) {
+			app.DestroyReclaimableGenerationResources(ctx, now)
 		},
 	})
-	hub := events.NewHub()
-	watcher := artifacts.New(cfg.SessionsRoot, db, hub, log)
-	app := server.New(cfg, db, rt, watcher, hub, log)
-	app.SetOwnerUUID(owner.UUID)
-
-	if _, err := app.RecoverExpiredRuntimeResources(ctx, time.Now().UTC()); err != nil {
-		log.Error("failed to recover phase7 allocations", "error", err)
+	if err != nil {
+		log.Error("failed startup runtime recovery", "error", err)
 		os.Exit(1)
 	}
-	if _, err := db.ReapResources(ctx, store.ReaperParams{
-		OwnerUUID:       owner.UUID,
-		FailedRetention: cfg.Phase7.Reaper.FailedRetention.Duration,
-		Now:             time.Now().UTC(),
-	}); err != nil {
-		log.Error("failed to reap phase7 resources", "error", err)
-		os.Exit(1)
+	if startup.ClearedActiveSessionExpiries > 0 {
+		log.Info("cleared active session expiry", "sessions", startup.ClearedActiveSessionExpiries)
 	}
-	app.DestroyReclaimableGenerationResources(ctx, time.Now().UTC())
 	ownerHeartbeatErr := db.StartOwnerHeartbeat(ctx, owner)
 	if err := db.EnsureUser(ctx, "lab", "Lab User"); err != nil {
 		log.Error("failed to ensure lab user", "error", err)
