@@ -100,6 +100,7 @@ const SSE_TYPED_EVENT_TYPES = [
   "session.error",
   "generation.error",
   "session.checkpoint_retired",
+  "session.restore_fallback_retired",
   "artifact.updated",
   "artifact.deleted",
   "ack_turn_started",
@@ -428,7 +429,8 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
           }));
           return;
         }
-        case "session.checkpoint_retired": {
+        case "session.checkpoint_retired":
+        case "session.restore_fallback_retired": {
           if (!sessionId || !isRecord(event.payload)) return;
           const rawSessionStatus = event.payload.session_status;
           const sessionStatus =

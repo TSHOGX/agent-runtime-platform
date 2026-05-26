@@ -171,10 +171,25 @@ type RetireExpiredCheckpointsParams struct {
 	CheckpointImageRetention time.Duration
 }
 
+type RetireRestoreFallbackParams struct {
+	SessionID    string
+	GenerationID string
+	Owner        string
+	ErrorClass   string
+	Reason       string
+	Now          time.Time
+}
+
 type RetiredCheckpoint struct {
 	SessionID    string
 	GenerationID string
 	EventID      int64
+}
+
+type RetiredRestoreFallback struct {
+	SessionID    string
+	GenerationID string
+	EventIDs     []int64
 }
 
 type ReclaimableGeneration struct {
@@ -930,6 +945,178 @@ WHERE id = ?
 		return nil, err
 	}
 	return retired, nil
+}
+
+func (s *Store) RetireRestoreFallback(ctx context.Context, p RetireRestoreFallbackParams) (RetiredRestoreFallback, error) {
+	if p.Now.IsZero() {
+		p.Now = time.Now().UTC()
+	}
+	if strings.TrimSpace(p.SessionID) == "" {
+		return RetiredRestoreFallback{}, fmt.Errorf("session id is required")
+	}
+	if strings.TrimSpace(p.GenerationID) == "" {
+		return RetiredRestoreFallback{}, fmt.Errorf("generation id is required")
+	}
+	if strings.TrimSpace(p.Owner) == "" {
+		return RetiredRestoreFallback{}, fmt.Errorf("owner is required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return RetiredRestoreFallback{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := assertOwnerTx(ctx, tx, ownerUUIDFromLeaseOwner(p.Owner)); err != nil {
+		return RetiredRestoreFallback{}, err
+	}
+
+	var lastActivityAt sql.NullString
+	if err := tx.QueryRowContext(ctx, `
+SELECT last_activity_at
+FROM sessions
+WHERE id = ?
+  AND active_generation_id = ?
+  AND status = 'checkpointed'`, p.SessionID, p.GenerationID).Scan(&lastActivityAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return RetiredRestoreFallback{}, fmt.Errorf("restore fallback session CAS failed")
+		}
+		return RetiredRestoreFallback{}, err
+	}
+
+	nowString := formatTime(p.Now)
+	res, err := tx.ExecContext(ctx, `
+UPDATE runtime_generations
+SET status = 'failed',
+    error_class = ?,
+    failure_reason = ?,
+    ended_at = ?,
+    lease_owner = NULL,
+    lease_expires_at = NULL
+WHERE generation_id = ?
+  AND session_id = ?
+  AND status IN ('checkpointed','restoring')
+  AND (
+    (status = 'restoring' AND lease_owner = ? AND lease_expires_at > ?)
+    OR (status = 'checkpointed' AND (lease_owner IS NULL OR lease_owner = ''))
+  )
+  AND EXISTS (
+    SELECT 1 FROM sessions
+    WHERE id = ?
+      AND active_generation_id = ?
+      AND status = 'checkpointed'
+  )`,
+		nullableString(p.ErrorClass), nullableString(p.Reason), nowString, p.GenerationID, p.SessionID,
+		p.Owner, nowString, p.SessionID, p.GenerationID)
+	if err != nil {
+		return RetiredRestoreFallback{}, err
+	}
+	if affected, err := res.RowsAffected(); err != nil {
+		return RetiredRestoreFallback{}, err
+	} else if affected != 1 {
+		return RetiredRestoreFallback{}, fmt.Errorf("restore fallback generation CAS failed")
+	}
+	res, err = tx.ExecContext(ctx, `
+UPDATE network_profiles
+SET allocation_state = 'reclaimable'
+WHERE generation_id = ?
+  AND session_id = ?
+  AND allocation_state IN ('reserved_checkpointed','recreating')`, p.GenerationID, p.SessionID)
+	if err != nil {
+		return RetiredRestoreFallback{}, err
+	}
+	if affected, err := res.RowsAffected(); err != nil {
+		return RetiredRestoreFallback{}, err
+	} else if affected != 1 {
+		return RetiredRestoreFallback{}, fmt.Errorf("restore fallback network CAS failed")
+	}
+	res, err = tx.ExecContext(ctx, `
+UPDATE runtime_generation_resources
+SET resource_state = 'reclaimable'
+WHERE generation_id = ?
+  AND resource_state IN ('reserved_checkpointed','recreating')`, p.GenerationID)
+	if err != nil {
+		return RetiredRestoreFallback{}, err
+	}
+	if affected, err := res.RowsAffected(); err != nil {
+		return RetiredRestoreFallback{}, err
+	} else if affected != 1 {
+		return RetiredRestoreFallback{}, fmt.Errorf("restore fallback resource CAS failed")
+	}
+	res, err = tx.ExecContext(ctx, `
+UPDATE sessions
+SET status = 'running_idle',
+    checkpoint_path = NULL,
+    restore_ms = NULL,
+    updated_at = ?,
+    error_class = NULL,
+    failure_reason = NULL
+WHERE id = ?
+  AND status = 'checkpointed'
+  AND active_generation_id = ?`, nowString, p.SessionID, p.GenerationID)
+	if err != nil {
+		return RetiredRestoreFallback{}, err
+	}
+	if affected, err := res.RowsAffected(); err != nil {
+		return RetiredRestoreFallback{}, err
+	} else if affected != 1 {
+		return RetiredRestoreFallback{}, fmt.Errorf("restore fallback session update CAS failed")
+	}
+	var lastActivity any
+	if lastActivityAt.Valid {
+		lastActivity = lastActivityAt.String
+	}
+	statusEventID, err := appendEventTx(ctx, tx, AppendEventParams{
+		SessionID:    p.SessionID,
+		GenerationID: p.GenerationID,
+		DedupeKey:    "restore_fallback_retired:" + p.GenerationID,
+		Type:         "session.restore_fallback_retired",
+		Payload: map[string]any{
+			"terminal":                 false,
+			"generation_id":            p.GenerationID,
+			"session_status":           "running_idle",
+			"status":                   "running_idle",
+			"session_updated_at":       nowString,
+			"updated_at":               nowString,
+			"session_last_activity_at": lastActivity,
+			"active_generation_id":     p.GenerationID,
+			"checkpoint_path":          nil,
+			"restore_ms":               nil,
+			"fallback":                 "cold",
+			"error_class":              p.ErrorClass,
+			"error":                    p.Reason,
+		},
+		Now: p.Now,
+	})
+	if err != nil {
+		return RetiredRestoreFallback{}, err
+	}
+	errorEventID, err := appendEventTx(ctx, tx, AppendEventParams{
+		SessionID:    p.SessionID,
+		GenerationID: p.GenerationID,
+		DedupeKey:    "restore_fallback_error:" + p.GenerationID,
+		Type:         "generation.error",
+		Payload: map[string]any{
+			"terminal":             false,
+			"error_class":          p.ErrorClass,
+			"error":                p.Reason,
+			"generation_id":        p.GenerationID,
+			"session_status":       "running_idle",
+			"session_updated_at":   nowString,
+			"active_generation_id": p.GenerationID,
+			"fallback":             "cold",
+		},
+		Now: p.Now,
+	})
+	if err != nil {
+		return RetiredRestoreFallback{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return RetiredRestoreFallback{}, err
+	}
+	return RetiredRestoreFallback{
+		SessionID:    p.SessionID,
+		GenerationID: p.GenerationID,
+		EventIDs:     []int64{statusEventID, errorEventID},
+	}, nil
 }
 
 func (s *Store) MarkGenerationResourcesDestroyed(ctx context.Context, p DestroyGenerationResourcesParams) error {

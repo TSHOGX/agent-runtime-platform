@@ -748,6 +748,13 @@ func TestSendMessageFallsBackWhenCheckpointRestoreFails(t *testing.T) {
 		t.Fatalf("record checkpointed artifacts: %v", err)
 	}
 	markServerGenerationCheckpointed(t, ctx, st, session.ID, old.GenerationID, time.Now().UTC())
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE sessions
+SET checkpoint_path = ?,
+    restore_ms = 123
+WHERE id = ?`, filepath.Join(dir, "checkpoints", session.ID), session.ID); err != nil {
+		t.Fatalf("seed checkpoint metadata: %v", err)
+	}
 
 	rt := &restoreFailoverRuntime{err: errors.New("checkpoint_runsc_version mismatch")}
 	srv := &Server{
@@ -772,6 +779,9 @@ func TestSendMessageFallsBackWhenCheckpointRestoreFails(t *testing.T) {
 	}
 	if gotSession.ActiveGenerationID == "" || gotSession.ActiveGenerationID == old.GenerationID || gotSession.Status != string(sessionstate.RunningActive) {
 		t.Fatalf("fallback did not replace active generation: %+v old=%s", gotSession, old.GenerationID)
+	}
+	if gotSession.CheckpointPath != "" || gotSession.RestoreMS != nil {
+		t.Fatalf("fallback should clear checkpoint metadata: checkpoint=%q restore=%v", gotSession.CheckpointPath, gotSession.RestoreMS)
 	}
 	var oldStatus, oldNetwork, oldResources, oldErrorClass, newStatus, newNetwork, newResources string
 	if err := st.DBForTest().QueryRowContext(ctx, `
@@ -818,6 +828,279 @@ WHERE session_id = ?
 	}
 	if startRequests[1].RestoreFromCheckpoint || startRequests[1].GenerationID != gotSession.ActiveGenerationID {
 		t.Fatalf("second start was not cold fallback: %+v", startRequests[1])
+	}
+	var restoreRetiredEvents, runtimeEvents, terminalEvents int
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT
+  SUM(CASE WHEN type = 'session.restore_fallback_retired' THEN 1 ELSE 0 END),
+  SUM(CASE WHEN type = 'generation.error' THEN 1 ELSE 0 END),
+  SUM(CASE WHEN type = 'session.error' THEN 1 ELSE 0 END)
+FROM events
+WHERE session_id = ?`, session.ID).Scan(&restoreRetiredEvents, &runtimeEvents, &terminalEvents); err != nil {
+		t.Fatalf("count restore fallback events: %v", err)
+	}
+	if restoreRetiredEvents != 1 || runtimeEvents != 1 || terminalEvents != 0 {
+		t.Fatalf("unexpected restore fallback events: retired=%d runtime=%d terminal=%d", restoreRetiredEvents, runtimeEvents, terminalEvents)
+	}
+}
+
+func TestSendMessageRestoreFallbackColdStartFailureLeavesSessionRetryable(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_restore_fallback_start_fail", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
+	cfg := testServerConfig(dir)
+	cfg.Phase7.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
+	leaseOwner := store.GenerationLeaseOwner(owner.UUID)
+	old, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     leaseOwner,
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    serverTestAllocatorConfig(cfg, "claude"),
+	})
+	if err != nil {
+		t.Fatalf("allocate checkpointed generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, session.ID, old.GenerationID, old.Owner, time.Now().UTC()); err != nil {
+		t.Fatalf("mark checkpointed generation live: %v", err)
+	}
+	if err := st.RecordGenerationRuntimeArtifacts(ctx, old.GenerationID, "restore_manifest_digest", "runsc restore-test"); err != nil {
+		t.Fatalf("record checkpointed artifacts: %v", err)
+	}
+	markServerGenerationCheckpointed(t, ctx, st, session.ID, old.GenerationID, time.Now().UTC())
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE sessions
+SET checkpoint_path = ?,
+    restore_ms = 456
+WHERE id = ?`, filepath.Join(dir, "checkpoints", session.ID), session.ID); err != nil {
+		t.Fatalf("seed checkpoint metadata: %v", err)
+	}
+
+	rt := &restoreFailoverRuntime{
+		err:     errors.New("checkpoint_runsc_version mismatch"),
+		coldErr: errors.New("pre-start sandbox network probe failed"),
+	}
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: rt,
+		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(`{"content":"after restore fallback start fail"}`))
+	rec := httptest.NewRecorder()
+	srv.sendMessage(rec, req, session.ID)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d body %s", rec.Code, rec.Body.String())
+	}
+	gotSession, err := st.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("get fallback session: %v", err)
+	}
+	if gotSession.Status != string(sessionstate.RunningIdle) || gotSession.CheckpointPath != "" || gotSession.RestoreMS != nil {
+		t.Fatalf("session should stay non-checkpointed and retryable after fallback start failure: %+v", gotSession)
+	}
+	if gotSession.ActiveGenerationID == "" || gotSession.ActiveGenerationID == old.GenerationID {
+		t.Fatalf("expected replacement generation to remain active after failed cold fallback: %+v old=%s", gotSession, old.GenerationID)
+	}
+	var oldStatus, oldNetwork, oldResources, newStatus, newNetwork, newResources string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT g.status, n.allocation_state, r.resource_state
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, old.GenerationID).Scan(&oldStatus, &oldNetwork, &oldResources); err != nil {
+		t.Fatalf("query old generation: %v", err)
+	}
+	if oldStatus != "failed" || oldNetwork != "reclaimable" || oldResources != "reclaimable" {
+		t.Fatalf("old generation not reclaimable after restore fallback: status=%s network=%s resources=%s", oldStatus, oldNetwork, oldResources)
+	}
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT g.status, n.allocation_state, r.resource_state
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, gotSession.ActiveGenerationID).Scan(&newStatus, &newNetwork, &newResources); err != nil {
+		t.Fatalf("query replacement generation: %v", err)
+	}
+	if newStatus != "failed" || newNetwork != "reclaimable" || newResources != "reclaimable" {
+		t.Fatalf("replacement generation should be failed/reclaimable after cold fallback failure: status=%s network=%s resources=%s", newStatus, newNetwork, newResources)
+	}
+	var queuedTurns int
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM turns
+WHERE session_id = ?`, session.ID).Scan(&queuedTurns); err != nil {
+		t.Fatalf("count turns: %v", err)
+	}
+	if queuedTurns != 0 {
+		t.Fatalf("turn should not be enqueued when cold fallback start fails, got %d", queuedTurns)
+	}
+}
+
+func TestSendMessageRestoreLiveCASFailureDestroysRestoreIDBeforeFallback(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_restore_live_cas", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
+	cfg := testServerConfig(dir)
+	cfg.Phase7.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
+	leaseOwner := store.GenerationLeaseOwner(owner.UUID)
+	old, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     leaseOwner,
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    serverTestAllocatorConfig(cfg, "claude"),
+	})
+	if err != nil {
+		t.Fatalf("allocate checkpointed generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, session.ID, old.GenerationID, old.Owner, time.Now().UTC()); err != nil {
+		t.Fatalf("mark checkpointed generation live: %v", err)
+	}
+	if err := st.RecordGenerationRuntimeArtifacts(ctx, old.GenerationID, "restore_manifest_digest", "runsc restore-test"); err != nil {
+		t.Fatalf("record checkpointed artifacts: %v", err)
+	}
+	markServerGenerationCheckpointed(t, ctx, st, session.ID, old.GenerationID, time.Now().UTC())
+
+	rt := &restoreStartHookRuntime{
+		onRestoreStart: func() {
+			if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE network_profiles
+SET allocation_state = 'reserved_checkpointed'
+WHERE generation_id = ?`, old.GenerationID); err != nil {
+				t.Fatalf("force restore live CAS failure: %v", err)
+			}
+		},
+	}
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: rt,
+		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(`{"content":"after restore live cas"}`))
+	rec := httptest.NewRecorder()
+	srv.sendMessage(rec, req, session.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status 202, got %d body %s", rec.Code, rec.Body.String())
+	}
+	destroyIDs := rt.runtimeDestroyRequests()
+	if len(destroyIDs) != 1 || destroyIDs[0] != session.RestoreID {
+		t.Fatalf("restore live CAS cleanup should destroy restore id %q, got %+v", session.RestoreID, destroyIDs)
+	}
+	if destroyIDs[0] == session.ID {
+		t.Fatalf("restore live CAS cleanup used bare session id %q", session.ID)
+	}
+	gotSession, err := st.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("get fallback session: %v", err)
+	}
+	if gotSession.ActiveGenerationID == old.GenerationID || gotSession.Status != string(sessionstate.RunningActive) {
+		t.Fatalf("fallback did not allocate replacement after restore live CAS failure: %+v old=%s", gotSession, old.GenerationID)
+	}
+	var oldStatus, oldNetwork, oldResources string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT g.status, n.allocation_state, r.resource_state
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, old.GenerationID).Scan(&oldStatus, &oldNetwork, &oldResources); err != nil {
+		t.Fatalf("query old generation: %v", err)
+	}
+	if oldStatus != "failed" || oldNetwork != "reclaimable" || oldResources != "reclaimable" {
+		t.Fatalf("old generation not reclaimable after restore live CAS fallback: status=%s network=%s resources=%s", oldStatus, oldNetwork, oldResources)
+	}
+}
+
+func TestSendMessageRestoreLiveCASFailureDoesNotRetireWhenDestroyFails(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_restore_destroy_fail", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
+	cfg := testServerConfig(dir)
+	cfg.Phase7.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
+	leaseOwner := store.GenerationLeaseOwner(owner.UUID)
+	old, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     leaseOwner,
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    serverTestAllocatorConfig(cfg, "claude"),
+	})
+	if err != nil {
+		t.Fatalf("allocate checkpointed generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, session.ID, old.GenerationID, old.Owner, time.Now().UTC()); err != nil {
+		t.Fatalf("mark checkpointed generation live: %v", err)
+	}
+	if err := st.RecordGenerationRuntimeArtifacts(ctx, old.GenerationID, "restore_manifest_digest", "runsc restore-test"); err != nil {
+		t.Fatalf("record checkpointed artifacts: %v", err)
+	}
+	markServerGenerationCheckpointed(t, ctx, st, session.ID, old.GenerationID, time.Now().UTC())
+
+	rt := &restoreStartHookRuntime{
+		recordingRuntime: recordingRuntime{destroyRuntimeErr: errors.New("destroy failed")},
+		onRestoreStart: func() {
+			if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE network_profiles
+SET allocation_state = 'reserved_checkpointed'
+WHERE generation_id = ?`, old.GenerationID); err != nil {
+				t.Fatalf("force restore live CAS failure: %v", err)
+			}
+		},
+	}
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: rt,
+		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(`{"content":"after restore destroy fail"}`))
+	rec := httptest.NewRecorder()
+	srv.sendMessage(rec, req, session.ID)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d body %s", rec.Code, rec.Body.String())
+	}
+	destroyIDs := rt.runtimeDestroyRequests()
+	if len(destroyIDs) != 1 || destroyIDs[0] != session.RestoreID {
+		t.Fatalf("restore cleanup should target restore id %q before failing, got %+v", session.RestoreID, destroyIDs)
+	}
+	var oldStatus, oldNetwork, oldResources string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT g.status, n.allocation_state, r.resource_state
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, old.GenerationID).Scan(&oldStatus, &oldNetwork, &oldResources); err != nil {
+		t.Fatalf("query old generation: %v", err)
+	}
+	if oldStatus == "failed" || oldNetwork == "reclaimable" || oldResources == "reclaimable" {
+		t.Fatalf("restore generation should not be retired when runtime destroy fails: status=%s network=%s resources=%s", oldStatus, oldNetwork, oldResources)
+	}
+	var retirementEvents int
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM events
+WHERE session_id = ?
+  AND type IN ('session.restore_fallback_retired', 'generation.error')`, session.ID).Scan(&retirementEvents); err != nil {
+		t.Fatalf("count restore fallback events: %v", err)
+	}
+	if retirementEvents != 0 {
+		t.Fatalf("restore fallback events should not be committed when destroy fails, got %d", retirementEvents)
 	}
 }
 
@@ -2605,13 +2888,15 @@ func (instantRuntime) Checkpoint(context.Context, runtime.CheckpointRequest) err
 }
 
 type recordingRuntime struct {
-	mu              sync.Mutex
-	prepareRequests []runtime.StartRequest
-	startRequests   []runtime.StartRequest
-	destroyRequests []store.RuntimeGenerationDetails
-	destroyErr      error
-	checkpointReqs  []runtime.CheckpointRequest
-	checkpointErr   error
+	mu                sync.Mutex
+	prepareRequests   []runtime.StartRequest
+	startRequests     []runtime.StartRequest
+	destroyRuntimeIDs []string
+	destroyRuntimeErr error
+	destroyRequests   []store.RuntimeGenerationDetails
+	destroyErr        error
+	checkpointReqs    []runtime.CheckpointRequest
+	checkpointErr     error
 }
 
 func (r *recordingRuntime) PrepareGeneration(_ context.Context, req runtime.StartRequest) (runtime.GenerationArtifacts, error) {
@@ -2643,8 +2928,12 @@ func (r *recordingRuntime) DestroyGenerationResources(_ context.Context, details
 	}, nil
 }
 
-func (r *recordingRuntime) Destroy(context.Context, string) error {
-	return nil
+func (r *recordingRuntime) Destroy(_ context.Context, restoreID string) error {
+	r.mu.Lock()
+	r.destroyRuntimeIDs = append(r.destroyRuntimeIDs, restoreID)
+	err := r.destroyRuntimeErr
+	r.mu.Unlock()
+	return err
 }
 
 func (r *recordingRuntime) Interrupt(string) error {
@@ -2679,9 +2968,16 @@ func (r *recordingRuntime) destroyGenerationRequests() []store.RuntimeGeneration
 	return append([]store.RuntimeGenerationDetails(nil), r.destroyRequests...)
 }
 
+func (r *recordingRuntime) runtimeDestroyRequests() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.destroyRuntimeIDs...)
+}
+
 type restoreFailoverRuntime struct {
 	recordingRuntime
-	err error
+	err     error
+	coldErr error
 }
 
 func (r *restoreFailoverRuntime) Start(_ context.Context, req runtime.StartRequest, _ func(runtime.Output)) runtime.Result {
@@ -2690,6 +2986,24 @@ func (r *restoreFailoverRuntime) Start(_ context.Context, req runtime.StartReque
 	r.mu.Unlock()
 	if req.RestoreFromCheckpoint {
 		return runtime.Result{Err: r.err}
+	}
+	if r.coldErr != nil {
+		return runtime.Result{Err: r.coldErr}
+	}
+	return runtime.Result{ControlManifestDigest: req.PreparedArtifacts.ManifestDigest, RunscVersion: req.PreparedArtifacts.RunscVersion}
+}
+
+type restoreStartHookRuntime struct {
+	recordingRuntime
+	onRestoreStart func()
+}
+
+func (r *restoreStartHookRuntime) Start(_ context.Context, req runtime.StartRequest, _ func(runtime.Output)) runtime.Result {
+	r.mu.Lock()
+	r.startRequests = append(r.startRequests, req)
+	r.mu.Unlock()
+	if req.RestoreFromCheckpoint && r.onRestoreStart != nil {
+		r.onRestoreStart()
 	}
 	return runtime.Result{ControlManifestDigest: req.PreparedArtifacts.ManifestDigest, RunscVersion: req.PreparedArtifacts.RunscVersion}
 }

@@ -1670,6 +1670,111 @@ WHERE id = ?`, filepath.Join(t.TempDir(), sessionID, "checkpoint"), sessionID); 
 	}
 }
 
+func TestRetireRestoreFallbackClearsCheckpointMetadataAndAppendsEvents(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	cfg := testAllocatorConfig(t)
+	now := time.Now().UTC()
+	leaseOwner := GenerationLeaseOwner(owner.UUID)
+	allocation := createAutoCheckpointGeneration(t, ctx, st, cfg, "sess_restore_retire", leaseOwner, now.Add(-2*time.Hour))
+	checkpointedGeneration(t, ctx, st, "sess_restore_retire", allocation.GenerationID, now.Add(-time.Hour))
+	checkpointPath := filepath.Join(t.TempDir(), "checkpoint")
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE sessions
+SET checkpoint_path = ?,
+    restore_ms = 321,
+    last_activity_at = ?
+WHERE id = ?`, checkpointPath, formatTime(now.Add(-30*time.Minute)), "sess_restore_retire"); err != nil {
+		t.Fatalf("seed session checkpoint metadata: %v", err)
+	}
+	claimed, err := st.ClaimCheckpointedGenerationForRestore(ctx, ClaimCheckpointedGenerationParams{
+		SessionID:    "sess_restore_retire",
+		GenerationID: allocation.GenerationID,
+		Owner:        leaseOwner,
+		LeaseTTL:     time.Minute,
+		Now:          now.Add(-time.Second),
+	})
+	if err != nil {
+		t.Fatalf("claim checkpointed generation: %v", err)
+	}
+
+	retired, err := st.RetireRestoreFallback(ctx, RetireRestoreFallbackParams{
+		SessionID:    "sess_restore_retire",
+		GenerationID: allocation.GenerationID,
+		Owner:        claimed.Owner,
+		ErrorClass:   "runtime_failed",
+		Reason:       "restore failed",
+		Now:          now,
+	})
+	if err != nil {
+		t.Fatalf("retire restore fallback: %v", err)
+	}
+	if retired.SessionID != "sess_restore_retire" || retired.GenerationID != allocation.GenerationID || len(retired.EventIDs) != 2 || retired.EventIDs[0] == 0 || retired.EventIDs[1] == 0 {
+		t.Fatalf("unexpected restore fallback retirement: %+v", retired)
+	}
+
+	var generationStatus, generationError, sessionStatus, networkState, resourceState string
+	var sessionCheckpointPath, sessionRestoreMS sql.NullString
+	if err := st.db.QueryRowContext(ctx, `
+SELECT g.status, COALESCE(g.error_class, ''), s.status, s.checkpoint_path, s.restore_ms,
+       n.allocation_state, r.resource_state
+FROM runtime_generations g
+JOIN sessions s ON s.active_generation_id = g.generation_id
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, allocation.GenerationID).Scan(
+		&generationStatus,
+		&generationError,
+		&sessionStatus,
+		&sessionCheckpointPath,
+		&sessionRestoreMS,
+		&networkState,
+		&resourceState,
+	); err != nil {
+		t.Fatalf("query restore fallback state: %v", err)
+	}
+	if generationStatus != "failed" ||
+		generationError != "runtime_failed" ||
+		sessionStatus != string(sessionstate.RunningIdle) ||
+		sessionCheckpointPath.Valid ||
+		sessionRestoreMS.Valid ||
+		networkState != "reclaimable" ||
+		resourceState != "reclaimable" {
+		t.Fatalf("unexpected restore fallback state: generation=%s error=%s session=%s checkpoint_valid=%v restore_valid=%v network=%s resource=%s",
+			generationStatus, generationError, sessionStatus, sessionCheckpointPath.Valid, sessionRestoreMS.Valid, networkState, resourceState)
+	}
+
+	rows, err := st.db.QueryContext(ctx, `
+SELECT type, payload
+FROM events
+WHERE event_id IN (?, ?)
+ORDER BY event_id`, retired.EventIDs[0], retired.EventIDs[1])
+	if err != nil {
+		t.Fatalf("query restore fallback events: %v", err)
+	}
+	defer rows.Close()
+	var eventTypes []string
+	var payloads []string
+	for rows.Next() {
+		var eventType, payload string
+		if err := rows.Scan(&eventType, &payload); err != nil {
+			t.Fatalf("scan restore fallback event: %v", err)
+		}
+		eventTypes = append(eventTypes, eventType)
+		payloads = append(payloads, payload)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate restore fallback events: %v", err)
+	}
+	if !slices.Equal(eventTypes, []string{"session.restore_fallback_retired", "generation.error"}) ||
+		!strings.Contains(payloads[0], `"checkpoint_path":null`) ||
+		!strings.Contains(payloads[0], `"restore_ms":null`) ||
+		!strings.Contains(payloads[0], `"session_status":"running_idle"`) ||
+		!strings.Contains(payloads[1], `"fallback":"cold"`) {
+		t.Fatalf("unexpected restore fallback events: types=%+v payloads=%+v", eventTypes, payloads)
+	}
+}
+
 func TestSweepExpiredSessionsDestroysAndRejectsInputState(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
