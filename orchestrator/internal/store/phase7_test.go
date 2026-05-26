@@ -1153,6 +1153,144 @@ WHERE g.generation_id = ?`, normalAllocation.GenerationID).Scan(&normalStatus, &
 	}
 }
 
+func TestFailGenerationStartRejectsStaleOwnerActiveGenerationAndLifecycle(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	type generationSnapshot struct {
+		sessionStatus      string
+		activeGenerationID string
+		generationStatus   string
+		generationOwner    string
+		networkState       string
+		resourceState      string
+		eventCount         int
+	}
+	readSnapshot := func(t *testing.T, st *Store, sessionID, generationID string) generationSnapshot {
+		t.Helper()
+		var snap generationSnapshot
+		if err := st.db.QueryRowContext(ctx, `
+SELECT s.status, COALESCE(s.active_generation_id, ''), g.status, COALESCE(g.lease_owner, ''),
+       n.allocation_state, r.resource_state
+FROM sessions s
+JOIN runtime_generations g ON g.session_id = s.id
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE s.id = ?
+  AND g.generation_id = ?`, sessionID, generationID).Scan(
+			&snap.sessionStatus,
+			&snap.activeGenerationID,
+			&snap.generationStatus,
+			&snap.generationOwner,
+			&snap.networkState,
+			&snap.resourceState,
+		); err != nil {
+			t.Fatalf("query generation snapshot: %v", err)
+		}
+		if err := st.db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM events
+WHERE session_id = ?
+  AND generation_id = ?`, sessionID, generationID).Scan(&snap.eventCount); err != nil {
+			t.Fatalf("count events: %v", err)
+		}
+		return snap
+	}
+
+	cases := []struct {
+		name   string
+		mutate func(t *testing.T, st *Store, sessionID string, allocation GenerationAllocation)
+	}{
+		{
+			name: "owner changed",
+			mutate: func(t *testing.T, st *Store, _ string, allocation GenerationAllocation) {
+				t.Helper()
+				if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_generations
+SET lease_owner = 'other-owner'
+WHERE generation_id = ?`, allocation.GenerationID); err != nil {
+					t.Fatalf("change owner: %v", err)
+				}
+			},
+		},
+		{
+			name: "active generation changed",
+			mutate: func(t *testing.T, st *Store, sessionID string, allocation GenerationAllocation) {
+				t.Helper()
+				replacementID := "gen_replacement_" + strings.TrimPrefix(sessionID, "sess_start_stale_")
+				if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_generations
+SET status = 'failed'
+WHERE generation_id = ?`, allocation.GenerationID); err != nil {
+					t.Fatalf("mark old generation failed: %v", err)
+				}
+				if _, err := st.db.ExecContext(ctx, `
+INSERT INTO runtime_generations (generation_id, session_id, status, lease_owner, lease_expires_at)
+VALUES (?, ?, 'idle', ?, ?)`, replacementID, sessionID, allocation.Owner, formatTime(now.Add(time.Minute))); err != nil {
+					t.Fatalf("insert replacement generation: %v", err)
+				}
+				if _, err := st.db.ExecContext(ctx, `
+UPDATE sessions
+SET active_generation_id = ?
+WHERE id = ?`, replacementID, sessionID); err != nil {
+					t.Fatalf("change active generation: %v", err)
+				}
+			},
+		},
+		{
+			name: "lifecycle became active",
+			mutate: func(t *testing.T, st *Store, _ string, allocation GenerationAllocation) {
+				t.Helper()
+				if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_generations
+SET status = 'active'
+WHERE generation_id = ?`, allocation.GenerationID); err != nil {
+					t.Fatalf("change lifecycle: %v", err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st, owner := openOwnedStore(t, ctx)
+			sessionID := "sess_start_stale_" + strings.ReplaceAll(tc.name, " ", "_")
+			createStoreSession(t, ctx, st, sessionID)
+			allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+				SessionID: sessionID,
+				Owner:     GenerationLeaseOwner(owner.UUID),
+				LeaseTTL:  time.Minute,
+				Now:       now.Add(-2 * time.Minute),
+				Config:    testAllocatorConfig(t),
+			})
+			if err != nil {
+				t.Fatalf("allocate generation: %v", err)
+			}
+			tc.mutate(t, st, sessionID, allocation)
+			before := readSnapshot(t, st, sessionID, allocation.GenerationID)
+
+			_, err = st.FailGenerationStart(ctx, FailGenerationStartParams{
+				SessionID:      sessionID,
+				GenerationID:   allocation.GenerationID,
+				Owner:          allocation.Owner,
+				SessionStatus:  string(sessionstate.Created),
+				ErrorClass:     "late_start_failure",
+				Reason:         "late start failure",
+				EventType:      "generation.error",
+				EventDedupeKey: "generation_error:" + allocation.GenerationID,
+				Now:            now,
+			})
+			if err == nil || !strings.Contains(err.Error(), "generation start failure CAS failed") {
+				t.Fatalf("expected stale start-failure CAS rejection, got %v", err)
+			}
+			after := readSnapshot(t, st, sessionID, allocation.GenerationID)
+			if after != before {
+				t.Fatalf("stale start failure mutated state: before=%+v after=%+v", before, after)
+			}
+		})
+	}
+}
+
 func TestSessionActiveGenerationCAS(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))

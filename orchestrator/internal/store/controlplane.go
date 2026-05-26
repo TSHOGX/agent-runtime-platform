@@ -1030,7 +1030,7 @@ SET status = 'failed',
     lease_owner = NULL
 WHERE generation_id = ?
   AND session_id = ?
-  AND status IN ('allocating','starting','probing','idle','active','restoring')
+  AND status IN ('allocating','starting','probing','idle','restoring')
   AND lease_owner = ?
   AND EXISTS (
     SELECT 1 FROM sessions
