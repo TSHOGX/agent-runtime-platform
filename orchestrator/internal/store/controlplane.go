@@ -95,6 +95,14 @@ type RenewHeartbeatParams struct {
 	Now          time.Time
 }
 
+type RenewGenerationStartLeaseParams struct {
+	SessionID    string
+	GenerationID string
+	Owner        string
+	LeaseTTL     time.Duration
+	Now          time.Time
+}
+
 type FailGenerationParams struct {
 	SessionID    string
 	GenerationID string
@@ -883,6 +891,40 @@ WHERE session_id = ?
 	return tx.Commit()
 }
 
+func (s *Store) RenewGenerationStartLease(ctx context.Context, p RenewGenerationStartLeaseParams) error {
+	if p.Now.IsZero() {
+		p.Now = time.Now().UTC()
+	}
+	if p.LeaseTTL <= 0 {
+		return fmt.Errorf("lease ttl must be > 0")
+	}
+	expiresAt := p.Now.Add(p.LeaseTTL)
+	res, err := s.db.ExecContext(ctx, `
+UPDATE runtime_generations
+SET lease_expires_at = ?,
+    last_seen_at = ?
+WHERE generation_id = ?
+  AND session_id = ?
+  AND status IN ('allocating','starting','probing','idle','active','restoring')
+  AND lease_owner = ?
+  AND lease_expires_at > ?
+  AND EXISTS (
+    SELECT 1 FROM sessions
+    WHERE id = ?
+      AND active_generation_id = ?
+      AND status NOT IN ('failed', 'destroyed')
+  )`, formatTime(expiresAt), formatTime(p.Now), p.GenerationID, p.SessionID, p.Owner, formatTime(p.Now), p.SessionID, p.GenerationID)
+	if err != nil {
+		return err
+	}
+	if affected, err := res.RowsAffected(); err != nil {
+		return err
+	} else if affected != 1 {
+		return fmt.Errorf("generation start lease renewal CAS failed")
+	}
+	return nil
+}
+
 func (s *Store) FailGeneration(ctx context.Context, p FailGenerationParams) error {
 	if p.Now.IsZero() {
 		p.Now = time.Now().UTC()
@@ -990,7 +1032,6 @@ WHERE generation_id = ?
   AND session_id = ?
   AND status IN ('allocating','starting','probing','idle','active','restoring')
   AND lease_owner = ?
-  AND lease_expires_at > ?
   AND EXISTS (
     SELECT 1 FROM sessions
     WHERE id = ?
@@ -998,7 +1039,7 @@ WHERE generation_id = ?
       AND status NOT IN ('failed', 'destroyed')
   )`,
 		nullableString(p.ErrorClass), nullableString(p.Reason), formatTime(p.Now), p.GenerationID, p.SessionID,
-		p.Owner, formatTime(p.Now), p.SessionID, p.GenerationID)
+		p.Owner, p.SessionID, p.GenerationID)
 	if err != nil {
 		return 0, err
 	}

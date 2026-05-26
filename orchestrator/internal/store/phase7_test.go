@@ -1019,6 +1019,140 @@ WHERE sandbox_source_ip = '10.240.0.2'`).Scan(&contextExpires, &contextOwner); e
 	}
 }
 
+func TestRenewGenerationStartLeaseKeepsAllocatingAttemptAlive(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	createStoreSession(t, ctx, st, "sess_start_renew")
+	now := time.Now().UTC()
+	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_start_renew",
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       now,
+		Config:    testAllocatorConfig(t),
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	renewAt := now.Add(10 * time.Second)
+	if err := st.RenewGenerationStartLease(ctx, RenewGenerationStartLeaseParams{
+		SessionID:    "sess_start_renew",
+		GenerationID: allocation.GenerationID,
+		Owner:        allocation.Owner,
+		LeaseTTL:     2 * time.Minute,
+		Now:          renewAt,
+	}); err != nil {
+		t.Fatalf("renew start lease: %v", err)
+	}
+	var leaseExpires, lastSeen string
+	if err := st.db.QueryRowContext(ctx, `
+SELECT lease_expires_at, last_seen_at
+FROM runtime_generations
+WHERE generation_id = ?`, allocation.GenerationID).Scan(&leaseExpires, &lastSeen); err != nil {
+		t.Fatalf("query generation lease: %v", err)
+	}
+	if got, want := parseTime(leaseExpires), renewAt.Add(2*time.Minute); !got.Equal(want) {
+		t.Fatalf("lease_expires_at=%s want %s", got, want)
+	}
+	if got := parseTime(lastSeen); !got.Equal(renewAt) {
+		t.Fatalf("last_seen_at=%s want %s", got, renewAt)
+	}
+}
+
+func TestFailGenerationStartCanFinalizeExpiredOwnedAttempt(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	now := time.Now().UTC()
+
+	createStoreSession(t, ctx, st, "sess_expired_start")
+	startAllocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_expired_start",
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       now.Add(-2 * time.Minute),
+		Config:    testAllocatorConfig(t),
+	})
+	if err != nil {
+		t.Fatalf("allocate expired start generation: %v", err)
+	}
+	eventID, err := st.FailGenerationStart(ctx, FailGenerationStartParams{
+		SessionID:      "sess_expired_start",
+		GenerationID:   startAllocation.GenerationID,
+		Owner:          startAllocation.Owner,
+		SessionStatus:  string(sessionstate.Created),
+		ErrorClass:     "probe_failure",
+		Reason:         "late probe failure",
+		EventType:      "generation.error",
+		EventDedupeKey: "generation_error:" + startAllocation.GenerationID,
+		Now:            now,
+	})
+	if err != nil {
+		t.Fatalf("fail expired start generation: %v", err)
+	}
+	if eventID == 0 {
+		t.Fatalf("expected durable generation error event")
+	}
+	var sessionStatus, generationStatus, generationOwner, networkState, resourceState string
+	if err := st.db.QueryRowContext(ctx, `
+SELECT s.status, g.status, COALESCE(g.lease_owner, ''), n.allocation_state, r.resource_state
+FROM sessions s
+JOIN runtime_generations g ON g.session_id = s.id
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE s.id = ?`, "sess_expired_start").Scan(&sessionStatus, &generationStatus, &generationOwner, &networkState, &resourceState); err != nil {
+		t.Fatalf("query expired start failure state: %v", err)
+	}
+	if sessionStatus != string(sessionstate.Created) ||
+		generationStatus != "failed" ||
+		generationOwner != "" ||
+		networkState != "reclaimable" ||
+		resourceState != "reclaimable" {
+		t.Fatalf("unexpected expired start failure state: session=%s generation=%s owner=%q network=%s resource=%s",
+			sessionStatus, generationStatus, generationOwner, networkState, resourceState)
+	}
+
+	createStoreSession(t, ctx, st, "sess_expired_normal")
+	normalAllocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_expired_normal",
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       now.Add(-2 * time.Minute),
+		Config:    testAllocatorConfig(t),
+	})
+	if err != nil {
+		t.Fatalf("allocate expired ordinary generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, "sess_expired_normal", normalAllocation.GenerationID, normalAllocation.Owner, now); err == nil || !strings.Contains(err.Error(), "generation live CAS failed") {
+		t.Fatalf("expected expired live CAS failure, got %v", err)
+	}
+	if err := st.FailGeneration(ctx, FailGenerationParams{
+		SessionID:    "sess_expired_normal",
+		GenerationID: normalAllocation.GenerationID,
+		Owner:        normalAllocation.Owner,
+		ErrorClass:   "ordinary_failure",
+		Reason:       "expired",
+		Now:          now,
+	}); err == nil || !strings.Contains(err.Error(), "generation failure CAS failed") {
+		t.Fatalf("expected expired ordinary failure CAS rejection, got %v", err)
+	}
+	var normalStatus, normalOwner, normalNetwork, normalResource string
+	if err := st.db.QueryRowContext(ctx, `
+SELECT g.status, COALESCE(g.lease_owner, ''), n.allocation_state, r.resource_state
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, normalAllocation.GenerationID).Scan(&normalStatus, &normalOwner, &normalNetwork, &normalResource); err != nil {
+		t.Fatalf("query ordinary expired state: %v", err)
+	}
+	if normalStatus != "allocating" ||
+		normalOwner != normalAllocation.Owner ||
+		normalNetwork != "allocating" ||
+		normalResource != "allocating" {
+		t.Fatalf("ordinary expired helpers should not mutate state: generation=%s owner=%q network=%s resource=%s",
+			normalStatus, normalOwner, normalNetwork, normalResource)
+	}
+}
+
 func TestSessionActiveGenerationCAS(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))

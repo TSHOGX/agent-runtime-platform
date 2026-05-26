@@ -1882,6 +1882,136 @@ WHERE session_id = ?
 	}
 }
 
+func TestStartEnsuredGenerationRenewsLeaseDuringSlowPrepare(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_slow_start", string(sessionstate.Created), time.Now().UTC(), nil)
+	cfg := testServerConfig(dir)
+	cfg.Phase7.Bridge.LeaseTTL = config.Duration{Duration: 40 * time.Millisecond}
+	now := time.Now().UTC()
+	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     store.GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  cfg.Phase7.Bridge.LeaseTTL.Duration,
+		Now:       now,
+		Config:    serverTestAllocatorConfig(cfg, session.Agent),
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	rt := newBlockingPrepareRuntime()
+	t.Cleanup(rt.release)
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: rt,
+		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.startEnsuredGeneration(ctx, session, ensuredGeneration{
+			Allocation: allocation,
+			IsNew:      true,
+		}, startFailureInputAcceptable)
+	}()
+
+	select {
+	case <-rt.prepareStarted:
+	case <-time.After(time.Second):
+		t.Fatalf("prepare did not start")
+	}
+	waitForGenerationLeaseAfter(t, ctx, st, allocation.GenerationID, allocation.LeaseExpiresAt)
+	rt.release()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("start ensured generation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("start ensured generation did not finish")
+	}
+	waitForGenerationStatus(t, ctx, st, allocation.GenerationID, "idle")
+}
+
+func TestStartEnsuredGenerationDestroysRuntimeAfterOwnerLoss(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_start_owner_loss", string(sessionstate.Created), time.Now().UTC(), nil)
+	cfg := testServerConfig(dir)
+	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     store.GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    serverTestAllocatorConfig(cfg, session.Agent),
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	rt := &startHookRuntime{
+		onStart: func(req runtime.StartRequest) {
+			if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE runtime_generations
+SET lease_owner = 'other_owner',
+    lease_expires_at = ?
+WHERE generation_id = ?`, time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano), req.GenerationID); err != nil {
+				t.Fatalf("steal generation lease: %v", err)
+			}
+		},
+	}
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: rt,
+		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+
+	err = srv.startEnsuredGeneration(ctx, session, ensuredGeneration{
+		Allocation: allocation,
+		IsNew:      true,
+	}, startFailureInputAcceptable)
+	if !errors.Is(err, errGenerationStartLeaseLost) {
+		t.Fatalf("expected start lease loss, got %v", err)
+	}
+	if got := rt.runtimeDestroyRequests(); len(got) != 1 || got[0] != session.RestoreID {
+		t.Fatalf("owner loss should destroy started runtime %q, got %+v", session.RestoreID, got)
+	}
+	var status, ownerValue, errorClass, networkState, resourceState string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT g.status, COALESCE(g.lease_owner, ''), COALESCE(g.error_class, ''), n.allocation_state, r.resource_state
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&status, &ownerValue, &errorClass, &networkState, &resourceState); err != nil {
+		t.Fatalf("query generation after owner loss: %v", err)
+	}
+	if status != "idle" ||
+		ownerValue != "other_owner" ||
+		errorClass != "" ||
+		networkState != "live" ||
+		resourceState != "live" {
+		t.Fatalf("owner loss should not fail or reclaim the stolen generation: status=%s owner=%q class=%q network=%s resource=%s", status, ownerValue, errorClass, networkState, resourceState)
+	}
+	var runtimeEvents int
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM events
+WHERE session_id = ?
+  AND type = 'generation.error'`, session.ID).Scan(&runtimeEvents); err != nil {
+		t.Fatalf("count generation events: %v", err)
+	}
+	if runtimeEvents != 0 {
+		t.Fatalf("owner loss should not publish generation error events, got %d", runtimeEvents)
+	}
+}
+
 func TestRuntimeFailureClassDetectsPostStartProbeFailure(t *testing.T) {
 	cases := []string{
 		"harness-bridge-client probe exited with status 1",
@@ -3081,6 +3211,53 @@ type recordingRuntime struct {
 	checkpointErr     error
 }
 
+type blockingPrepareRuntime struct {
+	recordingRuntime
+	prepareStarted chan struct{}
+	releasePrepare chan struct{}
+	startedOnce    sync.Once
+	releaseOnce    sync.Once
+}
+
+func newBlockingPrepareRuntime() *blockingPrepareRuntime {
+	return &blockingPrepareRuntime{
+		prepareStarted: make(chan struct{}),
+		releasePrepare: make(chan struct{}),
+	}
+}
+
+func (r *blockingPrepareRuntime) PrepareGeneration(ctx context.Context, req runtime.StartRequest) (runtime.GenerationArtifacts, error) {
+	r.mu.Lock()
+	r.prepareRequests = append(r.prepareRequests, req)
+	r.mu.Unlock()
+	r.startedOnce.Do(func() { close(r.prepareStarted) })
+	select {
+	case <-r.releasePrepare:
+		return testGenerationArtifacts(), nil
+	case <-ctx.Done():
+		return runtime.GenerationArtifacts{}, ctx.Err()
+	}
+}
+
+func (r *blockingPrepareRuntime) release() {
+	r.releaseOnce.Do(func() { close(r.releasePrepare) })
+}
+
+type startHookRuntime struct {
+	recordingRuntime
+	onStart func(runtime.StartRequest)
+}
+
+func (r *startHookRuntime) Start(_ context.Context, req runtime.StartRequest, _ func(runtime.Output)) runtime.Result {
+	r.mu.Lock()
+	r.startRequests = append(r.startRequests, req)
+	r.mu.Unlock()
+	if r.onStart != nil {
+		r.onStart(req)
+	}
+	return runtime.Result{ControlManifestDigest: req.PreparedArtifacts.ManifestDigest, RunscVersion: req.PreparedArtifacts.RunscVersion}
+}
+
 func (r *recordingRuntime) PrepareGeneration(_ context.Context, req runtime.StartRequest) (runtime.GenerationArtifacts, error) {
 	r.mu.Lock()
 	r.prepareRequests = append(r.prepareRequests, req)
@@ -3618,6 +3795,30 @@ func waitForGenerationStatus(t *testing.T, ctx context.Context, st *store.Store,
 		t.Fatalf("query final generation status: %v", err)
 	}
 	t.Fatalf("generation did not reach %s: got %s", want, got)
+}
+
+func waitForGenerationLeaseAfter(t *testing.T, ctx context.Context, st *store.Store, generationID string, after time.Time) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		var raw string
+		if err := st.DBForTest().QueryRowContext(ctx, `SELECT lease_expires_at FROM runtime_generations WHERE generation_id = ?`, generationID).Scan(&raw); err != nil {
+			t.Fatalf("query generation lease: %v", err)
+		}
+		if got, err := time.Parse(time.RFC3339Nano, raw); err == nil && got.After(after) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("context canceled before generation lease renewed")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	var raw string
+	if err := st.DBForTest().QueryRowContext(ctx, `SELECT lease_expires_at FROM runtime_generations WHERE generation_id = ?`, generationID).Scan(&raw); err != nil {
+		t.Fatalf("query final generation lease: %v", err)
+	}
+	t.Fatalf("generation %s lease was not renewed after %s: got %s", generationID, after, raw)
 }
 
 func waitForEventIDs(t *testing.T, ctx context.Context, st *store.Store, want []int64) {
