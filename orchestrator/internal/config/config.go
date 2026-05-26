@@ -426,9 +426,6 @@ func validatePhase7Config(cfg Phase7Config) error {
 	if pool.Bits() > 30 {
 		return fmt.Errorf("harness.network.cidr_pool prefix length must be <= 30")
 	}
-	if capacity := cidrPool30Capacity(pool); uint64(cfg.MaxSessions) >= capacity {
-		return fmt.Errorf("harness.max_sessions %d must be less than /30 capacity %d for harness.network.cidr_pool", cfg.MaxSessions, capacity)
-	}
 	if len(cfg.Network.Egress.DorisFEHosts) == 0 {
 		return fmt.Errorf("harness.network.egress.doris_fe_hosts must be non-empty")
 	}
@@ -560,14 +557,6 @@ func validateSecretsRoot(cfg SecretsConfig) error {
 		return fmt.Errorf("harness.secrets.root %q must have group %d, got %d", cfg.Root, cfg.ReadersGID, stat.Gid)
 	}
 	return nil
-}
-
-func cidrPool30Capacity(prefix netip.Prefix) uint64 {
-	bits := prefix.Addr().BitLen()
-	if prefix.Bits() > 30 || bits < 30 {
-		return 0
-	}
-	return uint64(1) << uint(30-prefix.Bits())
 }
 
 func anyHostname(groups ...[]string) bool {

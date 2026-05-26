@@ -48,7 +48,7 @@ Useful environment variables:
 - `HARNESS_BUNDLE_ROOT` defaults to `<repo>/bundle/out`.
 - `HARNESS_DB_PATH` defaults to `<sessions_root>/orchestrator.db`.
 - `HARNESS_DEFAULT_AGENT` defaults to `claude`.
-- `HARNESS_MAX_SESSIONS` defaults to `30`.
+- `HARNESS_MAX_SESSIONS` defaults to `30` and caps non-terminal sessions, not live `/30` slots.
 - `RUNSC_ROOT` defaults to `/var/lib/harness/runsc`.
 - `HARNESS_RESTORE_SCRIPT` is loaded for compatibility, but the current direct `runsc` path does not execute it.
 
@@ -103,6 +103,8 @@ harness:
 
 The loader uses strict YAML decoding for the Phase 7 `harness:` schema. Legacy files containing only top-level `runtime:` / `claude:` sections still load during the cutover, but mixing them with `harness:` is rejected.
 
+With `session_retention: 0s`, retained non-terminal sessions keep counting toward `max_sessions` even after runtime resources are retired. The `/api/quota` response reports the session ceiling and live `/30` pool ceiling separately. Use `DELETE /api/sessions/<id>` to close sessions and free session quota; close preserves messages, artifacts, workspace, and agent-home paths while reclaiming runtime resources.
+
 The runtime currently launches `runsc` directly in sandbox mode and keeps containers alive across turns. Each generation gets its own network profile, netns/veth pair, `/30`, generated runtime spec, control manifest, and file-queue bridge. Automatic idle checkpointing is a per-session policy: the checked-in default is off, `HARNESS_AUTO_CHECKPOINT_ENABLED=true` enables the policy for newly created sessions, and only the next idle generation with an empty turn queue plus fresh bridge heartbeat/checkpoint-ready markers can checkpoint. `Shell` sessions use the PTY-backed shell shim and can be interrupted with `POST /api/sessions/<id>/interrupt`. `bundle/restore-sandbox.sh` is still useful as a smoke-test boundary, but it is not the main request path anymore.
 
 ## Event Streams
@@ -114,6 +116,7 @@ The runtime currently launches `runsc` directly in sandbox mode and keeps contai
 ## Session Control
 
 - `POST /api/sessions/<id>/interrupt` - interrupt a running shell session
+- `DELETE /api/sessions/<id>` - close a session, preserve history/workspace state, and reclaim runtime resources
 
 ## Curl Smoke Test
 

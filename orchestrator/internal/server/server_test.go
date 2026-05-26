@@ -104,6 +104,114 @@ func TestCreateSessionSoftLimitUsesPoolExhaustedEnvelope(t *testing.T) {
 	}
 }
 
+func TestCloseSessionReleasesSoftLimitWithoutDeletingHistory(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	cfg := testServerConfig(dir)
+	cfg.SessionRetention = 0
+	cfg.MaxSessions = 1
+	cfg.Phase7.MaxSessions = 1
+	now := time.Now().UTC()
+	oldSession := store.Session{
+		ID:                "sess_retained",
+		UserID:            labUserID,
+		Status:            string(sessionstate.Created),
+		Agent:             "claude",
+		Workspace:         filepath.Join(cfg.SessionsRoot, "sess_retained"),
+		AgentHomePath:     filepath.Join(dir, "agent-homes", "sess_retained"),
+		RestoreID:         "phase3-sess_retained",
+		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
+	if err := os.MkdirAll(oldSession.Workspace, 0o755); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	if err := os.MkdirAll(oldSession.AgentHomePath, 0o755); err != nil {
+		t.Fatalf("create agent home: %v", err)
+	}
+	if err := st.CreateSession(ctx, oldSession); err != nil {
+		t.Fatalf("create retained session: %v", err)
+	}
+	if _, err := st.AddMessage(ctx, oldSession.ID, "user", "keep this"); err != nil {
+		t.Fatalf("add message: %v", err)
+	}
+	if err := st.UpsertArtifact(ctx, store.Artifact{
+		SessionID: oldSession.ID,
+		Path:      "report.txt",
+		Size:      12,
+		ModTime:   now,
+	}); err != nil {
+		t.Fatalf("upsert artifact: %v", err)
+	}
+
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: runtime.New(runtime.Config{}),
+		watcher: artifacts.New(cfg.SessionsRoot, st, events.NewHub(), slog.Default()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(`{"agent":"claude"}`))
+	rec := httptest.NewRecorder()
+	srv.createSession(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected quota rejection before close, got %d body %s", rec.Code, rec.Body.String())
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/sessions/"+oldSession.ID, nil)
+	deleteRec := httptest.NewRecorder()
+	srv.destroySession(deleteRec, deleteReq, oldSession.ID)
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("expected close status 200, got %d body %s", deleteRec.Code, deleteRec.Body.String())
+	}
+
+	createReq := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(`{"agent":"claude"}`))
+	createRec := httptest.NewRecorder()
+	srv.createSession(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("expected create after close, got %d body %s", createRec.Code, createRec.Body.String())
+	}
+
+	closed, err := st.GetSession(ctx, oldSession.ID)
+	if err != nil {
+		t.Fatalf("get closed session: %v", err)
+	}
+	if closed.Status != string(sessionstate.Destroyed) ||
+		closed.Workspace != oldSession.Workspace ||
+		closed.AgentHomePath != oldSession.AgentHomePath {
+		t.Fatalf("closed session should preserve terminal state and paths: %+v", closed)
+	}
+	if _, err := os.Stat(oldSession.Workspace); err != nil {
+		t.Fatalf("workspace should remain after close: %v", err)
+	}
+	if _, err := os.Stat(oldSession.AgentHomePath); err != nil {
+		t.Fatalf("agent home should remain after close: %v", err)
+	}
+	messages, err := st.ListMessages(ctx, oldSession.ID)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	if len(messages) != 1 || messages[0].Content != "keep this" {
+		t.Fatalf("expected retained message, got %+v", messages)
+	}
+	artifacts, err := st.ListArtifacts(ctx, oldSession.ID)
+	if err != nil {
+		t.Fatalf("list artifacts: %v", err)
+	}
+	if len(artifacts) != 1 || artifacts[0].Path != "report.txt" {
+		t.Fatalf("expected retained artifact, got %+v", artifacts)
+	}
+}
+
 func TestCreateSessionUsesNullExpiryWhenSessionRetentionDisabled(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -1610,9 +1718,11 @@ func TestGetQuotaReportsSessionAndPoolCeilings(t *testing.T) {
 		body["active_sessions"] != 1 ||
 		body["live_pool_ceiling"] != 2 ||
 		body["allocated_pool_slots"] != 1 ||
-		body["remaining_pool_slots"] != 1 ||
-		body["effective_ceiling"] != 2 {
+		body["remaining_pool_slots"] != 1 {
 		t.Fatalf("unexpected quota body for allocation %s: %+v", allocation.GenerationID, body)
+	}
+	if _, ok := body["effective_ceiling"]; ok {
+		t.Fatalf("quota should report session and pool ceilings separately without effective_ceiling: %+v", body)
 	}
 }
 

@@ -19,7 +19,7 @@ harness:
   session_retention: 0s                    # session row/history/workspace retention;
                                            # 0s means no automatic session expiry
   max_sessions: 30                         # soft policy ceiling reported by /api/quota;
-                                           # must be < CIDR pool /30 capacity
+                                           # counts non-terminal sessions, not live /30s
 
   network:
     cidr_pool: 10.200.0.0/16               # pool from which /30 per-generation
@@ -84,9 +84,11 @@ The per-generation roots are derived from `harness.run_dir`, not configured sepa
 Enforced by the loader, asserted by unit tests:
 
 ```text
-- harness.network.cidr_pool must be a valid CIDR with prefix length <=
-  30 and must be wide enough to host harness.max_sessions /30 slots
-  (loader rejects if max_sessions exceeds the pool's /30 count).
+- harness.network.cidr_pool must be a valid IPv4 CIDR with prefix length <=
+  30. The loader does not compare it to harness.max_sessions; /30 pool
+  exhaustion is an allocation-time condition.
+- harness.max_sessions must be > 0. It is a non-terminal session ceiling,
+  independent from the live runtime /30 pool capacity.
 - harness.session_retention must be >= 0. `0s` leaves `sessions.expires_at`
   NULL and disables automatic session expiry; positive values set an absolute
   retention deadline when the session is created.

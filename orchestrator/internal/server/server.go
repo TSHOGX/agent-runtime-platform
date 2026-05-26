@@ -233,17 +233,12 @@ func (s *Server) getQuota(w http.ResponseWriter, r *http.Request) {
 	if remainingPoolSlots < 0 {
 		remainingPoolSlots = 0
 	}
-	effectiveCeiling := s.cfg.MaxSessions
-	if poolCeiling < effectiveCeiling {
-		effectiveCeiling = poolCeiling
-	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"soft_session_ceiling": s.cfg.MaxSessions,
 		"active_sessions":      activeSessions,
 		"live_pool_ceiling":    poolCeiling,
 		"allocated_pool_slots": resourceQuota.AllocatedPoolSlots,
 		"remaining_pool_slots": remainingPoolSlots,
-		"effective_ceiling":    effectiveCeiling,
 	})
 }
 

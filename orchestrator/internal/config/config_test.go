@@ -258,14 +258,6 @@ func TestValidatePhase7Config(t *testing.T) {
 			want: "harness.network.cidr_pool prefix length must be <= 30",
 		},
 		{
-			name: "cidr capacity",
-			mutate: func(cfg *Phase7Config) {
-				cfg.MaxSessions = 1
-				cfg.Network.CIDRPool.Prefix = netip.MustParsePrefix("10.0.0.0/30")
-			},
-			want: "must be less than /30 capacity",
-		},
-		{
 			name: "missing doris hosts",
 			mutate: func(cfg *Phase7Config) {
 				cfg.Network.Egress.DorisFEHosts = nil
@@ -553,6 +545,19 @@ func TestValidatePhase7ConfigAllowsZeroSessionRetention(t *testing.T) {
 	}
 }
 
+func TestValidatePhase7ConfigAllowsMaxSessionsAboveCIDRCapacity(t *testing.T) {
+	dir := t.TempDir()
+	cfg := defaultPhase7Config()
+	cfg.MaxSessions = 10
+	cfg.Network.CIDRPool.Prefix = netip.MustParsePrefix("10.0.0.0/30")
+	cfg.Secrets.Root = prepareSecretsRoot(t, dir, 1234)
+	cfg.Secrets.ReadersGID = 1234
+
+	if err := validatePhase7Config(cfg); err != nil {
+		t.Fatalf("max_sessions should be independent from /30 capacity: %v", err)
+	}
+}
+
 func TestSessionRetentionEnvRejectsObsoleteSessionTTL(t *testing.T) {
 	unsetEnvForTest(t, "HARNESS_SESSION_RETENTION")
 	t.Setenv("HARNESS_SESSION_TTL", "2h")
@@ -735,10 +740,11 @@ func TestLoadValidatesMergedPhase7Config(t *testing.T) {
 			t.Fatalf("restore wd: %v", err)
 		}
 	})
-	t.Setenv("HARNESS_MAX_SESSIONS", "2")
+	unsetEnvForTest(t, "HARNESS_SESSION_TTL")
+	t.Setenv("HARNESS_SESSION_RETENTION", "-1s")
 
 	_, err = Load()
-	if err == nil || !strings.Contains(err.Error(), "must be less than /30 capacity") {
+	if err == nil || !strings.Contains(err.Error(), "harness.session_retention must be >= 0") {
 		t.Fatalf("expected merged validation error, got %v", err)
 	}
 }

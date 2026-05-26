@@ -233,7 +233,7 @@ Orchestrator:
 | `HARNESS_BUNDLE_ROOT` | `<repo>/bundle/out` | OCI bundle root |
 | `HARNESS_DB_PATH` | `<sessions_root>/orchestrator.db` | SQLite DB path |
 | `HARNESS_DEFAULT_AGENT` | `claude` | Default session agent |
-| `HARNESS_MAX_SESSIONS` | `harness.max_sessions` (`30`) | Active session cap |
+| `HARNESS_MAX_SESSIONS` | `harness.max_sessions` (`30`) | Non-terminal session ceiling; independent of live `/30` capacity |
 | `RUNSC_ROOT` | `/var/lib/harness/runsc` | runsc state root |
 
 `HARNESS_RESTORE_SCRIPT` is still parsed by config for compatibility, but the current direct `runsc` path does not execute the script.
@@ -247,6 +247,8 @@ Project config:
 The config loader reads `config/harness.yaml` through a strict `gopkg.in/yaml.v3` decoder. The primary shape is the Phase 7 `harness:` schema: `run_dir`, `session_retention`, `max_sessions`, nested network egress, event retention, probe status, bridge lease, reaper, and secret-root settings are decoded into typed config and validated before startup. Legacy files containing only top-level `runtime:` / `claude:` sections still load during the cutover, but mixing legacy sections with `harness:` is rejected.
 
 General orchestrator paths such as session roots and DB path still use the environment variables above. `HARNESS_SESSION_RETENTION` and `HARNESS_MAX_SESSIONS` override their `harness:` values and are revalidated against the Phase 7 schema. `HARNESS_SESSION_TTL` is obsolete and fails startup if present so deployments do not silently switch to no-expiry retention.
+
+With `session_retention: 0s`, sessions, messages, artifacts, workspaces, and agent-home paths do not expire automatically. `harness.max_sessions` still counts non-terminal sessions (`created`, `running_active`, `running_idle`, `checkpointing`, `checkpointed`) rather than live gVisor resources, so it is not validated against the configured `/30` pool. `GET /api/quota` reports `soft_session_ceiling` and `live_pool_ceiling` separately. Operators should close sessions explicitly with `DELETE /api/sessions/{id}` to free session quota; close preserves history and workspace state while reclaiming runtime resources.
 
 Current `config/harness.yaml` values:
 
