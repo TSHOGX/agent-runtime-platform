@@ -315,6 +315,76 @@ func TestCleanupExitedContainerDoesNotRemoveReplacement(t *testing.T) {
 	}
 }
 
+func TestRuntimeStartDoesNotReuseContainerForDifferentGeneration(t *testing.T) {
+	rt := New(Config{DefaultAgent: "claude"})
+	stdin := &recordingWriteCloser{}
+	canceled := make(chan struct{})
+	rt.containers["sess_1"] = &Container{
+		SessionID:    "sess_1",
+		GenerationID: "gen_old",
+		RestoreID:    "phase3-sess_1",
+		Agent:        "claude",
+		Stdin:        stdin,
+		OutputHub:    NewOutputHub(),
+		Cancel:       func() { close(canceled) },
+	}
+
+	res := rt.Start(context.Background(), StartRequest{
+		SessionID:    "sess_1",
+		GenerationID: "gen_new",
+		Agent:        "claude",
+		FirstMessage: "hello stale generation",
+		WaitForTurn:  true,
+		Done:         closedDone(),
+		Generation: store.RuntimeGenerationDetails{
+			SessionID:    "sess_1",
+			GenerationID: "gen_new",
+		},
+	}, nil)
+	if res.Err == nil || !strings.Contains(res.Err.Error(), "generation resource paths are required") {
+		t.Fatalf("expected cold-start validation error after stale container eviction, got %v", res.Err)
+	}
+	select {
+	case <-canceled:
+	default:
+		t.Fatal("stale generation container was not canceled")
+	}
+	if _, exists := rt.containers["sess_1"]; exists {
+		t.Fatalf("stale generation container remains in runtime map")
+	}
+	stdin.mu.Lock()
+	written := stdin.buf.String()
+	stdin.mu.Unlock()
+	if written != "" {
+		t.Fatalf("message was written to stale generation stdin: %q", written)
+	}
+}
+
+func TestEvictContainerByRestoreIDCancelsAndRemovesMatchingContainer(t *testing.T) {
+	rt := New(Config{})
+	canceled := make(chan struct{})
+	rt.containers["sess_1"] = &Container{
+		SessionID: "sess_1",
+		RestoreID: "phase3-sess_1",
+		Cancel:    func() { close(canceled) },
+	}
+	rt.containers["sess_2"] = &Container{SessionID: "sess_2", RestoreID: "phase3-sess_2"}
+
+	rt.evictContainerByRestoreID("phase3-sess_1")
+
+	select {
+	case <-canceled:
+	default:
+		t.Fatal("matching restore container was not canceled")
+	}
+	if _, exists := rt.containers["sess_1"]; exists {
+		t.Fatal("matching restore container remains in runtime map")
+	}
+	if _, exists := rt.containers["sess_2"]; !exists {
+		t.Fatal("non-matching restore container was removed")
+	}
+}
+
 func TestCheckpointRequiresGenerationIdentity(t *testing.T) {
 	rt := New(Config{})
 	rt.containers["sess_1"] = &Container{SessionID: "sess_1", GenerationID: "gen_a", RestoreID: "phase3-sess_1"}

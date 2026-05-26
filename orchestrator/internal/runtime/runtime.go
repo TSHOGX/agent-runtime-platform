@@ -268,10 +268,13 @@ func (r *Runtime) Start(ctx context.Context, req StartRequest, output func(Outpu
 	r.mu.RUnlock()
 
 	if exists {
-		if !req.WaitForTurn {
-			return Result{}
+		if container.GenerationID == req.GenerationID {
+			if !req.WaitForTurn {
+				return Result{}
+			}
+			return r.sendMessage(ctx, container, req.FirstMessage, req.Done, output)
 		}
-		return r.sendMessage(ctx, container, req.FirstMessage, req.Done, output)
+		r.stopContainer(container)
 	}
 
 	if req.RestoreFromCheckpoint {
@@ -347,6 +350,7 @@ func (r *Runtime) Destroy(ctx context.Context, restoreID string) error {
 	if err := r.deleteRunscContainer(ctx, restoreID); err != nil {
 		return fmt.Errorf("runsc delete %s: %w", restoreID, err)
 	}
+	r.evictContainerByRestoreID(restoreID)
 	return nil
 }
 
@@ -661,8 +665,27 @@ func (r *Runtime) cleanupExitedContainer(container *Container) {
 
 func (r *Runtime) stopContainer(container *Container) {
 	r.removeContainer(container)
-	container.Cancel()
+	if container.Cancel != nil {
+		container.Cancel()
+	}
 	r.cleanupRunscContainer(context.Background(), container.RestoreID)
+}
+
+func (r *Runtime) evictContainerByRestoreID(restoreID string) {
+	var evicted []*Container
+	r.mu.Lock()
+	for sessionID, container := range r.containers {
+		if container.RestoreID == restoreID {
+			delete(r.containers, sessionID)
+			evicted = append(evicted, container)
+		}
+	}
+	r.mu.Unlock()
+	for _, container := range evicted {
+		if container.Cancel != nil {
+			container.Cancel()
+		}
+	}
 }
 
 func (r *Runtime) readRestoreMS(sessionID string) *int64 {
