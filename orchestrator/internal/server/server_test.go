@@ -1138,6 +1138,88 @@ WHERE id = ?`, turnID).Scan(&queuedStatus); err != nil {
 	}
 }
 
+func TestRunPhase7MaintenanceRetiresExpiredCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_retire_checkpoint", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
+	cfg := testServerConfig(dir)
+	cfg.Phase7.Reaper.CheckpointImageRetention = config.Duration{Duration: 0}
+	cfg.Phase7.Reaper.FailedRetention = config.Duration{Duration: time.Hour}
+	allocation := prepareServerIdleGeneration(t, ctx, st, cfg, owner.UUID, session.ID)
+	checkpointedAt := time.Now().UTC().Add(-2 * time.Hour)
+	markServerGenerationCheckpointed(t, ctx, st, session.ID, allocation.GenerationID, checkpointedAt)
+	checkpointPath := filepath.Join(dir, "checkpoint", session.ID)
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE sessions
+SET checkpoint_path = ?,
+    restore_ms = 99,
+    last_activity_at = ?
+WHERE id = ?`, checkpointPath, checkpointedAt.Format(time.RFC3339Nano), session.ID); err != nil {
+		t.Fatalf("seed checkpoint session metadata: %v", err)
+	}
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE runtime_generation_resources
+SET checkpoint_path = ?
+WHERE generation_id = ?`, checkpointPath, allocation.GenerationID); err != nil {
+		t.Fatalf("seed checkpoint resource path: %v", err)
+	}
+
+	hub := events.NewHub()
+	eventsCh, cancelEvents := hub.Subscribe(session.ID)
+	defer cancelEvents()
+	rt := &recordingRuntime{}
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: rt,
+		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, hub, slog.Default()),
+		hub:     hub,
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() {
+		done <- srv.RunPhase7Maintenance(runCtx)
+	}()
+	event := waitForHubEvent(t, eventsCh, "session.checkpoint_retired")
+	waitForGenerationResourceStates(t, runCtx, st, allocation.GenerationID, "destroyed", "destroyed")
+	cancel()
+	err := <-done
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("maintenance exit err=%v, want context canceled", err)
+	}
+	payload, ok := event.Payload.(json.RawMessage)
+	if !ok || !strings.Contains(string(payload), `"checkpoint_path":null`) || !strings.Contains(string(payload), `"restore_ms":null`) {
+		t.Fatalf("unexpected checkpoint retirement event payload: %#v", event.Payload)
+	}
+
+	gotSession, err := st.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("get retired session: %v", err)
+	}
+	if gotSession.Status != string(sessionstate.RunningIdle) || gotSession.CheckpointPath != "" || gotSession.RestoreMS != nil {
+		t.Fatalf("unexpected retired session: %+v", gotSession)
+	}
+	var generationStatus, generationError, networkState, resourceState string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT g.status, COALESCE(g.error_class, ''), n.allocation_state, r.resource_state
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &generationError, &networkState, &resourceState); err != nil {
+		t.Fatalf("query retired generation: %v", err)
+	}
+	if generationStatus != "failed" || generationError != "checkpoint_retired" || networkState != "destroyed" || resourceState != "destroyed" {
+		t.Fatalf("unexpected retired generation: status=%s error=%s network=%s resource=%s", generationStatus, generationError, networkState, resourceState)
+	}
+	destroyRequests := rt.destroyGenerationRequests()
+	if len(destroyRequests) != 1 || destroyRequests[0].GenerationID != allocation.GenerationID {
+		t.Fatalf("unexpected destroy generation requests: %+v", destroyRequests)
+	}
+}
+
 func TestGetQuotaReportsSessionAndPoolCeilings(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -1877,6 +1959,7 @@ func TestRunPhase7MaintenancePublishesBridgeOutputAndCompletion(t *testing.T) {
 		done <- srv.RunPhase7Maintenance(runCtx)
 	}()
 	waitForSessionStatus(t, runCtx, st, session.ID, string(sessionstate.RunningIdle))
+	waitForHubEvent(t, eventsCh, bridge.TypeAckTurnCompleted)
 	cancel()
 	err = <-done
 	if !errors.Is(err, context.Canceled) {
@@ -1895,9 +1978,6 @@ WHERE session_id = ?
 	}
 	if assistantMessages != 1 {
 		t.Fatalf("assistant messages=%d want 1", assistantMessages)
-	}
-	if !drainHasEvent(eventsCh, bridge.TypeAckTurnCompleted) {
-		t.Fatalf("missing durable completion hub event")
 	}
 }
 
@@ -2891,6 +2971,34 @@ func waitForSessionStatus(t *testing.T, ctx context.Context, st *store.Store, se
 	}
 	data, _ := json.Marshal(got)
 	t.Fatalf("session did not reach %s: %s", want, data)
+}
+
+func waitForGenerationResourceStates(t *testing.T, ctx context.Context, st *store.Store, generationID, wantNetwork, wantResource string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		var networkState, resourceState string
+		if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT n.allocation_state, r.resource_state
+FROM network_profiles n
+JOIN runtime_generation_resources r ON r.generation_id = n.generation_id
+WHERE n.generation_id = ?`, generationID).Scan(&networkState, &resourceState); err != nil {
+			t.Fatalf("query generation resource states: %v", err)
+		}
+		if networkState == wantNetwork && resourceState == wantResource {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	var networkState, resourceState string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT n.allocation_state, r.resource_state
+FROM network_profiles n
+JOIN runtime_generation_resources r ON r.generation_id = n.generation_id
+WHERE n.generation_id = ?`, generationID).Scan(&networkState, &resourceState); err != nil {
+		t.Fatalf("query final generation resource states: %v", err)
+	}
+	t.Fatalf("generation %s resource states did not reach %s/%s: network=%s resource=%s", generationID, wantNetwork, wantResource, networkState, resourceState)
 }
 
 func waitForCheckpointRequests(t *testing.T, ctx context.Context, rt *recordingRuntime, want int) {

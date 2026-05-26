@@ -99,6 +99,7 @@ const SSE_TYPED_EVENT_TYPES = [
   "system.status",
   "session.error",
   "generation.error",
+  "session.checkpoint_retired",
   "artifact.updated",
   "artifact.deleted",
   "ack_turn_started",
@@ -424,6 +425,37 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
               ...p.conversations,
               [sessionId]: { ...ensureConvo(p.conversations, sessionId)[sessionId], streaming: [] }
             }
+          }));
+          return;
+        }
+        case "session.checkpoint_retired": {
+          if (!sessionId || !isRecord(event.payload)) return;
+          const rawSessionStatus = event.payload.session_status;
+          const sessionStatus =
+            typeof rawSessionStatus === "string" && SESSION_EVENT_STATUSES.has(rawSessionStatus as SessionStatus)
+              ? (rawSessionStatus as SessionStatus)
+              : "running_idle";
+          const updatedAt =
+            typeof event.payload.session_updated_at === "string" ? event.payload.session_updated_at : time;
+          const activeGenerationId =
+            typeof event.payload.active_generation_id === "string" ? event.payload.active_generation_id : undefined;
+          const lastActivityAt =
+            typeof event.payload.session_last_activity_at === "string" ? event.payload.session_last_activity_at : null;
+          setState((p) => ({
+            ...p,
+            sessions: p.sessions.map((s) =>
+              s.id === sessionId
+                ? {
+                    ...s,
+                    status: sessionStatus,
+                    updated_at: updatedAt,
+                    active_generation_id: activeGenerationId ?? s.active_generation_id,
+                    last_activity_at: lastActivityAt,
+                    checkpoint_path: null,
+                    restore_ms: null
+                  }
+                : s
+            )
           }));
           return;
         }

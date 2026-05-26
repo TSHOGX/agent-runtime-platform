@@ -1521,6 +1521,155 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &se
 	}
 }
 
+func TestRetireExpiredCheckpointsClearsSessionAndMakesGenerationDestroyable(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	cfg := testAllocatorConfig(t)
+	now := time.Now().UTC()
+	allocation := createAutoCheckpointGeneration(t, ctx, st, cfg, "sess_retire_checkpoint", GenerationLeaseOwner(owner.UUID), now.Add(-48*time.Hour))
+	checkpointedGeneration(t, ctx, st, "sess_retire_checkpoint", allocation.GenerationID, now.Add(-36*time.Hour))
+	checkpointPath := filepath.Join(t.TempDir(), "checkpoint")
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE sessions
+SET checkpoint_path = ?,
+    restore_ms = 123,
+    last_activity_at = ?
+WHERE id = ?`, checkpointPath, formatTime(now.Add(-30*time.Hour)), "sess_retire_checkpoint"); err != nil {
+		t.Fatalf("seed session checkpoint metadata: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_generation_resources
+SET checkpoint_path = ?
+WHERE generation_id = ?`, checkpointPath, allocation.GenerationID); err != nil {
+		t.Fatalf("seed resource checkpoint path: %v", err)
+	}
+
+	normal := createAutoCheckpointGeneration(t, ctx, st, cfg, "sess_recent_failed", GenerationLeaseOwner(owner.UUID), now.Add(-30*time.Minute))
+	if err := st.FailGeneration(ctx, FailGenerationParams{
+		SessionID:    "sess_recent_failed",
+		GenerationID: normal.GenerationID,
+		Owner:        normal.Owner,
+		ErrorClass:   "recent_failure",
+		Reason:       "recent failure",
+		Now:          now,
+	}); err != nil {
+		t.Fatalf("fail recent generation: %v", err)
+	}
+
+	retired, err := st.RetireExpiredCheckpoints(ctx, RetireExpiredCheckpointsParams{
+		OwnerUUID:                owner.UUID,
+		Now:                      now,
+		CheckpointImageRetention: 24 * time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("retire expired checkpoints: %v", err)
+	}
+	if len(retired) != 1 || retired[0].SessionID != "sess_retire_checkpoint" || retired[0].GenerationID != allocation.GenerationID || retired[0].EventID == 0 {
+		t.Fatalf("unexpected retired checkpoints: %+v", retired)
+	}
+
+	var generationStatus, generationError, sessionStatus, networkState, resourceState string
+	var sessionCheckpointPath, sessionRestoreMS sql.NullString
+	if err := st.db.QueryRowContext(ctx, `
+SELECT g.status, COALESCE(g.error_class, ''), s.status, s.checkpoint_path, s.restore_ms,
+       n.allocation_state, r.resource_state
+FROM runtime_generations g
+JOIN sessions s ON s.active_generation_id = g.generation_id
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, allocation.GenerationID).Scan(
+		&generationStatus,
+		&generationError,
+		&sessionStatus,
+		&sessionCheckpointPath,
+		&sessionRestoreMS,
+		&networkState,
+		&resourceState,
+	); err != nil {
+		t.Fatalf("query retired checkpoint state: %v", err)
+	}
+	if generationStatus != "failed" ||
+		generationError != "checkpoint_retired" ||
+		sessionStatus != string(sessionstate.RunningIdle) ||
+		sessionCheckpointPath.Valid ||
+		sessionRestoreMS.Valid ||
+		networkState != "reclaimable" ||
+		resourceState != "reclaimable" {
+		t.Fatalf("unexpected retired checkpoint state: generation=%s error=%s session=%s checkpoint_valid=%v restore_valid=%v network=%s resource=%s",
+			generationStatus, generationError, sessionStatus, sessionCheckpointPath.Valid, sessionRestoreMS.Valid, networkState, resourceState)
+	}
+	var eventType, eventPayload string
+	if err := st.db.QueryRowContext(ctx, `SELECT type, payload FROM events WHERE event_id = ?`, retired[0].EventID).Scan(&eventType, &eventPayload); err != nil {
+		t.Fatalf("query retirement event: %v", err)
+	}
+	if eventType != "session.checkpoint_retired" ||
+		!strings.Contains(eventPayload, `"checkpoint_path":null`) ||
+		!strings.Contains(eventPayload, `"restore_ms":null`) ||
+		!strings.Contains(eventPayload, `"session_status":"running_idle"`) {
+		t.Fatalf("unexpected retirement event: type=%s payload=%s", eventType, eventPayload)
+	}
+
+	destroyable, err := st.ListDestroyableReclaimableGenerations(ctx, now, time.Hour)
+	if err != nil {
+		t.Fatalf("list destroyable generations: %v", err)
+	}
+	if !hasReclaimableGeneration(destroyable, "sess_retire_checkpoint", allocation.GenerationID) {
+		t.Fatalf("checkpoint-retired generation should be immediately destroyable: %+v", destroyable)
+	}
+	if hasReclaimableGeneration(destroyable, "sess_recent_failed", normal.GenerationID) {
+		t.Fatalf("recent ordinary failed generation should still honor failed_retention: %+v", destroyable)
+	}
+}
+
+func TestRetireExpiredCheckpointsUsesCheckpointCreatedFallbackAndChecksOwner(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	cfg := testAllocatorConfig(t)
+	now := time.Now().UTC()
+	old := createAutoCheckpointGeneration(t, ctx, st, cfg, "sess_retire_null_activity", GenerationLeaseOwner(owner.UUID), now.Add(-3*time.Hour))
+	checkpointedGeneration(t, ctx, st, "sess_retire_null_activity", old.GenerationID, now.Add(-2*time.Hour))
+	young := createAutoCheckpointGeneration(t, ctx, st, cfg, "sess_keep_null_activity", GenerationLeaseOwner(owner.UUID), now.Add(-30*time.Minute))
+	checkpointedGeneration(t, ctx, st, "sess_keep_null_activity", young.GenerationID, now.Add(-30*time.Minute))
+	for _, sessionID := range []string{"sess_retire_null_activity", "sess_keep_null_activity"} {
+		if _, err := st.db.ExecContext(ctx, `
+UPDATE sessions
+SET last_activity_at = NULL,
+    checkpoint_path = ?
+WHERE id = ?`, filepath.Join(t.TempDir(), sessionID, "checkpoint"), sessionID); err != nil {
+			t.Fatalf("clear last activity for %s: %v", sessionID, err)
+		}
+	}
+	if _, err := st.RetireExpiredCheckpoints(ctx, RetireExpiredCheckpointsParams{
+		OwnerUUID:                "wrong-owner",
+		Now:                      now,
+		CheckpointImageRetention: time.Hour,
+	}); err == nil {
+		t.Fatalf("owner mismatch should reject checkpoint retirement")
+	}
+	retired, err := st.RetireExpiredCheckpoints(ctx, RetireExpiredCheckpointsParams{
+		OwnerUUID:                owner.UUID,
+		Now:                      now,
+		CheckpointImageRetention: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("retire expired checkpoints: %v", err)
+	}
+	if len(retired) != 1 || retired[0].SessionID != "sess_retire_null_activity" {
+		t.Fatalf("unexpected fallback-anchor retirements: %+v", retired)
+	}
+	oldSession, err := st.GetSession(ctx, "sess_retire_null_activity")
+	if err != nil {
+		t.Fatalf("get old session: %v", err)
+	}
+	youngSession, err := st.GetSession(ctx, "sess_keep_null_activity")
+	if err != nil {
+		t.Fatalf("get young session: %v", err)
+	}
+	if oldSession.Status != string(sessionstate.RunningIdle) || youngSession.Status != string(sessionstate.Checkpointed) {
+		t.Fatalf("unexpected fallback-anchor statuses: old=%s young=%s", oldSession.Status, youngSession.Status)
+	}
+}
+
 func TestSweepExpiredSessionsDestroysAndRejectsInputState(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
@@ -1985,6 +2134,15 @@ WHERE generation_id = ?`, generationID); err != nil {
 	if err := st.UpdateSessionStatus(ctx, sessionID, string(sessionstate.Checkpointed), nil); err != nil {
 		t.Fatalf("set checkpointed session: %v", err)
 	}
+}
+
+func hasReclaimableGeneration(generations []ReclaimableGeneration, sessionID, generationID string) bool {
+	for _, generation := range generations {
+		if generation.SessionID == sessionID && generation.GenerationID == generationID {
+			return true
+		}
+	}
+	return false
 }
 
 func openOwnedStore(t *testing.T, ctx context.Context) (*Store, *OwnerLock) {

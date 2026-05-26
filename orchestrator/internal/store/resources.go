@@ -165,6 +165,18 @@ type ReaperResult struct {
 	DestroyedAllocations    int64
 }
 
+type RetireExpiredCheckpointsParams struct {
+	OwnerUUID                string
+	Now                      time.Time
+	CheckpointImageRetention time.Duration
+}
+
+type RetiredCheckpoint struct {
+	SessionID    string
+	GenerationID string
+	EventID      int64
+}
+
 type ReclaimableGeneration struct {
 	SessionID    string
 	GenerationID string
@@ -734,10 +746,10 @@ FROM network_profiles n
 JOIN runtime_generation_resources r ON r.generation_id = n.generation_id
 JOIN runtime_generations g ON g.generation_id = n.generation_id
 WHERE n.allocation_state = 'reclaimable'
-  AND n.netns_name LIKE 'harness-gen-%'
   AND r.resource_state = 'reclaimable'
   AND (
     g.status != 'failed'
+    OR COALESCE(g.error_class, '') = 'checkpoint_retired'
     OR (g.ended_at IS NOT NULL AND g.ended_at <= ?)
   )
 ORDER BY n.created_at, n.generation_id`, formatTime(cutoff))
@@ -757,6 +769,167 @@ ORDER BY n.created_at, n.generation_id`, formatTime(cutoff))
 		return nil, err
 	}
 	return generations, nil
+}
+
+func (s *Store) RetireExpiredCheckpoints(ctx context.Context, p RetireExpiredCheckpointsParams) ([]RetiredCheckpoint, error) {
+	if p.Now.IsZero() {
+		p.Now = time.Now().UTC()
+	}
+	if p.CheckpointImageRetention < 0 {
+		return nil, fmt.Errorf("checkpoint image retention must be >= 0")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := assertOwnerTx(ctx, tx, p.OwnerUUID); err != nil {
+		return nil, err
+	}
+
+	cutoff := p.Now.Add(-p.CheckpointImageRetention)
+	rows, err := tx.QueryContext(ctx, `
+SELECT s.id, g.generation_id, s.last_activity_at
+FROM sessions s
+JOIN runtime_generations g ON g.generation_id = s.active_generation_id
+  AND g.session_id = s.id
+JOIN network_profiles n ON n.generation_id = g.generation_id
+  AND n.session_id = s.id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE s.status = 'checkpointed'
+  AND g.status = 'checkpointed'
+  AND n.allocation_state = 'reserved_checkpointed'
+  AND r.resource_state = 'reserved_checkpointed'
+  AND COALESCE(s.last_activity_at, g.checkpoint_created_at, s.updated_at, s.created_at) < ?
+ORDER BY COALESCE(s.last_activity_at, g.checkpoint_created_at, s.updated_at, s.created_at), s.id`, formatTime(cutoff))
+	if err != nil {
+		return nil, err
+	}
+	type candidate struct {
+		sessionID      string
+		generationID   string
+		lastActivityAt sql.NullString
+	}
+	var candidates []candidate
+	for rows.Next() {
+		var candidate candidate
+		if err := rows.Scan(&candidate.sessionID, &candidate.generationID, &candidate.lastActivityAt); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	retired := make([]RetiredCheckpoint, 0, len(candidates))
+	nowString := formatTime(p.Now)
+	for _, candidate := range candidates {
+		res, err := tx.ExecContext(ctx, `
+UPDATE runtime_generations
+SET status = 'failed',
+    error_class = 'checkpoint_retired',
+    failure_reason = 'checkpoint image retired after retention window',
+    ended_at = ?,
+    lease_owner = NULL,
+    lease_expires_at = NULL
+WHERE generation_id = ?
+  AND session_id = ?
+  AND status = 'checkpointed'
+  AND EXISTS (
+    SELECT 1 FROM sessions
+    WHERE id = ?
+      AND active_generation_id = ?
+      AND status = 'checkpointed'
+  )`, nowString, candidate.generationID, candidate.sessionID, candidate.sessionID, candidate.generationID)
+		if err != nil {
+			return nil, err
+		}
+		if affected, err := res.RowsAffected(); err != nil {
+			return nil, err
+		} else if affected != 1 {
+			return nil, fmt.Errorf("checkpoint retirement generation CAS failed")
+		}
+		res, err = tx.ExecContext(ctx, `
+UPDATE network_profiles
+SET allocation_state = 'reclaimable'
+WHERE generation_id = ?
+  AND session_id = ?
+  AND allocation_state = 'reserved_checkpointed'`, candidate.generationID, candidate.sessionID)
+		if err != nil {
+			return nil, err
+		}
+		if affected, err := res.RowsAffected(); err != nil {
+			return nil, err
+		} else if affected != 1 {
+			return nil, fmt.Errorf("checkpoint retirement network CAS failed")
+		}
+		res, err = tx.ExecContext(ctx, `
+UPDATE runtime_generation_resources
+SET resource_state = 'reclaimable'
+WHERE generation_id = ?
+  AND resource_state = 'reserved_checkpointed'`, candidate.generationID)
+		if err != nil {
+			return nil, err
+		}
+		if affected, err := res.RowsAffected(); err != nil {
+			return nil, err
+		} else if affected != 1 {
+			return nil, fmt.Errorf("checkpoint retirement resource CAS failed")
+		}
+		res, err = tx.ExecContext(ctx, `
+UPDATE sessions
+SET status = 'running_idle',
+    checkpoint_path = NULL,
+    restore_ms = NULL,
+    updated_at = ?
+WHERE id = ?
+  AND status = 'checkpointed'
+  AND active_generation_id = ?`, nowString, candidate.sessionID, candidate.generationID)
+		if err != nil {
+			return nil, err
+		}
+		if affected, err := res.RowsAffected(); err != nil {
+			return nil, err
+		} else if affected != 1 {
+			return nil, fmt.Errorf("checkpoint retirement session CAS failed")
+		}
+		var lastActivity any
+		if candidate.lastActivityAt.Valid {
+			lastActivity = candidate.lastActivityAt.String
+		}
+		eventID, err := appendEventTx(ctx, tx, AppendEventParams{
+			SessionID:    candidate.sessionID,
+			GenerationID: candidate.generationID,
+			DedupeKey:    "checkpoint_retired:" + candidate.generationID,
+			Type:         "session.checkpoint_retired",
+			Payload: map[string]any{
+				"terminal":                 false,
+				"generation_id":            candidate.generationID,
+				"session_status":           "running_idle",
+				"status":                   "running_idle",
+				"session_updated_at":       nowString,
+				"updated_at":               nowString,
+				"session_last_activity_at": lastActivity,
+				"active_generation_id":     candidate.generationID,
+				"checkpoint_path":          nil,
+				"restore_ms":               nil,
+			},
+			Now: p.Now,
+		})
+		if err != nil {
+			return nil, err
+		}
+		retired = append(retired, RetiredCheckpoint{SessionID: candidate.sessionID, GenerationID: candidate.generationID, EventID: eventID})
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return retired, nil
 }
 
 func (s *Store) MarkGenerationResourcesDestroyed(ctx context.Context, p DestroyGenerationResourcesParams) error {

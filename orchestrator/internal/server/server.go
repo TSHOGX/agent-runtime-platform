@@ -829,6 +829,20 @@ func (s *Server) RunPhase7Maintenance(ctx context.Context) error {
 				touchHostHeartbeat(generation, now)
 			}
 		}
+		retiredCheckpoints, err := s.store.RetireExpiredCheckpoints(ctx, store.RetireExpiredCheckpointsParams{
+			OwnerUUID:                s.ownerUUID,
+			Now:                      now,
+			CheckpointImageRetention: s.cfg.Phase7.Reaper.CheckpointImageRetention.Duration,
+		})
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				s.log.Warn("phase7 checkpoint retirement failed", "error", err)
+			}
+		} else {
+			for _, retired := range retiredCheckpoints {
+				s.publishDurableEvent(ctx, retired.EventID)
+			}
+		}
 		if _, err := s.store.ReapResources(ctx, store.ReaperParams{
 			OwnerUUID:       s.ownerUUID,
 			FailedRetention: s.cfg.Phase7.Reaper.FailedRetention.Duration,
