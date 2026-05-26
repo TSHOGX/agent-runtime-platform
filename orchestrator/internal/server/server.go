@@ -926,27 +926,28 @@ func (s *Server) destroyReclaimableGenerationResources(ctx context.Context, now 
 		return
 	}
 	for _, candidate := range candidates {
-		details, err := s.store.GetRuntimeGenerationDetails(ctx, candidate.SessionID, candidate.GenerationID)
-		if err != nil {
-			if !errors.Is(err, context.Canceled) {
-				s.log.Warn("phase7 destroyable resource lookup failed", "session_id", candidate.SessionID, "generation_id", candidate.GenerationID, "error", err)
-			}
-			continue
-		}
-		if _, err := s.runtime.DestroyGenerationResources(ctx, details); err != nil {
-			if !errors.Is(err, context.Canceled) {
-				s.log.Warn("phase7 generation resource cleanup failed", "session_id", candidate.SessionID, "generation_id", candidate.GenerationID, "error", err)
-			}
-			continue
-		}
-		if err := s.store.MarkGenerationResourcesDestroyed(ctx, store.DestroyGenerationResourcesParams{
-			SessionID:    candidate.SessionID,
-			GenerationID: candidate.GenerationID,
-			Now:          now,
-		}); err != nil && !errors.Is(err, context.Canceled) {
-			s.log.Warn("phase7 generation resource destroy mark failed", "session_id", candidate.SessionID, "generation_id", candidate.GenerationID, "error", err)
+		if err := s.cleanupGenerationResources(ctx, candidate.SessionID, candidate.GenerationID, now); err != nil && !errors.Is(err, context.Canceled) {
+			s.log.Warn("phase7 generation resource cleanup failed", "session_id", candidate.SessionID, "generation_id", candidate.GenerationID, "error", err)
 		}
 	}
+}
+
+func (s *Server) cleanupGenerationResources(ctx context.Context, sessionID, generationID string, now time.Time) error {
+	details, err := s.store.GetRuntimeGenerationDetails(ctx, sessionID, generationID)
+	if err != nil {
+		return fmt.Errorf("lookup generation resources: %w", err)
+	}
+	if _, err := s.runtime.DestroyGenerationResources(ctx, details); err != nil {
+		return fmt.Errorf("destroy generation resources: %w", err)
+	}
+	if err := s.store.MarkGenerationResourcesDestroyed(ctx, store.DestroyGenerationResourcesParams{
+		SessionID:    sessionID,
+		GenerationID: generationID,
+		Now:          now,
+	}); err != nil {
+		return fmt.Errorf("mark generation resources destroyed: %w", err)
+	}
+	return nil
 }
 
 func (s *Server) handleBridgeCommittedEnvelope(ctx context.Context, envelope bridge.Envelope, eventID int64) {
@@ -1188,15 +1189,26 @@ func (s *Server) destroySession(w http.ResponseWriter, r *http.Request, sessionI
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := s.runtime.Destroy(r.Context(), session.RestoreID); err != nil {
-		s.log.Warn("runtime destroy returned error", "session_id", sessionID, "error", err)
+	if session.ActiveGenerationID != "" && session.Status != string(sessionstate.Checkpointed) {
+		if err := s.runtime.Destroy(r.Context(), session.RestoreID); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}
-	if err := s.store.DestroySession(r.Context(), sessionID, time.Now().UTC()); err != nil {
+	now := time.Now().UTC()
+	result, err := s.store.DestroySession(r.Context(), sessionID, now)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	for _, generationID := range result.GenerationIDs {
+		if err := s.cleanupGenerationResources(r.Context(), sessionID, generationID, now); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
 	status := string(sessionstate.Destroyed)
-	s.hub.Publish(events.Event{Type: "session." + status, SessionID: sessionID})
+	s.publishDurableEvent(r.Context(), result.EventID)
 	writeJSON(w, http.StatusOK, map[string]string{"status": status})
 }
 

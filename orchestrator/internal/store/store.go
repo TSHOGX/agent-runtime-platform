@@ -37,6 +37,11 @@ type Session struct {
 	ErrorClass            string     `json:"error_class,omitempty"`
 }
 
+type DestroySessionResult struct {
+	GenerationIDs []string
+	EventID       int64
+}
+
 type Message struct {
 	ID        int64     `json:"id"`
 	SessionID string    `json:"session_id"`
@@ -215,16 +220,16 @@ WHERE id = ?`
 	return err
 }
 
-func (s *Store) DestroySession(ctx context.Context, id string, now time.Time) error {
+func (s *Store) DestroySession(ctx context.Context, id string, now time.Time) (DestroySessionResult, error) {
 	if strings.TrimSpace(id) == "" {
-		return fmt.Errorf("session id is required")
+		return DestroySessionResult{}, fmt.Errorf("session id is required")
 	}
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return DestroySessionResult{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -233,17 +238,21 @@ SELECT generation_id
 FROM runtime_generations
 WHERE session_id = ?`, id)
 	if err != nil {
-		return err
+		return DestroySessionResult{}, err
 	}
 
 	nowString := formatTime(now)
 	if _, err := tx.ExecContext(ctx, `
 UPDATE sessions
 SET status = 'destroyed',
+    checkpoint_path = NULL,
+    restore_ms = NULL,
+    error_class = 'session_destroyed',
+    failure_reason = 'session_destroyed',
     updated_at = ?,
     ended_at = COALESCE(ended_at, ?)
 WHERE id = ?`, nowString, nowString, id); err != nil {
-		return err
+		return DestroySessionResult{}, err
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -257,7 +266,7 @@ SET status = 'canceled',
     lease_expires_at = NULL
 WHERE session_id = ?
   AND status IN ('queued', 'leased', 'running')`, nowString, id); err != nil {
-		return err
+		return DestroySessionResult{}, err
 	}
 
 	if len(generationIDs) > 0 {
@@ -272,17 +281,36 @@ SET status = 'failed',
     lease_owner = NULL
 WHERE generation_id IN (`+sqlPlaceholders(len(generationIDs))+`)
   AND status NOT IN ('failed', 'destroyed')`, args...); err != nil {
-			return err
+			return DestroySessionResult{}, err
 		}
 		if err := markAllocationsReclaimableTx(ctx, tx, generationIDs); err != nil {
-			return err
+			return DestroySessionResult{}, err
 		}
 		if err := deleteActiveContextsForGenerationsTx(ctx, tx, generationIDs); err != nil {
-			return err
+			return DestroySessionResult{}, err
 		}
 	}
 
-	return tx.Commit()
+	eventID, err := appendEventTx(ctx, tx, AppendEventParams{
+		SessionID: id,
+		DedupeKey: "session_destroyed:" + id,
+		Type:      "session.destroyed",
+		Payload: map[string]any{
+			"terminal":           true,
+			"status":             "destroyed",
+			"session_status":     "destroyed",
+			"session_updated_at": nowString,
+			"updated_at":         nowString,
+		},
+		Now: now,
+	})
+	if err != nil {
+		return DestroySessionResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return DestroySessionResult{}, err
+	}
+	return DestroySessionResult{GenerationIDs: generationIDs, EventID: eventID}, nil
 }
 
 func (s *Store) CancelTerminalSessionPendingTurns(ctx context.Context, now time.Time) (int64, error) {

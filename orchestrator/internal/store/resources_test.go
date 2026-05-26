@@ -2163,8 +2163,12 @@ func TestDestroySessionCancelsPendingTurnsAndReclaimsGeneration(t *testing.T) {
 	}
 
 	destroyedAt := now.Add(3 * time.Second)
-	if err := st.DestroySession(ctx, sessionID, destroyedAt); err != nil {
+	result, err := st.DestroySession(ctx, sessionID, destroyedAt)
+	if err != nil {
 		t.Fatalf("destroy session: %v", err)
+	}
+	if len(result.GenerationIDs) != 1 || result.GenerationIDs[0] != allocation.GenerationID || result.EventID == 0 {
+		t.Fatalf("unexpected destroy session result: %+v", result)
 	}
 
 	var sessionStatus, turnStatus, turnErrorClass, generationStatus, generationErrorClass, networkState, resourceState string
@@ -2197,6 +2201,13 @@ WHERE s.id = ?
 		resourceState != "reclaimable" {
 		t.Fatalf("unexpected destroyed state: session=%s turn=%s turn_error=%s generation=%s generation_error=%s network=%s resource=%s",
 			sessionStatus, turnStatus, turnErrorClass, generationStatus, generationErrorClass, networkState, resourceState)
+	}
+	var eventType, eventPayload string
+	if err := st.db.QueryRowContext(ctx, `SELECT type, payload FROM events WHERE event_id = ?`, result.EventID).Scan(&eventType, &eventPayload); err != nil {
+		t.Fatalf("query destroyed event: %v", err)
+	}
+	if eventType != "session.destroyed" || !strings.Contains(eventPayload, `"terminal":true`) {
+		t.Fatalf("unexpected destroyed event: type=%s payload=%s", eventType, eventPayload)
 	}
 }
 

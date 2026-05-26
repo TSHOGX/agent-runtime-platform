@@ -1921,10 +1921,11 @@ func TestDestroySessionCancelsPendingTurnAndReclaimsGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enqueue turn: %v", err)
 	}
+	rt := &recordingRuntime{}
 	srv := &Server{
 		cfg:     cfg,
 		store:   st,
-		runtime: failingRuntime{},
+		runtime: rt,
 		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
@@ -1936,6 +1937,14 @@ func TestDestroySessionCancelsPendingTurnAndReclaimsGeneration(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d body %s", rec.Code, rec.Body.String())
+	}
+	destroyIDs := rt.runtimeDestroyRequests()
+	if len(destroyIDs) != 1 || destroyIDs[0] != session.RestoreID {
+		t.Fatalf("destroy session should tear down restore id %q, got %+v", session.RestoreID, destroyIDs)
+	}
+	destroyGenerationRequests := rt.destroyGenerationRequests()
+	if len(destroyGenerationRequests) != 1 || destroyGenerationRequests[0].GenerationID != allocation.GenerationID {
+		t.Fatalf("destroy session should clean generation resources, got %+v", destroyGenerationRequests)
 	}
 	var sessionStatus, turnStatus, turnErrorClass, generationStatus, generationErrorClass, networkState, resourceState string
 	if err := st.DBForTest().QueryRowContext(ctx, `
@@ -1963,10 +1972,21 @@ WHERE s.id = ?
 		turnErrorClass != "session_destroyed" ||
 		generationStatus != "failed" ||
 		generationErrorClass != "session_destroyed" ||
-		networkState != "reclaimable" ||
-		resourceState != "reclaimable" {
+		networkState != "destroyed" ||
+		resourceState != "destroyed" {
 		t.Fatalf("unexpected destroyed state: session=%s turn=%s turn_error=%s generation=%s generation_error=%s network=%s resource=%s",
 			sessionStatus, turnStatus, turnErrorClass, generationStatus, generationErrorClass, networkState, resourceState)
+	}
+	var destroyedEvents int
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM events
+WHERE session_id = ?
+  AND type = 'session.destroyed'`, session.ID).Scan(&destroyedEvents); err != nil {
+		t.Fatalf("count destroyed events: %v", err)
+	}
+	if destroyedEvents != 1 {
+		t.Fatalf("expected one durable destroyed event, got %d", destroyedEvents)
 	}
 }
 
