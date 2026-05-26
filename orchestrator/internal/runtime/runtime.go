@@ -59,9 +59,14 @@ const secretPublishValidationWait = 500 * time.Millisecond
 var requiredCheckpointImageFiles = []string{"checkpoint.img", "pages.img", "pages_meta.img"}
 
 type GenerationResourceCleanup struct {
-	NetnsDeleted    bool
-	HostVethDeleted bool
-	NftTableDeleted bool
+	CheckpointDeleted bool
+	ControlDirDeleted bool
+	BundleDirDeleted  bool
+	BridgeDirDeleted  bool
+	LogDirDeleted     bool
+	NetnsDeleted      bool
+	HostVethDeleted   bool
+	NftTableDeleted   bool
 }
 
 type CommandRunner interface {
@@ -350,34 +355,266 @@ func (r *Runtime) DestroyGenerationResources(ctx context.Context, details store.
 	if strings.TrimSpace(details.GenerationID) == "" {
 		return cleanup, fmt.Errorf("generation id is required")
 	}
-	if !strings.EqualFold(strings.TrimSpace(r.runscNetwork(details)), "sandbox") {
-		return cleanup, nil
-	}
-	if strings.TrimSpace(details.NetnsName) == "" || strings.TrimSpace(details.HostVeth) == "" {
-		return cleanup, fmt.Errorf("sandbox resource cleanup requires netns and host veth")
+	if strings.TrimSpace(details.SessionID) == "" {
+		return cleanup, fmt.Errorf("session id is required")
 	}
 
 	var errs []error
-	tableName := hostEgressTableName(details.GenerationID)
-	if err := r.deleteNetworkResource(ctx, "nft", []string{"delete", "table", "inet", tableName}, true); err != nil {
-		errs = append(errs, err)
-	} else {
-		cleanup.NftTableDeleted = true
+	targets, err := r.generationFilesystemCleanupTargets(details)
+	if err != nil {
+		return cleanup, err
 	}
-	if err := r.deleteNetworkResource(ctx, "ip", []string{"link", "delete", details.HostVeth}, true); err != nil {
-		errs = append(errs, err)
-	} else {
-		cleanup.HostVethDeleted = true
+	for _, target := range targets {
+		deleted, err := removeFilesystemCleanupTarget(target)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		switch target.kind {
+		case cleanupTargetCheckpoint:
+			cleanup.CheckpointDeleted = deleted
+		case cleanupTargetControl:
+			cleanup.ControlDirDeleted = deleted
+		case cleanupTargetBundle:
+			cleanup.BundleDirDeleted = deleted
+		case cleanupTargetBridge:
+			cleanup.BridgeDirDeleted = deleted
+		case cleanupTargetLog:
+			cleanup.LogDirDeleted = deleted
+		}
 	}
-	if err := r.deleteNetworkResource(ctx, "ip", []string{"netns", "delete", details.NetnsName}, true); err != nil {
-		errs = append(errs, err)
-	} else {
-		cleanup.NetnsDeleted = true
+	if len(errs) > 0 {
+		return cleanup, errors.Join(errs...)
+	}
+
+	if strings.EqualFold(strings.TrimSpace(r.runscNetwork(details)), "sandbox") {
+		tableName := hostEgressTableName(details.GenerationID)
+		if err := r.deleteNetworkResource(ctx, "nft", []string{"delete", "table", "inet", tableName}, true); err != nil {
+			errs = append(errs, err)
+		} else {
+			cleanup.NftTableDeleted = true
+		}
+		if strings.TrimSpace(details.HostVeth) != "" {
+			if err := r.deleteNetworkResource(ctx, "ip", []string{"link", "delete", details.HostVeth}, true); err != nil {
+				errs = append(errs, err)
+			} else {
+				cleanup.HostVethDeleted = true
+			}
+		}
+		if strings.TrimSpace(details.NetnsName) != "" {
+			if err := r.deleteNetworkResource(ctx, "ip", []string{"netns", "delete", details.NetnsName}, true); err != nil {
+				errs = append(errs, err)
+			} else {
+				cleanup.NetnsDeleted = true
+			}
+		}
 	}
 	if len(errs) > 0 {
 		return cleanup, errors.Join(errs...)
 	}
 	return cleanup, nil
+}
+
+type cleanupTargetKind string
+
+const (
+	cleanupTargetCheckpoint cleanupTargetKind = "checkpoint"
+	cleanupTargetControl    cleanupTargetKind = "control"
+	cleanupTargetBundle     cleanupTargetKind = "bundle"
+	cleanupTargetBridge     cleanupTargetKind = "bridge"
+	cleanupTargetLog        cleanupTargetKind = "log"
+)
+
+type filesystemCleanupTarget struct {
+	kind cleanupTargetKind
+	path string
+	root string
+}
+
+func (r *Runtime) generationFilesystemCleanupTargets(details store.RuntimeGenerationDetails) ([]filesystemCleanupTarget, error) {
+	runRoot, err := cleanAbsoluteRoot(r.cfg.Phase7RunDir, "phase7 run dir")
+	if err != nil {
+		return nil, err
+	}
+	generationDir, err := safePathComponent("generation id", "gen-"+strings.TrimSpace(details.GenerationID))
+	if err != nil {
+		return nil, err
+	}
+	targets := []filesystemCleanupTarget{
+		{kind: cleanupTargetControl, path: details.ControlDirPath, root: runRoot},
+		{kind: cleanupTargetBundle, path: details.BundleDirPath, root: runRoot},
+		{kind: cleanupTargetBridge, path: details.BridgeDirPath, root: runRoot},
+		{kind: cleanupTargetLog, path: details.LogDirPath, root: runRoot},
+	}
+	expected := map[cleanupTargetKind]string{
+		cleanupTargetControl: filepath.Join(runRoot, "control", generationDir),
+		cleanupTargetBundle:  filepath.Join(runRoot, "runtime", generationDir),
+		cleanupTargetBridge:  filepath.Join(runRoot, "bridge", generationDir),
+		cleanupTargetLog:     filepath.Join(runRoot, "logs", generationDir),
+	}
+	for _, target := range targets {
+		if err := validateFilesystemCleanupTarget(target.kind, target.path, expected[target.kind], target.root); err != nil {
+			return nil, err
+		}
+	}
+
+	checkpointPath, err := validateCheckpointCleanupTarget(details, runRoot, generationDir, r.cfg.CheckpointsRoot)
+	if err != nil {
+		return nil, err
+	}
+	targets = append([]filesystemCleanupTarget{{kind: cleanupTargetCheckpoint, path: checkpointPath.path, root: checkpointPath.root}}, targets...)
+	return targets, nil
+}
+
+func validateCheckpointCleanupTarget(details store.RuntimeGenerationDetails, runRoot, generationDir, checkpointsRoot string) (filesystemCleanupTarget, error) {
+	expectedPhase7 := filepath.Join(runRoot, generationDir, "checkpoint")
+	if err := validateFilesystemCleanupTarget(cleanupTargetCheckpoint, details.CheckpointPath, expectedPhase7, runRoot); err == nil {
+		return filesystemCleanupTarget{kind: cleanupTargetCheckpoint, path: cleanAbsolutePath(details.CheckpointPath), root: runRoot}, nil
+	}
+
+	root, err := cleanAbsoluteRoot(checkpointsRoot, "checkpoints root")
+	if err != nil {
+		return filesystemCleanupTarget{}, fmt.Errorf("checkpoint cleanup target %q is not the phase7 generation checkpoint path and legacy cleanup is unavailable: %w", details.CheckpointPath, err)
+	}
+	sessionComponent, err := safePathComponent("session id", strings.TrimSpace(details.SessionID))
+	if err != nil {
+		return filesystemCleanupTarget{}, err
+	}
+	expectedLegacy := filepath.Join(root, sessionComponent)
+	if err := validateFilesystemCleanupTarget(cleanupTargetCheckpoint, details.CheckpointPath, expectedLegacy, root); err != nil {
+		return filesystemCleanupTarget{}, err
+	}
+	return filesystemCleanupTarget{kind: cleanupTargetCheckpoint, path: cleanAbsolutePath(details.CheckpointPath), root: root}, nil
+}
+
+func validateFilesystemCleanupTarget(kind cleanupTargetKind, actual, expected, root string) error {
+	actual = strings.TrimSpace(actual)
+	if actual == "" {
+		return fmt.Errorf("%s cleanup path is required", kind)
+	}
+	if pathContainsDotDot(actual) {
+		return fmt.Errorf("%s cleanup path %q must not contain '..'", kind, actual)
+	}
+	cleaned := cleanAbsolutePath(actual)
+	if cleaned == "" {
+		return fmt.Errorf("%s cleanup path %q must be absolute", kind, actual)
+	}
+	if cleaned != filepath.Clean(expected) {
+		return fmt.Errorf("%s cleanup path %q does not match expected %q", kind, cleaned, filepath.Clean(expected))
+	}
+	if err := ensurePathStaysWithinRoot(cleaned, root); err != nil {
+		return fmt.Errorf("%s cleanup path %q is unsafe: %w", kind, cleaned, err)
+	}
+	return nil
+}
+
+func removeFilesystemCleanupTarget(target filesystemCleanupTarget) (bool, error) {
+	if _, err := os.Lstat(target.path); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat %s cleanup path %q: %w", target.kind, target.path, err)
+	}
+	if err := os.RemoveAll(target.path); err != nil {
+		return false, fmt.Errorf("remove %s cleanup path %q: %w", target.kind, target.path, err)
+	}
+	return true, nil
+}
+
+func cleanAbsoluteRoot(path, label string) (string, error) {
+	cleaned := cleanAbsolutePath(path)
+	if cleaned == "" {
+		return "", fmt.Errorf("%s is required and must be absolute", label)
+	}
+	return cleaned, nil
+}
+
+func cleanAbsolutePath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" || !filepath.IsAbs(path) {
+		return ""
+	}
+	return filepath.Clean(path)
+}
+
+func safePathComponent(label, value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || filepath.Base(value) != value || value == "." || value == ".." {
+		return "", fmt.Errorf("%s %q is not a safe path component", label, value)
+	}
+	return value, nil
+}
+
+func pathContainsDotDot(path string) bool {
+	for _, part := range strings.Split(path, string(filepath.Separator)) {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+func ensurePathStaysWithinRoot(path, root string) error {
+	if !pathWithinRoot(path, root) {
+		return fmt.Errorf("path is outside root %q", root)
+	}
+	resolvedRoot := root
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		resolvedRoot = filepath.Clean(resolved)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("resolve root: %w", err)
+	}
+
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err == nil {
+		if !pathWithinRoot(filepath.Clean(resolvedPath), resolvedRoot) {
+			return fmt.Errorf("resolved path escapes root %q", resolvedRoot)
+		}
+		return nil
+	}
+	if !os.IsNotExist(err) {
+		return fmt.Errorf("resolve path: %w", err)
+	}
+	prefix, err := deepestExistingPath(path)
+	if err != nil {
+		return err
+	}
+	if prefix == "" {
+		return nil
+	}
+	if !pathWithinRoot(prefix, root) {
+		return nil
+	}
+	resolvedPrefix, err := filepath.EvalSymlinks(prefix)
+	if err != nil {
+		return fmt.Errorf("resolve existing prefix: %w", err)
+	}
+	if !pathWithinRoot(filepath.Clean(resolvedPrefix), resolvedRoot) {
+		return fmt.Errorf("resolved existing prefix escapes root %q", resolvedRoot)
+	}
+	return nil
+}
+
+func deepestExistingPath(path string) (string, error) {
+	for current := filepath.Clean(path); ; current = filepath.Dir(current) {
+		if _, err := os.Lstat(current); err == nil {
+			return current, nil
+		} else if !os.IsNotExist(err) {
+			return "", fmt.Errorf("stat existing prefix %q: %w", current, err)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", nil
+		}
+	}
+}
+
+func pathWithinRoot(path, root string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 func (r *Runtime) deleteNetworkResource(ctx context.Context, name string, args []string, missingOK bool) error {

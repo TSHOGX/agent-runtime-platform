@@ -1862,6 +1862,77 @@ WHERE n.generation_id = ?`, allocation.GenerationID).Scan(&networkState, &resour
 	}
 }
 
+func TestDestroyReclaimableGenerationResourcesRemovesFilesystemWithRealRuntime(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	cfg := testServerConfig(dir)
+	createServerTestSession(t, ctx, st, dir, "sess_cleanup_real", string(sessionstate.Created), now.Add(-time.Minute), nil)
+	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: "sess_cleanup_real",
+		Owner:     store.GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       now.Add(-time.Minute),
+		Config:    serverTestAllocatorConfig(cfg, "claude"),
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, "sess_cleanup_real", allocation.GenerationID, allocation.Owner, now.Add(-59*time.Second)); err != nil {
+		t.Fatalf("mark resources live: %v", err)
+	}
+	if err := st.FailGeneration(ctx, store.FailGenerationParams{
+		SessionID:    "sess_cleanup_real",
+		GenerationID: allocation.GenerationID,
+		Owner:        allocation.Owner,
+		ErrorClass:   "probe_failed_pre_start",
+		Reason:       "probe failed",
+		Now:          now.Add(-58 * time.Second),
+	}); err != nil {
+		t.Fatalf("fail generation: %v", err)
+	}
+	details, err := st.GetRuntimeGenerationDetails(ctx, "sess_cleanup_real", allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get runtime generation details: %v", err)
+	}
+	createServerGenerationFilesystem(t, details)
+
+	realRuntime := runtime.New(runtime.Config{
+		RunscNetwork:    "sandbox",
+		RunscOverlay2:   "none",
+		Phase7RunDir:    cfg.Phase7.RunDir,
+		CheckpointsRoot: filepath.Join(dir, "checkpoints"),
+		CommandRunner:   serverCommandRunner{},
+	})
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: realRuntime,
+		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.destroyReclaimableGenerationResources(ctx, now)
+
+	for _, path := range []string{details.CheckpointPath, details.ControlDirPath, details.BundleDirPath, details.BridgeDirPath, details.LogDirPath} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("expected cleanup path %s to be removed, stat err=%v", path, err)
+		}
+	}
+	var networkState, resourceState string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT n.allocation_state, r.resource_state
+FROM network_profiles n
+JOIN runtime_generation_resources r ON r.generation_id = n.generation_id
+WHERE n.generation_id = ?`, allocation.GenerationID).Scan(&networkState, &resourceState); err != nil {
+		t.Fatalf("query resource states: %v", err)
+	}
+	if networkState != "destroyed" || resourceState != "destroyed" {
+		t.Fatalf("unexpected states after real runtime cleanup: network=%s resource=%s", networkState, resourceState)
+	}
+}
+
 func TestRunPhase7MaintenancePublishesBridgeOutputAndCompletion(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -2949,6 +3020,18 @@ func serverTestAllocatorConfig(cfg config.Config, agent string) store.ResourceAl
 		AgentModel:                 cfg.Claude.Model,
 		AgentOutputFormat:          outputFormat,
 		DisableNonessentialTraffic: cfg.Claude.DisableNonessentialTraffic,
+	}
+}
+
+func createServerGenerationFilesystem(t *testing.T, details store.RuntimeGenerationDetails) {
+	t.Helper()
+	for _, path := range []string{details.CheckpointPath, details.ControlDirPath, details.BundleDirPath, details.BridgeDirPath, details.LogDirPath} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("create generation filesystem path %s: %v", path, err)
+		}
+		if err := os.WriteFile(filepath.Join(path, ".keep"), []byte("keep"), 0o644); err != nil {
+			t.Fatalf("write generation filesystem marker %s: %v", path, err)
+		}
 	}
 }
 
