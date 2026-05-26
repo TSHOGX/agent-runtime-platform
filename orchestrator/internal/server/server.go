@@ -406,15 +406,15 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 	if ensured.IsNew {
 		preparedArtifacts, err = s.runtime.PrepareGeneration(ctx, s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, runtime.GenerationArtifacts{}))
 		if err != nil {
-			s.failGenerationBeforeTurn(session.ID, allocation.GenerationID, allocation.Owner, err)
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err)
 			return err
 		}
 		if err := s.store.RecordGenerationRuntimeArtifactDigests(ctx, allocation.GenerationID, runtimeArtifactDigests(preparedArtifacts)); err != nil {
-			s.failGenerationBeforeTurn(session.ID, allocation.GenerationID, allocation.Owner, err)
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err)
 			return err
 		}
 		if err := s.store.MarkGenerationResourcesLive(ctx, session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
-			s.failGenerationBeforeTurn(session.ID, allocation.GenerationID, allocation.Owner, err)
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err)
 			return err
 		}
 	}
@@ -426,7 +426,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			s.failGenerationForRestoreFallback(session.ID, allocation.GenerationID, allocation.Owner, result.Err)
 			return result.Err
 		}
-		s.failGenerationBeforeTurn(session.ID, allocation.GenerationID, allocation.Owner, result.Err)
+		s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, result.Err)
 		return result.Err
 	}
 	if ensured.RestoreFromCheckpoint {
@@ -441,7 +441,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 	return nil
 }
 
-func (s *Server) failGenerationBeforeTurn(sessionID, generationID, owner string, failure error) {
+func (s *Server) failGenerationBeforeTurn(session store.Session, generationID, owner string, failure error) {
 	reason := ""
 	if failure != nil {
 		reason = failure.Error()
@@ -450,30 +450,26 @@ func (s *Server) failGenerationBeforeTurn(sessionID, generationID, owner string,
 	now := time.Now().UTC()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := s.store.FailGeneration(ctx, store.FailGenerationParams{
-		SessionID:    sessionID,
-		GenerationID: generationID,
-		Owner:        owner,
-		ErrorClass:   errorClass,
-		Reason:       reason,
-		Now:          now,
-	}); err != nil {
-		s.log.Warn("failed to fail generation before turn start", "session_id", sessionID, "generation_id", generationID, "error", err)
+	retryableStatus := string(sessionstate.RunningIdle)
+	if session.Status == string(sessionstate.Created) {
+		retryableStatus = string(sessionstate.Created)
 	}
-	if err := s.store.FailSession(ctx, store.FailSessionParams{
-		SessionID:    sessionID,
-		ErrorClass:   errorClass,
-		Reason:       reason,
-		LastActivity: now,
-		Now:          now,
-	}); err != nil {
-		s.log.Warn("failed to mark session failed before turn start", "session_id", sessionID, "generation_id", generationID, "error", err)
+	eventID, err := s.store.FailGenerationStart(ctx, store.FailGenerationStartParams{
+		SessionID:      session.ID,
+		GenerationID:   generationID,
+		Owner:          owner,
+		SessionStatus:  retryableStatus,
+		ErrorClass:     errorClass,
+		Reason:         reason,
+		EventType:      "generation.error",
+		EventDedupeKey: "generation_error:" + generationID,
+		Now:            now,
+	})
+	if err != nil {
+		s.log.Warn("failed to fail generation before turn start", "session_id", session.ID, "generation_id", generationID, "error", err)
+		return
 	}
-	s.hub.Publish(events.Event{Type: "session.error", SessionID: sessionID, Payload: map[string]string{
-		"error_class": errorClass,
-		"error":       runtimeFailureMessage(errorClass, reason),
-	}})
-	s.hub.Publish(events.Event{Type: "session." + string(sessionstate.Failed), SessionID: sessionID})
+	s.publishDurableEvent(ctx, eventID)
 }
 
 func (s *Server) failGenerationForRestoreFallback(sessionID, generationID, owner string, failure error) {

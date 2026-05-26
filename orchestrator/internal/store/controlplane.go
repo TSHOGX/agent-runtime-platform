@@ -105,6 +105,18 @@ type FailGenerationParams struct {
 	Now          time.Time
 }
 
+type FailGenerationStartParams struct {
+	SessionID      string
+	GenerationID   string
+	Owner          string
+	SessionStatus  string
+	ErrorClass     string
+	Reason         string
+	EventType      string
+	EventDedupeKey string
+	Now            time.Time
+}
+
 func (s *Store) EnqueueTurn(ctx context.Context, sessionID, content string, now time.Time) (int64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -953,6 +965,111 @@ WHERE session_id = ?
 		return err
 	}
 	return tx.Commit()
+}
+
+func (s *Store) FailGenerationStart(ctx context.Context, p FailGenerationStartParams) (int64, error) {
+	if p.Now.IsZero() {
+		p.Now = time.Now().UTC()
+	}
+	if p.SessionStatus == "" {
+		p.SessionStatus = "running_idle"
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `
+UPDATE runtime_generations
+SET status = 'failed',
+    error_class = ?,
+    failure_reason = ?,
+    ended_at = ?,
+    lease_owner = NULL
+WHERE generation_id = ?
+  AND session_id = ?
+  AND status IN ('allocating','starting','probing','idle','active','restoring')
+  AND lease_owner = ?
+  AND lease_expires_at > ?
+  AND EXISTS (
+    SELECT 1 FROM sessions
+    WHERE id = ?
+      AND active_generation_id = ?
+      AND status NOT IN ('failed', 'destroyed')
+  )`,
+		nullableString(p.ErrorClass), nullableString(p.Reason), formatTime(p.Now), p.GenerationID, p.SessionID,
+		p.Owner, formatTime(p.Now), p.SessionID, p.GenerationID)
+	if err != nil {
+		return 0, err
+	}
+	if affected, err := res.RowsAffected(); err != nil {
+		return 0, err
+	} else if affected != 1 {
+		return 0, fmt.Errorf("generation start failure CAS failed")
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE network_profiles
+SET allocation_state = 'reclaimable'
+WHERE generation_id = ?
+  AND session_id = ?
+  AND allocation_state IN ('allocating','ready','live','reserved_checkpointed','recreating')`, p.GenerationID, p.SessionID); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE runtime_generation_resources
+SET resource_state = 'reclaimable'
+WHERE generation_id = ?
+  AND resource_state IN ('allocating','ready','live','reserved_checkpointed','recreating')`, p.GenerationID); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM active_model_request_contexts
+WHERE session_id = ?
+  AND generation_id = ?`, p.SessionID, p.GenerationID); err != nil {
+		return 0, err
+	}
+	res, err = tx.ExecContext(ctx, `
+UPDATE sessions
+SET status = ?,
+    updated_at = ?,
+    restore_ms = NULL,
+    error_class = NULL,
+    failure_reason = NULL
+WHERE id = ?
+  AND active_generation_id = ?
+  AND status NOT IN ('failed', 'destroyed')`,
+		p.SessionStatus, formatTime(p.Now), p.SessionID, p.GenerationID)
+	if err != nil {
+		return 0, err
+	}
+	if affected, err := res.RowsAffected(); err != nil {
+		return 0, err
+	} else if affected != 1 {
+		return 0, fmt.Errorf("session start failure CAS failed")
+	}
+	var eventID int64
+	if p.EventType != "" {
+		eventID, err = appendEventTx(ctx, tx, AppendEventParams{
+			SessionID:    p.SessionID,
+			GenerationID: p.GenerationID,
+			DedupeKey:    p.EventDedupeKey,
+			Type:         p.EventType,
+			Payload: map[string]any{
+				"terminal":             false,
+				"error_class":          p.ErrorClass,
+				"error":                p.Reason,
+				"generation_id":        p.GenerationID,
+				"session_status":       p.SessionStatus,
+				"session_updated_at":   formatTime(p.Now),
+				"active_generation_id": p.GenerationID,
+			},
+			Now: p.Now,
+		})
+		if err != nil {
+			return 0, err
+		}
+	}
+	return eventID, tx.Commit()
 }
 
 func claimReplay(ctx context.Context, tx *sql.Tx, p ClaimNextTurnParams) (TurnGrant, bool, error) {

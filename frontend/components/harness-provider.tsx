@@ -98,6 +98,7 @@ const SSE_TYPED_EVENT_TYPES = [
   "agent.output",
   "system.status",
   "session.error",
+  "generation.error",
   "artifact.updated",
   "artifact.deleted",
   "ack_turn_started",
@@ -401,6 +402,29 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
             }));
             upsertConvo(sessionId, (c) => ({ ...c, streaming: [] }));
           }
+          return;
+        }
+        case "generation.error": {
+          if (!sessionId || !isRecord(event.payload)) return;
+          const error = typeof event.payload.error === "string" ? event.payload.error : "Runtime start failed";
+          const rawSessionStatus = event.payload.session_status;
+          const sessionStatus =
+            typeof rawSessionStatus === "string" && SESSION_EVENT_STATUSES.has(rawSessionStatus as SessionStatus)
+              ? (rawSessionStatus as SessionStatus)
+              : null;
+          const updatedAt =
+            typeof event.payload.session_updated_at === "string" ? event.payload.session_updated_at : time;
+          toast.error(error, { duration: 6000 });
+          setState((p) => ({
+            ...p,
+            sessions: sessionStatus
+              ? p.sessions.map((s) => (s.id === sessionId ? { ...s, status: sessionStatus, updated_at: updatedAt } : s))
+              : p.sessions,
+            conversations: {
+              ...p.conversations,
+              [sessionId]: { ...ensureConvo(p.conversations, sessionId)[sessionId], streaming: [] }
+            }
+          }));
           return;
         }
         case "ack_turn_completed": {

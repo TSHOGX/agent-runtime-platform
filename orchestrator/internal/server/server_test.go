@@ -1206,10 +1206,24 @@ WHERE g.session_id = ?`, session.ID).Scan(
 		errorClass != "probe_failed_pre_start" ||
 		networkState != "reclaimable" ||
 		resourceState != "reclaimable" ||
-		sessionStatus != string(sessionstate.Failed) ||
-		sessionErrorClass != "probe_failed_pre_start" ||
-		sessionFailureReason != "pre-start sandbox network probe failed" {
+		sessionStatus != string(sessionstate.Created) ||
+		sessionErrorClass != "" ||
+		sessionFailureReason != "" {
 		t.Fatalf("unexpected failed generation state: generation=%s class=%s network=%s resource=%s session=%s session_class=%s session_reason=%s", generationStatus, errorClass, networkState, resourceState, sessionStatus, sessionErrorClass, sessionFailureReason)
+	}
+	if !sessionstate.CanAcceptInput(sessionStatus) {
+		t.Fatalf("session should remain input-acceptable after start failure, got %s", sessionStatus)
+	}
+	var runtimeEvents int
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM events
+WHERE session_id = ?
+  AND type = 'generation.error'`, session.ID).Scan(&runtimeEvents); err != nil {
+		t.Fatalf("count generation error events: %v", err)
+	}
+	if runtimeEvents != 1 {
+		t.Fatalf("expected one generation.error event, got %d", runtimeEvents)
 	}
 	var turns int
 	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM turns WHERE session_id = ?`, session.ID).Scan(&turns); err != nil {
@@ -1217,6 +1231,24 @@ WHERE g.session_id = ?`, session.ID).Scan(
 	}
 	if turns != 0 {
 		t.Fatalf("runtime start failure should happen before turn creation, got %d turns", turns)
+	}
+
+	srv.runtime = instantRuntime{}
+	retryReq := httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(`{"content":"retry"}`))
+	retryRec := httptest.NewRecorder()
+	srv.sendMessage(retryRec, retryReq, session.ID)
+	if retryRec.Code != http.StatusAccepted {
+		t.Fatalf("expected retry status 202, got %d body %s", retryRec.Code, retryRec.Body.String())
+	}
+	var generationCount int
+	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_generations WHERE session_id = ?`, session.ID).Scan(&generationCount); err != nil {
+		t.Fatalf("count generations after retry: %v", err)
+	}
+	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM turns WHERE session_id = ?`, session.ID).Scan(&turns); err != nil {
+		t.Fatalf("count turns after retry: %v", err)
+	}
+	if generationCount != 2 || turns != 1 {
+		t.Fatalf("retry should allocate generation N+1 and enqueue one turn, generations=%d turns=%d", generationCount, turns)
 	}
 }
 
@@ -1314,10 +1346,24 @@ WHERE g.session_id = ?`, session.ID).Scan(
 		errorClass != "probe_failed_pre_start" ||
 		networkState != "reclaimable" ||
 		resourceState != "reclaimable" ||
-		sessionStatus != string(sessionstate.Failed) ||
-		sessionErrorClass != "probe_failed_pre_start" ||
-		sessionFailureReason != "pre-start sandbox network probe failed" {
+		sessionStatus != string(sessionstate.Created) ||
+		sessionErrorClass != "" ||
+		sessionFailureReason != "" {
 		t.Fatalf("unexpected failed generation state: generation=%s class=%s network=%s resource=%s session=%s session_class=%s session_reason=%s", generationStatus, errorClass, networkState, resourceState, sessionStatus, sessionErrorClass, sessionFailureReason)
+	}
+	if !sessionstate.CanAcceptInput(sessionStatus) {
+		t.Fatalf("session should remain input-acceptable after prepare failure, got %s", sessionStatus)
+	}
+	var runtimeEvents int
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM events
+WHERE session_id = ?
+  AND type = 'generation.error'`, session.ID).Scan(&runtimeEvents); err != nil {
+		t.Fatalf("count generation error events: %v", err)
+	}
+	if runtimeEvents != 1 {
+		t.Fatalf("expected one generation.error event, got %d", runtimeEvents)
 	}
 	var turns int
 	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM turns WHERE session_id = ?`, session.ID).Scan(&turns); err != nil {
