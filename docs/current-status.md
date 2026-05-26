@@ -1,7 +1,7 @@
 # Current Status
 
-> Last updated: 2026-05-25
-> Scope: current baseline after the Phase 7 checkpoint-safe control-plane refactor and release qualification.
+> Last updated: 2026-05-27
+> Scope: current baseline after the Phase 7 checkpoint-safe control-plane refactor, release qualification, and completed P0 lifetime separation.
 
 ## Baseline
 
@@ -18,9 +18,23 @@ Harness Platform now has a working end-to-end lab stack:
 - Phase 7 typed `config/harness.yaml` is loaded with strict YAML validation and drives per-generation network, probe, bridge, reaper, checkpoint, and secret settings.
 - Agent Bridge claim/ack is the live turn execution path. Turns transition through `queued`, `leased`, `running`, and terminal states with CAS fencing and durable events.
 - Checkpoint/restore primitives are behind the Phase 7 control plane. Automatic idle checkpointing is policy-gated and disabled in the checked-in lab config.
+- Session/history retention is decoupled from runtime resource lifetime. `harness.session_retention: 0s` is the checked-in default, active sessions store `expires_at = NULL`, and retryable generation/runtime/turn failures no longer make the session terminal.
+- Checkpoint image retirement is controlled by `harness.reaper.checkpoint_image_retention`; checkpoint-retired and restore-fallback generations clear checkpoint metadata through durable non-terminal events and can cold-start replacement generations for the same session.
+- `harness.max_sessions` is a non-terminal session ceiling independent of live `/30` pool capacity. `/api/quota` reports the session ceiling and live pool ceiling separately, and `DELETE /api/sessions/<id>` closes a session while preserving history/workspace state.
 - Artifact browsing is a metadata-backed live file tree with search, safe downloads, delete/rename event handling, and richer previews for Markdown, code, text, images, JSON, CSV/TSV, and PDF.
 
 ## Notable Commits And Qualification
+
+### P0 Lifetime Separation - `20a8c07`
+
+The P0 lifetime baseline is complete at `20a8c07`. The roadmap now treats Phase 9 as active work on top of long-lived sessions. Key commits in this slice:
+
+- `5cf0ddb fix(config): rename session ttl to retention` - renames the user-facing retention knob and makes `0s` the no-expiry default.
+- `c46c3db feat(config): add checkpoint image retention` and `fd01372 feat(store): retire expired checkpoint metadata` - add explicit checkpoint-image retirement.
+- `bb28e0c fix(server): retire restore fallback checkpoints` and `62ec903 fix(server): refetch stale checkpoint restore` - make restore fallback non-terminal and retryable.
+- `c1c59a4 fix(bridge): keep failed turns session-retryable` and `1f98f47 test(bridge): cover claude turn failures` - keep agent execution failures at turn scope.
+- `02c0384 fix(server): renew generation start leases`, `b538ef0 fix(server): require runtime cleanup before recovery`, and `7f9dcfa fix(store): reject stale generation start failures` - tighten retryable generation lifecycle fencing.
+- `fc08a33 fix(server): clean resources on session close`, `0e317eb fix(config): decouple session ceiling from pool capacity`, and `dac665c feat(frontend): expose session close action` - make retained-session quota recoverable without deleting history.
 
 ### Phase 7 Release Qualification - `d0cdaf6`
 
@@ -94,7 +108,7 @@ Artifact handling moved from a flat metadata list to a read-only file browser:
 
 ### Phase 7 Config Loader
 
-The current codebase loads `config/harness.yaml` through the Phase 7 typed `harness:` schema. The full file shape and per-field semantics live in [architecture.md → Configuration](./architecture.md#configuration). Legacy `runtime:` / `claude:`-only files still parse during the cutover, but cannot be mixed with `harness:`.
+The current codebase loads `config/harness.yaml` through the Phase 7 typed `harness:` schema. The full file shape and per-field semantics live in [architecture.md → Configuration](./architecture.md#configuration). Legacy `runtime:` / `claude:`-only files still parse for compatibility, but cannot be mixed with `harness:`.
 
 ### Phase 7 Release Qualification
 
@@ -140,12 +154,13 @@ HTTP routes, SSE/WebSocket endpoints, and the canonical event-name set are docum
 - The current Go runtime uses `runsc -network sandbox -overlay2 none` with per-generation network profiles. The runtime creates the allocated netns/veth pair, configures host and sandbox addresses from the persisted `/30`, applies the static lab egress allow-list, probes the local proxy, and writes the generation-specific sandbox-visible Anthropic base URL into the control manifest. The local proxy key remains `123` for the lab path.
 - Automatic idle checkpointing is disabled by the checked-in policy. It can be enabled only after operators accept the measured restore/resource-retention behavior for the lab.
 - Reclaimable runtime resources are retained for `harness.reaper.failed_retention` before physical cleanup, so recently failed/destroyed generations can remain visible briefly by design.
+- Retained non-terminal sessions count toward `harness.max_sessions` even when they have no live runtime resources. Use the workbench close action or `DELETE /api/sessions/<id>` to free session quota while keeping history and workspace files.
 - Artifact metadata is recorded by host-side scanning/watching and rendered as a read-only live file tree. Direct file mutation operations remain outside the UI; use the sandbox agent or shell path to create, rename, or delete files.
 - Auth is lab shared-password cookie auth when `HARNESS_LAB_PASSWORD` is set.
 
 ## Next Architecture Target
 
-The next major architecture phase is Phase 8: production auth/authorization, real secret storage and rotation, tenant-level egress policy, resource limits, observability, and multi-orchestrator HA.
+Active architecture work is Phase 9: configurable harness system prompt, proactive context compaction, system-skills mount, and harness-managed Claude Code settings. Production auth/authorization, real secret storage and rotation, tenant-level egress policy, resource limits, observability, and multi-orchestrator HA are Phase 10.
 
 ## Checks
 
@@ -162,7 +177,14 @@ Frontend:
 cd frontend
 npm run lint
 npm run typecheck
+npm test
 npm run build
+```
+
+Sandbox bridge client:
+
+```bash
+python3 -m unittest sandbox-image/tests/test_harness_bridge_client.py
 ```
 
 Phase 7 release gates:

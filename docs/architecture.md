@@ -244,7 +244,7 @@ Project config:
 | --- | --- |
 | `config/harness.yaml` | Phase 7 typed control-plane schema and explicit lab runtime profile. |
 
-The config loader reads `config/harness.yaml` through a strict `gopkg.in/yaml.v3` decoder. The primary shape is the Phase 7 `harness:` schema: `run_dir`, `session_retention`, `max_sessions`, nested network egress, event retention, probe status, bridge lease, reaper, and secret-root settings are decoded into typed config and validated before startup. Legacy files containing only top-level `runtime:` / `claude:` sections still load during the cutover, but mixing legacy sections with `harness:` is rejected.
+The config loader reads `config/harness.yaml` through a strict `gopkg.in/yaml.v3` decoder. The primary shape is the Phase 7 `harness:` schema: `run_dir`, `session_retention`, `max_sessions`, nested network egress, event retention, probe status, bridge lease, reaper, and secret-root settings are decoded into typed config and validated before startup. Legacy files containing only top-level `runtime:` / `claude:` sections still load for compatibility, but mixing legacy sections with `harness:` is rejected.
 
 General orchestrator paths such as session roots and DB path still use the environment variables above. `HARNESS_SESSION_RETENTION` and `HARNESS_MAX_SESSIONS` override their `harness:` values and are revalidated against the Phase 7 schema. `HARNESS_SESSION_TTL` is obsolete and fails startup if present so deployments do not silently switch to no-expiry retention.
 
@@ -352,7 +352,7 @@ Checkpoint/restore remains policy-gated. Operators should enable automatic check
 
 - Additional agent adapters beyond Claude Code and the shell shim need their own completion contract before they are first-class multi-turn citizens.
 - Artifact browsing is read-only. File creation, renaming, and deletion should still happen through the sandbox agent or shell session, with the UI reflecting those changes through metadata events.
-- Tenant-level resource limits and production egress policy management are Phase 8 work.
+- Tenant-level resource limits and production egress policy management are Phase 10 work.
 - The current output hub intentionally drops lines for slow subscribers; that is acceptable for UI logs but should be revisited before using the stream as an audit log.
 - Automatic checkpoint/restore is not enabled by default in the lab config; it is a policy decision on top of the Phase 7 control plane.
 

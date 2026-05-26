@@ -1,6 +1,6 @@
 # Phase 9: Agent Capability and UX
 
-> Status: planned. Follows the [P0 lifetime fixes](../p0-session-lifetime.md).
+> Status: planned. Builds on the completed [P0 lifetime baseline](../p0-session-lifetime.md).
 > Roadmap entry: [PLAN.md → Phase 9](../PLAN.md#phase-9-agent-capability-and-ux).
 
 Phase 9 addresses the agent-side capability gaps that are most immediately user-visible:

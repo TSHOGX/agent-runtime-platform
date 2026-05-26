@@ -86,18 +86,18 @@ The main difference from the current architecture is the **Agent Bridge**: inste
 8. [test-matrix.md](./test-matrix.md) — observable assertions that make every invariant a runtime guarantee. Cross-references every other file.
 9. [release-qualification.md](./release-qualification.md) — release-only gates for the pinned proxy contract, gVisor bridge durability lab, secret permission lab, and live turn-start latency benchmark.
 
-## Out of scope (deferred to Phase 8)
+## Out of scope (deferred to Phase 10)
 
 Phase 7 establishes fencing and persistence; the following must not gate Phase 7 acceptance:
 
 - multi-orchestrator HA / shared-DB clustering / leader election.
-- real upstream credentials with KMS-backed storage and rotation. Phase 7 ships the `secret_id`/`secret_version` indirection and per-generation mount; Phase 8 wires the actual store.
-- per-tenant egress policy at the host firewall. Phase 7 ships per-generation netns and a static allowed-egress list; Phase 8 adds tenant-level policy and quotas.
+- real upstream credentials with KMS-backed storage and rotation. Phase 7 ships the `secret_id`/`secret_version` indirection and per-generation mount; Phase 10 wires the actual store.
+- per-tenant egress policy at the host firewall. Phase 7 ships per-generation netns and a static allowed-egress list; Phase 10 adds tenant-level policy and quotas.
 - authentication and authorization on the orchestrator HTTP/SSE surface. Phase 7 assumes a trusted operator.
 
 ## Key design choices
 
 - **Bridge transport: file-backed queue.** The checkpoint-ready precondition rules out any transport with a live host-side handle. A Unix socket bind mount or HTTP long-poll requires an explicit quiesce step before `runsc checkpoint`; the file-backed queue accepts higher latency and filesystem edge cases (rename atomicity, fsync cadence) in exchange for transparent checkpoint/restore. Protocol is transport-neutral; a low-latency variant can be added later if it implements quiesce and proves clean reconnect across restore.
-- **Event log storage: SQLite events table.** Same database as `turns` and `runtime_generations`, so durability and ordering are a single-transaction concern. Postgres is a Phase 8 deployment change, not an architecture change.
+- **Event log storage: SQLite events table.** Same database as `turns` and `runtime_generations`, so durability and ordering are a single-transaction concern. Postgres is a Phase 10 deployment change, not an architecture change.
 - **Checkpoint policy rollout: feature flag, gated on the bridge.** Automatic checkpointing is controlled by `harness.checkpoint.auto_enabled` / `HARNESS_AUTO_CHECKPOINT_ENABLED`, snapshots the per-session policy onto each generation at allocation, and only checkpoints idle generations whose bridge heartbeat and `checkpoint-ready` marker are fresh. Memory-pressure policy remains a future rollout layer.
 - **Manifest digest verification: canonical JSON in both host and sandbox.** A side-file or pre-canonicalized on-disk format would eliminate the sandbox-side verifier, but using the same deterministic JSON rule everywhere removes a class of host/sandbox divergence bugs that recur the moment a third consumer appears. Phase 7's manifest schema is restricted to JSON object payloads with strings, booleans, and integers; both the Go host code and sandbox Python verifier sort keys, remove insignificant whitespace, preserve UTF-8, and hash the resulting bytes. The test matrix carries a shared fixture that both suites must pass in release builds.

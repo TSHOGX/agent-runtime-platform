@@ -24,15 +24,15 @@ The checkpoint-safe Phase 7 baseline and P0 lifetime separation are qualified. A
 
 ### P0: session and runtime lifetime separation
 
-User sessions, conversation history, and workspace files must persist effectively forever. Live gVisor runtime resources (sandbox processes, netns/veth, checkpoint images, `/30` slots) should be flexibly released and reloaded independently of session lifetime. The current code couples these in several places that must be unwound first:
+User sessions, conversation history, and workspace files now persist independently from live gVisor runtime resources (sandbox processes, netns/veth, checkpoint images, `/30` slots). P0 established this contract through these completed changes:
 
-1. Hard rename `harness.session_ttl` to `harness.session_retention`. `0s` is the new default and means no automatic session expiry. No backwards-compat alias — lab configs migrate in one step. The existing `harness.checkpoint.idle_threshold` already drives generation idle lifetime separately and does not need renaming.
-2. Decouple retryable runtime failures from terminal session failure. Generation start failures, restore fallback, and failed/canceled bridge `ack_turn_completed` outcomes must leave the session retryable or correctly input-blocking, publish durable non-terminal events, and keep the frontend from marking the session failed.
-3. Add `harness.reaper.checkpoint_image_retention`. Expired checkpointed generations must be atomically retired before their `reserved_checkpointed` allocations move to `reclaimable`; otherwise the next turn still attempts restore and fails the CAS. Retirement events must carry enough committed session fields for the frontend to clear stale checkpoint/restore metadata.
-4. Finish generation cleanup coverage. Checkpoint-retired generations must become physically destroyable without waiting for ordinary failed-retention, and `DestroyGenerationResources` must remove generation-scoped checkpoint/control/runtime/bridge/log directories independently of sandbox network metadata.
-5. Treat `harness.max_sessions` with `session_retention: 0s` as an explicit P0 release constraint. The cap remains a non-terminal session ceiling, so docs and UI/API close paths must make the behavior recoverable and visible.
+1. Renamed `harness.session_ttl` to `harness.session_retention`. `0s` is the default and means no automatic session expiry. No backwards-compat alias — lab configs migrate in one step. The existing `harness.checkpoint.idle_threshold` continues to drive generation idle lifetime separately.
+2. Decoupled retryable runtime failures from terminal session failure. Generation start failures, restore fallback, and failed/canceled bridge `ack_turn_completed` outcomes leave the session retryable or correctly input-blocking, publish durable non-terminal events, and keep the frontend from marking the session failed.
+3. Added `harness.reaper.checkpoint_image_retention`. Expired checkpointed generations are atomically retired before their `reserved_checkpointed` allocations move to `reclaimable`, and retirement events carry committed session fields so the frontend clears stale checkpoint/restore metadata.
+4. Finished generation cleanup coverage. Checkpoint-retired generations become physically destroyable without waiting for ordinary failed-retention, and `DestroyGenerationResources` removes generation-scoped checkpoint/control/runtime/bridge/log directories independently of sandbox network metadata.
+5. Documented `harness.max_sessions` with `session_retention: 0s` as an explicit P0 release constraint. The cap remains a non-terminal session ceiling, and docs plus UI/API close paths make the behavior recoverable and visible.
 
-Detailed design: [p0-session-lifetime.md](./p0-session-lifetime.md).
+Completed design record and regression checklist: [p0-session-lifetime.md](./p0-session-lifetime.md).
 
 ### Phase 9: agent capability and UX
 
@@ -51,7 +51,7 @@ Design only. Folds raw session trajectories into versioned skills via episode me
 
 ## Ongoing Guardrails
 
-Standing constraints that must hold throughout the P0 fixes, Phase 9, Phase 10, and any later work. These are not deliverables — there is no "done" state — but any change that violates one should be revisited before it lands.
+Standing constraints that must hold after P0 and throughout Phase 9, Phase 10, and any later work. These are not deliverables — there is no "done" state — but any change that violates one should be revisited before it lands.
 
 1. Maintain the supported Claude Code and shell session paths.
 2. Keep Phase 7 release gates blocking for runtime, proxy, or config changes, including the pinned proxy contract, gVisor bridge durability lab, secret permission lab, and live turn-start latency gate.
@@ -74,7 +74,7 @@ The current runtime keeps active generation sandboxes alive across turns and rou
 
 ## What Is Done
 
-Phases 0–7 are complete. Highlights below; full per-phase notes live in [current-status.md](./current-status.md).
+Phases 0–7 and P0 lifetime separation are complete. Highlights below; full per-phase notes live in [current-status.md](./current-status.md).
 
 - **Phase 0–2**: host capability check (no `/dev/kvm`), `vhr_data` schema packaging, manual rootfs + bundle bake + `runsc` smoke path; standard restore latency in low-hundreds of ms.
 - **Phase 3–4**: Go orchestrator with SQLite store, session API, artifact scanning, event hub, checkpoint/restore primitives; Next.js workbench with same-origin proxy and SSE.

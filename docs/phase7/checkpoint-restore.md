@@ -152,7 +152,7 @@ strict (included in manifest digest projection — any mismatch -> cold fallback
   - manifest.anthropic_api_key_secret_id
   - manifest.anthropic_auth_token_secret_id
   - manifest.secret_version (rotation invalidates the checkpoint by
-      design — Phase 8 will lift this with a separate indirection)
+      design — Phase 10 will lift this with a separate indirection)
   - manifest.secret_mount_path
   - manifest.model
   - manifest.workspace_path
