@@ -593,6 +593,62 @@ class BridgeClientTest(unittest.TestCase):
         self.assertIn("--resume", commands[1])
         self.assertNotIn("--session-id", commands[1])
 
+    def test_claude_runner_maps_stream_error_to_failed_turn(self):
+        class FakeStdin:
+            def write(self, value):
+                pass
+
+            def close(self):
+                pass
+
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = FakeStdin()
+                self.stdout = iter(['{"type":"error","message":"model overloaded"}\n'])
+
+            def wait(self):
+                return 0
+
+        emitted = []
+
+        with mock.patch.dict(os.environ, claude_runner_env(), clear=True):
+            with mock.patch.object(bridge.subprocess, "Popen", return_value=FakeProcess()):
+                status, error_class, error = bridge.ClaudeTurnRunner().run_turn(
+                    "hello",
+                    lambda stream, line: emitted.append((stream, line)),
+                )
+
+        self.assertEqual((status, error_class, error), ("failed", "agent_execution_failed", "model overloaded"))
+        self.assertEqual(emitted, [("stdout", '{"type":"error","message":"model overloaded"}')])
+
+    def test_claude_runner_maps_nonzero_exit_to_failed_turn(self):
+        class FakeStdin:
+            def write(self, value):
+                pass
+
+            def close(self):
+                pass
+
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = FakeStdin()
+                self.stdout = iter(["plain stderr line\n"])
+
+            def wait(self):
+                return 7
+
+        emitted = []
+
+        with mock.patch.dict(os.environ, claude_runner_env(), clear=True):
+            with mock.patch.object(bridge.subprocess, "Popen", return_value=FakeProcess()):
+                status, error_class, error = bridge.ClaudeTurnRunner().run_turn(
+                    "hello",
+                    lambda stream, line: emitted.append((stream, line)),
+                )
+
+        self.assertEqual((status, error_class, error), ("failed", "agent_exit_nonzero", "claude exited with status 7"))
+        self.assertEqual(emitted, [("stdout", "plain stderr line")])
+
 
 class EntrypointStaticTest(unittest.TestCase):
     def test_manifest_digest_matches_host_fixture(self):
@@ -642,6 +698,22 @@ class EntrypointStaticTest(unittest.TestCase):
 
 def argparse_namespace(**kwargs):
     return type("Args", (), kwargs)()
+
+
+def claude_runner_env():
+    return {
+        "CLAUDE_SESSION_UUID": "11111111-2222-3333-4444-555555555555",
+        "SESSION_ID": "sess",
+        "HARNESS_AGENT_HOME": "/agent-homes/sess",
+        "HARNESS_AGENT_UID": "65534",
+        "HARNESS_AGENT_GID": "65534",
+        "HARNESS_SECRET_READERS_GID": "12345",
+        "ANTHROPIC_BASE_URL": "http://10.240.0.1:8082",
+        "SECRET_MOUNT_PATH": "/harness-secrets",
+        "ANTHROPIC_API_KEY_SECRET_ID": "anthropic_api_key",
+        "ANTHROPIC_AUTH_TOKEN_SECRET_ID": "anthropic_auth_token",
+        "SECRET_VERSION": "local",
+    }
 
 
 if __name__ == "__main__":
