@@ -987,13 +987,7 @@ func (s *Server) RunPhase7Maintenance(ctx context.Context) error {
 		if _, err := s.store.CancelTerminalSessionPendingTurns(ctx, now); err != nil && !errors.Is(err, context.Canceled) {
 			s.log.Warn("phase7 terminal-session turn cleanup failed", "error", err)
 		}
-		if _, err := s.store.RecoverAllocations(ctx, store.StartupRecoveryParams{
-			OwnerUUID:       s.ownerUUID,
-			Now:             now,
-			LeaseTTL:        s.cfg.Phase7.Bridge.LeaseTTL.Duration,
-			ReconnectGrace:  s.cfg.Phase7.Bridge.ReconnectGrace.Duration,
-			AckStartedGrace: s.cfg.Phase7.Bridge.AckStartedGrace.Duration,
-		}); err != nil && !errors.Is(err, context.Canceled) {
+		if _, err := s.RecoverExpiredRuntimeResources(ctx, now); err != nil && !errors.Is(err, context.Canceled) {
 			s.log.Warn("phase7 allocation recovery failed", "error", err)
 		}
 		if _, err := s.store.RenewLiveGenerationLeases(ctx, store.RenewLiveGenerationsParams{
@@ -1078,6 +1072,55 @@ func (s *Server) RunPhase7Maintenance(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
+}
+
+func (s *Server) RecoverExpiredRuntimeResources(ctx context.Context, now time.Time) (store.StartupRecoveryResult, error) {
+	if strings.TrimSpace(s.ownerUUID) == "" {
+		return store.StartupRecoveryResult{}, fmt.Errorf("runtime recovery requires owner uuid")
+	}
+	params := store.StartupRecoveryParams{
+		OwnerUUID:       s.ownerUUID,
+		Now:             now,
+		LeaseTTL:        s.cfg.Phase7.Bridge.LeaseTTL.Duration,
+		ReconnectGrace:  s.cfg.Phase7.Bridge.ReconnectGrace.Duration,
+		AckStartedGrace: s.cfg.Phase7.Bridge.AckStartedGrace.Duration,
+	}
+	candidates, err := s.store.ListExpiredRuntimeRecoveryCandidates(ctx, params)
+	if err != nil {
+		return store.StartupRecoveryResult{}, err
+	}
+	cleaned := make([]store.ExpiredRuntimeRecoveryCandidate, 0, len(candidates))
+	result := store.StartupRecoveryResult{}
+	for _, candidate := range candidates {
+		runtimeID := strings.TrimSpace(candidate.RuntimeID)
+		if runtimeID == "" {
+			result.RuntimeCleanupSkipped++
+			s.log.Warn("phase7 recovery candidate has no runtime id", "session_id", candidate.SessionID, "generation_id", candidate.GenerationID)
+			continue
+		}
+		if err := s.runtime.Destroy(ctx, runtimeID); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return result, err
+			}
+			result.RuntimeCleanupSkipped++
+			s.log.Warn("phase7 runtime cleanup before recovery failed", "session_id", candidate.SessionID, "generation_id", candidate.GenerationID, "runtime_id", runtimeID, "error", err)
+			continue
+		}
+		cleaned = append(cleaned, candidate)
+	}
+	repaired, err := s.store.RepairExpiredRuntimeRecovery(ctx, params, cleaned)
+	if err != nil {
+		return result, err
+	}
+	repaired.RuntimeCleanupSkipped += result.RuntimeCleanupSkipped
+	for _, eventID := range repaired.EventIDs {
+		s.publishDurableEvent(ctx, eventID)
+	}
+	return repaired, nil
+}
+
+func (s *Server) DestroyReclaimableGenerationResources(ctx context.Context, now time.Time) {
+	s.destroyReclaimableGenerationResources(ctx, now)
 }
 
 func (s *Server) destroyReclaimableGenerationResources(ctx context.Context, now time.Time) {

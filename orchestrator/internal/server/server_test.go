@@ -2381,8 +2381,80 @@ WHERE generation_id = ?`, allocation.GenerationID).Scan(&errorClass, &leaseOwner
 	if errorClass != "orchestrator_restart_reconnect_grace_expired" || leaseOwnerAfter != "" {
 		t.Fatalf("unexpected recovered generation: error_class=%s lease_owner=%s", errorClass, leaseOwnerAfter)
 	}
+	if got := rt.runtimeDestroyRequests(); len(got) != 1 || got[0] != session.RestoreID {
+		t.Fatalf("maintenance should destroy runtime before repair using restore id %q, got %+v", session.RestoreID, got)
+	}
 	if _, starts := rt.requests(); len(starts) != 0 {
 		t.Fatalf("maintenance should not cold-start without a queued turn: %+v", starts)
+	}
+}
+
+func TestExpiredRuntimeRecoverySkipsRepairWhenRuntimeCleanupFails(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	now := time.Now().UTC()
+	session := createServerTestSession(t, ctx, st, dir, "sess_recovery_cleanup_fail", string(sessionstate.RunningIdle), now.Add(-2*time.Minute), nil)
+	cfg := testServerConfig(dir)
+	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     store.GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       now.Add(-3 * time.Minute),
+		Config:    serverTestAllocatorConfig(cfg, session.Agent),
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, session.ID, allocation.GenerationID, allocation.Owner, now.Add(-3*time.Minute+time.Second)); err != nil {
+		t.Fatalf("mark generation live: %v", err)
+	}
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE runtime_generations
+SET status = 'idle',
+    lease_owner = ?,
+    lease_expires_at = ?
+WHERE generation_id = ?`, store.GenerationLeaseOwner("previous-owner"), now.Add(-time.Minute).Format(time.RFC3339Nano), allocation.GenerationID); err != nil {
+		t.Fatalf("expire generation: %v", err)
+	}
+	rt := &recordingRuntime{destroyRuntimeErr: errors.New("runsc delete failed")}
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: rt,
+		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+
+	recovered, err := srv.RecoverExpiredRuntimeResources(ctx, now)
+	if err != nil {
+		t.Fatalf("recover expired runtime resources: %v", err)
+	}
+	if recovered.RuntimeCleanupSkipped != 1 ||
+		recovered.ReconnectGraceFailed != 0 ||
+		recovered.ExpiredLifecycleFailed != 0 ||
+		recovered.UnknownAfterAckStarted != 0 {
+		t.Fatalf("cleanup failure should skip repair, got %+v", recovered)
+	}
+	if got := rt.runtimeDestroyRequests(); len(got) != 1 || got[0] != session.RestoreID {
+		t.Fatalf("expected runtime cleanup attempt for %q, got %+v", session.RestoreID, got)
+	}
+	var generationStatus, ownerAfter, networkState, resourceState string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT g.status, COALESCE(g.lease_owner, ''), n.allocation_state, r.resource_state
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ownerAfter, &networkState, &resourceState); err != nil {
+		t.Fatalf("query skipped recovery state: %v", err)
+	}
+	if generationStatus != "idle" ||
+		ownerAfter != string(store.GenerationLeaseOwner("previous-owner")) ||
+		networkState != "live" ||
+		resourceState != "live" {
+		t.Fatalf("cleanup failure should leave DB non-reclaimable: generation=%s owner=%s network=%s resource=%s", generationStatus, ownerAfter, networkState, resourceState)
 	}
 }
 

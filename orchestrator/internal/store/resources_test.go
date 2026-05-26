@@ -753,7 +753,7 @@ func TestAllocatorReturnsPoolExhaustedBeforeRows(t *testing.T) {
 	}
 }
 
-func TestRecoverAllocationsAndReaperTransitions(t *testing.T) {
+func TestExpiredRuntimeRecoveryAndReaperTransitions(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
 	cfg := testAllocatorConfig(t)
@@ -782,7 +782,7 @@ UPDATE runtime_generation_resources SET resource_state = 'recreating' WHERE gene
 		t.Fatalf("set recreating resource: %v", err)
 	}
 
-	recovered, err := st.RecoverAllocations(ctx, StartupRecoveryParams{
+	recovered, err := recoverCleanedAllocations(t, ctx, st, StartupRecoveryParams{
 		OwnerUUID:      owner.UUID,
 		Now:            now,
 		LeaseTTL:       time.Minute,
@@ -835,7 +835,7 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ne
 	}
 }
 
-func TestRecoverAllocationsDoesNotReclaimUnrelatedFailedGeneration(t *testing.T) {
+func TestExpiredRuntimeRecoveryDoesNotReclaimUnrelatedFailedGeneration(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
 	cfg := testAllocatorConfig(t)
@@ -878,7 +878,7 @@ WHERE generation_id = ?`, formatTime(now.Add(-5*time.Second)), recentFailed.Gene
 		t.Fatalf("set recent failed generation: %v", err)
 	}
 
-	recovered, err := st.RecoverAllocations(ctx, StartupRecoveryParams{
+	recovered, err := recoverCleanedAllocations(t, ctx, st, StartupRecoveryParams{
 		OwnerUUID:      owner.UUID,
 		Now:            now,
 		LeaseTTL:       time.Minute,
@@ -902,7 +902,7 @@ WHERE generation_id = ?`, formatTime(now.Add(-5*time.Second)), recentFailed.Gene
 	}
 }
 
-func TestRecoverAllocationsRequeuesExpiredLeasedTurn(t *testing.T) {
+func TestExpiredRuntimeRecoveryRequeuesExpiredLeasedTurn(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
 	cfg := testAllocatorConfig(t)
@@ -936,7 +936,7 @@ func TestRecoverAllocationsRequeuesExpiredLeasedTurn(t *testing.T) {
 		t.Fatalf("claim setup: ok=%v grant=%+v err=%v", ok, grant, err)
 	}
 
-	recovered, err := st.RecoverAllocations(ctx, StartupRecoveryParams{
+	recovered, err := recoverCleanedAllocations(t, ctx, st, StartupRecoveryParams{
 		OwnerUUID:       owner.UUID,
 		Now:             now,
 		LeaseTTL:        time.Minute,
@@ -1040,7 +1040,7 @@ func TestClaimNextTurnPreservesSequenceOrderingAfterRecoveryRequeue(t *testing.T
 				t.Fatalf("claim old turn setup: ok=%v grant=%+v err=%v", ok, grant, err)
 			}
 
-			recovered, err := st.RecoverAllocations(ctx, StartupRecoveryParams{
+			recovered, err := recoverCleanedAllocations(t, ctx, st, StartupRecoveryParams{
 				OwnerUUID:       owner.UUID,
 				Now:             now,
 				LeaseTTL:        time.Minute,
@@ -1107,7 +1107,7 @@ func TestClaimNextTurnPreservesSequenceOrderingAfterRecoveryRequeue(t *testing.T
 	}
 }
 
-func TestRecoverAllocationsLeavesAckStartedTurnDuringGrace(t *testing.T) {
+func TestExpiredRuntimeRecoveryLeavesAckStartedTurnDuringGrace(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
 	cfg := testAllocatorConfig(t)
@@ -1115,7 +1115,7 @@ func TestRecoverAllocationsLeavesAckStartedTurnDuringGrace(t *testing.T) {
 	now := time.Now().UTC()
 	allocation, turnID := createExpiredAckStartedTurn(t, ctx, st, owner.UUID, cfg, "sess_ack_grace", now, 80*time.Second)
 
-	recovered, err := st.RecoverAllocations(ctx, StartupRecoveryParams{
+	recovered, err := recoverCleanedAllocations(t, ctx, st, StartupRecoveryParams{
 		OwnerUUID:       owner.UUID,
 		Now:             now,
 		LeaseTTL:        time.Minute,
@@ -1140,7 +1140,7 @@ func TestRecoverAllocationsLeavesAckStartedTurnDuringGrace(t *testing.T) {
 	}
 }
 
-func TestRecoverAllocationsMarksExpiredAckStartedTurnUnknown(t *testing.T) {
+func TestExpiredRuntimeRecoveryMarksExpiredAckStartedTurnUnknown(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
 	cfg := testAllocatorConfig(t)
@@ -1148,7 +1148,7 @@ func TestRecoverAllocationsMarksExpiredAckStartedTurnUnknown(t *testing.T) {
 	now := time.Now().UTC()
 	allocation, turnID := createExpiredAckStartedTurn(t, ctx, st, owner.UUID, cfg, "sess_ack_unknown", now, 3*time.Minute)
 
-	recovered, err := st.RecoverAllocations(ctx, StartupRecoveryParams{
+	recovered, err := recoverCleanedAllocations(t, ctx, st, StartupRecoveryParams{
 		OwnerUUID:       owner.UUID,
 		Now:             now,
 		LeaseTTL:        time.Minute,
@@ -1188,7 +1188,7 @@ WHERE t.id = ?`, turnID).Scan(&turnStatus, &turnError, &generationStatus, &gener
 	}
 }
 
-func TestRecoverAllocationsDeletesStaleProxyContextsFromPreviousOwner(t *testing.T) {
+func TestExpiredRuntimeRecoveryDeletesStaleProxyContextsFromPreviousOwner(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
 	cfg := testAllocatorConfig(t)
@@ -1206,7 +1206,7 @@ WHERE generation_id = ?`, staleOwner, stale.GenerationID); err != nil {
 		t.Fatalf("move stale proxy context to previous owner: %v", err)
 	}
 
-	recovered, err := st.RecoverAllocations(ctx, StartupRecoveryParams{
+	recovered, err := recoverCleanedAllocations(t, ctx, st, StartupRecoveryParams{
 		OwnerUUID:       owner.UUID,
 		Now:             now,
 		LeaseTTL:        time.Minute,
@@ -2317,6 +2317,15 @@ func openOwnedStore(t *testing.T, ctx context.Context) (*Store, *OwnerLock) {
 		t.Fatalf("write owner: %v", err)
 	}
 	return st, owner
+}
+
+func recoverCleanedAllocations(t *testing.T, ctx context.Context, st *Store, p StartupRecoveryParams) (StartupRecoveryResult, error) {
+	t.Helper()
+	candidates, err := st.ListExpiredRuntimeRecoveryCandidates(ctx, p)
+	if err != nil {
+		return StartupRecoveryResult{}, err
+	}
+	return st.RepairExpiredRuntimeRecovery(ctx, p, candidates)
 }
 
 func createAutoCheckpointGeneration(t *testing.T, ctx context.Context, st *Store, cfg ResourceAllocatorConfig, sessionID, owner string, now time.Time) GenerationAllocation {

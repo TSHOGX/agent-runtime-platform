@@ -633,10 +633,15 @@ func (r *Runtime) deleteNetworkResource(ctx context.Context, name string, args [
 }
 
 func (r *Runtime) deleteRunscContainer(ctx context.Context, restoreID string) error {
-	kill := exec.CommandContext(ctx, "runsc", "-root", r.cfg.RunscRoot, "kill", restoreID, "KILL")
-	deleteCmd := exec.CommandContext(ctx, "runsc", "-root", r.cfg.RunscRoot, "delete", restoreID)
-	_ = kill.Run()
-	return deleteCmd.Run()
+	_, _ = r.runner.CombinedOutput(ctx, "runsc", "-root", r.cfg.RunscRoot, "kill", restoreID, "KILL")
+	output, err := r.runner.CombinedOutput(ctx, "runsc", "-root", r.cfg.RunscRoot, "delete", restoreID)
+	if err != nil {
+		if commandOutputContains(string(output), "does not exist", "not found", "no such container", "no such file") {
+			return nil
+		}
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 func (r *Runtime) cleanupRunscContainer(ctx context.Context, restoreID string) {

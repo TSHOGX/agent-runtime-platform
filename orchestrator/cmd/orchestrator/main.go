@@ -67,49 +67,8 @@ func main() {
 			log.Info("cleared active session expiry", "sessions", cleared)
 		}
 	}
-	if _, err := db.RecoverAllocations(ctx, store.StartupRecoveryParams{
-		OwnerUUID:       owner.UUID,
-		Now:             time.Now().UTC(),
-		LeaseTTL:        cfg.Phase7.Bridge.LeaseTTL.Duration,
-		ReconnectGrace:  cfg.Phase7.Bridge.ReconnectGrace.Duration,
-		AckStartedGrace: cfg.Phase7.Bridge.AckStartedGrace.Duration,
-	}); err != nil {
-		log.Error("failed to recover phase7 allocations", "error", err)
-		os.Exit(1)
-	}
-	if _, err := db.ReapResources(ctx, store.ReaperParams{
-		OwnerUUID:       owner.UUID,
-		FailedRetention: cfg.Phase7.Reaper.FailedRetention.Duration,
-		Now:             time.Now().UTC(),
-	}); err != nil {
-		log.Error("failed to reap phase7 resources", "error", err)
-		os.Exit(1)
-	}
-	ownerHeartbeatErr := db.StartOwnerHeartbeat(ctx, owner)
-	if err := db.EnsureUser(ctx, "lab", "Lab User"); err != nil {
-		log.Error("failed to ensure lab user", "error", err)
-		os.Exit(1)
-	}
-	if err := os.MkdirAll(cfg.AgentHomesRoot, 0o755); err != nil {
-		log.Error("failed to create agent homes root", "error", err)
-		os.Exit(1)
-	}
-
 	hub := events.NewHub()
 	watcher := artifacts.New(cfg.SessionsRoot, db, hub, log)
-	go func() {
-		if err := <-ownerHeartbeatErr; err != nil {
-			log.Error("orchestrator owner heartbeat failed", "error", err)
-			stop()
-		}
-	}()
-
-	go func() {
-		if err := watcher.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			log.Error("artifact watcher stopped", "error", err)
-		}
-	}()
-
 	rt := runtime.New(runtime.Config{
 		RestoreScript:         cfg.RestoreScript,
 		RunscRoot:             cfg.RunscRoot,
@@ -141,6 +100,42 @@ func main() {
 	})
 	app := server.New(cfg, db, rt, watcher, hub, log)
 	app.SetOwnerUUID(owner.UUID)
+
+	if _, err := app.RecoverExpiredRuntimeResources(ctx, time.Now().UTC()); err != nil {
+		log.Error("failed to recover phase7 allocations", "error", err)
+		os.Exit(1)
+	}
+	if _, err := db.ReapResources(ctx, store.ReaperParams{
+		OwnerUUID:       owner.UUID,
+		FailedRetention: cfg.Phase7.Reaper.FailedRetention.Duration,
+		Now:             time.Now().UTC(),
+	}); err != nil {
+		log.Error("failed to reap phase7 resources", "error", err)
+		os.Exit(1)
+	}
+	app.DestroyReclaimableGenerationResources(ctx, time.Now().UTC())
+	ownerHeartbeatErr := db.StartOwnerHeartbeat(ctx, owner)
+	if err := db.EnsureUser(ctx, "lab", "Lab User"); err != nil {
+		log.Error("failed to ensure lab user", "error", err)
+		os.Exit(1)
+	}
+	if err := os.MkdirAll(cfg.AgentHomesRoot, 0o755); err != nil {
+		log.Error("failed to create agent homes root", "error", err)
+		os.Exit(1)
+	}
+
+	go func() {
+		if err := <-ownerHeartbeatErr; err != nil {
+			log.Error("orchestrator owner heartbeat failed", "error", err)
+			stop()
+		}
+	}()
+
+	go func() {
+		if err := watcher.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error("artifact watcher stopped", "error", err)
+		}
+	}()
 
 	// Start idle session monitoring
 	go func() {

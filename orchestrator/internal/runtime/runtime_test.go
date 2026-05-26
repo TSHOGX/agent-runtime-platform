@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -823,6 +824,28 @@ func TestDestroyGenerationResourcesCleansFilesystemWithIncompleteSandboxMetadata
 	want := []string{"nft delete table inet harness_gen_gen_missing_net"}
 	if got := runner.Commands(); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("unexpected commands:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func TestDestroyTreatsMissingRunscContainerAsAbsent(t *testing.T) {
+	runner := &recordingCommandRunner{
+		sequence: map[string][]commandResult{
+			"runsc -root /runsc delete phase3-missing": {
+				{out: []byte("container phase3-missing not found"), err: errors.New("exit status 1")},
+			},
+		},
+	}
+	rt := New(Config{RunscRoot: "/runsc", CommandRunner: runner})
+
+	if err := rt.Destroy(context.Background(), "phase3-missing"); err != nil {
+		t.Fatalf("destroy missing runsc container: %v", err)
+	}
+	want := []string{
+		"runsc -root /runsc kill phase3-missing KILL",
+		"runsc -root /runsc delete phase3-missing",
+	}
+	if got := runner.Commands(); !slices.Equal(got, want) {
+		t.Fatalf("commands=%v want %v", got, want)
 	}
 }
 
