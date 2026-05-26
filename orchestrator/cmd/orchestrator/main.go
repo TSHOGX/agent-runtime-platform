@@ -67,8 +67,6 @@ func main() {
 			log.Info("cleared active session expiry", "sessions", cleared)
 		}
 	}
-	hub := events.NewHub()
-	watcher := artifacts.New(cfg.SessionsRoot, db, hub, log)
 	rt := runtime.New(runtime.Config{
 		RestoreScript:         cfg.RestoreScript,
 		RunscRoot:             cfg.RunscRoot,
@@ -98,6 +96,8 @@ func main() {
 			DisableNonessentialTraffic: cfg.Claude.DisableNonessentialTraffic,
 		},
 	})
+	hub := events.NewHub()
+	watcher := artifacts.New(cfg.SessionsRoot, db, hub, log)
 	app := server.New(cfg, db, rt, watcher, hub, log)
 	app.SetOwnerUUID(owner.UUID)
 
