@@ -19,6 +19,7 @@ import (
 const RuntimeManagerRoleTag = "runtime_manager"
 
 var ErrPoolExhausted = errors.New("pool exhausted")
+var ErrStaleCheckpointRestore = errors.New("stale checkpoint restore")
 
 type ResourceAllocatorConfig struct {
 	RunDir                     string
@@ -531,6 +532,13 @@ WHERE generation_id = ?
 		return GenerationAllocation{}, err
 	}
 	if affected != 1 {
+		stale, err := staleCheckpointRestoreTx(ctx, tx, p.SessionID, p.GenerationID)
+		if err != nil {
+			return GenerationAllocation{}, err
+		}
+		if stale {
+			return GenerationAllocation{}, fmt.Errorf("%w: checkpointed generation restore CAS failed", ErrStaleCheckpointRestore)
+		}
 		return GenerationAllocation{}, fmt.Errorf("checkpointed generation restore CAS failed")
 	}
 
@@ -583,6 +591,24 @@ WHERE generation_id = ?
 		return GenerationAllocation{}, err
 	}
 	return allocation, nil
+}
+
+func staleCheckpointRestoreTx(ctx context.Context, tx *sql.Tx, sessionID, generationID string) (bool, error) {
+	var sessionStatus, activeGenerationID, generationStatus string
+	if err := tx.QueryRowContext(ctx, `
+SELECT s.status, COALESCE(s.active_generation_id, ''), COALESCE(g.status, '')
+FROM sessions s
+LEFT JOIN runtime_generations g ON g.session_id = s.id
+  AND g.generation_id = ?
+WHERE s.id = ?`, generationID, sessionID).Scan(&sessionStatus, &activeGenerationID, &generationStatus); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return activeGenerationID != generationID ||
+		sessionStatus != "checkpointed" ||
+		generationStatus != "checkpointed", nil
 }
 
 func (s *Store) SweepExpiredSessions(ctx context.Context, now time.Time) (int64, error) {

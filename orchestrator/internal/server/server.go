@@ -513,6 +513,10 @@ func (s *Server) retireGenerationForRestoreFallback(sessionID, generationID, own
 }
 
 func (s *Server) ensureActiveGeneration(ctx context.Context, session store.Session, owner string) (ensuredGeneration, error) {
+	return s.ensureActiveGenerationWithRestoreRefetch(ctx, session, owner, true)
+}
+
+func (s *Server) ensureActiveGenerationWithRestoreRefetch(ctx context.Context, session store.Session, owner string, allowRestoreRefetch bool) (ensuredGeneration, error) {
 	activeGenerationID := strings.TrimSpace(session.ActiveGenerationID)
 	if activeGenerationID != "" {
 		status, err := s.store.GetRuntimeGenerationStatus(ctx, session.ID, activeGenerationID)
@@ -528,6 +532,13 @@ func (s *Server) ensureActiveGeneration(ctx context.Context, session store.Sessi
 				Now:          time.Now().UTC(),
 			})
 			if err != nil {
+				if allowRestoreRefetch && errors.Is(err, store.ErrStaleCheckpointRestore) {
+					refreshed, refreshErr := s.store.GetSession(ctx, session.ID)
+					if refreshErr != nil {
+						return ensuredGeneration{}, refreshErr
+					}
+					return s.ensureActiveGenerationWithRestoreRefetch(ctx, refreshed, owner, false)
+				}
 				return ensuredGeneration{}, err
 			}
 			return ensuredGeneration{

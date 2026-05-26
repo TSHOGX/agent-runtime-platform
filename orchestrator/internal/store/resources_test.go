@@ -576,8 +576,8 @@ func TestClaimCheckpointedGenerationForRestoreRequiresCheckpointedSession(t *tes
 		LeaseTTL:     time.Minute,
 		Now:          now.Add(3 * time.Second),
 	})
-	if err == nil || !strings.Contains(err.Error(), "checkpointed generation restore CAS failed") {
-		t.Fatalf("expected generation CAS failure, got %v", err)
+	if !errors.Is(err, ErrStaleCheckpointRestore) {
+		t.Fatalf("expected stale checkpoint restore error, got %v", err)
 	}
 	var generationStatus, leaseOwnerAfter, networkState, resourceState string
 	if err := st.db.QueryRowContext(ctx, `
@@ -1667,6 +1667,45 @@ WHERE id = ?`, filepath.Join(t.TempDir(), sessionID, "checkpoint"), sessionID); 
 	}
 	if oldSession.Status != string(sessionstate.RunningIdle) || youngSession.Status != string(sessionstate.Checkpointed) {
 		t.Fatalf("unexpected fallback-anchor statuses: old=%s young=%s", oldSession.Status, youngSession.Status)
+	}
+}
+
+func TestClaimCheckpointedGenerationForRestoreReturnsStaleAfterCheckpointRetirement(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	cfg := testAllocatorConfig(t)
+	now := time.Now().UTC()
+	leaseOwner := GenerationLeaseOwner(owner.UUID)
+	allocation := createAutoCheckpointGeneration(t, ctx, st, cfg, "sess_restore_stale", leaseOwner, now.Add(-3*time.Hour))
+	checkpointedGeneration(t, ctx, st, "sess_restore_stale", allocation.GenerationID, now.Add(-2*time.Hour))
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE sessions
+SET checkpoint_path = ?,
+    last_activity_at = ?
+WHERE id = ?`, filepath.Join(t.TempDir(), "checkpoint"), formatTime(now.Add(-2*time.Hour)), "sess_restore_stale"); err != nil {
+		t.Fatalf("seed stale checkpoint metadata: %v", err)
+	}
+	retired, err := st.RetireExpiredCheckpoints(ctx, RetireExpiredCheckpointsParams{
+		OwnerUUID:                owner.UUID,
+		Now:                      now,
+		CheckpointImageRetention: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("retire checkpoint: %v", err)
+	}
+	if len(retired) != 1 {
+		t.Fatalf("expected one retired checkpoint, got %+v", retired)
+	}
+
+	_, err = st.ClaimCheckpointedGenerationForRestore(ctx, ClaimCheckpointedGenerationParams{
+		SessionID:    "sess_restore_stale",
+		GenerationID: allocation.GenerationID,
+		Owner:        leaseOwner,
+		LeaseTTL:     time.Minute,
+		Now:          now.Add(time.Second),
+	})
+	if !errors.Is(err, ErrStaleCheckpointRestore) {
+		t.Fatalf("expected stale checkpoint restore error, got %v", err)
 	}
 }
 

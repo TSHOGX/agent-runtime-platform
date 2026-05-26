@@ -1503,6 +1503,58 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ge
 	}
 }
 
+func TestEnsureActiveGenerationColdStartsAfterCheckpointRetirement(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_retire_then_send", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
+	cfg := testServerConfig(dir)
+	cfg.Phase7.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
+	allocation := prepareServerIdleGeneration(t, ctx, st, cfg, owner.UUID, session.ID)
+	checkpointedAt := time.Now().UTC().Add(-2 * time.Hour)
+	markServerGenerationCheckpointed(t, ctx, st, session.ID, allocation.GenerationID, checkpointedAt)
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE sessions
+SET checkpoint_path = ?,
+    last_activity_at = ?
+WHERE id = ?`, filepath.Join(dir, "checkpoint", session.ID), checkpointedAt.Format(time.RFC3339Nano), session.ID); err != nil {
+		t.Fatalf("seed checkpoint session metadata: %v", err)
+	}
+	staleCheckpointedSession, err := st.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("get checkpointed session: %v", err)
+	}
+	if _, err := st.RetireExpiredCheckpoints(ctx, store.RetireExpiredCheckpointsParams{
+		OwnerUUID:                owner.UUID,
+		Now:                      time.Now().UTC(),
+		CheckpointImageRetention: time.Hour,
+	}); err != nil {
+		t.Fatalf("retire checkpoint: %v", err)
+	}
+
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: &recordingRuntime{},
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	ensured, err := srv.ensureActiveGeneration(ctx, staleCheckpointedSession, store.GenerationLeaseOwner(owner.UUID))
+	if err != nil {
+		t.Fatalf("ensure active generation after retirement: %v", err)
+	}
+	if !ensured.IsNew || ensured.RestoreFromCheckpoint || ensured.Allocation.GenerationID == allocation.GenerationID {
+		t.Fatalf("ensure should cold-start replacement after checkpoint retirement: %+v old=%s", ensured, allocation.GenerationID)
+	}
+	gotSession, err := st.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("get replacement session: %v", err)
+	}
+	if gotSession.ActiveGenerationID != ensured.Allocation.GenerationID {
+		t.Fatalf("session active generation=%s want replacement %s", gotSession.ActiveGenerationID, ensured.Allocation.GenerationID)
+	}
+}
+
 func TestGetQuotaReportsSessionAndPoolCeilings(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
