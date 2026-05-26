@@ -15,7 +15,7 @@ bundle/checkpoints/
 
 # 构建产物
 orchestrator/orchestrator
-scripts/
+.scratch/
 
 # 通用
 .DS_Store
