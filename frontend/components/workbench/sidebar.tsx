@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronDown, Loader2, Plus, RotateCw } from "lucide-react";
+import { ChevronDown, Loader2, Plus, RotateCw, Trash2 } from "lucide-react";
 
 import { useHarness } from "@/components/harness-provider";
 import { Button } from "@/components/ui/button";
@@ -11,9 +11,11 @@ import { formatRelative, statusLabel } from "@/lib/format";
 import { cn } from "@/lib/cn";
 
 export function Sidebar() {
-  const { state, selectSession, createSession, refresh } = useHarness();
+  const { state, selectSession, createSession, destroySession, refresh } = useHarness();
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [closeError, setCloseError] = useState<string | null>(null);
+  const [closingId, setClosingId] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
 
   const handleCreate = async (agent: RuntimeAgent) => {
@@ -23,6 +25,16 @@ export function Sidebar() {
     const res = await createSession(agent);
     setCreating(false);
     if (!res.ok) setCreateError(res.error ?? "Failed to create session");
+  };
+
+  const handleClose = async (id: string) => {
+    if (closingId) return;
+    if (!window.confirm(`Close session ${id}? History and workspace files are retained.`)) return;
+    setClosingId(id);
+    setCloseError(null);
+    const res = await destroySession(id);
+    setClosingId(null);
+    if (!res.ok) setCloseError(res.error ?? "Failed to close session");
   };
 
   return (
@@ -72,6 +84,9 @@ export function Sidebar() {
         {createError ? (
           <p className="mt-2 text-xs text-[var(--color-danger)]">{createError}</p>
         ) : null}
+        {closeError ? (
+          <p className="mt-2 text-xs text-[var(--color-danger)]">{closeError}</p>
+        ) : null}
       </div>
 
       <div className="flex shrink-0 items-center justify-between px-4 pt-3 pb-2">
@@ -88,31 +103,47 @@ export function Sidebar() {
           <ul className="px-1.5 pb-3 space-y-0.5">
             {state.sessions.map((s) => {
               const active = s.id === state.selectedId;
+              const closing = closingId === s.id;
               return (
                 <li key={s.id}>
-                  <button
+                  <div
                     className={cn(
                       "group flex w-full items-start gap-2 rounded-[var(--radius)] px-2.5 py-2 text-left transition-colors",
                       active
                         ? "bg-[var(--color-surface-muted)] border-l-2 border-[var(--color-accent)] pl-[calc(0.625rem-2px)]"
                         : "hover:bg-[var(--color-surface-muted)]"
                     )}
-                    onClick={() => selectSession(s.id)}
                   >
-                    <StatusDot tone={statusTone(s.status)} />
-                    <div className="flex-1 min-w-0">
-                      <div className="truncate text-sm leading-tight">
-                        {s.id}
+                    <button
+                      className="flex min-w-0 flex-1 items-start gap-2 text-left"
+                      onClick={() => selectSession(s.id)}
+                    >
+                      <StatusDot tone={statusTone(s.status)} />
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-sm leading-tight">
+                          {s.id}
+                        </div>
+                        <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-[var(--color-foreground-muted)]">
+                          <span>{agentLabel(s.agent)}</span>
+                          <span aria-hidden>·</span>
+                          <span>{statusLabel(s.status)}</span>
+                          <span aria-hidden>·</span>
+                          <span>{formatRelative(s.updated_at)}</span>
+                        </div>
                       </div>
-                      <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-[var(--color-foreground-muted)]">
-                        <span>{agentLabel(s.agent)}</span>
-                        <span aria-hidden>·</span>
-                        <span>{statusLabel(s.status)}</span>
-                        <span aria-hidden>·</span>
-                        <span>{formatRelative(s.updated_at)}</span>
-                      </div>
-                    </div>
-                  </button>
+                    </button>
+                    <Button
+                      variant="danger"
+                      size="icon"
+                      className="h-7 w-7 shrink-0 opacity-70 hover:opacity-100 focus:opacity-100"
+                      onClick={() => void handleClose(s.id)}
+                      disabled={closing || s.status === "destroyed"}
+                      aria-label={`Close session ${s.id}`}
+                      title="Close session"
+                    >
+                      {closing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                    </Button>
+                  </div>
                 </li>
               );
             })}

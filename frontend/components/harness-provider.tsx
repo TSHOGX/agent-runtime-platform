@@ -56,7 +56,7 @@ type HarnessApi = {
   state: HarnessState;
   selectSession: (id: string | null) => void;
   createSession: (agent: RuntimeAgent) => Promise<{ ok: boolean; error?: string; session?: ApiSession }>;
-  destroySession: (id: string) => Promise<void>;
+  destroySession: (id: string) => Promise<{ ok: boolean; error?: string }>;
   interruptSession: (id: string) => Promise<{ ok: boolean; error?: string }>;
   sendMessage: (id: string, content: string) => Promise<{ ok: boolean; error?: string }>;
   refresh: () => Promise<void>;
@@ -589,7 +589,25 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
   );
 
   const destroySession = useCallback(async (id: string) => {
-    await apiDestroySession(id);
+    const res = await apiDestroySession(id);
+    if (!res.ok) return { ok: false as const, error: res.error };
+    const now = new Date().toISOString();
+    setState((p) => ({
+      ...p,
+      sessions: p.sessions.map((s) =>
+        s.id === id
+          ? {
+              ...s,
+              status: res.data.status,
+              updated_at: now,
+              ended_at: s.ended_at ?? now,
+              checkpoint_path: null,
+              restore_ms: null
+            }
+          : s
+      )
+    }));
+    return { ok: true as const };
   }, []);
 
   const interruptSession = useCallback(async (id: string) => {
