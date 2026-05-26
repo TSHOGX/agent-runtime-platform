@@ -13,8 +13,8 @@
 - [x] **Phase 6**: artifact UX hardening, live file tree, and richer previews
 - [x] **Phase 7a**: control-plane skeleton — per-generation resources, durable schema, per-generation network and bundle, no shared `phase1-demo` / `phase2-template` state.
 - [x] **Phase 7b**: turn execution refactor — Agent Bridge claim/ack, durable turn ledger with `ack_started_at` semantics, durable event log, cold Claude resume, checkpoint-safe restore, and checkpoint policy.
-- [ ] **P0 fixes**: rename `harness.session_ttl` to `harness.session_retention` with `0s = no expiry` as default, decouple generation start failure from session failure, add checkpoint image retention.
-- [ ] **Phase 9**: configurable harness system prompt, proactive context compaction driven by proxy-reported token usage, versioned system-skills mount.
+- [ ] **P0 fixes**: rename `harness.session_ttl` to `harness.session_retention` with `0s = no expiry` as default, decouple retryable runtime/turn failures from terminal session failure, add checkpoint image retention, and close the generation cleanup/quota documentation gaps.
+- [ ] **Phase 9**: configurable harness system prompt, proactive context compaction driven by proxy-reported token usage, system-skills mount, harness-managed Claude Code settings (hooks + remote MCP).
 - [ ] **Phase 10**: multi-user auth, credential storage/rotation/GC, tenant egress policy enforcement, cgroup limits, observability, multi-orchestrator HA.
 - [ ] **Phase 11** (future, design only): trajectory → memory → skill pipeline.
 
@@ -24,11 +24,13 @@ The checkpoint-safe Phase 7 baseline is qualified. Active engineering work is th
 
 ### P0: session and runtime lifetime separation
 
-User sessions, conversation history, and workspace files must persist effectively forever. Live gVisor runtime resources (sandbox processes, netns/veth, checkpoint images, `/30` slots) should be flexibly released and reloaded independently of session lifetime. The current code couples these in three places that must be unwound first:
+User sessions, conversation history, and workspace files must persist effectively forever. Live gVisor runtime resources (sandbox processes, netns/veth, checkpoint images, `/30` slots) should be flexibly released and reloaded independently of session lifetime. The current code couples these in several places that must be unwound first:
 
 1. Hard rename `harness.session_ttl` to `harness.session_retention`. `0s` is the new default and means no automatic session expiry. No backwards-compat alias — lab configs migrate in one step. The existing `harness.checkpoint.idle_threshold` already drives generation idle lifetime separately and does not need renaming.
-2. Decouple generation start failure from session failure. `failGenerationBeforeTurn` currently cascades to `FailSession` unconditionally, making the session permanently terminal even when conversation history and workspace are intact. Only true session-level invariant violations should be terminal; generation start failures should leave the session retryable.
-3. Add `harness.reaper.checkpoint_image_retention`. `reserved_checkpointed` allocations move to `reclaimable` once the session `last_activity_at` exceeds the configured retention. Without this, long-idle sessions accumulate checkpoint images and `/30` network slots indefinitely (the reaper today explicitly skips `reserved_checkpointed`).
+2. Decouple retryable runtime failures from terminal session failure. Generation start failures, restore fallback, and failed/canceled bridge `ack_turn_completed` outcomes must leave the session retryable or correctly input-blocking, publish durable non-terminal events, and keep the frontend from marking the session failed.
+3. Add `harness.reaper.checkpoint_image_retention`. Expired checkpointed generations must be atomically retired before their `reserved_checkpointed` allocations move to `reclaimable`; otherwise the next turn still attempts restore and fails the CAS. Retirement events must carry enough committed session fields for the frontend to clear stale checkpoint/restore metadata.
+4. Finish generation cleanup coverage. Checkpoint-retired generations must become physically destroyable without waiting for ordinary failed-retention, and `DestroyGenerationResources` must remove generation-scoped checkpoint/control/runtime/bridge/log directories independently of sandbox network metadata.
+5. Treat `harness.max_sessions` with `session_retention: 0s` as an explicit P0 release constraint. The cap remains a non-terminal session ceiling, so docs and UI/API close paths must make the behavior recoverable and visible.
 
 Detailed design: [p0-session-lifetime.md](./p0-session-lifetime.md).
 
@@ -36,7 +38,8 @@ Detailed design: [p0-session-lifetime.md](./p0-session-lifetime.md).
 
 1. **9a — Configurable harness system prompt.** Inject an operator-controlled system prompt into every session — agent identity (e.g., "BatteryGPT"), capability bounds (no image reading), and sandbox resource constraints (1 GiB memory, no `fetchall()` on wide tables). Propagated through the per-generation control manifest. Detailed design: [phase9/system-prompt.md](./phase9/system-prompt.md).
 2. **9b — Proactive context compaction driven by proxy-reported usage.** The pinned `claude-code-proxy` already correlates every upstream request to a session/turn via sandbox source IP and posts a `finish` observation to the orchestrator. Extend the finish payload with token counts; the orchestrator stores them inside the existing `proxy.request.completed` event payload (no schema migration). The orchestrator sums tokens per turn and instructs Claude Code to compact before the deployed model's real context window is exhausted. Detailed design: [phase9/context-compaction.md](./phase9/context-compaction.md).
-3. **9c — Versioned system-skills mount.** Read-only `/harness-skills` bind mount with `skills_release_id` and `skills_digest` persisted in the control manifest so checkpoint/restore stays digest-pinned. Skill files stay outside `/workspace`. Detailed design: [phase9/system-skills-mount.md](./phase9/system-skills-mount.md).
+3. **9c — System-skills mount.** Read-only `/harness-skills` bind mount with `skills_digest` persisted in the control manifest so checkpoint/restore stays digest-pinned. Skill content lives in this repository under `sandbox-image/system-skills/`; versioning is the codebase's git history, not a separate `releases/` tree. Skill files stay outside `/workspace`. Detailed design: [phase9/system-skills-mount.md](./phase9/system-skills-mount.md).
+4. **9d — Harness-managed Claude Code settings (hooks + remote MCP).** Render `/etc/claude-code/managed-settings.json` inside the sandbox from operator-controlled config in this repo. Carries `hooks` (with optional `disableAllHooks` / `allowManagedHooksOnly` policy gates) and `mcpServers` (remote `http`/`sse` transport only — MCP servers are deployed elsewhere; bearer tokens come from the existing `/harness-secrets` mount via placeholders resolved at entrypoint time). `managed_settings_digest` joins the projected control-manifest digest. Detailed design: [phase9/managed-settings.md](./phase9/managed-settings.md).
 
 ### Phase 10: production operations
 
@@ -44,7 +47,7 @@ Scope: multi-user auth, credential storage/rotation/GC, tenant egress policy enf
 
 ### Phase 11: trajectory → memory → skill pipeline (future)
 
-Design only. Folds raw session trajectories into versioned skills via episode memory, semantic memory, and human-reviewed skill candidates. Sits on top of 9c's versioned-skills release plumbing. Detailed design: [phase11-trajectory-pipeline.md](./phase11-trajectory-pipeline.md). Not currently planned in detail.
+Design only. Folds raw session trajectories into versioned skills via episode memory, semantic memory, and human-reviewed skill candidates. Sits on top of 9c's skills mount (a `releases/` tree and human-review flow are part of Phase 11, not 9c). Detailed design: [phase11-trajectory-pipeline.md](./phase11-trajectory-pipeline.md). Not currently planned in detail.
 
 ## Ongoing Guardrails
 

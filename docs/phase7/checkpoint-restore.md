@@ -159,11 +159,16 @@ strict (included in manifest digest projection — any mismatch -> cold fallback
   - manifest.agent_home_path
   - manifest.manifest_version
   - manifest.egress_policy_digest         (Doris/DNS allow-list contents)
+  - manifest.system_prompt_enabled      (Phase 9a addition)
+  - manifest.system_prompt_text         (Phase 9a addition)
+  - manifest.system_prompt_digest       (Phase 9a addition)
   - manifest.spec_digest                  (the config.json that runsc
       restore will see after re-rendering)
 ```
 
 The manifest writer at checkpoint time and the restore validator both project the manifest through the same field-allowlist filter before computing the digest, so the comparison is `digest(strict_fields_at_checkpoint) == digest(strict_fields_at_restore)`. The orchestrator must reject a restore where the projected digest mismatches **and** must reject any code path that adds a new manifest field without explicitly classifying it as regenerable or strict; the migration that adds a new manifest field is required to update the projection function and ship the matching test.
+
+> **Phase 9a compatibility note.** Checkpoint manifests created before Phase 9a do not contain `manifest.system_prompt_enabled`, `manifest.system_prompt_text`, or `manifest.system_prompt_digest`. After Phase 9a adds those fields to the strict projection, the first restore attempt for such a checkpoint will fail the projected-digest comparison and cold-fall back, consistent with the `runsc`-version invalidation policy below. The fallback allocates a replacement generation for the same migrated session using that session's stored disabled/empty prompt snapshot; it does not create a new session and does not read the current operator prompt config.
 
 ## `runsc` Version Exact-Match
 

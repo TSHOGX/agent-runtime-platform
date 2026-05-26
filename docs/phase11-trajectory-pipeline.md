@@ -2,7 +2,7 @@
 
 > Status: design only / future. Not actively planned.
 > Roadmap entry: [PLAN.md → Phase 11](./PLAN.md#phase-11-trajectory--memory--skill-pipeline-future).
-> Depends on [Phase 9c versioned skills mount](./phase9/system-skills-mount.md).
+> Depends on [Phase 9c system-skills mount](./phase9/system-skills-mount.md). Phase 11 may add a reviewed skills release layer on top of that mount.
 
 ## Goal
 
@@ -68,8 +68,8 @@ trajectory_snapshots
 - event_min_id
 - event_max_id
 - artifact_manifest_json
-- skills_release_id
 - skills_digest
+- skills_release_id (nullable; populated only if Phase 11 introduces a release layer above the 9c mount)
 - fidelity: full | partial
 - created_at
 - processed_at
@@ -340,9 +340,10 @@ The eval can start simple:
 The easiest landing path is static skills refresh:
 
 1. Nightly pipeline generates draft skills.
-2. Human publishes a new versioned release.
-3. New sessions mount `/var/lib/harness/system-skills/current`.
-4. Existing sessions stay pinned to their original skills digest.
+2. Human publishes a reviewed skills payload.
+3. Phase 11 either commits the accepted payload back to `sandbox-image/system-skills/` or introduces a formal `releases/<release_id>` tree above the Phase 9c mount.
+4. New sessions mount the selected skills payload.
+5. Existing sessions stay pinned to their original skills digest.
 
 This avoids changing the turn execution path. Dynamic memory retrieval (injecting relevant `semantic_memories` per turn as hidden context) is a later sub-phase and should not block the first working loop.
 
@@ -401,11 +402,11 @@ Report sections:
 - Generate Markdown draft skill changes.
 - Keep all candidates in review state by default.
 
-### 11D: Publish to Versioned Skills
+### 11D: Publish to Mounted Skills
 
-- Integrate with the Phase 9c skills release layout.
-- Publish accepted drafts into `releases/<release_id>`.
-- Move `current` atomically.
+- Integrate with the Phase 9c skills mount.
+- Publish accepted drafts into `sandbox-image/system-skills/`, or introduce a formal `releases/<release_id>` tree if independent rollback/review requires it.
+- Ensure new sessions resolve the selected payload while existing sessions remain digest-pinned.
 
 ### 11E: Runtime Retrieval (optional)
 
