@@ -120,6 +120,28 @@ func TestProxyRequestStartRejectsExpiredContext(t *testing.T) {
 	}
 }
 
+func TestProxyRequestStartRequiresLiveRuntimeResource(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	now := time.Now().UTC()
+	allocation, _, sandboxSourceIP := createRunningProxyTurn(t, ctx, st, owner.UUID, "sess_proxy_resource_not_live", now)
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_resource_instances
+SET state = 'ready'
+WHERE generation_id = ?`, allocation.GenerationID); err != nil {
+		t.Fatalf("move runtime resource out of live: %v", err)
+	}
+
+	_, err := st.StartProxyRequest(ctx, StartProxyRequestParams{
+		SandboxSourceIP: sandboxSourceIP,
+		ProxyRequestID:  "proxy_resource_not_live",
+		Now:             now.Add(5 * time.Second),
+	})
+	if !errors.Is(err, ErrProxyContextUnavailable) {
+		t.Fatalf("resource-not-live proxy start err=%v want ErrProxyContextUnavailable", err)
+	}
+}
+
 func TestProxyRequestStartRequiresModelEntitlement(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -525,6 +547,7 @@ func createRunningProxyTurn(t *testing.T, ctx context.Context, st *Store, ownerU
 	if err := st.MarkGenerationResourcesLive(ctx, sessionID, allocation.GenerationID, allocation.Owner, now.Add(time.Second)); err != nil {
 		t.Fatalf("mark resources live: %v", err)
 	}
+	createLiveRuntimeResourceInstanceForAllocation(t, ctx, st, sessionID, allocation, ownerUUID, "host-proxy", now.Add(2*time.Second))
 	turnID, err := st.EnqueueTurn(ctx, sessionID, "proxy observed turn", now.Add(2*time.Second))
 	if err != nil {
 		t.Fatalf("enqueue turn: %v", err)

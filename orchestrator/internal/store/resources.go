@@ -1832,6 +1832,8 @@ FROM sessions s
 JOIN runtime_generations g ON g.generation_id = s.active_generation_id
   AND g.session_id = s.id
 JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+JOIN runtime_resource_instances ri ON ri.generation_id = g.generation_id
+  AND ri.session_id = g.session_id
 WHERE s.status = 'running_idle'
   AND s.auto_checkpoint_enabled = 1
   AND s.last_activity_at IS NOT NULL
@@ -1843,6 +1845,7 @@ WHERE s.status = 'running_idle'
   AND g.runsc_version IS NOT NULL
   AND g.runsc_platform IS NOT NULL
   AND r.resource_state = 'live'
+  AND ri.state = 'live'
   AND r.checkpoint_path IS NOT NULL
   AND r.control_manifest_digest IS NOT NULL
   AND r.projected_control_manifest_digest IS NOT NULL

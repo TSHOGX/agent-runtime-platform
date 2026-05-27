@@ -1551,6 +1551,13 @@ WHERE generation_id = ?`, missingArtifacts.GenerationID); err != nil {
 	if _, err := st.db.ExecContext(ctx, `UPDATE runtime_generations SET lease_owner = ? WHERE generation_id = ?`, GenerationLeaseOwner("other"), otherOwner.GenerationID); err != nil {
 		t.Fatalf("move owner: %v", err)
 	}
+	readyOnly := createAutoCheckpointGeneration(t, ctx, st, cfg, "sess_auto_ready_resource", ownerLease, now)
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_resource_instances
+SET state = 'ready'
+WHERE generation_id = ?`, readyOnly.GenerationID); err != nil {
+		t.Fatalf("move runtime resource out of live: %v", err)
+	}
 
 	candidates, err := st.ListAutoCheckpointCandidates(ctx, ownerLease, now.Add(2*time.Minute), time.Minute)
 	if err != nil {
@@ -2517,6 +2524,7 @@ func createAutoCheckpointGeneration(t *testing.T, ctx context.Context, st *Store
 	if err := st.MarkGenerationResourcesLive(ctx, sessionID, allocation.GenerationID, allocation.Owner, now.Add(-time.Minute)); err != nil {
 		t.Fatalf("mark generation live for %s: %v", sessionID, err)
 	}
+	createLiveRuntimeResourceInstanceForAllocation(t, ctx, st, sessionID, allocation, ownerUUIDFromLeaseOwner(owner), "host-auto-checkpoint", now.Add(-time.Minute+time.Second))
 	if err := st.UpdateSessionStatusAndActivity(ctx, sessionID, string(sessionstate.RunningIdle), nil, now.Add(-2*time.Minute)); err != nil {
 		t.Fatalf("mark session idle for %s: %v", sessionID, err)
 	}

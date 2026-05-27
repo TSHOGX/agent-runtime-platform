@@ -91,9 +91,13 @@ JOIN turns t ON t.id = c.turn_id
   AND t.generation_id = c.generation_id
 JOIN runtime_generations g ON g.generation_id = c.generation_id
   AND g.session_id = c.session_id
+JOIN runtime_resource_instances ri ON ri.generation_id = c.generation_id
+  AND ri.session_id = c.session_id
 JOIN agent_runtime_profiles a ON a.agent_runtime_profile_id = g.agent_runtime_profile_id
 JOIN sessions s ON s.id = c.session_id
 WHERE c.sandbox_source_ip = ?
+  AND ri.state = 'live'
+  AND ri.sandbox_ip = c.sandbox_source_ip
   AND c.model_access_allowed = 1
   AND a.model_access_allowed = 1
   AND c.expires_at > ?

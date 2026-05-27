@@ -4229,6 +4229,7 @@ func prepareServerIdleGeneration(t *testing.T, ctx context.Context, st *store.St
 	if err := st.MarkGenerationResourcesLive(ctx, sessionID, allocation.GenerationID, allocation.Owner, now.Add(time.Second)); err != nil {
 		t.Fatalf("mark generation live: %v", err)
 	}
+	createServerRuntimeResourceLive(t, ctx, st, sessionID, allocation, ownerUUID, "host-idle", now.Add(2*time.Second))
 	if err := st.UpdateSessionStatusAndActivity(ctx, sessionID, string(sessionstate.RunningIdle), nil, now.Add(-time.Minute)); err != nil {
 		t.Fatalf("mark session idle: %v", err)
 	}
@@ -4606,6 +4607,7 @@ func createServerRunningProxyTurn(t *testing.T, ctx context.Context, st *store.S
 	if err := st.MarkGenerationResourcesLive(ctx, sessionID, allocation.GenerationID, allocation.Owner, now.Add(time.Second)); err != nil {
 		t.Fatalf("mark resources live: %v", err)
 	}
+	createServerRuntimeResourceLive(t, ctx, st, sessionID, allocation, ownerUUID, "host-proxy", now.Add(2*time.Second))
 	turnID, err := st.EnqueueTurn(ctx, sessionID, "proxy observed turn", now.Add(2*time.Second))
 	if err != nil {
 		t.Fatalf("enqueue turn: %v", err)
