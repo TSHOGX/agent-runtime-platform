@@ -2178,6 +2178,11 @@ func TestRuntimeResourceInstanceCheckpointRestoreTransitions(t *testing.T) {
 	if len(starts) != 2 || !starts[1].RestoreFromCheckpoint {
 		t.Fatalf("expected second start to restore checkpoint, got %+v", starts)
 	}
+	if starts[1].Generation.RunscContainerID != instance.RunscContainerID ||
+		starts[1].Generation.RunscBinaryDigest != instance.RunscBinaryDigest ||
+		starts[1].Generation.NetnsName != instance.NetnsName {
+		t.Fatalf("restore start did not use runtime resource identity: start=%+v instance=%+v", starts[1].Generation, instance)
+	}
 }
 
 func TestStartEnsuredGenerationDestroysRuntimeAfterOwnerLoss(t *testing.T) {

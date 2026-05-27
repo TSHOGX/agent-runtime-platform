@@ -421,6 +421,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 	resourceWorkerID := runtimeResourceWorkerID(s.ownerUUID, allocation.Owner)
 	resourceHostID := runtimeResourceHostID()
 	var runtimeResourceCreated bool
+	var runtimeResourceInstance store.RuntimeResourceInstance
 	retireRuntimeResource := func() {
 		if !runtimeResourceCreated {
 			return
@@ -494,13 +495,15 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		if err := leaseKeeper.ensureOwned(); err != nil {
 			return err
 		}
-		if _, err := s.createRuntimeResourceInstance(ctx, generationDetails, preparedArtifacts, resourceHostID); err != nil {
+		instance, err := s.createRuntimeResourceInstance(ctx, generationDetails, preparedArtifacts, resourceHostID)
+		if err != nil {
 			if leaseErr := leaseKeeper.err(); leaseErr != nil {
 				return leaseErr
 			}
 			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 			return err
 		}
+		runtimeResourceInstance = instance
 		runtimeResourceCreated = true
 		materializeNow := time.Now().UTC()
 		if err := s.store.ClaimRuntimeResourceMaterialization(ctx, store.RuntimeResourceMaterializationClaimParams{
@@ -541,7 +544,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		}
 	}
 	if ensured.RestoreFromCheckpoint {
-		resourceTracked, err := s.prepareRuntimeResourceRestore(ctx, allocation.GenerationID, resourceWorkerID, resourceHostID, s.cfg.Phase7.Bridge.LeaseTTL.Duration)
+		instance, resourceTracked, err := s.prepareRuntimeResourceRestore(ctx, allocation.GenerationID, resourceWorkerID, resourceHostID, s.cfg.Phase7.Bridge.LeaseTTL.Duration)
 		if err != nil {
 			if retireErr := s.retireGenerationForRestoreFallback(session.ID, allocation.GenerationID, allocation.Owner, err); retireErr != nil {
 				return retireErr
@@ -549,6 +552,10 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			return err
 		}
 		runtimeResourceCreated = resourceTracked
+		runtimeResourceInstance = instance
+	}
+	if runtimeResourceCreated {
+		generationDetails = runtimeDetailsWithResourceInstance(generationDetails, runtimeResourceInstance)
 	}
 	startReq := s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, preparedArtifacts)
 	startReq.RestoreFromCheckpoint = ensured.RestoreFromCheckpoint
@@ -1139,10 +1146,10 @@ func (s *Server) createRuntimeResourceInstance(ctx context.Context, details stor
 	})
 }
 
-func (s *Server) prepareRuntimeResourceRestore(ctx context.Context, generationID, workerID, hostID string, leaseTTL time.Duration) (bool, error) {
+func (s *Server) prepareRuntimeResourceRestore(ctx context.Context, generationID, workerID, hostID string, leaseTTL time.Duration) (store.RuntimeResourceInstance, bool, error) {
 	_, ok, err := s.runtimeResourceInstanceIfExists(ctx, generationID)
 	if err != nil || !ok {
-		return false, err
+		return store.RuntimeResourceInstance{}, false, err
 	}
 	now := time.Now().UTC()
 	if err := s.store.ClaimRuntimeResourceCheckpointRestore(ctx, store.RuntimeResourceMaterializationClaimParams{
@@ -1153,7 +1160,7 @@ func (s *Server) prepareRuntimeResourceRestore(ctx context.Context, generationID
 		IdempotencyToken: "restore:" + generationID,
 		Now:              now,
 	}); err != nil {
-		return true, err
+		return store.RuntimeResourceInstance{}, true, err
 	}
 	if err := s.store.MarkRuntimeResourceReady(ctx, store.RuntimeResourceWorkerTransitionParams{
 		GenerationID: generationID,
@@ -1169,9 +1176,13 @@ func (s *Server) prepareRuntimeResourceRestore(ctx context.Context, generationID
 			HostID:       hostID,
 			Now:          time.Now().UTC(),
 		})
-		return true, err
+		return store.RuntimeResourceInstance{}, true, err
 	}
-	return true, nil
+	instance, err := s.store.GetRuntimeResourceInstance(ctx, generationID)
+	if err != nil {
+		return store.RuntimeResourceInstance{}, true, err
+	}
+	return instance, true, nil
 }
 
 func (s *Server) reserveRuntimeResourceCheckpoint(ctx context.Context, generationID string) error {
