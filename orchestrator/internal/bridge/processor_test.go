@@ -237,7 +237,7 @@ func TestProcessorLifecycleMessagesUpdateTurnAndEvents(t *testing.T) {
 		SessionID:    sessionID,
 		GenerationID: allocation.GenerationID,
 		TurnID:       &turnID,
-		Payload:      json.RawMessage(`{"sandbox_source_ip":"10.240.0.2"}`),
+		Payload:      json.RawMessage(`{}`),
 	}
 	output := Envelope{
 		MessageID:    "msg_output",

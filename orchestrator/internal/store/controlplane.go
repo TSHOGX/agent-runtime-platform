@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
-	"strings"
 	"time"
 )
 
@@ -658,7 +657,8 @@ WHERE generation_id = ?
 	} else if affected != 1 {
 		return 0, fmt.Errorf("generation ack_started CAS failed")
 	}
-	if err := assertSandboxSourceIPTx(ctx, tx, p.SessionID, p.GenerationID, p.SandboxSourceIP); err != nil {
+	sandboxSourceIP, err := sandboxSourceIPForGenerationTx(ctx, tx, p.SessionID, p.GenerationID)
+	if err != nil {
 		return 0, err
 	}
 	var modelAccessAllowed int
@@ -685,7 +685,7 @@ INSERT INTO active_model_request_contexts (
   next_request_sequence = excluded.next_request_sequence,
   registered_at = excluded.registered_at,
   updated_at = excluded.updated_at`,
-			p.SandboxSourceIP, p.SessionID, p.GenerationID, p.TurnID, p.Owner, formatTime(expiresAt), modelAccessAllowed, formatTime(p.Now), formatTime(p.Now))
+			sandboxSourceIP, p.SessionID, p.GenerationID, p.TurnID, p.Owner, formatTime(expiresAt), modelAccessAllowed, formatTime(p.Now), formatTime(p.Now))
 		if err != nil {
 			return 0, err
 		}
@@ -708,11 +708,7 @@ INSERT INTO active_model_request_contexts (
 	return eventID, tx.Commit()
 }
 
-func assertSandboxSourceIPTx(ctx context.Context, tx *sql.Tx, sessionID, generationID, sandboxSourceIP string) error {
-	source, err := netip.ParseAddr(strings.TrimSpace(sandboxSourceIP))
-	if err != nil {
-		return fmt.Errorf("invalid sandbox_source_ip %q: %w", sandboxSourceIP, err)
-	}
+func sandboxSourceIPForGenerationTx(ctx context.Context, tx *sql.Tx, sessionID, generationID string) (string, error) {
 	var sandboxCIDR string
 	if err := tx.QueryRowContext(ctx, `
 SELECT n.sandbox_ip_cidr
@@ -720,16 +716,13 @@ FROM network_profiles n
 JOIN runtime_generations g ON g.network_profile_id = n.network_profile_id
 WHERE g.session_id = ?
   AND g.generation_id = ?`, sessionID, generationID).Scan(&sandboxCIDR); err != nil {
-		return err
+		return "", err
 	}
 	prefix, err := netip.ParsePrefix(sandboxCIDR)
 	if err != nil {
-		return fmt.Errorf("invalid network profile sandbox_ip_cidr %q: %w", sandboxCIDR, err)
+		return "", fmt.Errorf("invalid network profile sandbox_ip_cidr %q: %w", sandboxCIDR, err)
 	}
-	if source != prefix.Addr() {
-		return fmt.Errorf("sandbox_source_ip mismatch: got %s want %s", source, prefix.Addr())
-	}
-	return nil
+	return prefix.Addr().String(), nil
 }
 
 func (s *Store) CompleteTurn(ctx context.Context, p CompleteTurnParams) (int64, error) {

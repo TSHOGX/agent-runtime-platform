@@ -223,9 +223,6 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 			}
 			sandboxSourceIP = payload.SandboxSourceIP
 		}
-		if strings.TrimSpace(sandboxSourceIP) == "" {
-			return protocolErrorf("ack_turn_started requires sandbox_source_ip")
-		}
 		eventID, err := p.Store.AckTurnStarted(ctx, store.AckStartedParams{
 			SessionID:       envelope.SessionID,
 			GenerationID:    envelope.GenerationID,

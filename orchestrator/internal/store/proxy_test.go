@@ -446,7 +446,7 @@ func TestProxyRequestFinishRecordsTimeoutObservabilityFields(t *testing.T) {
 	}
 }
 
-func TestAckTurnStartedRejectsMismatchedSandboxSourceIP(t *testing.T) {
+func TestAckTurnStartedDerivesActiveContextSandboxSourceIP(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
 	now := time.Now().UTC()
@@ -480,7 +480,7 @@ func TestAckTurnStartedRejectsMismatchedSandboxSourceIP(t *testing.T) {
 		t.Fatalf("claim setup: ok=%v grant=%+v err=%v", ok, grant, err)
 	}
 
-	_, err = st.AckTurnStarted(ctx, AckStartedParams{
+	if _, err := st.AckTurnStarted(ctx, AckStartedParams{
 		SessionID:       "sess_proxy_ip_mismatch",
 		GenerationID:    allocation.GenerationID,
 		TurnID:          turnID,
@@ -488,21 +488,22 @@ func TestAckTurnStartedRejectsMismatchedSandboxSourceIP(t *testing.T) {
 		SandboxSourceIP: "10.240.0.99",
 		LeaseTTL:        time.Minute,
 		Now:             now.Add(4 * time.Second),
-	})
-	if err == nil || !strings.Contains(err.Error(), "sandbox_source_ip mismatch") {
-		t.Fatalf("mismatched sandbox source ip err=%v, want mismatch", err)
+	}); err != nil {
+		t.Fatalf("ack turn started should ignore sandbox-reported source ip: %v", err)
 	}
 
 	var turnStatus string
 	var contexts int
+	var contextSourceIP string
 	if err := st.db.QueryRowContext(ctx, `SELECT status FROM turns WHERE id = ?`, turnID).Scan(&turnStatus); err != nil {
 		t.Fatalf("query turn status: %v", err)
 	}
-	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM active_model_request_contexts`).Scan(&contexts); err != nil {
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MAX(sandbox_source_ip), '') FROM active_model_request_contexts`).Scan(&contexts, &contextSourceIP); err != nil {
 		t.Fatalf("query active contexts: %v", err)
 	}
-	if turnStatus != "leased" || contexts != 0 {
-		t.Fatalf("mismatched ack mutated state: turn=%s contexts=%d", turnStatus, contexts)
+	expectedSourceIP := sandboxSourceIPForGeneration(t, ctx, st, allocation.GenerationID)
+	if turnStatus != "running" || contexts != 1 || contextSourceIP != expectedSourceIP {
+		t.Fatalf("unexpected ack state: turn=%s contexts=%d source_ip=%s want %s", turnStatus, contexts, contextSourceIP, expectedSourceIP)
 	}
 }
 
