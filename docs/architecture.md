@@ -108,7 +108,9 @@ Input is accepted only in `created`, `running_idle`, and `checkpointed`. `runnin
 2. **Restore path**: if the session is `checkpointed`, claim the checkpointed generation for restore, recreate compatible resources, validate checkpoint metadata, run `runsc restore`, and require the bridge probe before claim.
 3. **Cold path**: allocate a new runtime generation, render per-generation resources, run the host-side proxy probe, start `runsc`, require the in-sandbox bridge probe, then let the bridge claim turns.
 
-The active Go runtime now drives `runsc` directly. `bundle/restore-sandbox.sh` remains valuable for Phase 2 smoke tests and restore experiments, but it is no longer the primary request path.
+The active Go runtime now drives `runsc` directly. `bundle/bake-bundle.sh` and
+`bundle/restore-sandbox.sh` are quarantined legacy Phase 2 smoke tools: they
+fail closed and are not Phase 8 release evidence.
 
 The bridge is the lower-level turn transport. It uses a file-backed queue so reconnect and checkpoint/restore do not depend on a live host pipe.
 

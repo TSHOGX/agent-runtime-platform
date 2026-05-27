@@ -3,6 +3,15 @@ set -Eeuo pipefail
 trap '' PIPE
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+cat >&2 <<'EOF'
+bundle/restore-sandbox.sh is quarantined for sandbox-isolation-v1.
+It restores the legacy Phase 2 smoke checkpoint and must not be used as Phase 8
+release evidence. Use the orchestrator runtime restore path, which validates
+stored sandbox-isolation-v1 artifacts, resource identity, and runsc pins.
+EOF
+exit 1
+
 DEFAULT_MANIFEST="${SCRIPT_DIR}/out/phase2-template-bundle/phase2-manifest.env"
 MANIFEST="${MANIFEST:-${DEFAULT_MANIFEST}}"
 

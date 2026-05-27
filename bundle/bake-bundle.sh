@@ -5,6 +5,14 @@ trap '' PIPE
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
+cat >&2 <<'EOF'
+bundle/bake-bundle.sh is quarantined for sandbox-isolation-v1.
+It still contains the legacy Phase 2 smoke-bundle recipe and must not be used
+as Phase 8 release evidence. Use the orchestrator runtime, which renders
+per-generation sandbox-isolation-v1 artifacts from persisted contracts.
+EOF
+exit 1
+
 ROOTFS_DIR="${ROOTFS_DIR:-${REPO_ROOT}/sandbox-image/rootfs}"
 BUNDLE_DIR="${BUNDLE_DIR:-${SCRIPT_DIR}/out/phase2-template-bundle}"
 CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SCRIPT_DIR}/checkpoints/phase2-template}"

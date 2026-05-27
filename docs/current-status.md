@@ -152,7 +152,9 @@ HTTP routes, SSE/WebSocket endpoints, and the canonical event-name set are docum
 
 - Claude Code is the primary supported analysis path.
 - `Shell` is the supported interactive command path and has its own `turn_done`/`interrupt` contract; future adapters still need their own completion protocol before they are first-class multi-turn citizens.
-- The active Go runtime launches `runsc` directly. `bundle/restore-sandbox.sh` is a legacy Phase 2 smoke tool, not the main orchestrator runtime path; Phase 8 must migrate it to the `sandbox-isolation-v1` runtime contract or quarantine it as pre-Phase-8-only tooling.
+- The active Go runtime launches `runsc` directly. `bundle/bake-bundle.sh` and
+  `bundle/restore-sandbox.sh` are quarantined legacy Phase 2 smoke tools: they
+  fail closed and are not Phase 8 release evidence.
 - The current Go runtime uses `runsc -network sandbox -overlay2 none` with per-generation network profiles. The runtime creates the allocated netns/veth pair, configures host and sandbox addresses from the persisted `/30`, applies the static lab egress allow-list, probes the local proxy, and writes the generation-specific sandbox-visible Anthropic base URL into the control manifest. The local proxy key remains `123` for the lab path.
 - The current runtime still mounts the parent session root at `/sessions` and the parent agent-home root at `/agent-homes`, then points the active session at `/workspace`. This gives the sandbox a broader filesystem view than the intended per-session boundary and is the blocking Phase 8 fix.
 - Claude generations currently receive model/proxy credentials through sandbox-readable secret files and export them before execing Claude. The manifest/spec avoid plaintext credentials, but the Claude process can still observe the runtime values. Phase 8 moves upstream credentials host-side and authorizes model requests through source-IP/generation/turn context plus driver entitlement; it does not add a sandbox-visible proxy-token path.
