@@ -1153,7 +1153,7 @@ WHERE session_id = ?`, session.ID).Scan(&queuedTurns); err != nil {
 	}
 }
 
-func TestSendMessageRestoreLiveCASFailureDestroysRestoreIDBeforeFallback(t *testing.T) {
+func TestSendMessageRestoreLiveCASFailureDestroysRunscContainerIDBeforeFallback(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	st, owner := openServerOwnedStore(t, ctx, dir)
@@ -1206,8 +1206,9 @@ WHERE generation_id = ?`, old.GenerationID); err != nil {
 		t.Fatalf("expected status 202, got %d body %s", rec.Code, rec.Body.String())
 	}
 	destroyIDs := rt.runtimeDestroyRequests()
-	if len(destroyIDs) != 1 || destroyIDs[0] != session.RestoreID {
-		t.Fatalf("restore live CAS cleanup should destroy restore id %q, got %+v", session.RestoreID, destroyIDs)
+	oldRunscID := serverRunscContainerID(t, ctx, st, session.ID, old.GenerationID)
+	if len(destroyIDs) != 1 || destroyIDs[0] != oldRunscID {
+		t.Fatalf("restore live CAS cleanup should destroy runsc container id %q, got %+v", oldRunscID, destroyIDs)
 	}
 	if destroyIDs[0] == session.ID {
 		t.Fatalf("restore live CAS cleanup used bare session id %q", session.ID)
@@ -1287,8 +1288,9 @@ WHERE generation_id = ?`, old.GenerationID); err != nil {
 		t.Fatalf("expected status 500, got %d body %s", rec.Code, rec.Body.String())
 	}
 	destroyIDs := rt.runtimeDestroyRequests()
-	if len(destroyIDs) != 1 || destroyIDs[0] != session.RestoreID {
-		t.Fatalf("restore cleanup should target restore id %q before failing, got %+v", session.RestoreID, destroyIDs)
+	oldRunscID := serverRunscContainerID(t, ctx, st, session.ID, old.GenerationID)
+	if len(destroyIDs) != 1 || destroyIDs[0] != oldRunscID {
+		t.Fatalf("restore cleanup should target runsc container id %q before failing, got %+v", oldRunscID, destroyIDs)
 	}
 	var oldStatus, oldNetwork, oldResources string
 	if err := st.DBForTest().QueryRowContext(ctx, `
@@ -2085,8 +2087,9 @@ WHERE generation_id = ?`, time.Now().UTC().Add(time.Minute).Format(time.RFC3339N
 	if !errors.Is(err, errGenerationStartLeaseLost) {
 		t.Fatalf("expected start lease loss, got %v", err)
 	}
-	if got := rt.runtimeDestroyRequests(); len(got) != 1 || got[0] != session.RestoreID {
-		t.Fatalf("owner loss should destroy started runtime %q, got %+v", session.RestoreID, got)
+	runscID := serverRunscContainerID(t, ctx, st, session.ID, allocation.GenerationID)
+	if got := rt.runtimeDestroyRequests(); len(got) != 1 || got[0] != runscID {
+		t.Fatalf("owner loss should destroy started runtime %q, got %+v", runscID, got)
 	}
 	var status, ownerValue, errorClass, networkState, resourceState string
 	if err := st.DBForTest().QueryRowContext(ctx, `
@@ -2285,8 +2288,9 @@ func TestDestroySessionCancelsPendingTurnAndReclaimsGeneration(t *testing.T) {
 		t.Fatalf("expected status 200, got %d body %s", rec.Code, rec.Body.String())
 	}
 	destroyIDs := rt.runtimeDestroyRequests()
-	if len(destroyIDs) != 1 || destroyIDs[0] != session.RestoreID {
-		t.Fatalf("destroy session should tear down restore id %q, got %+v", session.RestoreID, destroyIDs)
+	runscID := serverRunscContainerID(t, ctx, st, session.ID, allocation.GenerationID)
+	if len(destroyIDs) != 1 || destroyIDs[0] != runscID {
+		t.Fatalf("destroy session should tear down runsc container id %q, got %+v", runscID, destroyIDs)
 	}
 	destroyGenerationRequests := rt.destroyGenerationRequests()
 	if len(destroyGenerationRequests) != 1 || destroyGenerationRequests[0].GenerationID != allocation.GenerationID {
@@ -2487,8 +2491,9 @@ WHERE generation_id = ?`, allocation.GenerationID).Scan(&errorClass, &leaseOwner
 	if errorClass != "orchestrator_restart_reconnect_grace_expired" || leaseOwnerAfter != "" {
 		t.Fatalf("unexpected recovered generation: error_class=%s lease_owner=%s", errorClass, leaseOwnerAfter)
 	}
-	if got := rt.runtimeDestroyRequests(); len(got) != 1 || got[0] != session.RestoreID {
-		t.Fatalf("maintenance should destroy runtime before repair using restore id %q, got %+v", session.RestoreID, got)
+	runscID := serverRunscContainerID(t, ctx, st, session.ID, allocation.GenerationID)
+	if got := rt.runtimeDestroyRequests(); len(got) != 1 || got[0] != runscID {
+		t.Fatalf("maintenance should destroy runtime before repair using runsc container id %q, got %+v", runscID, got)
 	}
 	if _, starts := rt.requests(); len(starts) != 0 {
 		t.Fatalf("maintenance should not cold-start without a queued turn: %+v", starts)
@@ -2544,8 +2549,9 @@ WHERE generation_id = ?`, store.GenerationLeaseOwner("previous-owner"), now.Add(
 		recovered.UnknownAfterAckStarted != 0 {
 		t.Fatalf("cleanup failure should skip repair, got %+v", recovered)
 	}
-	if got := rt.runtimeDestroyRequests(); len(got) != 1 || got[0] != session.RestoreID {
-		t.Fatalf("expected runtime cleanup attempt for %q, got %+v", session.RestoreID, got)
+	runscID := serverRunscContainerID(t, ctx, st, session.ID, allocation.GenerationID)
+	if got := rt.runtimeDestroyRequests(); len(got) != 1 || got[0] != runscID {
+		t.Fatalf("expected runtime cleanup attempt for %q, got %+v", runscID, got)
 	}
 	var generationStatus, ownerAfter, networkState, resourceState string
 	if err := st.DBForTest().QueryRowContext(ctx, `
@@ -3559,9 +3565,9 @@ func (r *recordingRuntime) DestroyGenerationResources(_ context.Context, details
 	}, nil
 }
 
-func (r *recordingRuntime) Destroy(_ context.Context, restoreID string) error {
+func (r *recordingRuntime) Destroy(_ context.Context, runtimeID string) error {
 	r.mu.Lock()
-	r.destroyRuntimeIDs = append(r.destroyRuntimeIDs, restoreID)
+	r.destroyRuntimeIDs = append(r.destroyRuntimeIDs, runtimeID)
 	err := r.destroyRuntimeErr
 	r.mu.Unlock()
 	return err
@@ -3819,6 +3825,18 @@ func createServerTestSession(t *testing.T, ctx context.Context, st *store.Store,
 		t.Fatalf("create session: %v", err)
 	}
 	return session
+}
+
+func serverRunscContainerID(t *testing.T, ctx context.Context, st *store.Store, sessionID, generationID string) string {
+	t.Helper()
+	details, err := st.GetRuntimeGenerationDetails(ctx, sessionID, generationID)
+	if err != nil {
+		t.Fatalf("get generation details: %v", err)
+	}
+	if strings.TrimSpace(details.RunscContainerID) == "" {
+		t.Fatalf("generation %s has no runsc container id", generationID)
+	}
+	return details.RunscContainerID
 }
 
 func enableSessionAutoCheckpoint(t *testing.T, ctx context.Context, st *store.Store, sessionID string) {

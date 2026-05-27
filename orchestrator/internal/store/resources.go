@@ -1256,9 +1256,10 @@ func (s *Store) ListExpiredRuntimeRecoveryCandidates(ctx context.Context, p Star
 
 	var candidates []ExpiredRuntimeRecoveryCandidate
 	rows, err := tx.QueryContext(ctx, `
-SELECT s.id, g.generation_id, s.restore_id, g.status
+SELECT s.id, g.generation_id, COALESCE(r.runsc_container_id, ''), g.status
 FROM runtime_generations g
 JOIN sessions s ON s.id = g.session_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
 WHERE g.status IN ('allocating','starting','probing','restoring','checkpointing')
   AND g.lease_expires_at IS NOT NULL
   AND g.lease_expires_at <= ?
@@ -1283,9 +1284,10 @@ ORDER BY s.id, g.generation_id`, formatTime(p.Now))
 
 	ackStartedCutoff := p.Now.Add(-p.AckStartedGrace)
 	rows, err = tx.QueryContext(ctx, `
-SELECT s.id, g.generation_id, s.restore_id, g.status
+SELECT s.id, g.generation_id, COALESCE(r.runsc_container_id, ''), g.status
 FROM runtime_generations g
 JOIN sessions s ON s.id = g.session_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
 WHERE g.status IN ('active','idle')
   AND g.lease_expires_at IS NOT NULL
   AND g.lease_expires_at <= ?
@@ -1318,9 +1320,10 @@ ORDER BY s.id, g.generation_id`, formatTime(ackStartedCutoff), formatTime(ackSta
 
 	cutoff := p.Now.Add(-p.ReconnectGrace)
 	rows, err = tx.QueryContext(ctx, `
-SELECT s.id, g.generation_id, s.restore_id, g.status
+SELECT s.id, g.generation_id, COALESCE(r.runsc_container_id, ''), g.status
 FROM runtime_generations g
 JOIN sessions s ON s.id = g.session_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
 WHERE g.status IN ('active','idle')
   AND g.lease_expires_at IS NOT NULL
   AND g.lease_expires_at <= ?

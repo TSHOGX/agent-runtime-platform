@@ -343,14 +343,14 @@ func scanLines(wg *sync.WaitGroup, r io.Reader, stream string, hub *OutputHub) {
 	}
 }
 
-func (r *Runtime) Destroy(ctx context.Context, restoreID string) error {
-	if restoreID == "" {
-		return errors.New("restore id is required")
+func (r *Runtime) Destroy(ctx context.Context, containerID string) error {
+	if containerID == "" {
+		return errors.New("runsc container id is required")
 	}
-	if err := r.deleteRunscContainer(ctx, restoreID); err != nil {
-		return fmt.Errorf("runsc delete %s: %w", restoreID, err)
+	if err := r.deleteRunscContainer(ctx, containerID); err != nil {
+		return fmt.Errorf("runsc delete %s: %w", containerID, err)
 	}
-	r.evictContainerByRestoreID(restoreID)
+	r.evictContainerByRestoreID(containerID)
 	return nil
 }
 
@@ -639,9 +639,9 @@ func (r *Runtime) deleteNetworkResource(ctx context.Context, name string, args [
 	return fmt.Errorf("destroy sandbox network resource %q: %w: %s", strings.Join(append([]string{name}, args...), " "), err, strings.TrimSpace(string(output)))
 }
 
-func (r *Runtime) deleteRunscContainer(ctx context.Context, restoreID string) error {
-	_, _ = r.runner.CombinedOutput(ctx, "runsc", "-root", r.cfg.RunscRoot, "kill", restoreID, "KILL")
-	output, err := r.runner.CombinedOutput(ctx, "runsc", "-root", r.cfg.RunscRoot, "delete", restoreID)
+func (r *Runtime) deleteRunscContainer(ctx context.Context, containerID string) error {
+	_, _ = r.runner.CombinedOutput(ctx, "runsc", "-root", r.cfg.RunscRoot, "kill", containerID, "KILL")
+	output, err := r.runner.CombinedOutput(ctx, "runsc", "-root", r.cfg.RunscRoot, "delete", containerID)
 	if err != nil {
 		if commandOutputContains(string(output), "does not exist", "not found", "no such container", "no such file") {
 			return nil
@@ -651,8 +651,8 @@ func (r *Runtime) deleteRunscContainer(ctx context.Context, restoreID string) er
 	return nil
 }
 
-func (r *Runtime) cleanupRunscContainer(ctx context.Context, restoreID string) {
-	_ = r.deleteRunscContainer(ctx, restoreID)
+func (r *Runtime) cleanupRunscContainer(ctx context.Context, containerID string) {
+	_ = r.deleteRunscContainer(ctx, containerID)
 }
 
 func (r *Runtime) removeContainer(container *Container) {

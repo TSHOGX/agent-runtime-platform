@@ -474,7 +474,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		return result.Err
 	}
 	if err := leaseKeeper.ensureOwned(); err != nil {
-		if destroyErr := s.runtime.Destroy(context.Background(), session.RestoreID); destroyErr != nil && !errors.Is(destroyErr, context.Canceled) {
+		if destroyErr := s.destroyGenerationRuntime(context.Background(), generationDetails); destroyErr != nil && !errors.Is(destroyErr, context.Canceled) {
 			s.log.Warn("failed to destroy runtime after start lease loss", "session_id", session.ID, "generation_id", allocation.GenerationID, "error", destroyErr)
 			return destroyErr
 		}
@@ -482,7 +482,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 	}
 	if ensured.RestoreFromCheckpoint {
 		if err := s.store.MarkGenerationResourcesLive(ctx, session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
-			if destroyErr := s.runtime.Destroy(ctx, session.RestoreID); destroyErr != nil && !errors.Is(destroyErr, context.Canceled) {
+			if destroyErr := s.destroyGenerationRuntime(ctx, generationDetails); destroyErr != nil && !errors.Is(destroyErr, context.Canceled) {
 				s.log.Warn("failed to destroy runtime after restore live CAS failure", "session_id", session.ID, "generation_id", allocation.GenerationID, "error", destroyErr)
 				return destroyErr
 			}
@@ -495,7 +495,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			return err
 		}
 		if err := leaseKeeper.ensureOwned(); err != nil {
-			if destroyErr := s.runtime.Destroy(context.Background(), session.RestoreID); destroyErr != nil && !errors.Is(destroyErr, context.Canceled) {
+			if destroyErr := s.destroyGenerationRuntime(context.Background(), generationDetails); destroyErr != nil && !errors.Is(destroyErr, context.Canceled) {
 				s.log.Warn("failed to destroy runtime after restore start lease loss", "session_id", session.ID, "generation_id", allocation.GenerationID, "error", destroyErr)
 				return destroyErr
 			}
@@ -808,7 +808,7 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request, sessionID 
 func (s *Server) runtimeStartRequest(session store.Session, generationID string, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts) runtime.StartRequest {
 	return runtime.StartRequest{
 		SessionID:         session.ID,
-		RestoreID:         session.RestoreID,
+		RestoreID:         details.RunscContainerID,
 		GenerationID:      generationID,
 		Agent:             session.Agent,
 		WaitForTurn:       false,
@@ -817,6 +817,14 @@ func (s *Server) runtimeStartRequest(session store.Session, generationID string,
 		Generation:        details,
 		PreparedArtifacts: artifacts,
 	}
+}
+
+func (s *Server) destroyGenerationRuntime(ctx context.Context, details store.RuntimeGenerationDetails) error {
+	runtimeID := strings.TrimSpace(details.RunscContainerID)
+	if runtimeID == "" {
+		return fmt.Errorf("generation %s has no runsc container id", details.GenerationID)
+	}
+	return s.runtime.Destroy(ctx, runtimeID)
 }
 
 func runtimeArtifactsFromDetails(details store.RuntimeGenerationDetails) runtime.GenerationArtifacts {
@@ -1406,7 +1414,12 @@ func (s *Server) destroySession(w http.ResponseWriter, r *http.Request, sessionI
 		return
 	}
 	if session.ActiveGenerationID != "" && session.Status != string(sessionstate.Checkpointed) {
-		if err := s.runtime.Destroy(r.Context(), session.RestoreID); err != nil {
+		details, err := s.runtimeGenerationDetails(r.Context(), session.ID, session.ActiveGenerationID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := s.destroyGenerationRuntime(r.Context(), details); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
