@@ -2136,6 +2136,7 @@ func TestRuntimeFailureClassDetectsManifestFailures(t *testing.T) {
 		message string
 		want    string
 	}{
+		{"sandbox_secret_disallowed", "sandbox_secret_disallowed"},
 		{"shell_secret_disallowed", "shell_secret_disallowed"},
 		{"runsc run: exit status 1: control manifest digest mismatch", "manifest_digest_mismatch"},
 		{"runsc run: exit status 1: expected session_id=sess_a got sess_b", "manifest_digest_mismatch"},

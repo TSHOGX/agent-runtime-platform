@@ -25,7 +25,7 @@ type MountPlanMount struct {
 	Annotations map[string]string
 }
 
-type Phase8MountPlanInputs struct {
+type SandboxMountPlanInputs struct {
 	Generation        store.RuntimeGenerationDetails
 	WorkspaceHostPath string
 	AgentHomeHostPath string
@@ -33,7 +33,7 @@ type Phase8MountPlanInputs struct {
 	SchemaPackPath    string
 }
 
-func BuildPhase8MountPlan(input Phase8MountPlanInputs) (MountPlan, error) {
+func BuildSandboxMountPlan(input SandboxMountPlanInputs) (MountPlan, error) {
 	details := input.Generation
 	plan := MountPlan{
 		Content: []MountPlanMount{

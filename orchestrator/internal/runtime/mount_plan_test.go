@@ -10,9 +10,9 @@ import (
 	"harness-platform/orchestrator/internal/store"
 )
 
-func TestBuildPhase8MountPlanUsesExactSandboxSurface(t *testing.T) {
+func TestBuildSandboxMountPlanUsesExactSandboxSurface(t *testing.T) {
 	dir := t.TempDir()
-	plan, err := BuildPhase8MountPlan(Phase8MountPlanInputs{
+	plan, err := BuildSandboxMountPlan(SandboxMountPlanInputs{
 		Generation: store.RuntimeGenerationDetails{
 			ControlDirPath: filepath.Join(dir, "run", "control", "gen-1"),
 			BridgeDirPath:  filepath.Join(dir, "run", "bridge", "gen-1"),

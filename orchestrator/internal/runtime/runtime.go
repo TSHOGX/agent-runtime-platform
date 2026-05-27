@@ -863,7 +863,7 @@ func modelProxyBaseURLHost(raw string) (string, error) {
 func (r *Runtime) materializeSecrets(details store.RuntimeGenerationDetails) error {
 	if !details.RequiresSecretDrop {
 		if strings.TrimSpace(details.SecretsDirPath) != "" {
-			return fmt.Errorf("shell generation must not carry a secrets dir")
+			return fmt.Errorf("generation must not carry a secrets dir")
 		}
 		return nil
 	}
@@ -1078,15 +1078,12 @@ func validateSecretVersion(path string, readersGID int) error {
 
 func (r *Runtime) buildGenerationManifest(req StartRequest, runscVersion, bundleDigest, runtimeConfigDigest, specDigest string) (controlManifest, error) {
 	details := req.Generation
-	agentHomePath := filepath.Join("/agent-homes", req.SessionID)
-	workspacePath := filepath.Join("/sessions", req.SessionID)
-	if isPhase8ShellRequest(req) {
-		agentHomePath = "/agent-home"
-		workspacePath = "/workspace"
-	}
-	secretMountPath := ""
-	if details.RequiresSecretDrop {
-		secretMountPath = "/harness-secrets"
+	if !isSandboxIsolatedRequest(req) {
+		agent := sandboxAgent(req)
+		if agent == "" {
+			return controlManifest{}, fmt.Errorf("agent is required")
+		}
+		return controlManifest{}, fmt.Errorf("unsupported agent %q", agent)
 	}
 	return controlManifest{
 		SessionID:                            req.SessionID,
@@ -1095,7 +1092,7 @@ func (r *Runtime) buildGenerationManifest(req StartRequest, runscVersion, bundle
 		AttemptID:                            "attempt-0",
 		NetworkProfileID:                     details.NetworkProfileID,
 		AgentRuntimeProfileID:                details.AgentRuntimeProfileID,
-		Agent:                                req.Agent,
+		Agent:                                sandboxAgent(req),
 		ClaudeSessionUUID:                    req.ClaudeSessionUUID,
 		ResumeClaude:                         req.ResumeClaude,
 		RunscPlatform:                        defaultString(details.RunscPlatform, "systrap"),
@@ -1104,11 +1101,10 @@ func (r *Runtime) buildGenerationManifest(req StartRequest, runscVersion, bundle
 		AnthropicAPIKeySecretID:              details.AnthropicAPIKeySecretID,
 		AnthropicAuthTokenSecretID:           details.AnthropicAuthTokenSecretID,
 		SecretVersion:                        details.SecretVersion,
-		SecretMountPath:                      secretMountPath,
 		Model:                                details.Model,
 		OutputFormat:                         details.OutputFormat,
-		WorkspacePath:                        workspacePath,
-		AgentHomePath:                        agentHomePath,
+		WorkspacePath:                        "/workspace",
+		AgentHomePath:                        "/agent-home",
 		BundleDigest:                         bundleDigest,
 		RuntimeConfigDigest:                  runtimeConfigDigest,
 		SpecDigest:                           specDigest,
@@ -1129,20 +1125,22 @@ func validateGenerationDetails(req StartRequest) error {
 	if strings.TrimSpace(details.Agent) != "" && strings.TrimSpace(req.Agent) != "" && details.Agent != req.Agent {
 		return fmt.Errorf("generation agent mismatch")
 	}
-	if !details.RequiresSecretDrop {
-		if strings.TrimSpace(details.SecretsDirPath) != "" ||
-			strings.TrimSpace(details.AnthropicAPIKeySecretID) != "" ||
-			strings.TrimSpace(details.AnthropicAuthTokenSecretID) != "" ||
-			strings.TrimSpace(details.SecretVersion) != "" {
-			return fmt.Errorf("shell_secret_disallowed")
-		}
-		return nil
+	agent := sandboxAgent(req)
+	if agent == "" {
+		return fmt.Errorf("agent is required")
 	}
-	if strings.TrimSpace(details.SecretsDirPath) == "" ||
-		strings.TrimSpace(details.AnthropicAPIKeySecretID) == "" ||
-		strings.TrimSpace(details.AnthropicAuthTokenSecretID) == "" ||
-		strings.TrimSpace(details.SecretVersion) == "" {
-		return fmt.Errorf("secret-backed generation requires secret references")
+	if _, ok := agents.Lookup(agent); !ok {
+		return fmt.Errorf("unsupported agent %q", agent)
+	}
+	if !isSandboxIsolatedRequest(req) {
+		return fmt.Errorf("unsupported agent %q", agent)
+	}
+	if details.RequiresSecretDrop ||
+		strings.TrimSpace(details.SecretsDirPath) != "" ||
+		strings.TrimSpace(details.AnthropicAPIKeySecretID) != "" ||
+		strings.TrimSpace(details.AnthropicAuthTokenSecretID) != "" ||
+		strings.TrimSpace(details.SecretVersion) != "" {
+		return fmt.Errorf("sandbox_secret_disallowed")
 	}
 	return nil
 }
@@ -1213,140 +1211,30 @@ func projectedControlManifestDigest(manifest controlManifest) (string, error) {
 }
 
 func (r *Runtime) renderRuntimeSpec(req StartRequest) (runtimeSpec, string, error) {
-	if isPhase8ShellRequest(req) {
-		return r.renderPhase8ShellRuntimeSpec(req)
+	agent := sandboxAgent(req)
+	switch agent {
+	case string(agents.Claude), string(agents.Shell):
+		return r.renderSandboxIsolatedRuntimeSpec(req)
+	case "":
+		return runtimeSpec{}, "", fmt.Errorf("agent is required")
+	default:
+		return runtimeSpec{}, "", fmt.Errorf("unsupported agent %q", agent)
 	}
-	return r.renderLegacyRuntimeSpec(req)
 }
 
-func (r *Runtime) renderLegacyRuntimeSpec(req StartRequest) (runtimeSpec, string, error) {
+func (r *Runtime) renderSandboxIsolatedRuntimeSpec(req StartRequest) (runtimeSpec, string, error) {
 	var spec runtimeSpec
 	details := req.Generation
-	spec.OCIVersion = "1.0.2"
-	spec.Process.Terminal = false
-	spec.Process.User = specUser{UID: 0, GID: 0}
-	spec.Process.Args = []string{"/usr/local/bin/harness-agent-entrypoint"}
-	spec.Process.Env = []string{
-		"PATH=/usr/local/bin:/usr/bin:/bin",
-		"LANG=C.UTF-8",
-		"MPLCONFIGDIR=/tmp/matplotlib",
-	}
-	spec.Process.Cwd = "/"
-	spec.Process.Capabilities = map[string]any{
-		"bounding":    []string{"CAP_AUDIT_WRITE", "CAP_CHOWN", "CAP_KILL", "CAP_NET_BIND_SERVICE", "CAP_SETGID", "CAP_SETUID"},
-		"effective":   []string{"CAP_AUDIT_WRITE", "CAP_CHOWN", "CAP_KILL", "CAP_NET_BIND_SERVICE", "CAP_SETGID", "CAP_SETUID"},
-		"inheritable": []string{},
-		"permitted":   []string{"CAP_AUDIT_WRITE", "CAP_CHOWN", "CAP_KILL", "CAP_NET_BIND_SERVICE", "CAP_SETGID", "CAP_SETUID"},
-		"ambient":     []string{},
-	}
-	spec.Process.Rlimits = []map[string]any{{"type": "RLIMIT_NOFILE", "hard": 1024, "soft": 1024}}
-	spec.Process.NoNewPrivileges = true
-	spec.Root = specRoot{Path: r.rootFSPath(), Readonly: false}
-	spec.Hostname = "harness-gen-" + shortID(details.GenerationID)
-	identity := r.legacyAgentIdentity()
-	spec.Process.Env = append(spec.Process.Env,
-		"HARNESS_EXPECTED_SESSION_ID="+req.SessionID,
-		"HARNESS_EXPECTED_GENERATION_ID="+details.GenerationID,
-		"HARNESS_EXPECTED_NETWORK_PROFILE_ID="+details.NetworkProfileID,
-		"HARNESS_EXPECTED_AGENT_RUNTIME_PROFILE_ID="+details.AgentRuntimeProfileID,
-		"HARNESS_EXPECTED_MANIFEST_VERSION=1",
-		"HARNESS_EXPECTED_API_KEY_SECRET_ID="+details.AnthropicAPIKeySecretID,
-		"HARNESS_EXPECTED_AUTH_TOKEN_SECRET_ID="+details.AnthropicAuthTokenSecretID,
-		"HARNESS_EXPECTED_SECRET_VERSION="+details.SecretVersion,
-		fmt.Sprintf("HARNESS_AGENT_UID=%d", identity.UID),
-		fmt.Sprintf("HARNESS_AGENT_GID=%d", identity.GID),
-		fmt.Sprintf("HARNESS_SECRET_READERS_GID=%d", r.cfg.SecretReadersGID),
-		"HARNESS_BRIDGE_DIR="+bridge.BridgeMountDestination,
-		"HARNESS_BRIDGE_MODE="+defaultString(r.cfg.BridgeMode, "claim-loop"),
-		"HARNESS_BRIDGE_HEARTBEAT_INTERVAL="+formatSeconds(defaultDuration(r.cfg.BridgeHeartbeat, 30*time.Second)),
-		"HARNESS_BRIDGE_POLL_INTERVAL="+formatSeconds(defaultDuration(r.cfg.BridgePollInterval, 5*time.Millisecond)),
-		"HARNESS_BRIDGE_IDLE_INTERVAL="+formatSeconds(defaultDuration(r.cfg.BridgePollInterval, 5*time.Millisecond)),
-		"HARNESS_PROBE_HEALTHZ_STATUSES="+joinInts(defaultIntSlice(r.cfg.ProbeHealthzStatuses, []int{200})),
-		"HARNESS_PROBE_MESSAGE_STATUSES="+joinInts(defaultIntSlice(r.cfg.ProbeMessageStatuses, []int{400})),
-	)
-	spec.Mounts = []specMount{
-		{Destination: "/proc", Type: "proc", Source: "proc"},
-		{Destination: "/dev", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
-		{Destination: "/dev/pts", Type: "devpts", Source: "devpts", Options: []string{"nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620", "gid=5"}},
-		{Destination: "/dev/shm", Type: "tmpfs", Source: "shm", Options: []string{"nosuid", "noexec", "nodev", "mode=1777", "size=65536k"}},
-		{Destination: "/dev/mqueue", Type: "mqueue", Source: "mqueue", Options: []string{"nosuid", "noexec", "nodev"}},
-		{Destination: "/sys", Type: "sysfs", Source: "sysfs", Options: []string{"nosuid", "noexec", "nodev", "ro"}},
-		{Destination: "/sessions", Type: "bind", Source: r.cfg.SessionsRoot, Options: []string{"rbind", "rw"}},
-		{Destination: "/agent-homes", Type: "bind", Source: r.cfg.AgentHomesRoot, Options: []string{"rbind", "rw"}},
-		{Destination: "/harness-control", Type: "bind", Source: details.ControlDirPath, Options: []string{"rbind", "ro"}},
-		{
-			Destination: bridge.BridgeMountDestination,
-			Type:        "bind",
-			Source:      details.BridgeDirPath,
-			Options:     []string{"rbind", "rw"},
-			Annotations: map[string]string{
-				"dev.gvisor.spec.mount./harness-control/bridge.type":  "bind",
-				"dev.gvisor.spec.mount./harness-control/bridge.share": "exclusive",
-			},
-		},
-	}
-	if schemaPack := r.schemaPackPath(); schemaPack != "" {
-		spec.Mounts = append(spec.Mounts, specMount{Destination: "/schema-pack", Type: "bind", Source: schemaPack, Options: []string{"rbind", "ro"}})
-	}
-	if strings.TrimSpace(details.NetworkHostsPath) != "" {
-		spec.Mounts = append(spec.Mounts, specMount{
-			Destination: "/etc/hosts",
-			Type:        "bind",
-			Source:      details.NetworkHostsPath,
-			Options:     []string{"bind", "ro", "nosuid", "nodev", "noexec"},
-		})
-	}
-	if details.RequiresSecretDrop {
-		spec.Mounts = append(spec.Mounts, specMount{
-			Destination: "/harness-secrets",
-			Type:        "bind",
-			Source:      details.SecretsDirPath,
-			Options:     []string{"rbind", "ro", "nosuid", "nodev", "noexec"},
-		})
-	}
-	linux := map[string]any{
-		"resources": map[string]any{
-			"memory": map[string]any{"limit": 1073741824},
-			"cpu":    map[string]any{"shares": 1024},
-			"pids":   map[string]any{"limit": 256},
-		},
-		"namespaces": []map[string]any{
-			{"type": "pid"},
-			{"type": "ipc"},
-			{"type": "uts"},
-			{"type": "mount"},
-		},
-	}
-	if strings.EqualFold(strings.TrimSpace(r.runscNetwork(details)), "sandbox") {
-		if strings.TrimSpace(details.NetnsPath) == "" {
-			return runtimeSpec{}, "", fmt.Errorf("sandbox generation requires netns path")
-		}
-		linux["namespaces"] = append(linux["namespaces"].([]map[string]any), map[string]any{"type": "network", "path": details.NetnsPath})
-	}
-	linuxBytes, err := canonicalJSON(linux)
+	agent := sandboxAgent(req)
+	identity, err := r.requiredSandboxIdentity(details)
 	if err != nil {
 		return runtimeSpec{}, "", err
 	}
-	spec.Linux = linuxBytes
-	payload, err := canonicalJSON(spec)
+	workspaceHostPath, agentHomeHostPath, err := r.sandboxIsolationDataPaths(req)
 	if err != nil {
 		return runtimeSpec{}, "", err
 	}
-	return spec, digestHex(payload), nil
-}
-
-func (r *Runtime) renderPhase8ShellRuntimeSpec(req StartRequest) (runtimeSpec, string, error) {
-	var spec runtimeSpec
-	details := req.Generation
-	identity, err := r.requiredSandboxIdentity()
-	if err != nil {
-		return runtimeSpec{}, "", err
-	}
-	workspaceHostPath, agentHomeHostPath, err := r.phase8ShellDataPaths(req)
-	if err != nil {
-		return runtimeSpec{}, "", err
-	}
-	plan, err := BuildPhase8MountPlan(Phase8MountPlanInputs{
+	plan, err := BuildSandboxMountPlan(SandboxMountPlanInputs{
 		Generation:        details,
 		WorkspaceHostPath: workspaceHostPath,
 		AgentHomeHostPath: agentHomeHostPath,
@@ -1370,7 +1258,7 @@ func (r *Runtime) renderPhase8ShellRuntimeSpec(req StartRequest) (runtimeSpec, s
 		"LOGNAME=harness",
 		"SESSION_WORKSPACE=/workspace",
 		"HARNESS_AGENT_HOME=/agent-home",
-		"HARNESS_AGENT=sh",
+		"HARNESS_AGENT=" + agent,
 		"HARNESS_EXPECTED_SESSION_ID=" + req.SessionID,
 		"HARNESS_EXPECTED_GENERATION_ID=" + details.GenerationID,
 		"HARNESS_EXPECTED_NETWORK_PROFILE_ID=" + details.NetworkProfileID,
@@ -1597,46 +1485,40 @@ type runtimeSandboxIdentity struct {
 	SupplementalGIDs []int
 }
 
-func (r *Runtime) requiredSandboxIdentity() (runtimeSandboxIdentity, error) {
+func (r *Runtime) requiredSandboxIdentity(details store.RuntimeGenerationDetails) (runtimeSandboxIdentity, error) {
+	supplementalGIDs := append([]int(nil), details.SandboxSupplementalGIDs...)
+	if len(supplementalGIDs) == 0 {
+		supplementalGIDs = append([]int(nil), r.cfg.SandboxSupplementalGIDs...)
+	}
 	identity := runtimeSandboxIdentity{
-		UID:              r.cfg.SandboxUID,
-		GID:              r.cfg.SandboxGID,
-		SupplementalGIDs: append([]int(nil), r.cfg.SandboxSupplementalGIDs...),
+		UID:              details.SandboxUID,
+		GID:              details.SandboxGID,
+		SupplementalGIDs: supplementalGIDs,
+	}
+	if identity.UID <= 0 {
+		identity.UID = r.cfg.SandboxUID
+	}
+	if identity.GID <= 0 {
+		identity.GID = r.cfg.SandboxGID
 	}
 	sort.Ints(identity.SupplementalGIDs)
 	if identity.UID <= 0 {
-		return runtimeSandboxIdentity{}, fmt.Errorf("phase8 shell sandbox identity uid must be > 0")
+		return runtimeSandboxIdentity{}, fmt.Errorf("sandbox identity uid must be > 0")
 	}
 	if identity.GID <= 0 {
-		return runtimeSandboxIdentity{}, fmt.Errorf("phase8 shell sandbox identity gid must be > 0")
+		return runtimeSandboxIdentity{}, fmt.Errorf("sandbox identity gid must be > 0")
 	}
 	seen := map[int]struct{}{}
 	for _, gid := range identity.SupplementalGIDs {
 		if gid <= 0 {
-			return runtimeSandboxIdentity{}, fmt.Errorf("phase8 shell sandbox identity supplemental gids must be positive")
+			return runtimeSandboxIdentity{}, fmt.Errorf("sandbox identity supplemental gids must be positive")
 		}
 		if _, ok := seen[gid]; ok {
-			return runtimeSandboxIdentity{}, fmt.Errorf("phase8 shell sandbox identity supplemental gids contain duplicate gid %d", gid)
+			return runtimeSandboxIdentity{}, fmt.Errorf("sandbox identity supplemental gids contain duplicate gid %d", gid)
 		}
 		seen[gid] = struct{}{}
 	}
 	return identity, nil
-}
-
-func (r *Runtime) legacyAgentIdentity() runtimeSandboxIdentity {
-	identity := runtimeSandboxIdentity{
-		UID:              r.cfg.SandboxUID,
-		GID:              r.cfg.SandboxGID,
-		SupplementalGIDs: append([]int(nil), r.cfg.SandboxSupplementalGIDs...),
-	}
-	if identity.UID <= 0 {
-		identity.UID = 65534
-	}
-	if identity.GID <= 0 {
-		identity.GID = 65534
-	}
-	sort.Ints(identity.SupplementalGIDs)
-	return identity
 }
 
 func emptyCapabilities() map[string]any {
@@ -1649,33 +1531,23 @@ func emptyCapabilities() map[string]any {
 	}
 }
 
-func (r *Runtime) prepareSessionDirs(sessionID string) error {
-	if r.cfg.SessionsRoot != "" {
-		if err := os.MkdirAll(filepath.Join(r.cfg.SessionsRoot, sessionID), 0o755); err != nil {
-			return fmt.Errorf("create session workspace: %w", err)
-		}
-	}
-	if r.cfg.AgentHomesRoot != "" {
-		if err := os.MkdirAll(filepath.Join(r.cfg.AgentHomesRoot, sessionID), 0o755); err != nil {
-			return fmt.Errorf("create agent home: %w", err)
-		}
-	}
-	return nil
-}
-
 func (r *Runtime) prepareRuntimeDataDirs(req StartRequest) error {
-	if isPhase8ShellRequest(req) {
-		return r.preparePhase8ShellDataDirs(req)
+	if isSandboxIsolatedRequest(req) {
+		return r.prepareSandboxIsolationDataDirs(req)
 	}
-	return r.prepareSessionDirs(req.SessionID)
+	agent := sandboxAgent(req)
+	if agent == "" {
+		return fmt.Errorf("agent is required")
+	}
+	return fmt.Errorf("unsupported agent %q", agent)
 }
 
-func (r *Runtime) preparePhase8ShellDataDirs(req StartRequest) error {
-	identity, err := r.requiredSandboxIdentity()
+func (r *Runtime) prepareSandboxIsolationDataDirs(req StartRequest) error {
+	identity, err := r.requiredSandboxIdentity(req.Generation)
 	if err != nil {
 		return err
 	}
-	workspaceHostPath, agentHomeHostPath, err := r.phase8ShellDataPaths(req)
+	workspaceHostPath, agentHomeHostPath, err := r.sandboxIsolationDataPaths(req)
 	if err != nil {
 		return err
 	}
@@ -1684,28 +1556,28 @@ func (r *Runtime) preparePhase8ShellDataDirs(req StartRequest) error {
 		path  string
 		mode  os.FileMode
 	}{
-		{label: "phase8 shell workspace", path: workspaceHostPath, mode: 0o750},
-		{label: "phase8 shell agent home", path: agentHomeHostPath, mode: 0o750},
+		{label: "sandbox workspace", path: workspaceHostPath, mode: 0o750},
+		{label: "sandbox agent home", path: agentHomeHostPath, mode: 0o750},
 	} {
-		if err := ensurePhase8OwnedDir(item.path, identity.UID, identity.GID, item.mode); err != nil {
+		if err := ensureSandboxOwnedDir(item.path, identity.UID, identity.GID, item.mode); err != nil {
 			return fmt.Errorf("%s: %w", item.label, err)
 		}
 	}
-	if err := preparePhase8BridgePlaceholder(req.Generation.ControlDirPath); err != nil {
+	if err := prepareBridgeMountPlaceholder(req.Generation.ControlDirPath); err != nil {
 		return err
 	}
 	if strings.TrimSpace(req.Generation.BridgeDirPath) != "" {
 		if err := bridge.EnsureLayout(req.Generation.BridgeDirPath); err != nil {
-			return fmt.Errorf("create phase8 shell bridge dir: %w", err)
+			return fmt.Errorf("create sandbox bridge dir: %w", err)
 		}
-		if err := ensurePhase8OwnedTree(req.Generation.BridgeDirPath, identity.UID, identity.GID, 0o770); err != nil {
-			return fmt.Errorf("phase8 shell bridge dir: %w", err)
+		if err := ensureSandboxOwnedTree(req.Generation.BridgeDirPath, identity.UID, identity.GID, 0o770); err != nil {
+			return fmt.Errorf("sandbox bridge dir: %w", err)
 		}
 	}
 	return nil
 }
 
-func (r *Runtime) phase8ShellDataPaths(req StartRequest) (string, string, error) {
+func (r *Runtime) sandboxIsolationDataPaths(req StartRequest) (string, string, error) {
 	sessionsRoot, err := cleanAbsoluteRoot(r.cfg.SessionsRoot, "sessions root")
 	if err != nil {
 		return "", "", err
@@ -1718,54 +1590,59 @@ func (r *Runtime) phase8ShellDataPaths(req StartRequest) (string, string, error)
 	if err != nil {
 		return "", "", err
 	}
-	driverComponent, err := safePathComponent("driver", phase8ShellDriver(req))
+	driverComponent, err := safePathComponent("driver", sandboxAgent(req))
 	if err != nil {
 		return "", "", err
 	}
 	return filepath.Join(sessionsRoot, sessionComponent), filepath.Join(agentHomesRoot, sessionComponent, driverComponent), nil
 }
 
-func phase8ShellDriver(req StartRequest) string {
+func sandboxAgent(req StartRequest) string {
 	if agent := strings.TrimSpace(req.Agent); agent != "" {
 		return agent
 	}
 	return strings.TrimSpace(req.Generation.Agent)
 }
 
-func isPhase8ShellRequest(req StartRequest) bool {
-	return phase8ShellDriver(req) == string(agents.Shell)
+func isSandboxIsolatedRequest(req StartRequest) bool {
+	switch sandboxAgent(req) {
+	case string(agents.Claude), string(agents.Shell):
+		return true
+	default:
+		return false
+	}
 }
 
-func preparePhase8BridgePlaceholder(controlDir string) error {
+func prepareBridgeMountPlaceholder(controlDir string) error {
 	controlDir = strings.TrimSpace(controlDir)
 	if controlDir == "" {
-		return fmt.Errorf("phase8 shell control dir is required")
+		return fmt.Errorf("sandbox control dir is required")
 	}
 	placeholder := filepath.Join(controlDir, "bridge")
 	if err := os.MkdirAll(placeholder, 0o755); err != nil {
-		return fmt.Errorf("create phase8 bridge placeholder: %w", err)
+		return fmt.Errorf("create bridge mount placeholder: %w", err)
 	}
 	info, err := os.Lstat(placeholder)
 	if err != nil {
-		return fmt.Errorf("stat phase8 bridge placeholder: %w", err)
+		return fmt.Errorf("stat bridge mount placeholder: %w", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("phase8 bridge placeholder %q must not be a symlink", placeholder)
+		return fmt.Errorf("bridge mount placeholder %q must not be a symlink", placeholder)
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("phase8 bridge placeholder %q must be a directory", placeholder)
+		return fmt.Errorf("bridge mount placeholder %q must be a directory", placeholder)
 	}
 	entries, err := os.ReadDir(placeholder)
 	if err != nil {
-		return fmt.Errorf("read phase8 bridge placeholder: %w", err)
+		return fmt.Errorf("read bridge mount placeholder: %w", err)
 	}
 	if len(entries) > 0 {
-		return fmt.Errorf("phase8 bridge placeholder %q must be empty", placeholder)
+		return fmt.Errorf("bridge mount placeholder %q must be empty", placeholder)
 	}
 	return nil
 }
 
-func ensurePhase8OwnedDir(path string, uid, gid int, mode os.FileMode) error {
+func ensureSandboxOwnedDir(path string, uid, gid int, mode os.FileMode) error {
 	if err := os.MkdirAll(path, mode); err != nil {
 		return err
 	}
@@ -1779,13 +1656,13 @@ func ensurePhase8OwnedDir(path string, uid, gid int, mode os.FileMode) error {
 	if !info.IsDir() {
 		return fmt.Errorf("%q must be a directory", path)
 	}
-	if err := ensurePhase8Ownership(path, info, uid, gid); err != nil {
+	if err := ensureSandboxOwnership(path, info, uid, gid); err != nil {
 		return err
 	}
 	return os.Chmod(path, mode)
 }
 
-func ensurePhase8OwnedTree(root string, uid, gid int, dirMode os.FileMode) error {
+func ensureSandboxOwnedTree(root string, uid, gid int, dirMode os.FileMode) error {
 	return filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -1797,7 +1674,7 @@ func ensurePhase8OwnedTree(root string, uid, gid int, dirMode os.FileMode) error
 		if info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("%q must not be a symlink", path)
 		}
-		if err := ensurePhase8Ownership(path, info, uid, gid); err != nil {
+		if err := ensureSandboxOwnership(path, info, uid, gid); err != nil {
 			return err
 		}
 		if entry.IsDir() {
@@ -1807,7 +1684,7 @@ func ensurePhase8OwnedTree(root string, uid, gid int, dirMode os.FileMode) error
 	})
 }
 
-func ensurePhase8Ownership(path string, info os.FileInfo, uid, gid int) error {
+func ensureSandboxOwnership(path string, info os.FileInfo, uid, gid int) error {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
 		return fmt.Errorf("stat ownership unavailable for %s", path)

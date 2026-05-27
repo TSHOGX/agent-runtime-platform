@@ -1059,7 +1059,7 @@ func TestWriteUserTurnRejectsUnsupportedAgent(t *testing.T) {
 	}
 }
 
-func TestPrepareGenerationWritesPerGenerationSpecManifestAndSecrets(t *testing.T) {
+func TestPrepareGenerationWritesPerGenerationSpecManifestAndIsolatedRuntime(t *testing.T) {
 	t.Setenv("HARNESS_CLAUDE_BASE_URL", "http://bad.invalid")
 	t.Setenv("HARNESS_ANTHROPIC_BASE_URL", "http://bad.invalid")
 	t.Setenv("ANTHROPIC_BASE_URL", "http://bad.invalid")
@@ -1067,20 +1067,15 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndSecrets(t *testing.T
 	t.Setenv("HARNESS_ANTHROPIC_API_KEY", "bad")
 
 	dir := t.TempDir()
-	secretsRoot := filepath.Join(dir, "secrets")
 	rt := New(Config{
 		SessionsRoot:       filepath.Join(dir, "sessions"),
 		AgentHomesRoot:     filepath.Join(dir, "agent-homes"),
 		BundleRoot:         filepath.Join(dir, "bundle", "out"),
 		RootFSPath:         filepath.Join(dir, "rootfs"),
-		SecretsRoot:        secretsRoot,
-		SecretReadersGID:   testSecretReadersGID(),
 		BridgeHeartbeat:    20 * time.Second,
 		BridgePollInterval: 5 * time.Millisecond,
 		Claude: ClaudeConfig{
 			ProxyBindURL:               "http://0.0.0.0:8082",
-			APIKey:                     "123",
-			AuthToken:                  "123",
 			Model:                      "sonnet",
 			OutputFormat:               "stream-json",
 			DisableNonessentialTraffic: true,
@@ -1128,17 +1123,20 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndSecrets(t *testing.T
 	if manifest.ManifestVersion != 1 {
 		t.Fatalf("manifest_version=%d want 1", manifest.ManifestVersion)
 	}
-	if manifest.WorkspacePath != "/sessions/sess_1" || manifest.AgentHomePath != "/agent-homes/sess_1" {
+	if manifest.WorkspacePath != "/workspace" || manifest.AgentHomePath != "/agent-home" {
 		t.Fatalf("unexpected workspace/home paths: %+v", manifest)
 	}
 	if !manifest.ResumeClaude {
 		t.Fatalf("expected resume flag to be set: %+v", manifest)
 	}
-	if manifest.AnthropicBaseURL != "http://10.200.1.1:8082" {
+	if manifest.AnthropicBaseURL != "http://harness-model-proxy.internal:8082" {
 		t.Fatalf("unexpected sandbox base URL: %+v", manifest)
 	}
-	if manifest.AnthropicAPIKeySecretID != "anthropic_api_key" || manifest.AnthropicAuthTokenSecretID != "anthropic_auth_token" || manifest.SecretVersion != "local" {
-		t.Fatalf("unexpected secret refs: %+v", manifest)
+	if manifest.SecretMountPath != "" ||
+		manifest.AnthropicAPIKeySecretID != "" ||
+		manifest.AnthropicAuthTokenSecretID != "" ||
+		manifest.SecretVersion != "" {
+		t.Fatalf("host-only manifest must not reference secrets: %+v", manifest)
 	}
 	if strings.Contains(string(data), `"anthropic_api_key":`) || strings.Contains(string(data), `"anthropic_auth_token":`) {
 		t.Fatalf("manifest must not contain plaintext credential fields: %s", data)
@@ -1162,14 +1160,47 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndSecrets(t *testing.T
 	if strings.Contains(string(specData), "phase2-template") {
 		t.Fatalf("runtime spec hot path must not reference phase2-template: %s", specData)
 	}
+	if strings.Contains(string(specData), "/harness-secrets") ||
+		strings.Contains(string(specData), "anthropic_api_key") ||
+		strings.Contains(string(specData), "anthropic_auth_token") {
+		t.Fatalf("runtime spec must not contain legacy secret references: %s", specData)
+	}
+	if !spec.Root.Readonly {
+		t.Fatalf("isolated rootfs must be read-only: %+v", spec.Root)
+	}
+	if spec.Process.User.UID != testSandboxUID() || spec.Process.User.GID != testSandboxGID() {
+		t.Fatalf("isolated user=%+v want %d:%d", spec.Process.User, testSandboxUID(), testSandboxGID())
+	}
+	if strings.Contains(mustJSONForTest(t, spec.Process.Capabilities), "CAP_") {
+		t.Fatalf("isolated capabilities must be empty: %+v", spec.Process.Capabilities)
+	}
+	for _, destination := range []string{"/sessions", "/agent-homes", "/harness-secrets"} {
+		if mountByDestination(spec.Mounts, destination) != nil {
+			t.Fatalf("isolated spec must not mount %s: %+v", destination, spec.Mounts)
+		}
+	}
+	for _, mount := range spec.Mounts {
+		if slices.Contains(mount.Options, "rbind") {
+			t.Fatalf("isolated mount %s uses recursive bind: %+v", mount.Destination, mount)
+		}
+	}
+	if mountSource(spec.Mounts, "/workspace") != filepath.Join(dir, "sessions", "sess_1") {
+		t.Fatalf("workspace mount = %q", mountSource(spec.Mounts, "/workspace"))
+	}
+	if mountSource(spec.Mounts, "/agent-home") != filepath.Join(dir, "agent-homes", "sess_1", "claude") {
+		t.Fatalf("agent-home mount = %q", mountSource(spec.Mounts, "/agent-home"))
+	}
 	if mountSource(spec.Mounts, "/harness-control") != details.ControlDirPath {
 		t.Fatalf("control mount = %q, want %q", mountSource(spec.Mounts, "/harness-control"), details.ControlDirPath)
+	}
+	if control := mountByDestination(spec.Mounts, "/harness-control"); control == nil || strings.Join(control.Options, ",") != "bind,ro,nosuid,nodev,noexec" {
+		t.Fatalf("unexpected control mount: %+v", control)
 	}
 	bridgeMount := mountByDestination(spec.Mounts, "/harness-control/bridge")
 	if bridgeMount == nil {
 		t.Fatalf("runtime spec missing bridge mount: %+v", spec.Mounts)
 	}
-	if bridgeMount.Source != details.BridgeDirPath || strings.Join(bridgeMount.Options, ",") != "rbind,rw" {
+	if bridgeMount.Source != details.BridgeDirPath || strings.Join(bridgeMount.Options, ",") != "bind,rw,nosuid,nodev,noexec" {
 		t.Fatalf("unexpected bridge mount: %+v", bridgeMount)
 	}
 	if bridgeMount.Annotations["dev.gvisor.spec.mount./harness-control/bridge.share"] != "exclusive" ||
@@ -1187,30 +1218,23 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndSecrets(t *testing.T
 		env["HARNESS_PROBE_MESSAGE_STATUSES"] != "400" {
 		t.Fatalf("runtime spec missing bridge/probe env: %+v", env)
 	}
+	if env["HARNESS_AGENT"] != "claude" ||
+		env["HARNESS_AGENT_UID"] != fmt.Sprint(testSandboxUID()) ||
+		env["HARNESS_AGENT_GID"] != fmt.Sprint(testSandboxGID()) ||
+		env["SESSION_WORKSPACE"] != "/workspace" ||
+		env["HARNESS_AGENT_HOME"] != "/agent-home" {
+		t.Fatalf("runtime spec missing isolated agent env: %+v", env)
+	}
+	for _, key := range []string{"HARNESS_EXPECTED_API_KEY_SECRET_ID", "HARNESS_EXPECTED_AUTH_TOKEN_SECRET_ID", "HARNESS_EXPECTED_SECRET_VERSION", "HARNESS_SECRET_READERS_GID"} {
+		if _, ok := env[key]; ok {
+			t.Fatalf("runtime spec must not include legacy secret env %s: %+v", key, env)
+		}
+	}
 	for _, name := range []string{"inbox", "outbox", "heartbeat", "tmp"} {
 		if info, err := os.Stat(filepath.Join(details.BridgeDirPath, name)); err != nil || !info.IsDir() {
 			t.Fatalf("bridge dir %s not initialized: info=%v err=%v", name, info, err)
 		}
 	}
-	if mountSource(spec.Mounts, "/harness-secrets") != details.SecretsDirPath {
-		t.Fatalf("secret mount = %q, want %q", mountSource(spec.Mounts, "/harness-secrets"), details.SecretsDirPath)
-	}
-	secretMount := mountByDestination(spec.Mounts, "/harness-secrets")
-	if secretMount == nil || strings.Join(secretMount.Options, ",") != "rbind,ro,nosuid,nodev,noexec" {
-		t.Fatalf("secret mount missing read-only hardening options: %+v", secretMount)
-	}
-	if _, err := os.Stat(filepath.Join(details.SecretsDirPath, "anthropic_api_key", "local")); err != nil {
-		t.Fatalf("materialized api key secret: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(details.SecretsDirPath, "anthropic_auth_token", "local")); err != nil {
-		t.Fatalf("materialized auth token secret: %v", err)
-	}
-	assertSecretPath(t, secretsRoot)
-	assertSecretPath(t, filepath.Join(secretsRoot, "anthropic_api_key"))
-	assertSecretFile(t, filepath.Join(secretsRoot, "anthropic_api_key", "local"))
-	assertSecretPath(t, details.SecretsDirPath)
-	assertSecretPath(t, filepath.Join(details.SecretsDirPath, "anthropic_api_key"))
-	assertSecretFile(t, filepath.Join(details.SecretsDirPath, "anthropic_api_key", "local"))
 }
 
 func TestPrepareClaudeHostOnlyGenerationHasNoSecretMount(t *testing.T) {
@@ -1425,22 +1449,22 @@ func TestPrepareShellGenerationHasNoSecretMount(t *testing.T) {
 		t.Fatalf("read shell spec json: %v", err)
 	}
 	if !spec.Root.Readonly {
-		t.Fatalf("shell phase8 rootfs must be read-only: %+v", spec.Root)
+		t.Fatalf("shell isolated rootfs must be read-only: %+v", spec.Root)
 	}
 	if spec.Process.User.UID != testSandboxUID() || spec.Process.User.GID != testSandboxGID() {
-		t.Fatalf("shell phase8 user=%+v want %d:%d", spec.Process.User, testSandboxUID(), testSandboxGID())
+		t.Fatalf("shell isolated user=%+v want %d:%d", spec.Process.User, testSandboxUID(), testSandboxGID())
 	}
 	if strings.Contains(mustJSONForTest(t, spec.Process.Capabilities), "CAP_") {
-		t.Fatalf("shell phase8 capabilities must be empty: %+v", spec.Process.Capabilities)
+		t.Fatalf("shell isolated capabilities must be empty: %+v", spec.Process.Capabilities)
 	}
 	for _, destination := range []string{"/sessions", "/agent-homes", "/harness-secrets"} {
 		if mountByDestination(spec.Mounts, destination) != nil {
-			t.Fatalf("shell phase8 spec must not mount %s: %+v", destination, spec.Mounts)
+			t.Fatalf("shell isolated spec must not mount %s: %+v", destination, spec.Mounts)
 		}
 	}
 	for _, mount := range spec.Mounts {
 		if slices.Contains(mount.Options, "rbind") {
-			t.Fatalf("shell phase8 mount %s uses recursive bind: %+v", mount.Destination, mount)
+			t.Fatalf("shell isolated mount %s uses recursive bind: %+v", mount.Destination, mount)
 		}
 	}
 	if mountSource(spec.Mounts, "/workspace") != filepath.Join(dir, "sessions", "sess_shell") {
@@ -1450,28 +1474,28 @@ func TestPrepareShellGenerationHasNoSecretMount(t *testing.T) {
 		t.Fatalf("agent-home mount = %q", mountSource(spec.Mounts, "/agent-home"))
 	}
 	if control := mountByDestination(spec.Mounts, "/harness-control"); control == nil || strings.Join(control.Options, ",") != "bind,ro,nosuid,nodev,noexec" {
-		t.Fatalf("unexpected phase8 control mount: %+v", control)
+		t.Fatalf("unexpected isolated control mount: %+v", control)
 	}
 	bridgeMount := mountByDestination(spec.Mounts, "/harness-control/bridge")
 	if bridgeMount == nil ||
 		bridgeMount.Source != details.BridgeDirPath ||
 		strings.Join(bridgeMount.Options, ",") != "bind,rw,nosuid,nodev,noexec" ||
 		bridgeMount.Annotations["dev.gvisor.spec.mount./harness-control/bridge.share"] != "exclusive" {
-		t.Fatalf("unexpected phase8 bridge mount: %+v", bridgeMount)
+		t.Fatalf("unexpected isolated bridge mount: %+v", bridgeMount)
 	}
 	env := specEnv(spec.Process.Env)
 	if env["HARNESS_AGENT_UID"] != fmt.Sprint(testSandboxUID()) ||
 		env["HARNESS_AGENT_GID"] != fmt.Sprint(testSandboxGID()) ||
 		env["SESSION_WORKSPACE"] != "/workspace" ||
 		env["HARNESS_AGENT_HOME"] != "/agent-home" {
-		t.Fatalf("shell phase8 identity/workspace env missing: %+v", env)
+		t.Fatalf("shell isolated identity/workspace env missing: %+v", env)
 	}
 	var manifestFile controlManifestFile
 	if err := json.Unmarshal(mustReadFile(t, details.ControlManifestPath), &manifestFile); err != nil {
 		t.Fatalf("read shell manifest: %v", err)
 	}
 	if manifestFile.Payload.WorkspacePath != "/workspace" || manifestFile.Payload.AgentHomePath != "/agent-home" {
-		t.Fatalf("shell manifest must use phase8 sandbox paths: %+v", manifestFile.Payload)
+		t.Fatalf("shell manifest must use isolated sandbox paths: %+v", manifestFile.Payload)
 	}
 	if manifestFile.Payload.SecretMountPath != "" || manifestFile.Payload.AnthropicAPIKeySecretID != "" {
 		t.Fatalf("shell manifest must not reference secrets: %+v", manifestFile.Payload)
@@ -1482,32 +1506,49 @@ func TestPrepareShellGenerationHasNoSecretMount(t *testing.T) {
 	assertControlManifestOmitsHostOnlyFields(t, mustReadFile(t, details.ControlManifestPath))
 }
 
-func TestPrepareShellGenerationRejectsSecretReferences(t *testing.T) {
-	dir := t.TempDir()
-	rt := New(Config{
-		SessionsRoot:     filepath.Join(dir, "sessions"),
-		AgentHomesRoot:   filepath.Join(dir, "agent-homes"),
-		BundleRoot:       filepath.Join(dir, "bundle", "out"),
-		RootFSPath:       filepath.Join(dir, "rootfs"),
-		SecretsRoot:      filepath.Join(dir, "secrets"),
-		SecretReadersGID: testSecretReadersGID(),
-	})
-	details := testGenerationDetails(dir, "gen_shell_bad")
-	details.SessionID = "sess_shell"
-	details.Agent = "sh"
-	details.RequiresSecretDrop = false
-
-	_, err := rt.PrepareGeneration(context.Background(), StartRequest{
-		SessionID:    "sess_shell",
-		GenerationID: details.GenerationID,
-		Agent:        "sh",
-		Generation:   details,
-	})
-	if err == nil {
-		t.Fatal("expected shell secret rejection")
+func TestPrepareSandboxGenerationRejectsSecretReferences(t *testing.T) {
+	tests := []struct {
+		name         string
+		sessionID    string
+		generationID string
+		agent        string
+		outputFormat string
+	}{
+		{name: "claude", sessionID: "sess_claude", generationID: "gen_claude_bad", agent: "claude", outputFormat: "stream-json"},
+		{name: "shell", sessionID: "sess_shell", generationID: "gen_shell_bad", agent: "sh", outputFormat: "shell_pty"},
 	}
-	if !strings.Contains(err.Error(), "shell_secret_disallowed") {
-		t.Fatalf("expected shell_secret_disallowed, got %v", err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			rt := New(Config{
+				SessionsRoot:   filepath.Join(dir, "sessions"),
+				AgentHomesRoot: filepath.Join(dir, "agent-homes"),
+				BundleRoot:     filepath.Join(dir, "bundle", "out"),
+				RootFSPath:     filepath.Join(dir, "rootfs"),
+			})
+			details := testGenerationDetails(dir, tc.generationID)
+			details.SessionID = tc.sessionID
+			details.Agent = tc.agent
+			details.OutputFormat = tc.outputFormat
+			details.RequiresSecretDrop = true
+			details.SecretsDirPath = filepath.Join(dir, "run", "control", "gen-"+details.GenerationID, "secrets")
+			details.AnthropicAPIKeySecretID = "anthropic_api_key"
+			details.AnthropicAuthTokenSecretID = "anthropic_auth_token"
+			details.SecretVersion = "local"
+
+			_, err := rt.PrepareGeneration(context.Background(), StartRequest{
+				SessionID:    tc.sessionID,
+				GenerationID: details.GenerationID,
+				Agent:        tc.agent,
+				Generation:   details,
+			})
+			if err == nil {
+				t.Fatal("expected sandbox secret rejection")
+			}
+			if !strings.Contains(err.Error(), "sandbox_secret_disallowed") {
+				t.Fatalf("expected sandbox_secret_disallowed, got %v", err)
+			}
+		})
 	}
 }
 
@@ -1553,7 +1594,7 @@ func testGenerationDetails(dir, generationID string) store.RuntimeGenerationDeta
 		BundleDirPath:              filepath.Join(dir, "run", "runtime", "gen-"+generationID),
 		SpecPath:                   filepath.Join(dir, "run", "runtime", "gen-"+generationID, "config.json"),
 		CheckpointPath:             filepath.Join(dir, "run", "gen-"+generationID, "checkpoint"),
-		SecretsDirPath:             filepath.Join(dir, "run", "control", "gen-"+generationID, "secrets"),
+		SecretsDirPath:             "",
 		BridgeDirPath:              filepath.Join(dir, "run", "bridge", "gen-"+generationID),
 		NetworkHostsPath:           "",
 		LogDirPath:                 filepath.Join(dir, "run", "logs", "gen-"+generationID),
@@ -1566,11 +1607,10 @@ func testGenerationDetails(dir, generationID string) store.RuntimeGenerationDeta
 		Model:                      "sonnet",
 		OutputFormat:               "stream-json",
 		DisableNonessentialTraffic: true,
-		RequiresSecretDrop:         true,
-		ManifestAnthropicBaseURL:   "http://10.200.1.1:8082",
-		AnthropicAPIKeySecretID:    "anthropic_api_key",
-		AnthropicAuthTokenSecretID: "anthropic_auth_token",
-		SecretVersion:              "local",
+		SandboxUID:                 testSandboxUID(),
+		SandboxGID:                 testSandboxGID(),
+		RequiresSecretDrop:         false,
+		ManifestAnthropicBaseURL:   "http://harness-model-proxy.internal:8082",
 	}
 }
 

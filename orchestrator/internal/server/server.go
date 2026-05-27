@@ -845,6 +845,9 @@ func runtimeArtifactDigests(artifacts runtime.GenerationArtifacts) store.Generat
 }
 
 func runtimeFailureClass(message string) string {
+	if strings.Contains(message, "sandbox_secret_disallowed") {
+		return "sandbox_secret_disallowed"
+	}
 	if strings.Contains(message, "shell_secret_disallowed") {
 		return "shell_secret_disallowed"
 	}
@@ -885,6 +888,8 @@ func runtimeFailureMessage(errorClass, reason string) string {
 		return "runtime manifest validation failed"
 	case "network_setup_failed":
 		return "sandbox network setup failed"
+	case "sandbox_secret_disallowed":
+		return "sandbox generation cannot mount model secrets"
 	case "shell_secret_disallowed":
 		return "shell agent cannot mount model secrets"
 	default:
