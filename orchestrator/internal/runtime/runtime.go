@@ -62,6 +62,7 @@ const defaultRunscPlatform = "systrap"
 var requiredCheckpointImageFiles = []string{"checkpoint.img", "pages.img", "pages_meta.img"}
 
 type GenerationResourceCleanup struct {
+	RunscDeleted      bool
 	CheckpointDeleted bool
 	ControlDirDeleted bool
 	BundleDirDeleted  bool
@@ -404,6 +405,16 @@ func (r *Runtime) DestroyGenerationResources(ctx context.Context, details store.
 	}
 	if len(errs) > 0 {
 		return cleanup, errors.Join(errs...)
+	}
+
+	containerID, err := runscContainerID(details)
+	if err != nil {
+		return cleanup, err
+	}
+	if err := r.deleteRunscContainer(ctx, containerID); err != nil {
+		errs = append(errs, fmt.Errorf("delete runsc container %s: %w", containerID, err))
+	} else {
+		cleanup.RunscDeleted = true
 	}
 
 	if strings.EqualFold(strings.TrimSpace(r.runscNetwork(details)), "sandbox") {

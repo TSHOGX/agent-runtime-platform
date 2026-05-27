@@ -1416,7 +1416,7 @@ func runtimeResourceCleanupEvidence(instance store.RuntimeResourceInstance, clea
 	addFilesystemEvidence("logs", instance.LogDirPath, cleanup.LogDirDeleted)
 	return store.ResourceReconciliationEvidence{
 		HostID:          instance.HostID,
-		RunscState:      "cleanup_completed",
+		RunscState:      cleanupEvidenceState("runsc_container", cleanup.RunscDeleted),
 		IPNetns:         cleanupEvidenceState("netns", cleanup.NetnsDeleted),
 		IPLink:          cleanupEvidenceState("host_veth", cleanup.HostVethDeleted),
 		NFT:             cleanupEvidenceState("nft_table", cleanup.NftTableDeleted),

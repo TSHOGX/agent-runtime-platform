@@ -732,6 +732,7 @@ func TestDestroyGenerationResourcesDeletesPerGenerationNetwork(t *testing.T) {
 	rt := New(Config{
 		RunscNetwork:    "sandbox",
 		RunscOverlay2:   "none",
+		RunscRoot:       filepath.Join(dir, "runsc-root"),
 		RunDir:          filepath.Join(dir, "run"),
 		CheckpointsRoot: filepath.Join(dir, "checkpoints"),
 		CommandRunner:   runner,
@@ -745,11 +746,13 @@ func TestDestroyGenerationResourcesDeletesPerGenerationNetwork(t *testing.T) {
 	if err != nil {
 		t.Fatalf("destroy generation resources: %v", err)
 	}
-	if !cleanup.NftTableDeleted || !cleanup.HostVethDeleted || !cleanup.NetnsDeleted {
+	if !cleanup.RunscDeleted || !cleanup.NftTableDeleted || !cleanup.HostVethDeleted || !cleanup.NetnsDeleted {
 		t.Fatalf("unexpected cleanup result: %+v", cleanup)
 	}
 
 	want := []string{
+		"runsc -root " + filepath.Join(dir, "runsc-root") + " kill harness-gen-gen_a KILL",
+		"runsc -root " + filepath.Join(dir, "runsc-root") + " delete harness-gen-gen_a",
 		"nft delete table inet harness_gen_gen_a",
 		"ip link delete hgenah",
 		"ip netns delete harness-gen-a",
@@ -979,6 +982,7 @@ func TestDestroyGenerationResourcesCleansFilesystemWithIncompleteSandboxMetadata
 	dir := t.TempDir()
 	rt := New(Config{
 		RunscNetwork:    "sandbox",
+		RunscRoot:       filepath.Join(dir, "runsc-root"),
 		RunDir:          filepath.Join(dir, "run"),
 		CheckpointsRoot: filepath.Join(dir, "checkpoints"),
 		CommandRunner:   runner,
@@ -996,12 +1000,16 @@ func TestDestroyGenerationResourcesCleansFilesystemWithIncompleteSandboxMetadata
 	if !cleanup.CheckpointDeleted || !cleanup.ControlDirDeleted || !cleanup.BundleDirDeleted || !cleanup.BridgeDirDeleted || !cleanup.LogDirDeleted {
 		t.Fatalf("filesystem cleanup did not run with missing sandbox metadata: %+v", cleanup)
 	}
-	if !cleanup.NftTableDeleted || cleanup.HostVethDeleted || cleanup.NetnsDeleted {
+	if !cleanup.RunscDeleted || !cleanup.NftTableDeleted || cleanup.HostVethDeleted || cleanup.NetnsDeleted {
 		t.Fatalf("unexpected network cleanup result with missing metadata: %+v", cleanup)
 	}
 	assertGenerationFilesystemMissing(t, generationFilesystemPaths(details))
 
-	want := []string{"nft delete table inet harness_gen_gen_missing_net"}
+	want := []string{
+		"runsc -root " + filepath.Join(dir, "runsc-root") + " kill harness-gen-gen_missing_net KILL",
+		"runsc -root " + filepath.Join(dir, "runsc-root") + " delete harness-gen-gen_missing_net",
+		"nft delete table inet harness_gen_gen_missing_net",
+	}
 	if got := runner.Commands(); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("unexpected commands:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}

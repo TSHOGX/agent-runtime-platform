@@ -1993,6 +1993,13 @@ WHERE session_id = ?
 		instance.VerifiedAt == nil {
 		t.Fatalf("runtime resource cleanup did not record destroyed evidence: %+v", instance)
 	}
+	var evidence store.ResourceReconciliationEvidence
+	if err := json.Unmarshal(instance.EvidenceJSON, &evidence); err != nil {
+		t.Fatalf("decode runtime resource cleanup evidence: %v", err)
+	}
+	if !strings.HasPrefix(evidence.RunscState, "runsc_container:absent") {
+		t.Fatalf("runtime resource cleanup did not record runsc absence: %+v", evidence)
+	}
 
 	srv.runtime = instantRuntime{}
 	retryReq := httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(`{"content":"retry"}`))
@@ -3790,6 +3797,7 @@ func (r *recordingRuntime) DestroyGenerationResources(_ context.Context, details
 		return runtime.GenerationResourceCleanup{}, err
 	}
 	return runtime.GenerationResourceCleanup{
+		RunscDeleted:    true,
 		NetnsDeleted:    true,
 		HostVethDeleted: true,
 		NftTableDeleted: true,
