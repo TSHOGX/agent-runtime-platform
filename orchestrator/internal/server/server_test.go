@@ -272,6 +272,109 @@ func TestCreateSessionUsesNullExpiryWhenSessionRetentionDisabled(t *testing.T) {
 	}
 }
 
+func TestCreateSessionUsesPublicSessionDTO(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	hub := events.NewHub()
+	eventsCh, cancelEvents := hub.Subscribe("")
+	defer cancelEvents()
+	srv := &Server{
+		cfg: config.Config{
+			SessionsRoot:     dir,
+			SessionRetention: time.Hour,
+			MaxSessions:      10,
+			DefaultAgent:     "claude",
+		},
+		store:   st,
+		runtime: runtime.New(runtime.Config{}),
+		watcher: artifacts.New(dir, st, events.NewHub(), slog.Default()),
+		hub:     hub,
+		log:     slog.Default(),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(`{"agent":"claude"}`))
+	rec := httptest.NewRecorder()
+	srv.createSession(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d body %s", rec.Code, rec.Body.String())
+	}
+	assertPublicSessionJSONOmitsHostFields(t, rec.Body.Bytes())
+	var created map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if created["id"] == "" || created["agent"] != "claude" {
+		t.Fatalf("unexpected create response: %v", created)
+	}
+
+	select {
+	case event := <-eventsCh:
+		if event.Type != "session.created" {
+			t.Fatalf("event type=%s want session.created", event.Type)
+		}
+		payload, err := json.Marshal(event.Payload)
+		if err != nil {
+			t.Fatalf("marshal event payload: %v", err)
+		}
+		assertPublicSessionJSONOmitsHostFields(t, payload)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for session.created event")
+	}
+}
+
+func TestSessionReadResponsesUsePublicSessionDTO(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	now := time.Now().UTC()
+	session := createServerTestSession(t, ctx, st, dir, "sess_public", string(sessionstate.RunningIdle), now, nil)
+	restoreMS := int64(123)
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE sessions
+SET agent_home_path = ?,
+    checkpoint_path = ?,
+    restore_ms = ?
+WHERE id = ?`, filepath.Join(dir, "agent-homes", session.ID), filepath.Join(dir, "checkpoints", session.ID), restoreMS, session.ID); err != nil {
+		t.Fatalf("seed host-only fields: %v", err)
+	}
+
+	srv := &Server{
+		store: st,
+		hub:   events.NewHub(),
+		log:   slog.Default(),
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/sessions/"+session.ID, nil)
+	getRec := httptest.NewRecorder()
+	srv.getSession(getRec, getReq, session.ID)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("expected get status 200, got %d body %s", getRec.Code, getRec.Body.String())
+	}
+	assertPublicSessionJSONOmitsHostFields(t, getRec.Body.Bytes())
+	assertContains(t, getRec.Body.String(), `"restore_ms":123`)
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
+	listRec := httptest.NewRecorder()
+	srv.listSessions(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected list status 200, got %d body %s", listRec.Code, listRec.Body.String())
+	}
+	assertPublicSessionJSONOmitsHostFields(t, listRec.Body.Bytes())
+	assertContains(t, listRec.Body.String(), `"id":"sess_public"`)
+}
+
 func TestMonitorIdleSessionsSkipsHostNetwork(t *testing.T) {
 	srv := &Server{
 		cfg: config.Config{
@@ -4062,6 +4165,22 @@ func waitForHubEvent(t *testing.T, ch <-chan events.Event, eventType string) eve
 			}
 		case <-deadline:
 			t.Fatalf("timeout waiting for hub event %s", eventType)
+		}
+	}
+}
+
+func assertPublicSessionJSONOmitsHostFields(t *testing.T, payload []byte) {
+	t.Helper()
+	body := string(payload)
+	for _, field := range []string{
+		`"workspace"`,
+		`"agent_home_path"`,
+		`"restore_id"`,
+		`"checkpoint_path"`,
+		`"claude_session_uuid"`,
+	} {
+		if strings.Contains(body, field) {
+			t.Fatalf("public session payload exposed host-only field %s: %s", field, body)
 		}
 	}
 }

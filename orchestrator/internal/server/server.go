@@ -217,7 +217,7 @@ func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
+	writeJSON(w, http.StatusOK, map[string]any{"sessions": publicSessions(sessions)})
 }
 
 func (s *Server) getQuota(w http.ResponseWriter, r *http.Request) {
@@ -298,8 +298,8 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.hub.Publish(events.Event{Type: "session.created", SessionID: id, Payload: session})
-	writeJSON(w, http.StatusCreated, session)
+	s.hub.Publish(events.Event{Type: "session.created", SessionID: id, Payload: publicSession(session)})
+	writeJSON(w, http.StatusCreated, publicSession(session))
 }
 
 func (s *Server) getSession(w http.ResponseWriter, r *http.Request, sessionID string) {
@@ -312,7 +312,7 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request, sessionID st
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, session)
+	writeJSON(w, http.StatusOK, publicSession(session))
 }
 
 func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, sessionID string) {
