@@ -19,6 +19,7 @@ import (
 )
 
 const RuntimeManagerRoleTag = "runtime_manager"
+const defaultSandboxModelProxyAliasURL = "http://harness-model-proxy.internal:8082"
 
 var ErrPoolExhausted = errors.New("pool exhausted")
 var ErrStaleCheckpointRestore = errors.New("stale checkpoint restore")
@@ -291,6 +292,9 @@ func (s *Store) AllocateGeneration(ctx context.Context, p AllocateGenerationPara
 	}
 	if strings.TrimSpace(p.Config.RunDir) == "" {
 		return GenerationAllocation{}, fmt.Errorf("run dir is required")
+	}
+	if err := p.Config.validateSandboxModelProxyBaseURL(); err != nil {
+		return GenerationAllocation{}, err
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -2700,7 +2704,7 @@ func (c ResourceAllocatorConfig) requiresNetworkHostsProjection() bool {
 	if !c.providerCredentialsHostOnly() || !c.modelAccessAllowed() {
 		return false
 	}
-	host := modelProxyBaseURLHost(c.SandboxModelProxyBaseURL)
+	host := modelProxyBaseURLHost(c.sandboxModelProxyBaseURL())
 	if host == "" {
 		return false
 	}
@@ -2711,13 +2715,57 @@ func (c ResourceAllocatorConfig) requiresNetworkHostsProjection() bool {
 }
 
 func (c ResourceAllocatorConfig) manifestAnthropicBaseURL(baseURL string) string {
-	if c.agent() == "sh" {
+	if c.agent() == "sh" || !c.modelAccessAllowed() {
 		return ""
 	}
-	if c.providerCredentialsHostOnly() && strings.TrimSpace(c.SandboxModelProxyBaseURL) != "" {
-		return strings.TrimSpace(c.SandboxModelProxyBaseURL)
+	if c.providerCredentialsHostOnly() {
+		return c.sandboxModelProxyBaseURL()
 	}
 	return strings.TrimSpace(baseURL)
+}
+
+func (c ResourceAllocatorConfig) sandboxModelProxyBaseURL() string {
+	if value := strings.TrimSpace(c.SandboxModelProxyBaseURL); value != "" {
+		return value
+	}
+	if c.providerCredentialsHostOnly() && c.modelAccessAllowed() {
+		return defaultSandboxModelProxyAliasURL
+	}
+	return ""
+}
+
+func (c ResourceAllocatorConfig) validateSandboxModelProxyBaseURL() error {
+	if !c.providerCredentialsHostOnly() || !c.modelAccessAllowed() {
+		return nil
+	}
+	raw := c.sandboxModelProxyBaseURL()
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("sandbox model proxy base url %q is invalid: %w", raw, err)
+	}
+	if parsed.Scheme != "http" {
+		return fmt.Errorf("sandbox model proxy base url %q must use the local http proxy scheme", raw)
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("sandbox model proxy base url %q must not include userinfo, query, or fragment", raw)
+	}
+	if parsed.Path != "" && parsed.Path != "/" {
+		return fmt.Errorf("sandbox model proxy base url %q must not include a path", raw)
+	}
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	if host == "" {
+		return fmt.Errorf("sandbox model proxy base url %q must include a hostname alias", raw)
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return fmt.Errorf("sandbox model proxy base url %q must use a stable hostname alias, not an IP literal", raw)
+	}
+	if modelProxyHostIsHostLocal(host) {
+		return fmt.Errorf("sandbox model proxy base url %q must not use a host-local name", raw)
+	}
+	if modelProxyHostIsProviderUpstream(host) {
+		return fmt.Errorf("sandbox model proxy base url %q must not point at a provider upstream", raw)
+	}
+	return nil
 }
 
 func modelProxyBaseURLHost(raw string) string {
@@ -2726,6 +2774,22 @@ func modelProxyBaseURLHost(raw string) string {
 		return ""
 	}
 	return strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+}
+
+func modelProxyHostIsHostLocal(host string) bool {
+	return host == "localhost" ||
+		host == "host.docker.internal" ||
+		strings.HasSuffix(host, ".localhost") ||
+		strings.HasSuffix(host, ".local")
+}
+
+func modelProxyHostIsProviderUpstream(host string) bool {
+	switch host {
+	case "api.anthropic.com", "anthropic.com", "api.openai.com", "openai.com":
+		return true
+	default:
+		return strings.HasSuffix(host, ".anthropic.com") || strings.HasSuffix(host, ".openai.com")
+	}
 }
 
 func (c ResourceAllocatorConfig) hostProxyBindURL() string {

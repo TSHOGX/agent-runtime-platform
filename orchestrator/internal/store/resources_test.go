@@ -97,6 +97,12 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ne
 		details.NetworkAllocationState != "allocating" {
 		t.Fatalf("generation details missing network allocation fields: %+v", details)
 	}
+	if details.ManifestAnthropicBaseURL != defaultSandboxModelProxyAliasURL {
+		t.Fatalf("manifest model proxy base URL = %q, want default alias", details.ManifestAnthropicBaseURL)
+	}
+	if details.NetworkHostsPath == "" {
+		t.Fatalf("claude generation should allocate network hosts alias projection: %+v", details)
+	}
 
 	if err := st.MarkGenerationResourcesLive(ctx, "sess_alloc", allocation.GenerationID, allocation.Owner, now.Add(time.Second)); err != nil {
 		t.Fatalf("mark resources live: %v", err)
@@ -780,6 +786,84 @@ func TestAllocateClaudeHostOnlyGenerationHasNoSecretReferences(t *testing.T) {
 	}
 	if details.ManifestAnthropicBaseURL != "http://harness-model-proxy.internal:8082" {
 		t.Fatalf("manifest base url = %q", details.ManifestAnthropicBaseURL)
+	}
+}
+
+func TestAllocateClaudeRejectsInvalidSandboxModelProxyBaseURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+		want    string
+	}{
+		{
+			name:    "gateway literal",
+			baseURL: "http://10.240.0.1:8082",
+			want:    "IP literal",
+		},
+		{
+			name:    "localhost",
+			baseURL: "http://localhost:8082",
+			want:    "host-local",
+		},
+		{
+			name:    "provider upstream",
+			baseURL: "http://api.anthropic.com",
+			want:    "provider upstream",
+		},
+		{
+			name:    "path",
+			baseURL: "http://harness-model-proxy.internal:8082/v1",
+			want:    "must not include a path",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			st, owner := openOwnedStore(t, ctx)
+			createStoreSession(t, ctx, st, "sess_invalid_proxy")
+			cfg := testAllocatorConfig(t)
+			cfg.SandboxModelProxyBaseURL = tt.baseURL
+
+			_, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+				SessionID: "sess_invalid_proxy",
+				Owner:     GenerationLeaseOwner(owner.UUID),
+				LeaseTTL:  time.Minute,
+				Now:       time.Now().UTC(),
+				Config:    cfg,
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %q rejection, got %v", tt.want, err)
+			}
+		})
+	}
+}
+
+func TestAllocateClaudeModelAccessDisabledOmitsProxyAliasProjection(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	createStoreSession(t, ctx, st, "sess_model_disabled")
+	modelAccessAllowed := false
+	cfg := testAllocatorConfig(t)
+	cfg.ModelAccessAllowed = &modelAccessAllowed
+
+	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_model_disabled",
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    cfg,
+	})
+	if err != nil {
+		t.Fatalf("allocate model-disabled claude generation: %v", err)
+	}
+	details, err := st.GetRuntimeGenerationDetails(ctx, "sess_model_disabled", allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get model-disabled generation details: %v", err)
+	}
+	if details.ModelAccessAllowed ||
+		details.ManifestAnthropicBaseURL != "" ||
+		details.NetworkHostsPath != "" {
+		t.Fatalf("model-disabled generation should not expose proxy alias: %+v", details)
 	}
 }
 
