@@ -218,6 +218,18 @@ INSERT INTO runtime_resource_instances (
 	return s.GetRuntimeResourceInstance(ctx, p.GenerationID)
 }
 
+func RuntimeResourceIdentityForParams(p RuntimeResourceInstanceParams) ([]byte, string, error) {
+	if strings.TrimSpace(p.SandboxContractVersion) == "" {
+		p.SandboxContractVersion = SandboxContractVersion
+	} else {
+		p.SandboxContractVersion = strings.TrimSpace(p.SandboxContractVersion)
+	}
+	if err := validateRuntimeResourceInstanceParams(p); err != nil {
+		return nil, "", err
+	}
+	return runtimeResourceIdentity(p)
+}
+
 func (s *Store) GetRuntimeResourceInstance(ctx context.Context, generationID string) (RuntimeResourceInstance, error) {
 	row := s.db.QueryRowContext(ctx, runtimeResourceInstanceSelectSQL()+`
 WHERE generation_id = ?`, strings.TrimSpace(generationID))

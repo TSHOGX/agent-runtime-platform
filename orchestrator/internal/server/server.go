@@ -452,12 +452,28 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		if err := leaseKeeper.ensureOwned(); err != nil {
 			return err
 		}
+		runtimeResourceParams, err := s.runtimeResourceInstanceParams(generationDetails, preparedArtifacts, resourceHostID)
+		if err != nil {
+			if leaseErr := leaseKeeper.err(); leaseErr != nil {
+				return leaseErr
+			}
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+			return err
+		}
+		_, resourceIdentityDigest, err := store.RuntimeResourceIdentityForParams(runtimeResourceParams)
+		if err != nil {
+			if leaseErr := leaseKeeper.err(); leaseErr != nil {
+				return leaseErr
+			}
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+			return err
+		}
 		if _, err := s.store.StoreSandboxContract(ctx, store.StoreSandboxContractParams{
 			ContractID:             sandboxContractID(allocation.GenerationID),
 			SessionID:              session.ID,
 			GenerationID:           allocation.GenerationID,
 			SandboxContractVersion: store.SandboxContractVersion,
-			Payload:                sandboxContractPayload(session, generationDetails, preparedArtifacts),
+			Payload:                sandboxContractPayload(session, generationDetails, preparedArtifacts, resourceIdentityDigest),
 			Now:                    time.Now().UTC(),
 		}); err != nil {
 			if leaseErr := leaseKeeper.err(); leaseErr != nil {
@@ -495,7 +511,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		if err := leaseKeeper.ensureOwned(); err != nil {
 			return err
 		}
-		instance, err := s.createRuntimeResourceInstance(ctx, generationDetails, preparedArtifacts, resourceHostID)
+		instance, err := s.createRuntimeResourceInstance(ctx, runtimeResourceParams)
 		if err != nil {
 			if leaseErr := leaseKeeper.err(); leaseErr != nil {
 				return leaseErr
@@ -999,7 +1015,7 @@ func sandboxContractID(generationID string) string {
 	return "contract_" + strings.TrimSpace(generationID)
 }
 
-func sandboxContractPayload(session store.Session, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts) map[string]any {
+func sandboxContractPayload(session store.Session, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, resourceIdentityDigest string) map[string]any {
 	runscPlatform := strings.TrimSpace(details.RunscPlatform)
 	if runscPlatform == "" {
 		runscPlatform = "systrap"
@@ -1054,6 +1070,9 @@ func sandboxContractPayload(session store.Session, details store.RuntimeGenerati
 			"runsc_network":       details.RunscNetwork,
 			"runsc_overlay2":      details.RunscOverlay2,
 		},
+		"resource_identity": map[string]any{
+			"resource_identity_digest": resourceIdentityDigest,
+		},
 		"credential_policy": map[string]any{
 			"provider_credentials": "host-only",
 			"sandbox_secret_mount": "absent",
@@ -1103,16 +1122,16 @@ func runtimeArtifactDigests(artifacts runtime.GenerationArtifacts) store.Generat
 	}
 }
 
-func (s *Server) createRuntimeResourceInstance(ctx context.Context, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, hostID string) (store.RuntimeResourceInstance, error) {
+func (s *Server) runtimeResourceInstanceParams(details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, hostID string) (store.RuntimeResourceInstanceParams, error) {
 	runscPlatform := strings.TrimSpace(details.RunscPlatform)
 	if runscPlatform == "" {
 		runscPlatform = "systrap"
 	}
 	sandboxIP, err := runtimeResourceSandboxIP(details.SandboxIPCIDR)
 	if err != nil {
-		return store.RuntimeResourceInstance{}, err
+		return store.RuntimeResourceInstanceParams{}, err
 	}
-	return s.store.CreateRuntimeResourceInstance(ctx, store.RuntimeResourceInstanceParams{
+	return store.RuntimeResourceInstanceParams{
 		GenerationID:           details.GenerationID,
 		SessionID:              details.SessionID,
 		ContractID:             sandboxContractID(details.GenerationID),
@@ -1143,7 +1162,11 @@ func (s *Server) createRuntimeResourceInstance(ctx context.Context, details stor
 		LogDirPath:             details.LogDirPath,
 		RootPrefixes:           s.runtimeResourceRootPrefixes(),
 		Now:                    time.Now().UTC(),
-	})
+	}, nil
+}
+
+func (s *Server) createRuntimeResourceInstance(ctx context.Context, params store.RuntimeResourceInstanceParams) (store.RuntimeResourceInstance, error) {
+	return s.store.CreateRuntimeResourceInstance(ctx, params)
 }
 
 func (s *Server) prepareRuntimeResourceRestore(ctx context.Context, generationID, workerID, hostID string, leaseTTL time.Duration) (store.RuntimeResourceInstance, bool, error) {

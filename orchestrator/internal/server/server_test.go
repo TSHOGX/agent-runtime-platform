@@ -2098,6 +2098,10 @@ func TestStartEnsuredGenerationRenewsLeaseDuringSlowPrepare(t *testing.T) {
 		adapter["runsc_binary_digest"] != "sha256:runsc-test" {
 		t.Fatalf("sandbox contract missing runsc binary metadata: %s", contract.CanonicalPayload)
 	}
+	resourceIdentity, ok := payload["resource_identity"].(map[string]any)
+	if !ok || resourceIdentity["resource_identity_digest"] != instance.ResourceIdentityDigest {
+		t.Fatalf("sandbox contract missing resource identity digest: %s instance=%+v", contract.CanonicalPayload, instance)
+	}
 	var manifestDigest, specDigest, bundleDigest string
 	if err := st.DBForTest().QueryRowContext(ctx, `
 SELECT control_manifest_digest, oci_spec_digest, bundle_digest
