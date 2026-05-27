@@ -43,7 +43,7 @@ type Config struct {
 	SandboxSupplementalGIDs []int
 	Claude                  ClaudeConfig
 	RestoreFromCheckpoint   bool
-	Phase7RunDir            string
+	RunDir                  string
 	PreStartProbeAttempts   int
 	PreStartProbeInterval   time.Duration
 	ProbeHealthzStatuses    []int
@@ -439,7 +439,7 @@ type filesystemCleanupTarget struct {
 }
 
 func (r *Runtime) generationFilesystemCleanupTargets(details store.RuntimeGenerationDetails) ([]filesystemCleanupTarget, error) {
-	runRoot, err := cleanAbsoluteRoot(r.cfg.Phase7RunDir, "phase7 run dir")
+	runRoot, err := cleanAbsoluteRoot(r.cfg.RunDir, "runtime run dir")
 	if err != nil {
 		return nil, err
 	}
@@ -478,14 +478,14 @@ func (r *Runtime) generationFilesystemCleanupTargets(details store.RuntimeGenera
 }
 
 func validateCheckpointCleanupTarget(details store.RuntimeGenerationDetails, runRoot, generationDir, checkpointsRoot string) (filesystemCleanupTarget, error) {
-	expectedPhase7 := filepath.Join(runRoot, generationDir, "checkpoint")
-	if err := validateFilesystemCleanupTarget(cleanupTargetCheckpoint, details.CheckpointPath, expectedPhase7, runRoot); err == nil {
+	expectedGenerationCheckpoint := filepath.Join(runRoot, generationDir, "checkpoint")
+	if err := validateFilesystemCleanupTarget(cleanupTargetCheckpoint, details.CheckpointPath, expectedGenerationCheckpoint, runRoot); err == nil {
 		return filesystemCleanupTarget{kind: cleanupTargetCheckpoint, path: cleanAbsolutePath(details.CheckpointPath), root: runRoot}, nil
 	}
 
 	root, err := cleanAbsoluteRoot(checkpointsRoot, "checkpoints root")
 	if err != nil {
-		return filesystemCleanupTarget{}, fmt.Errorf("checkpoint cleanup target %q is not the phase7 generation checkpoint path and legacy cleanup is unavailable: %w", details.CheckpointPath, err)
+		return filesystemCleanupTarget{}, fmt.Errorf("checkpoint cleanup target %q is not the generation checkpoint path and legacy cleanup is unavailable: %w", details.CheckpointPath, err)
 	}
 	sessionComponent, err := safePathComponent("session id", strings.TrimSpace(details.SessionID))
 	if err != nil {

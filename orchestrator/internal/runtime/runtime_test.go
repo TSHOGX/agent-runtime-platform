@@ -565,7 +565,7 @@ func TestDestroyGenerationResourcesDeletesPerGenerationNetwork(t *testing.T) {
 	rt := New(Config{
 		RunscNetwork:    "sandbox",
 		RunscOverlay2:   "none",
-		Phase7RunDir:    filepath.Join(dir, "run"),
+		RunDir:          filepath.Join(dir, "run"),
 		CheckpointsRoot: filepath.Join(dir, "checkpoints"),
 		CommandRunner:   runner,
 	})
@@ -596,7 +596,7 @@ func TestDestroyGenerationResourcesDeletesFilesystemInNonSandboxMode(t *testing.
 	dir := t.TempDir()
 	rt := New(Config{
 		RunscNetwork:    "host",
-		Phase7RunDir:    filepath.Join(dir, "run"),
+		RunDir:          filepath.Join(dir, "run"),
 		CheckpointsRoot: filepath.Join(dir, "checkpoints"),
 		CommandRunner:   &recordingCommandRunner{},
 	})
@@ -628,7 +628,7 @@ func TestDestroyGenerationResourcesDeletesLegacyCheckpointPath(t *testing.T) {
 	checkpointsRoot := filepath.Join(dir, "checkpoints")
 	rt := New(Config{
 		RunscNetwork:    "host",
-		Phase7RunDir:    filepath.Join(dir, "run"),
+		RunDir:          filepath.Join(dir, "run"),
 		CheckpointsRoot: checkpointsRoot,
 		CommandRunner:   &recordingCommandRunner{},
 	})
@@ -659,7 +659,7 @@ func TestDestroyGenerationResourcesRejectsUnsafeFilesystemPaths(t *testing.T) {
 			},
 		},
 		{
-			name: "outside phase7 root",
+			name: "outside runtime root",
 			mutate: func(_ *testing.T, dir string, details *store.RuntimeGenerationDetails) {
 				details.BridgeDirPath = filepath.Join(dir, "outside", "gen-"+details.GenerationID)
 			},
@@ -705,7 +705,7 @@ func TestDestroyGenerationResourcesRejectsUnsafeFilesystemPaths(t *testing.T) {
 			dir := t.TempDir()
 			rt := New(Config{
 				RunscNetwork:    "host",
-				Phase7RunDir:    filepath.Join(dir, "run"),
+				RunDir:          filepath.Join(dir, "run"),
 				CheckpointsRoot: filepath.Join(dir, "checkpoints"),
 				CommandRunner:   &recordingCommandRunner{},
 			})
@@ -786,7 +786,7 @@ func TestDestroyGenerationResourcesRejectsUnsafeLegacyCheckpointPaths(t *testing
 			checkpointsRoot := filepath.Join(dir, "checkpoints")
 			rt := New(Config{
 				RunscNetwork:    "host",
-				Phase7RunDir:    filepath.Join(dir, "run"),
+				RunDir:          filepath.Join(dir, "run"),
 				CheckpointsRoot: checkpointsRoot,
 				CommandRunner:   &recordingCommandRunner{},
 			})
@@ -812,7 +812,7 @@ func TestDestroyGenerationResourcesCleansFilesystemWithIncompleteSandboxMetadata
 	dir := t.TempDir()
 	rt := New(Config{
 		RunscNetwork:    "sandbox",
-		Phase7RunDir:    filepath.Join(dir, "run"),
+		RunDir:          filepath.Join(dir, "run"),
 		CheckpointsRoot: filepath.Join(dir, "checkpoints"),
 		CommandRunner:   runner,
 	})

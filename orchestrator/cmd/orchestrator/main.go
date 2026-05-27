@@ -75,7 +75,7 @@ func main() {
 				SandboxUID:              cfg.Phase7.SandboxIdentity.UID,
 				SandboxGID:              cfg.Phase7.SandboxIdentity.GID,
 				SandboxSupplementalGIDs: append([]int(nil), cfg.Phase7.SandboxIdentity.SupplementalGIDs...),
-				Phase7RunDir:            cfg.Phase7.RunDir,
+				RunDir:                  cfg.Phase7.RunDir,
 				PreStartProbeAttempts:   cfg.Phase7.Probe.PreStartAttempts,
 				PreStartProbeInterval:   cfg.Phase7.Probe.PreStartInterval.Duration,
 				ProbeHealthzStatuses:    cfg.Phase7.Probe.AcceptStatus.GetHealthz,

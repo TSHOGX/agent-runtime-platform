@@ -1372,7 +1372,7 @@ WHERE generation_id = ?`, checkpointPath, old.GenerationID); err != nil {
 		BundleRoot:      filepath.Join(dir, "run", "runtime"),
 		RunscNetwork:    "host",
 		RunscOverlay2:   "none",
-		Phase7RunDir:    cfg.Phase7.RunDir,
+		RunDir:          cfg.Phase7.RunDir,
 		CommandRunner:   serverCommandRunner{outputs: map[string][]byte{"runsc --version": []byte("runsc test")}},
 		BridgeMode:      "claim-loop",
 		BridgeHeartbeat: time.Second,
@@ -2680,7 +2680,7 @@ func TestDestroyReclaimableGenerationResourcesRemovesFilesystemWithRealRuntime(t
 	realRuntime := runtime.New(runtime.Config{
 		RunscNetwork:    "sandbox",
 		RunscOverlay2:   "none",
-		Phase7RunDir:    cfg.Phase7.RunDir,
+		RunDir:          cfg.Phase7.RunDir,
 		CheckpointsRoot: filepath.Join(dir, "checkpoints"),
 		CommandRunner:   serverCommandRunner{},
 	})
