@@ -33,6 +33,26 @@ type SandboxMountPlanInputs struct {
 	SchemaPackPath    string
 }
 
+type allowedMountPlanSurface struct {
+	Destination string
+	Type        string
+	Mode        string
+}
+
+var contentMountPlanAllowList = map[string]allowedMountPlanSurface{
+	"workspace":     {Destination: "/workspace", Type: "bind", Mode: "rw"},
+	"agent_home":    {Destination: "/agent-home", Type: "bind", Mode: "rw"},
+	"control":       {Destination: "/harness-control", Type: "bind", Mode: "ro"},
+	"bridge":        {Destination: bridge.BridgeMountDestination, Type: "bind", Mode: "rw"},
+	"network_hosts": {Destination: "/etc/hosts", Type: "bind", Mode: "ro"},
+	"schema_pack":   {Destination: "/schema-pack", Type: "bind", Mode: "ro"},
+}
+
+var scratchMountPlanAllowList = map[string]allowedMountPlanSurface{
+	"tmp":     {Destination: "/tmp", Type: "tmpfs", Mode: "rw"},
+	"var_tmp": {Destination: "/var/tmp", Type: "tmpfs", Mode: "rw"},
+}
+
 func BuildSandboxMountPlan(input SandboxMountPlanInputs) (MountPlan, error) {
 	details := input.Generation
 	plan := MountPlan{
@@ -64,41 +84,78 @@ func BuildSandboxMountPlan(input SandboxMountPlanInputs) (MountPlan, error) {
 
 func (p MountPlan) Validate() error {
 	seenDestinations := map[string]string{}
-	for _, mount := range append(append([]MountPlanMount{}, p.Content...), p.Scratch...) {
-		if strings.TrimSpace(mount.Name) == "" {
-			return fmt.Errorf("mount plan mount name is required")
-		}
-		if !filepath.IsAbs(mount.Destination) || filepath.Clean(mount.Destination) != mount.Destination {
-			return fmt.Errorf("mount plan destination %q must be canonical absolute path", mount.Destination)
-		}
-		if forbiddenMountPlanDestination(mount.Destination) {
-			return fmt.Errorf("mount plan destination %q is forbidden in sandbox-isolation-v1", mount.Destination)
-		}
-		if existing := seenDestinations[mount.Destination]; existing != "" {
-			return fmt.Errorf("mount plan destination %q duplicated by %s and %s", mount.Destination, existing, mount.Name)
-		}
-		seenDestinations[mount.Destination] = mount.Name
-		switch mount.Type {
-		case "bind":
-			if strings.TrimSpace(mount.Source) == "" || !filepath.IsAbs(mount.Source) || filepath.Clean(mount.Source) != mount.Source {
-				return fmt.Errorf("mount plan bind source for %s must be canonical absolute path", mount.Name)
+	sections := []struct {
+		name   string
+		mounts []MountPlanMount
+		allow  map[string]allowedMountPlanSurface
+	}{
+		{name: "content", mounts: p.Content, allow: contentMountPlanAllowList},
+		{name: "scratch", mounts: p.Scratch, allow: scratchMountPlanAllowList},
+	}
+	for _, section := range sections {
+		for _, mount := range section.mounts {
+			if err := validateMountPlanMount(mount, seenDestinations); err != nil {
+				return err
 			}
-			if mount.Source == string(filepath.Separator) {
-				return fmt.Errorf("mount plan bind source for %s must not be filesystem root", mount.Name)
+			if err := validateMountPlanSurface(section.name, mount, section.allow); err != nil {
+				return err
 			}
-			if slices.Contains(mount.Options, "rbind") {
-				return fmt.Errorf("mount plan bind %s must be exact, not recursive", mount.Name)
-			}
-			if !slices.Contains(mount.Options, mount.Mode) {
-				return fmt.Errorf("mount plan bind %s options must include mode %s", mount.Name, mount.Mode)
-			}
-		case "tmpfs":
-			if mount.Source != "tmpfs" {
-				return fmt.Errorf("mount plan tmpfs %s source must be tmpfs", mount.Name)
-			}
-		default:
-			return fmt.Errorf("mount plan mount %s has unsupported type %q", mount.Name, mount.Type)
 		}
+	}
+	return nil
+}
+
+func validateMountPlanSurface(section string, mount MountPlanMount, allow map[string]allowedMountPlanSurface) error {
+	allowed, ok := allow[mount.Name]
+	if !ok {
+		return fmt.Errorf("mount plan %s mount %q is not in sandbox-isolation-v1 allow-list", section, mount.Name)
+	}
+	if mount.Destination != allowed.Destination {
+		return fmt.Errorf("mount plan %s mount %q destination %q does not match allow-list destination %q", section, mount.Name, mount.Destination, allowed.Destination)
+	}
+	if mount.Type != allowed.Type {
+		return fmt.Errorf("mount plan %s mount %q type %q does not match allow-list type %q", section, mount.Name, mount.Type, allowed.Type)
+	}
+	if mount.Mode != allowed.Mode {
+		return fmt.Errorf("mount plan %s mount %q mode %q does not match allow-list mode %q", section, mount.Name, mount.Mode, allowed.Mode)
+	}
+	return nil
+}
+
+func validateMountPlanMount(mount MountPlanMount, seenDestinations map[string]string) error {
+	if strings.TrimSpace(mount.Name) == "" {
+		return fmt.Errorf("mount plan mount name is required")
+	}
+	if !filepath.IsAbs(mount.Destination) || filepath.Clean(mount.Destination) != mount.Destination {
+		return fmt.Errorf("mount plan destination %q must be canonical absolute path", mount.Destination)
+	}
+	if forbiddenMountPlanDestination(mount.Destination) {
+		return fmt.Errorf("mount plan destination %q is forbidden in sandbox-isolation-v1", mount.Destination)
+	}
+	if existing := seenDestinations[mount.Destination]; existing != "" {
+		return fmt.Errorf("mount plan destination %q duplicated by %s and %s", mount.Destination, existing, mount.Name)
+	}
+	seenDestinations[mount.Destination] = mount.Name
+	switch mount.Type {
+	case "bind":
+		if strings.TrimSpace(mount.Source) == "" || !filepath.IsAbs(mount.Source) || filepath.Clean(mount.Source) != mount.Source {
+			return fmt.Errorf("mount plan bind source for %s must be canonical absolute path", mount.Name)
+		}
+		if mount.Source == string(filepath.Separator) {
+			return fmt.Errorf("mount plan bind source for %s must not be filesystem root", mount.Name)
+		}
+		if slices.Contains(mount.Options, "rbind") {
+			return fmt.Errorf("mount plan bind %s must be exact, not recursive", mount.Name)
+		}
+		if !slices.Contains(mount.Options, mount.Mode) {
+			return fmt.Errorf("mount plan bind %s options must include mode %s", mount.Name, mount.Mode)
+		}
+	case "tmpfs":
+		if mount.Source != "tmpfs" {
+			return fmt.Errorf("mount plan tmpfs %s source must be tmpfs", mount.Name)
+		}
+	default:
+		return fmt.Errorf("mount plan mount %s has unsupported type %q", mount.Name, mount.Type)
 	}
 	return nil
 }

@@ -82,6 +82,42 @@ func TestMountPlanRejectsForbiddenAndRecursiveBinds(t *testing.T) {
 			error: "not recursive",
 		},
 		{
+			name: "unlisted content mount",
+			plan: MountPlan{Content: []MountPlanMount{{
+				Name:        "claude_home",
+				Destination: "/root/.claude",
+				Type:        "bind",
+				Source:      filepath.Join(dir, "agent-homes", "sess-1", "claude"),
+				Mode:        "ro",
+				Options:     []string{"bind", "ro"},
+			}}},
+			error: "allow-list",
+		},
+		{
+			name: "allow-listed name wrong destination",
+			plan: MountPlan{Content: []MountPlanMount{{
+				Name:        "workspace",
+				Destination: "/workspace/private",
+				Type:        "bind",
+				Source:      filepath.Join(dir, "sessions", "sess-1"),
+				Mode:        "rw",
+				Options:     []string{"bind", "rw"},
+			}}},
+			error: "allow-list",
+		},
+		{
+			name: "unlisted scratch mount",
+			plan: MountPlan{Scratch: []MountPlanMount{{
+				Name:        "cache",
+				Destination: "/root/.cache",
+				Type:        "tmpfs",
+				Source:      "tmpfs",
+				Mode:        "rw",
+				Options:     []string{"nosuid", "nodev"},
+			}}},
+			error: "allow-list",
+		},
+		{
 			name: "duplicate destination",
 			plan: MountPlan{Content: []MountPlanMount{
 				{
