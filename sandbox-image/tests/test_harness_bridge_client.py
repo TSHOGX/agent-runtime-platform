@@ -685,12 +685,23 @@ class EntrypointStaticTest(unittest.TestCase):
         text = entrypoint.read_text(encoding="utf-8")
         self.assertIn('expected ${label}=${expected} got ${actual}', text)
 
+    def test_entrypoint_requires_configured_agent_identity(self):
+        entrypoint = SCRIPT.with_name("harness-agent-entrypoint")
+        text = entrypoint.read_text(encoding="utf-8")
+        self.assertIn('AGENT_UID="${HARNESS_AGENT_UID:-}"', text)
+        self.assertIn('AGENT_GID="${HARNESS_AGENT_GID:-}"', text)
+        self.assertIn("HARNESS_AGENT_UID is required", text)
+        self.assertIn("HARNESS_AGENT_GID is required", text)
+        self.assertNotIn('AGENT_UID="65534"', text)
+        self.assertNotIn('AGENT_GID="65534"', text)
+
     def test_claim_loop_starts_after_workspace_and_agent_home_setup(self):
         entrypoint = SCRIPT.with_name("harness-agent-entrypoint")
         text = entrypoint.read_text(encoding="utf-8")
         claim_loop = text.index('HARNESS_BRIDGE_MODE:-}" = "claim-loop"')
         cd_workspace = text.index("cd /workspace")
         self.assertLess(text.index('SESSION_WORKSPACE="${SESSION_WORKSPACE:-/sessions/$SESSION_ID}"'), claim_loop)
+        self.assertLess(text.index('if [ "$SESSION_WORKSPACE" = "/workspace" ]; then'), claim_loop)
         self.assertLess(text.index("ln -sfn \"$SESSION_WORKSPACE\" /workspace"), claim_loop)
         self.assertLess(cd_workspace, claim_loop)
         self.assertLess(text.index("  ensure_agent_user", cd_workspace), claim_loop)

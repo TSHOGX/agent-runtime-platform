@@ -267,6 +267,8 @@ func TestRuntimeStartRestoreRejectsMetadataBeforeRunscRestore(t *testing.T) {
 		RootFSPath:     filepath.Join(dir, "rootfs"),
 		RunscNetwork:   "host",
 		CommandRunner:  runner,
+		SandboxUID:     testSandboxUID(),
+		SandboxGID:     testSandboxGID(),
 	})
 	details := testGenerationDetails(dir, "gen_restore_mismatch")
 	details.Agent = "sh"
@@ -1300,6 +1302,8 @@ func TestPrepareShellGenerationHasNoSecretMount(t *testing.T) {
 		AgentHomesRoot: filepath.Join(dir, "agent-homes"),
 		BundleRoot:     filepath.Join(dir, "bundle", "out"),
 		RootFSPath:     filepath.Join(dir, "rootfs"),
+		SandboxUID:     testSandboxUID(),
+		SandboxGID:     testSandboxGID(),
 	})
 	details := testGenerationDetails(dir, "gen_shell")
 	details.SessionID = "sess_shell"
@@ -1326,9 +1330,58 @@ func TestPrepareShellGenerationHasNoSecretMount(t *testing.T) {
 	if strings.Contains(string(specData), "/harness-secrets") {
 		t.Fatalf("shell spec must not mount secrets: %s", specData)
 	}
+	var spec runtimeSpec
+	if err := json.Unmarshal(specData, &spec); err != nil {
+		t.Fatalf("read shell spec json: %v", err)
+	}
+	if !spec.Root.Readonly {
+		t.Fatalf("shell phase8 rootfs must be read-only: %+v", spec.Root)
+	}
+	if spec.Process.User.UID != testSandboxUID() || spec.Process.User.GID != testSandboxGID() {
+		t.Fatalf("shell phase8 user=%+v want %d:%d", spec.Process.User, testSandboxUID(), testSandboxGID())
+	}
+	if strings.Contains(mustJSONForTest(t, spec.Process.Capabilities), "CAP_") {
+		t.Fatalf("shell phase8 capabilities must be empty: %+v", spec.Process.Capabilities)
+	}
+	for _, destination := range []string{"/sessions", "/agent-homes", "/harness-secrets"} {
+		if mountByDestination(spec.Mounts, destination) != nil {
+			t.Fatalf("shell phase8 spec must not mount %s: %+v", destination, spec.Mounts)
+		}
+	}
+	for _, mount := range spec.Mounts {
+		if slices.Contains(mount.Options, "rbind") {
+			t.Fatalf("shell phase8 mount %s uses recursive bind: %+v", mount.Destination, mount)
+		}
+	}
+	if mountSource(spec.Mounts, "/workspace") != filepath.Join(dir, "sessions", "sess_shell") {
+		t.Fatalf("workspace mount = %q", mountSource(spec.Mounts, "/workspace"))
+	}
+	if mountSource(spec.Mounts, "/agent-home") != filepath.Join(dir, "agent-homes", "sess_shell", "sh") {
+		t.Fatalf("agent-home mount = %q", mountSource(spec.Mounts, "/agent-home"))
+	}
+	if control := mountByDestination(spec.Mounts, "/harness-control"); control == nil || strings.Join(control.Options, ",") != "bind,ro,nosuid,nodev,noexec" {
+		t.Fatalf("unexpected phase8 control mount: %+v", control)
+	}
+	bridgeMount := mountByDestination(spec.Mounts, "/harness-control/bridge")
+	if bridgeMount == nil ||
+		bridgeMount.Source != details.BridgeDirPath ||
+		strings.Join(bridgeMount.Options, ",") != "bind,rw,nosuid,nodev,noexec" ||
+		bridgeMount.Annotations["dev.gvisor.spec.mount./harness-control/bridge.share"] != "exclusive" {
+		t.Fatalf("unexpected phase8 bridge mount: %+v", bridgeMount)
+	}
+	env := specEnv(spec.Process.Env)
+	if env["HARNESS_AGENT_UID"] != fmt.Sprint(testSandboxUID()) ||
+		env["HARNESS_AGENT_GID"] != fmt.Sprint(testSandboxGID()) ||
+		env["SESSION_WORKSPACE"] != "/workspace" ||
+		env["HARNESS_AGENT_HOME"] != "/agent-home" {
+		t.Fatalf("shell phase8 identity/workspace env missing: %+v", env)
+	}
 	var manifestFile controlManifestFile
 	if err := json.Unmarshal(mustReadFile(t, details.ControlManifestPath), &manifestFile); err != nil {
 		t.Fatalf("read shell manifest: %v", err)
+	}
+	if manifestFile.Payload.WorkspacePath != "/workspace" || manifestFile.Payload.AgentHomePath != "/agent-home" {
+		t.Fatalf("shell manifest must use phase8 sandbox paths: %+v", manifestFile.Payload)
 	}
 	if manifestFile.Payload.SecretMountPath != "" || manifestFile.Payload.AnthropicAPIKeySecretID != "" {
 		t.Fatalf("shell manifest must not reference secrets: %+v", manifestFile.Payload)
@@ -1563,6 +1616,15 @@ func mustReadFile(t *testing.T, path string) []byte {
 	return data
 }
 
+func mustJSONForTest(t *testing.T, value any) string {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal json: %v", err)
+	}
+	return string(data)
+}
+
 func assertSecretPath(t *testing.T, path string) {
 	t.Helper()
 	info, err := os.Stat(path)
@@ -1638,6 +1700,22 @@ func closedDone() <-chan struct{} {
 	done := make(chan struct{})
 	close(done)
 	return done
+}
+
+func testSandboxUID() int {
+	uid := os.Getuid()
+	if uid > 0 {
+		return uid
+	}
+	return 65534
+}
+
+func testSandboxGID() int {
+	gid := os.Getgid()
+	if gid > 0 {
+		return gid
+	}
+	return 65534
 }
 
 func testSecretReadersGID() int {

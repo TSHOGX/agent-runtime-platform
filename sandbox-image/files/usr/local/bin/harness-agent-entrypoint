@@ -7,8 +7,10 @@ CONTROL_JSON_FILE="/harness-control/session.json"
 CONTROL_ENV_FILE="/harness-control/session.env"
 POLL_INTERVAL="0.05"
 AGENT_USER="harness"
-AGENT_UID="65534"
-AGENT_GID="65534"
+AGENT_UID="${HARNESS_AGENT_UID:-}"
+AGENT_GID="${HARNESS_AGENT_GID:-}"
+[ -n "$AGENT_UID" ] || { echo "[entrypoint] HARNESS_AGENT_UID is required" >&2; exit 65; }
+[ -n "$AGENT_GID" ] || { echo "[entrypoint] HARNESS_AGENT_GID is required" >&2; exit 65; }
 export HARNESS_AGENT_UID="$AGENT_UID"
 export HARNESS_AGENT_GID="$AGENT_GID"
 
@@ -112,11 +114,9 @@ if [ "${HARNESS_BRIDGE_MODE:-}" = "probe" ]; then
   exec /usr/local/bin/harness-bridge-client probe
 fi
 
-SESSION_WORKSPACE="${SESSION_WORKSPACE:-/sessions/$SESSION_ID}"
-mkdir -p "$SESSION_WORKSPACE"
-
 # Keep the agent's writable HOME outside /workspace so Claude internals do not
 # appear in the user-visible file tree or artifact list.
+SESSION_WORKSPACE="${SESSION_WORKSPACE:-/sessions/$SESSION_ID}"
 AGENT_HOME="${HARNESS_AGENT_HOME:-/agent-homes/$SESSION_ID}"
 
 ensure_agent_user() {
@@ -124,10 +124,19 @@ ensure_agent_user() {
   chown -R "$AGENT_UID:$AGENT_GID" "$AGENT_HOME" "$SESSION_WORKSPACE" 2>/dev/null || true
 }
 
-if [ -d /workspace ] && [ ! -L /workspace ]; then
-  rmdir /workspace 2>/dev/null || true
+if [ "$SESSION_WORKSPACE" = "/workspace" ]; then
+  [ -d /workspace ] || { echo "[entrypoint] /workspace mount is required" >&2; exit 65; }
+else
+  mkdir -p "$SESSION_WORKSPACE"
+  if [ -d /workspace ] && [ ! -L /workspace ]; then
+    rmdir /workspace 2>/dev/null || true
+  fi
+  ln -sfn "$SESSION_WORKSPACE" /workspace
 fi
-ln -sfn "$SESSION_WORKSPACE" /workspace
+
+if [ "$AGENT_HOME" = "/agent-home" ]; then
+  [ -d /agent-home ] || { echo "[entrypoint] /agent-home mount is required" >&2; exit 65; }
+fi
 
 cd /workspace
 

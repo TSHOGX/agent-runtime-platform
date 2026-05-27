@@ -1271,6 +1271,8 @@ WHERE generation_id = ?`, checkpointPath, old.GenerationID); err != nil {
 		CommandRunner:   serverCommandRunner{outputs: map[string][]byte{"runsc --version": []byte("runsc test")}},
 		BridgeMode:      "claim-loop",
 		BridgeHeartbeat: time.Second,
+		SandboxUID:      cfg.Phase7.SandboxIdentity.UID,
+		SandboxGID:      cfg.Phase7.SandboxIdentity.GID,
 	})
 	rt := &restoreValidationRuntime{restore: realRuntime}
 	srv := &Server{
@@ -3743,8 +3745,28 @@ func testServerConfig(dir string) config.Config {
 			Reaper: config.ReaperConfig{
 				FailedRetention: config.Duration{Duration: 0},
 			},
+			SandboxIdentity: config.SandboxIdentity{
+				UID: serverTestSandboxUID(),
+				GID: serverTestSandboxGID(),
+			},
 		},
 	}
+}
+
+func serverTestSandboxUID() int {
+	uid := os.Getuid()
+	if uid > 0 {
+		return uid
+	}
+	return 65534
+}
+
+func serverTestSandboxGID() int {
+	gid := os.Getgid()
+	if gid > 0 {
+		return gid
+	}
+	return 65534
 }
 
 func serverTestAllocatorConfig(cfg config.Config, agent string) store.ResourceAllocatorConfig {

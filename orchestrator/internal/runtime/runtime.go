@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,29 +27,32 @@ import (
 )
 
 type Config struct {
-	RestoreScript         string
-	RunscRoot             string
-	RunscNetwork          string
-	RunscOverlay2         string
-	SessionsRoot          string
-	AgentHomesRoot        string
-	CheckpointsRoot       string
-	BundleRoot            string
-	RootFSPath            string
-	DefaultAgent          string
-	Claude                ClaudeConfig
-	RestoreFromCheckpoint bool
-	Phase7RunDir          string
-	SecretsRoot           string
-	SecretReadersGID      int
-	PreStartProbeAttempts int
-	PreStartProbeInterval time.Duration
-	ProbeHealthzStatuses  []int
-	ProbeMessageStatuses  []int
-	BridgeHeartbeat       time.Duration
-	BridgePollInterval    time.Duration
-	BridgeMode            string
-	CommandRunner         CommandRunner
+	RestoreScript           string
+	RunscRoot               string
+	RunscNetwork            string
+	RunscOverlay2           string
+	SessionsRoot            string
+	AgentHomesRoot          string
+	CheckpointsRoot         string
+	BundleRoot              string
+	RootFSPath              string
+	DefaultAgent            string
+	SandboxUID              int
+	SandboxGID              int
+	SandboxSupplementalGIDs []int
+	Claude                  ClaudeConfig
+	RestoreFromCheckpoint   bool
+	Phase7RunDir            string
+	SecretsRoot             string
+	SecretReadersGID        int
+	PreStartProbeAttempts   int
+	PreStartProbeInterval   time.Duration
+	ProbeHealthzStatuses    []int
+	ProbeMessageStatuses    []int
+	BridgeHeartbeat         time.Duration
+	BridgePollInterval      time.Duration
+	BridgeMode              string
+	CommandRunner           CommandRunner
 }
 
 const controlFileName = "session.json"
@@ -191,8 +195,9 @@ type runtimeSpec struct {
 }
 
 type specUser struct {
-	UID int `json:"uid"`
-	GID int `json:"gid"`
+	UID            int   `json:"uid"`
+	GID            int   `json:"gid"`
+	AdditionalGIDs []int `json:"additionalGids,omitempty"`
 }
 
 type specRoot struct {
@@ -794,7 +799,7 @@ func (r *Runtime) prepareGenerationDirs(req StartRequest) error {
 			return fmt.Errorf("create generation secrets dir: %w", err)
 		}
 	}
-	return r.prepareSessionDirs(req.SessionID)
+	return r.prepareRuntimeDataDirs(req)
 }
 
 func (r *Runtime) materializeSecrets(details store.RuntimeGenerationDetails) error {
@@ -1021,6 +1026,10 @@ func (r *Runtime) buildGenerationManifest(req StartRequest, runscVersion, bundle
 	}
 	agentHomePath := filepath.Join("/agent-homes", req.SessionID)
 	workspacePath := filepath.Join("/sessions", req.SessionID)
+	if isPhase8ShellRequest(req) {
+		agentHomePath = "/agent-home"
+		workspacePath = "/workspace"
+	}
 	secretMountPath := ""
 	if details.RequiresSecretDrop {
 		secretMountPath = "/harness-secrets"
@@ -1177,6 +1186,13 @@ func projectedControlManifestDigest(manifest controlManifest) (string, error) {
 }
 
 func (r *Runtime) renderRuntimeSpec(req StartRequest) (runtimeSpec, string, error) {
+	if isPhase8ShellRequest(req) {
+		return r.renderPhase8ShellRuntimeSpec(req)
+	}
+	return r.renderLegacyRuntimeSpec(req)
+}
+
+func (r *Runtime) renderLegacyRuntimeSpec(req StartRequest) (runtimeSpec, string, error) {
 	var spec runtimeSpec
 	details := req.Generation
 	spec.OCIVersion = "1.0.2"
@@ -1200,6 +1216,7 @@ func (r *Runtime) renderRuntimeSpec(req StartRequest) (runtimeSpec, string, erro
 	spec.Process.NoNewPrivileges = true
 	spec.Root = specRoot{Path: r.rootFSPath(), Readonly: false}
 	spec.Hostname = "harness-gen-" + shortID(details.GenerationID)
+	identity := r.legacyAgentIdentity()
 	spec.Process.Env = append(spec.Process.Env,
 		"HARNESS_EXPECTED_SESSION_ID="+req.SessionID,
 		"HARNESS_EXPECTED_GENERATION_ID="+details.GenerationID,
@@ -1209,6 +1226,8 @@ func (r *Runtime) renderRuntimeSpec(req StartRequest) (runtimeSpec, string, erro
 		"HARNESS_EXPECTED_API_KEY_SECRET_ID="+details.AnthropicAPIKeySecretID,
 		"HARNESS_EXPECTED_AUTH_TOKEN_SECRET_ID="+details.AnthropicAuthTokenSecretID,
 		"HARNESS_EXPECTED_SECRET_VERSION="+details.SecretVersion,
+		fmt.Sprintf("HARNESS_AGENT_UID=%d", identity.UID),
+		fmt.Sprintf("HARNESS_AGENT_GID=%d", identity.GID),
 		fmt.Sprintf("HARNESS_SECRET_READERS_GID=%d", r.cfg.SecretReadersGID),
 		"HARNESS_BRIDGE_DIR="+bridge.BridgeMountDestination,
 		"HARNESS_BRIDGE_MODE="+defaultString(r.cfg.BridgeMode, "claim-loop"),
@@ -1250,6 +1269,94 @@ func (r *Runtime) renderRuntimeSpec(req StartRequest) (runtimeSpec, string, erro
 			Options:     []string{"rbind", "ro", "nosuid", "nodev", "noexec"},
 		})
 	}
+	linux := map[string]any{
+		"resources": map[string]any{
+			"memory": map[string]any{"limit": 1073741824},
+			"cpu":    map[string]any{"shares": 1024},
+			"pids":   map[string]any{"limit": 256},
+		},
+		"namespaces": []map[string]any{
+			{"type": "pid"},
+			{"type": "ipc"},
+			{"type": "uts"},
+			{"type": "mount"},
+		},
+	}
+	if strings.EqualFold(strings.TrimSpace(r.runscNetwork(details)), "sandbox") {
+		if strings.TrimSpace(details.NetnsPath) == "" {
+			return runtimeSpec{}, "", fmt.Errorf("sandbox generation requires netns path")
+		}
+		linux["namespaces"] = append(linux["namespaces"].([]map[string]any), map[string]any{"type": "network", "path": details.NetnsPath})
+	}
+	linuxBytes, err := canonicalJSON(linux)
+	if err != nil {
+		return runtimeSpec{}, "", err
+	}
+	spec.Linux = linuxBytes
+	payload, err := canonicalJSON(spec)
+	if err != nil {
+		return runtimeSpec{}, "", err
+	}
+	return spec, digestHex(payload), nil
+}
+
+func (r *Runtime) renderPhase8ShellRuntimeSpec(req StartRequest) (runtimeSpec, string, error) {
+	var spec runtimeSpec
+	details := req.Generation
+	identity, err := r.requiredSandboxIdentity()
+	if err != nil {
+		return runtimeSpec{}, "", err
+	}
+	workspaceHostPath, agentHomeHostPath, err := r.phase8ShellDataPaths(req)
+	if err != nil {
+		return runtimeSpec{}, "", err
+	}
+	plan, err := BuildPhase8MountPlan(Phase8MountPlanInputs{
+		Generation:        details,
+		WorkspaceHostPath: workspaceHostPath,
+		AgentHomeHostPath: agentHomeHostPath,
+		SchemaPackPath:    r.schemaPackPath(),
+	})
+	if err != nil {
+		return runtimeSpec{}, "", err
+	}
+	spec.OCIVersion = "1.0.2"
+	spec.Process.Terminal = false
+	spec.Process.User = specUser{UID: identity.UID, GID: identity.GID, AdditionalGIDs: identity.SupplementalGIDs}
+	spec.Process.Args = []string{"/usr/local/bin/harness-agent-entrypoint"}
+	spec.Process.Env = []string{
+		"PATH=/usr/local/bin:/usr/bin:/bin",
+		"LANG=C.UTF-8",
+		"MPLCONFIGDIR=/tmp/matplotlib",
+		"TMPDIR=/tmp",
+		"HOME=/agent-home",
+		"USER=harness",
+		"LOGNAME=harness",
+		"SESSION_WORKSPACE=/workspace",
+		"HARNESS_AGENT_HOME=/agent-home",
+		"HARNESS_AGENT=sh",
+		"HARNESS_EXPECTED_SESSION_ID=" + req.SessionID,
+		"HARNESS_EXPECTED_GENERATION_ID=" + details.GenerationID,
+		"HARNESS_EXPECTED_NETWORK_PROFILE_ID=" + details.NetworkProfileID,
+		"HARNESS_EXPECTED_AGENT_RUNTIME_PROFILE_ID=" + details.AgentRuntimeProfileID,
+		"HARNESS_EXPECTED_MANIFEST_VERSION=1",
+		fmt.Sprintf("HARNESS_AGENT_UID=%d", identity.UID),
+		fmt.Sprintf("HARNESS_AGENT_GID=%d", identity.GID),
+		"HARNESS_BRIDGE_DIR=" + bridge.BridgeMountDestination,
+		"HARNESS_BRIDGE_MODE=" + defaultString(r.cfg.BridgeMode, "claim-loop"),
+		"HARNESS_BRIDGE_HEARTBEAT_INTERVAL=" + formatSeconds(defaultDuration(r.cfg.BridgeHeartbeat, 30*time.Second)),
+		"HARNESS_BRIDGE_POLL_INTERVAL=" + formatSeconds(defaultDuration(r.cfg.BridgePollInterval, 5*time.Millisecond)),
+		"HARNESS_BRIDGE_IDLE_INTERVAL=" + formatSeconds(defaultDuration(r.cfg.BridgePollInterval, 5*time.Millisecond)),
+		"HARNESS_PROBE_HEALTHZ_STATUSES=" + joinInts(defaultIntSlice(r.cfg.ProbeHealthzStatuses, []int{200})),
+		"HARNESS_PROBE_MESSAGE_STATUSES=" + joinInts(defaultIntSlice(r.cfg.ProbeMessageStatuses, []int{400})),
+	}
+	spec.Process.Cwd = "/"
+	spec.Process.Capabilities = emptyCapabilities()
+	spec.Process.Rlimits = []map[string]any{{"type": "RLIMIT_NOFILE", "hard": 1024, "soft": 1024}}
+	spec.Process.NoNewPrivileges = true
+	spec.Root = specRoot{Path: r.rootFSPath(), Readonly: true}
+	spec.Hostname = "harness-gen-" + shortID(details.GenerationID)
+	spec.Mounts = append(RuntimeAdapterPseudoMounts(), plan.SpecMounts()...)
 	linux := map[string]any{
 		"resources": map[string]any{
 			"memory": map[string]any{"limit": 1073741824},
@@ -1440,6 +1547,64 @@ func (r *Runtime) runscOverlay2(details store.RuntimeGenerationDetails) string {
 	return defaultString(details.RunscOverlay2, r.cfg.RunscOverlay2)
 }
 
+type runtimeSandboxIdentity struct {
+	UID              int
+	GID              int
+	SupplementalGIDs []int
+}
+
+func (r *Runtime) requiredSandboxIdentity() (runtimeSandboxIdentity, error) {
+	identity := runtimeSandboxIdentity{
+		UID:              r.cfg.SandboxUID,
+		GID:              r.cfg.SandboxGID,
+		SupplementalGIDs: append([]int(nil), r.cfg.SandboxSupplementalGIDs...),
+	}
+	sort.Ints(identity.SupplementalGIDs)
+	if identity.UID <= 0 {
+		return runtimeSandboxIdentity{}, fmt.Errorf("phase8 shell sandbox identity uid must be > 0")
+	}
+	if identity.GID <= 0 {
+		return runtimeSandboxIdentity{}, fmt.Errorf("phase8 shell sandbox identity gid must be > 0")
+	}
+	seen := map[int]struct{}{}
+	for _, gid := range identity.SupplementalGIDs {
+		if gid <= 0 {
+			return runtimeSandboxIdentity{}, fmt.Errorf("phase8 shell sandbox identity supplemental gids must be positive")
+		}
+		if _, ok := seen[gid]; ok {
+			return runtimeSandboxIdentity{}, fmt.Errorf("phase8 shell sandbox identity supplemental gids contain duplicate gid %d", gid)
+		}
+		seen[gid] = struct{}{}
+	}
+	return identity, nil
+}
+
+func (r *Runtime) legacyAgentIdentity() runtimeSandboxIdentity {
+	identity := runtimeSandboxIdentity{
+		UID:              r.cfg.SandboxUID,
+		GID:              r.cfg.SandboxGID,
+		SupplementalGIDs: append([]int(nil), r.cfg.SandboxSupplementalGIDs...),
+	}
+	if identity.UID <= 0 {
+		identity.UID = 65534
+	}
+	if identity.GID <= 0 {
+		identity.GID = 65534
+	}
+	sort.Ints(identity.SupplementalGIDs)
+	return identity
+}
+
+func emptyCapabilities() map[string]any {
+	return map[string]any{
+		"bounding":    []string{},
+		"effective":   []string{},
+		"inheritable": []string{},
+		"permitted":   []string{},
+		"ambient":     []string{},
+	}
+}
+
 func (r *Runtime) prepareSessionDirs(sessionID string) error {
 	if r.cfg.SessionsRoot != "" {
 		if err := os.MkdirAll(filepath.Join(r.cfg.SessionsRoot, sessionID), 0o755); err != nil {
@@ -1452,6 +1617,164 @@ func (r *Runtime) prepareSessionDirs(sessionID string) error {
 		}
 	}
 	return nil
+}
+
+func (r *Runtime) prepareRuntimeDataDirs(req StartRequest) error {
+	if isPhase8ShellRequest(req) {
+		return r.preparePhase8ShellDataDirs(req)
+	}
+	return r.prepareSessionDirs(req.SessionID)
+}
+
+func (r *Runtime) preparePhase8ShellDataDirs(req StartRequest) error {
+	identity, err := r.requiredSandboxIdentity()
+	if err != nil {
+		return err
+	}
+	workspaceHostPath, agentHomeHostPath, err := r.phase8ShellDataPaths(req)
+	if err != nil {
+		return err
+	}
+	for _, item := range []struct {
+		label string
+		path  string
+		mode  os.FileMode
+	}{
+		{label: "phase8 shell workspace", path: workspaceHostPath, mode: 0o750},
+		{label: "phase8 shell agent home", path: agentHomeHostPath, mode: 0o750},
+	} {
+		if err := ensurePhase8OwnedDir(item.path, identity.UID, identity.GID, item.mode); err != nil {
+			return fmt.Errorf("%s: %w", item.label, err)
+		}
+	}
+	if err := preparePhase8BridgePlaceholder(req.Generation.ControlDirPath); err != nil {
+		return err
+	}
+	if strings.TrimSpace(req.Generation.BridgeDirPath) != "" {
+		if err := bridge.EnsureLayout(req.Generation.BridgeDirPath); err != nil {
+			return fmt.Errorf("create phase8 shell bridge dir: %w", err)
+		}
+		if err := ensurePhase8OwnedTree(req.Generation.BridgeDirPath, identity.UID, identity.GID, 0o770); err != nil {
+			return fmt.Errorf("phase8 shell bridge dir: %w", err)
+		}
+	}
+	return nil
+}
+
+func (r *Runtime) phase8ShellDataPaths(req StartRequest) (string, string, error) {
+	sessionsRoot, err := cleanAbsoluteRoot(r.cfg.SessionsRoot, "sessions root")
+	if err != nil {
+		return "", "", err
+	}
+	agentHomesRoot, err := cleanAbsoluteRoot(r.cfg.AgentHomesRoot, "agent homes root")
+	if err != nil {
+		return "", "", err
+	}
+	sessionComponent, err := safePathComponent("session id", req.SessionID)
+	if err != nil {
+		return "", "", err
+	}
+	driverComponent, err := safePathComponent("driver", phase8ShellDriver(req))
+	if err != nil {
+		return "", "", err
+	}
+	return filepath.Join(sessionsRoot, sessionComponent), filepath.Join(agentHomesRoot, sessionComponent, driverComponent), nil
+}
+
+func phase8ShellDriver(req StartRequest) string {
+	if agent := strings.TrimSpace(req.Agent); agent != "" {
+		return agent
+	}
+	return strings.TrimSpace(req.Generation.Agent)
+}
+
+func isPhase8ShellRequest(req StartRequest) bool {
+	return phase8ShellDriver(req) == string(agents.Shell)
+}
+
+func preparePhase8BridgePlaceholder(controlDir string) error {
+	controlDir = strings.TrimSpace(controlDir)
+	if controlDir == "" {
+		return fmt.Errorf("phase8 shell control dir is required")
+	}
+	placeholder := filepath.Join(controlDir, "bridge")
+	if err := os.MkdirAll(placeholder, 0o755); err != nil {
+		return fmt.Errorf("create phase8 bridge placeholder: %w", err)
+	}
+	info, err := os.Lstat(placeholder)
+	if err != nil {
+		return fmt.Errorf("stat phase8 bridge placeholder: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("phase8 bridge placeholder %q must not be a symlink", placeholder)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("phase8 bridge placeholder %q must be a directory", placeholder)
+	}
+	entries, err := os.ReadDir(placeholder)
+	if err != nil {
+		return fmt.Errorf("read phase8 bridge placeholder: %w", err)
+	}
+	if len(entries) > 0 {
+		return fmt.Errorf("phase8 bridge placeholder %q must be empty", placeholder)
+	}
+	return nil
+}
+
+func ensurePhase8OwnedDir(path string, uid, gid int, mode os.FileMode) error {
+	if err := os.MkdirAll(path, mode); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%q must not be a symlink", path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%q must be a directory", path)
+	}
+	if err := ensurePhase8Ownership(path, info, uid, gid); err != nil {
+		return err
+	}
+	return os.Chmod(path, mode)
+}
+
+func ensurePhase8OwnedTree(root string, uid, gid int, dirMode os.FileMode) error {
+	return filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%q must not be a symlink", path)
+		}
+		if err := ensurePhase8Ownership(path, info, uid, gid); err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return os.Chmod(path, dirMode)
+		}
+		return nil
+	})
+}
+
+func ensurePhase8Ownership(path string, info os.FileInfo, uid, gid int) error {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("stat ownership unavailable for %s", path)
+	}
+	if int(stat.Uid) == uid && int(stat.Gid) == gid {
+		return nil
+	}
+	if os.Geteuid() != 0 {
+		return fmt.Errorf("%s owner is %d:%d, want %d:%d", path, stat.Uid, stat.Gid, uid, gid)
+	}
+	return os.Chown(path, uid, gid)
 }
 
 func (r *Runtime) ensureSandboxNetwork(ctx context.Context, details store.RuntimeGenerationDetails) error {
@@ -1947,7 +2270,7 @@ func (r *Runtime) startFresh(ctx context.Context, req StartRequest, output func(
 		return Result{Err: err}
 	}
 	req.PreparedArtifacts = artifacts
-	if err := r.prepareSessionDirs(req.SessionID); err != nil {
+	if err := r.prepareRuntimeDataDirs(req); err != nil {
 		return Result{Err: err}
 	}
 	if !req.PreparedArtifacts.NetworkPrepared {
