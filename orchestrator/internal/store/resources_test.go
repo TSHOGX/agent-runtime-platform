@@ -1412,6 +1412,7 @@ func TestListBridgePollGenerationsFiltersCurrentOwnerLiveResources(t *testing.T)
 	if err := st.MarkGenerationResourcesLive(ctx, "sess_poll", pollAllocation.GenerationID, pollAllocation.Owner, now.Add(time.Second)); err != nil {
 		t.Fatalf("mark poll generation live: %v", err)
 	}
+	createLiveRuntimeResourceInstanceForAllocation(t, ctx, st, "sess_poll", pollAllocation, owner.UUID, "host-1", now.Add(2*time.Second))
 
 	createStoreSession(t, ctx, st, "sess_other")
 	otherAllocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
@@ -1427,11 +1428,34 @@ func TestListBridgePollGenerationsFiltersCurrentOwnerLiveResources(t *testing.T)
 	if err := st.MarkGenerationResourcesLive(ctx, "sess_other", otherAllocation.GenerationID, otherAllocation.Owner, now.Add(time.Second)); err != nil {
 		t.Fatalf("mark other generation live: %v", err)
 	}
+	createLiveRuntimeResourceInstanceForAllocation(t, ctx, st, "sess_other", otherAllocation, owner.UUID, "host-1", now.Add(2*time.Second))
 	if _, err := st.DBForTest().ExecContext(ctx, `
 UPDATE runtime_generations
 SET lease_owner = ?
 WHERE generation_id = ?`, GenerationLeaseOwner("other-owner"), otherAllocation.GenerationID); err != nil {
 		t.Fatalf("move other generation to another owner: %v", err)
+	}
+
+	createStoreSession(t, ctx, st, "sess_ready_only")
+	readyOnly, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_ready_only",
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       now,
+		Config:    cfg,
+	})
+	if err != nil {
+		t.Fatalf("allocate ready-only generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, "sess_ready_only", readyOnly.GenerationID, readyOnly.Owner, now.Add(time.Second)); err != nil {
+		t.Fatalf("mark ready-only generation live: %v", err)
+	}
+	createLiveRuntimeResourceInstanceForAllocation(t, ctx, st, "sess_ready_only", readyOnly, owner.UUID, "host-1", now.Add(2*time.Second))
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE runtime_resource_instances
+SET state = 'ready'
+WHERE generation_id = ?`, readyOnly.GenerationID); err != nil {
+		t.Fatalf("move ready-only runtime resource to ready: %v", err)
 	}
 
 	generations, err := st.ListBridgePollGenerations(ctx, pollAllocation.Owner, now.Add(2*time.Second), 0)
@@ -1456,6 +1480,7 @@ func TestListBridgePollGenerationsIncludesAckStartedExpiredLeaseDuringGrace(t *t
 
 	createStoreSession(t, ctx, st, "sess_poll_recover")
 	recoverable, recoverableTurnID := createExpiredAckStartedTurn(t, ctx, st, owner.UUID, cfg, "sess_poll_recover", now, 30*time.Second)
+	createLiveRuntimeResourceInstanceForAllocation(t, ctx, st, "sess_poll_recover", recoverable, owner.UUID, "host-1", now.Add(-25*time.Second))
 	previousOwner := GenerationLeaseOwner("previous-owner")
 	if _, err := st.db.ExecContext(ctx, `
 UPDATE runtime_generations
@@ -1472,6 +1497,7 @@ WHERE id = ?`, previousOwner, recoverableTurnID); err != nil {
 
 	createStoreSession(t, ctx, st, "sess_poll_expired")
 	expired, _ := createExpiredAckStartedTurn(t, ctx, st, owner.UUID, cfg, "sess_poll_expired", now, 2*time.Minute)
+	createLiveRuntimeResourceInstanceForAllocation(t, ctx, st, "sess_poll_expired", expired, owner.UUID, "host-1", now.Add(-time.Minute))
 
 	generations, err := st.ListBridgePollGenerations(ctx, recoverable.Owner, now, time.Minute)
 	if err != nil {
@@ -2553,6 +2579,95 @@ WHERE id = ?`, formatTime(now.Add(-expiredFor)), turnID); err != nil {
 		t.Fatalf("expire turn lease: %v", err)
 	}
 	return allocation, turnID
+}
+
+func createLiveRuntimeResourceInstanceForAllocation(t *testing.T, ctx context.Context, st *Store, sessionID string, allocation GenerationAllocation, ownerUUID, hostID string, now time.Time) RuntimeResourceInstance {
+	t.Helper()
+	contractID := "contract_" + allocation.GenerationID
+	if _, err := st.StoreSandboxContract(ctx, StoreSandboxContractParams{
+		ContractID:   contractID,
+		SessionID:    sessionID,
+		GenerationID: allocation.GenerationID,
+		Payload:      testSandboxContractPayload(t, sessionID, allocation),
+		Now:          now,
+	}); err != nil {
+		t.Fatalf("store sandbox contract: %v", err)
+	}
+	details, err := st.GetRuntimeGenerationDetails(ctx, sessionID, allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get generation details: %v", err)
+	}
+	sandboxIP := sandboxIPFromCIDRForTest(t, details.SandboxIPCIDR)
+	runscPath := filepath.Join(t.TempDir(), "runsc")
+	instance, err := st.CreateRuntimeResourceInstance(ctx, RuntimeResourceInstanceParams{
+		GenerationID:           allocation.GenerationID,
+		SessionID:              sessionID,
+		ContractID:             contractID,
+		SandboxContractVersion: SandboxContractVersion,
+		HostID:                 hostID,
+		RunscContainerID:       details.RunscContainerID,
+		RunscPlatform:          "systrap",
+		RunscVersion:           "runsc test",
+		RunscBinaryPath:        runscPath,
+		RunscBinaryDigest:      "sha256:runsc",
+		NetworkProfileID:       allocation.NetworkProfileID,
+		NetnsName:              details.NetnsName,
+		NetnsPath:              details.NetnsPath,
+		HostVeth:               details.HostVeth,
+		SandboxVeth:            details.SandboxVeth,
+		HostGatewayIP:          details.HostGatewayIP,
+		SandboxIP:              sandboxIP,
+		SandboxIPCIDR:          details.SandboxIPCIDR,
+		HostSideCIDR:           details.HostSideCIDR,
+		NftTableName:           "harness_gen_" + strings.TrimPrefix(allocation.GenerationID, "gen_"),
+		ControlDirPath:         details.ControlDirPath,
+		ControlManifestPath:    details.ControlManifestPath,
+		BundleDirPath:          details.BundleDirPath,
+		SpecPath:               details.SpecPath,
+		CheckpointPath:         details.CheckpointPath,
+		BridgeDirPath:          details.BridgeDirPath,
+		LogDirPath:             details.LogDirPath,
+		RootPrefixes: map[string]string{
+			"run_dir":      filepath.Dir(filepath.Dir(details.ControlDirPath)),
+			"control_root": filepath.Dir(details.ControlDirPath),
+			"bridge_root":  filepath.Dir(details.BridgeDirPath),
+		},
+		Now: now,
+	})
+	if err != nil {
+		t.Fatalf("create runtime resource instance: %v", err)
+	}
+	workerID := strings.TrimSpace(ownerUUID)
+	if workerID == "" {
+		workerID = strings.TrimSuffix(strings.TrimSpace(allocation.Owner), ":"+RuntimeManagerRoleTag)
+	}
+	if err := st.ClaimRuntimeResourceMaterialization(ctx, RuntimeResourceMaterializationClaimParams{
+		GenerationID:     allocation.GenerationID,
+		WorkerID:         workerID,
+		HostID:           hostID,
+		LeaseExpiresAt:   now.Add(time.Minute),
+		IdempotencyToken: "test:" + allocation.GenerationID,
+		Now:              now.Add(time.Millisecond),
+	}); err != nil {
+		t.Fatalf("claim runtime resource materialization: %v", err)
+	}
+	if err := st.MarkRuntimeResourceReady(ctx, RuntimeResourceWorkerTransitionParams{
+		GenerationID: allocation.GenerationID,
+		WorkerID:     workerID,
+		HostID:       hostID,
+		Now:          now.Add(2 * time.Millisecond),
+	}); err != nil {
+		t.Fatalf("mark runtime resource ready: %v", err)
+	}
+	if err := st.MarkRuntimeResourceLive(ctx, RuntimeResourceWorkerTransitionParams{
+		GenerationID: allocation.GenerationID,
+		WorkerID:     workerID,
+		HostID:       hostID,
+		Now:          now.Add(3 * time.Millisecond),
+	}); err != nil {
+		t.Fatalf("mark runtime resource live: %v", err)
+	}
+	return instance
 }
 
 func testAllocatorConfig(t *testing.T) ResourceAllocatorConfig {

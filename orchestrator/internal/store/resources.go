@@ -1718,6 +1718,8 @@ func (s *Store) ListBridgePollGenerations(ctx context.Context, owner string, now
 SELECT g.session_id, g.generation_id, r.bridge_dir_path
 FROM runtime_generations g
 JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+JOIN runtime_resource_instances ri ON ri.generation_id = g.generation_id
+  AND ri.session_id = g.session_id
 JOIN sessions s ON s.id = g.session_id
 WHERE g.status IN ('active','idle','probing','restoring','starting')
   AND (
@@ -1726,7 +1728,8 @@ WHERE g.status IN ('active','idle','probing','restoring','starting')
   )
   AND s.active_generation_id = g.generation_id
   AND s.status NOT IN ('failed', 'destroyed')
-  AND r.resource_state IN ('ready','live','recreating')
+  AND r.resource_state = 'live'
+  AND ri.state = 'live'
 ORDER BY g.session_id, g.generation_id`, args...)
 	if err != nil {
 		return nil, err

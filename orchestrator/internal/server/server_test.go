@@ -2601,6 +2601,7 @@ func TestRunPhase7MaintenancePollsBridgeOutbox(t *testing.T) {
 	if err := st.MarkGenerationResourcesLive(ctx, session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
 		t.Fatalf("mark generation live: %v", err)
 	}
+	createServerRuntimeResourceLive(t, ctx, st, session.ID, allocation, owner.UUID, "host-bridge-poll", time.Now().UTC())
 	details, err := st.GetRuntimeGenerationDetails(ctx, session.ID, allocation.GenerationID)
 	if err != nil {
 		t.Fatalf("get generation details: %v", err)
@@ -2964,6 +2965,7 @@ func TestRunPhase7MaintenancePublishesBridgeOutputAndCompletion(t *testing.T) {
 	if err := st.MarkGenerationResourcesLive(ctx, session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
 		t.Fatalf("mark generation live: %v", err)
 	}
+	createServerRuntimeResourceLive(t, ctx, st, session.ID, allocation, owner.UUID, "host-bridge-events", time.Now().UTC())
 	details, err := st.GetRuntimeGenerationDetails(ctx, session.ID, allocation.GenerationID)
 	if err != nil {
 		t.Fatalf("get generation details: %v", err)
@@ -3986,6 +3988,107 @@ func recordServerRuntimeArtifacts(t *testing.T, ctx context.Context, st *store.S
 	}); err != nil {
 		t.Fatalf("record runtime artifacts: %v", err)
 	}
+}
+
+func createServerRuntimeResourceLive(t *testing.T, ctx context.Context, st *store.Store, sessionID string, allocation store.GenerationAllocation, ownerUUID, hostID string, now time.Time) store.RuntimeResourceInstance {
+	t.Helper()
+	contractID := sandboxContractID(allocation.GenerationID)
+	if _, err := st.StoreSandboxContract(ctx, store.StoreSandboxContractParams{
+		ContractID:   contractID,
+		SessionID:    sessionID,
+		GenerationID: allocation.GenerationID,
+		Payload: map[string]any{
+			"sandbox_contract_version": store.SandboxContractVersion,
+			"contract_schema_version":  1,
+			"contract_id":              contractID,
+			"session_id":               sessionID,
+			"generation_id":            allocation.GenerationID,
+			"runtime_profile_id":       allocation.AgentRuntimeProfileID,
+			"network_profile_id":       allocation.NetworkProfileID,
+		},
+		Now: now,
+	}); err != nil {
+		t.Fatalf("store sandbox contract: %v", err)
+	}
+	details, err := st.GetRuntimeGenerationDetails(ctx, sessionID, allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get generation details: %v", err)
+	}
+	prefix, err := netip.ParsePrefix(details.SandboxIPCIDR)
+	if err != nil {
+		t.Fatalf("parse sandbox cidr: %v", err)
+	}
+	artifacts := testGenerationArtifacts()
+	instance, err := st.CreateRuntimeResourceInstance(ctx, store.RuntimeResourceInstanceParams{
+		GenerationID:           allocation.GenerationID,
+		SessionID:              sessionID,
+		ContractID:             contractID,
+		SandboxContractVersion: store.SandboxContractVersion,
+		HostID:                 hostID,
+		RunscContainerID:       details.RunscContainerID,
+		RunscPlatform:          "systrap",
+		RunscVersion:           artifacts.RunscVersion,
+		RunscBinaryPath:        artifacts.RunscBinaryPath,
+		RunscBinaryDigest:      artifacts.RunscBinaryDigest,
+		NetworkProfileID:       allocation.NetworkProfileID,
+		NetnsName:              details.NetnsName,
+		NetnsPath:              details.NetnsPath,
+		HostVeth:               details.HostVeth,
+		SandboxVeth:            details.SandboxVeth,
+		HostGatewayIP:          details.HostGatewayIP,
+		SandboxIP:              prefix.Addr().String(),
+		SandboxIPCIDR:          details.SandboxIPCIDR,
+		HostSideCIDR:           details.HostSideCIDR,
+		NftTableName:           runtimeResourceNftTableName(allocation.GenerationID),
+		ControlDirPath:         details.ControlDirPath,
+		ControlManifestPath:    details.ControlManifestPath,
+		BundleDirPath:          details.BundleDirPath,
+		SpecPath:               details.SpecPath,
+		CheckpointPath:         details.CheckpointPath,
+		BridgeDirPath:          details.BridgeDirPath,
+		NetworkHostsPath:       details.NetworkHostsPath,
+		LogDirPath:             details.LogDirPath,
+		RootPrefixes: map[string]string{
+			"run_dir":      filepath.Dir(filepath.Dir(details.ControlDirPath)),
+			"control_root": filepath.Dir(details.ControlDirPath),
+			"bridge_root":  filepath.Dir(details.BridgeDirPath),
+		},
+		Now: now,
+	})
+	if err != nil {
+		t.Fatalf("create runtime resource instance: %v", err)
+	}
+	workerID := strings.TrimSpace(ownerUUID)
+	if workerID == "" {
+		workerID = strings.TrimSuffix(strings.TrimSpace(allocation.Owner), ":"+store.RuntimeManagerRoleTag)
+	}
+	if err := st.ClaimRuntimeResourceMaterialization(ctx, store.RuntimeResourceMaterializationClaimParams{
+		GenerationID:     allocation.GenerationID,
+		WorkerID:         workerID,
+		HostID:           hostID,
+		LeaseExpiresAt:   now.Add(time.Minute),
+		IdempotencyToken: "test:" + allocation.GenerationID,
+		Now:              now.Add(time.Millisecond),
+	}); err != nil {
+		t.Fatalf("claim runtime resource materialization: %v", err)
+	}
+	if err := st.MarkRuntimeResourceReady(ctx, store.RuntimeResourceWorkerTransitionParams{
+		GenerationID: allocation.GenerationID,
+		WorkerID:     workerID,
+		HostID:       hostID,
+		Now:          now.Add(2 * time.Millisecond),
+	}); err != nil {
+		t.Fatalf("mark runtime resource ready: %v", err)
+	}
+	if err := st.MarkRuntimeResourceLive(ctx, store.RuntimeResourceWorkerTransitionParams{
+		GenerationID: allocation.GenerationID,
+		WorkerID:     workerID,
+		HostID:       hostID,
+		Now:          now.Add(3 * time.Millisecond),
+	}); err != nil {
+		t.Fatalf("mark runtime resource live: %v", err)
+	}
+	return instance
 }
 
 type serverCheckpointImageManifest struct {
