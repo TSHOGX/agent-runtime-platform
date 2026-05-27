@@ -1687,7 +1687,7 @@ WHERE generation_id = ?`, checkpointPath, allocation.GenerationID); err != nil {
 		t.Fatalf("maintenance exit err=%v, want context canceled", err)
 	}
 	payload, ok := event.Payload.(json.RawMessage)
-	if !ok || !strings.Contains(string(payload), `"checkpoint_path":null`) || !strings.Contains(string(payload), `"restore_ms":null`) {
+	if !ok || strings.Contains(string(payload), `"checkpoint_path"`) || !strings.Contains(string(payload), `"restore_ms":null`) {
 		t.Fatalf("unexpected checkpoint retirement event payload: %#v", event.Payload)
 	}
 

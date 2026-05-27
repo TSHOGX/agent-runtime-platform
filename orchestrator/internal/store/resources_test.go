@@ -1695,9 +1695,9 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(
 		t.Fatalf("query retirement event: %v", err)
 	}
 	if eventType != "session.checkpoint_retired" ||
-		!strings.Contains(eventPayload, `"checkpoint_path":null`) ||
 		!strings.Contains(eventPayload, `"restore_ms":null`) ||
-		!strings.Contains(eventPayload, `"session_status":"running_idle"`) {
+		!strings.Contains(eventPayload, `"session_status":"running_idle"`) ||
+		strings.Contains(eventPayload, `"checkpoint_path"`) {
 		t.Fatalf("unexpected retirement event: type=%s payload=%s", eventType, eventPayload)
 	}
 
@@ -1898,9 +1898,9 @@ ORDER BY event_id`, retired.EventIDs[0], retired.EventIDs[1])
 		t.Fatalf("iterate restore fallback events: %v", err)
 	}
 	if !slices.Equal(eventTypes, []string{"session.restore_fallback_retired", "generation.error"}) ||
-		!strings.Contains(payloads[0], `"checkpoint_path":null`) ||
 		!strings.Contains(payloads[0], `"restore_ms":null`) ||
 		!strings.Contains(payloads[0], `"session_status":"running_idle"`) ||
+		strings.Contains(payloads[0], `"checkpoint_path"`) ||
 		!strings.Contains(payloads[1], `"fallback":"cold"`) {
 		t.Fatalf("unexpected restore fallback events: types=%+v payloads=%+v", eventTypes, payloads)
 	}
