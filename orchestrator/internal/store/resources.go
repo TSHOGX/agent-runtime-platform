@@ -42,9 +42,6 @@ type ResourceAllocatorConfig struct {
 	ModelAccessAllowed          *bool
 	ProviderCredentialsHostOnly bool
 	SandboxModelProxyBaseURL    string
-	AnthropicAPIKeySecretID     string
-	AnthropicAuthTokenSecretID  string
-	SecretVersion               string
 }
 
 type AllocateGenerationParams struct {
@@ -308,9 +305,7 @@ func (s *Store) AllocateGeneration(ctx context.Context, p AllocateGenerationPara
 	agentRuntimeProfileID := agentRuntimeProfileID(generationID)
 	resources := buildResourcePaths(p.Config.RunDir, generationID)
 	runscContainerID := generationRunscContainerID(generationID)
-	if !p.Config.requiresSecretDrop() {
-		resources.SecretsDirPath = ""
-	}
+	resources.SecretsDirPath = ""
 	if !p.Config.requiresNetworkHostsProjection() {
 		resources.NetworkHostsPath = ""
 	}
@@ -354,11 +349,10 @@ ON CONFLICT(agent, model, output_format, disable_nonessential_traffic,
 ) DO NOTHING`,
 		agentRuntimeProfileID, p.Config.agent(), nullableString(p.Config.AgentModel), p.Config.outputFormat(),
 		boolInt(p.Config.DisableNonessentialTraffic), p.Config.sandboxUID(), p.Config.sandboxGID(), string(supplementalGIDsJSON),
-		boolInt(p.Config.requiresSecretDrop()),
+		0,
 		boolInt(p.Config.modelAccessAllowed()),
 		nullableString(p.Config.manifestAnthropicBaseURL(network.SandboxBaseURL)),
-		nullableString(p.Config.apiKeySecretID()), nullableString(p.Config.authTokenSecretID()),
-		nullableString(p.Config.secretVersion()), now); err != nil {
+		nil, nil, nil, now); err != nil {
 		return GenerationAllocation{}, err
 	}
 	if err := tx.QueryRowContext(ctx, `
@@ -379,11 +373,10 @@ WHERE agent = ?
   AND COALESCE(secret_version, '') = COALESCE(?, '')`,
 		p.Config.agent(), nullableString(p.Config.AgentModel), p.Config.outputFormat(),
 		boolInt(p.Config.DisableNonessentialTraffic), p.Config.sandboxUID(), p.Config.sandboxGID(), string(supplementalGIDsJSON),
-		boolInt(p.Config.requiresSecretDrop()),
+		0,
 		boolInt(p.Config.modelAccessAllowed()),
 		nullableString(p.Config.manifestAnthropicBaseURL(network.SandboxBaseURL)),
-		nullableString(p.Config.apiKeySecretID()), nullableString(p.Config.authTokenSecretID()),
-		nullableString(p.Config.secretVersion())).Scan(&agentRuntimeProfileID); err != nil {
+		nil, nil, nil).Scan(&agentRuntimeProfileID); err != nil {
 		return GenerationAllocation{}, err
 	}
 
@@ -2635,10 +2628,6 @@ func (c ResourceAllocatorConfig) sandboxSupplementalGIDs() []int {
 	return deduped
 }
 
-func (c ResourceAllocatorConfig) requiresSecretDrop() bool {
-	return c.agent() == "claude" && !c.providerCredentialsHostOnly()
-}
-
 func (c ResourceAllocatorConfig) modelAccessAllowed() bool {
 	if c.ModelAccessAllowed != nil {
 		return *c.ModelAccessAllowed
@@ -2647,7 +2636,7 @@ func (c ResourceAllocatorConfig) modelAccessAllowed() bool {
 }
 
 func (c ResourceAllocatorConfig) providerCredentialsHostOnly() bool {
-	return c.agent() == "claude" && c.ProviderCredentialsHostOnly
+	return c.agent() == "claude"
 }
 
 func (c ResourceAllocatorConfig) requiresNetworkHostsProjection() bool {
@@ -2672,36 +2661,6 @@ func (c ResourceAllocatorConfig) manifestAnthropicBaseURL(baseURL string) string
 		return strings.TrimSpace(c.SandboxModelProxyBaseURL)
 	}
 	return strings.TrimSpace(baseURL)
-}
-
-func (c ResourceAllocatorConfig) apiKeySecretID() string {
-	if c.agent() == "sh" || c.providerCredentialsHostOnly() {
-		return ""
-	}
-	if strings.TrimSpace(c.AnthropicAPIKeySecretID) == "" {
-		return "anthropic_api_key"
-	}
-	return strings.TrimSpace(c.AnthropicAPIKeySecretID)
-}
-
-func (c ResourceAllocatorConfig) authTokenSecretID() string {
-	if c.agent() == "sh" || c.providerCredentialsHostOnly() {
-		return ""
-	}
-	if strings.TrimSpace(c.AnthropicAuthTokenSecretID) == "" {
-		return "anthropic_auth_token"
-	}
-	return strings.TrimSpace(c.AnthropicAuthTokenSecretID)
-}
-
-func (c ResourceAllocatorConfig) secretVersion() string {
-	if c.agent() == "sh" || c.providerCredentialsHostOnly() {
-		return ""
-	}
-	if strings.TrimSpace(c.SecretVersion) == "" {
-		return "local"
-	}
-	return strings.TrimSpace(c.SecretVersion)
 }
 
 func modelProxyBaseURLHost(raw string) string {

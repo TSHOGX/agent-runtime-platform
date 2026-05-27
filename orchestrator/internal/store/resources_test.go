@@ -56,12 +56,12 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ne
 	if err != nil {
 		t.Fatalf("get runtime generation details: %v", err)
 	}
-	if details.AnthropicAPIKeySecretID != "anthropic_api_key" ||
-		details.AnthropicAuthTokenSecretID != "anthropic_auth_token" ||
-		details.SecretVersion != "local" ||
-		!details.RequiresSecretDrop ||
-		details.SecretsDirPath == "" {
-		t.Fatalf("unexpected claude generation details: %+v", details)
+	if details.RequiresSecretDrop ||
+		details.SecretsDirPath != "" ||
+		details.AnthropicAPIKeySecretID != "" ||
+		details.AnthropicAuthTokenSecretID != "" ||
+		details.SecretVersion != "" {
+		t.Fatalf("claude generation should not carry sandbox secrets: %+v", details)
 	}
 	if details.RunscContainerID != "harness-gen-"+allocation.GenerationID {
 		t.Fatalf("runsc container id = %q, want generation-scoped id", details.RunscContainerID)
