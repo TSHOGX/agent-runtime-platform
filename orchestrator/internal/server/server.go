@@ -433,6 +433,23 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		if err := leaseKeeper.ensureOwned(); err != nil {
 			return err
 		}
+		if _, err := s.store.StoreSandboxContract(ctx, store.StoreSandboxContractParams{
+			ContractID:             sandboxContractID(allocation.GenerationID),
+			SessionID:              session.ID,
+			GenerationID:           allocation.GenerationID,
+			SandboxContractVersion: store.SandboxContractVersion,
+			Payload:                sandboxContractPayload(session, generationDetails, preparedArtifacts),
+			Now:                    time.Now().UTC(),
+		}); err != nil {
+			if leaseErr := leaseKeeper.err(); leaseErr != nil {
+				return leaseErr
+			}
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+			return err
+		}
+		if err := leaseKeeper.ensureOwned(); err != nil {
+			return err
+		}
 		if err := s.store.RecordGenerationRuntimeArtifactDigests(ctx, allocation.GenerationID, runtimeArtifactDigests(preparedArtifacts)); err != nil {
 			if leaseErr := leaseKeeper.err(); leaseErr != nil {
 				return leaseErr
@@ -824,6 +841,83 @@ func (s *Server) destroyGenerationRuntime(ctx context.Context, details store.Run
 		return fmt.Errorf("generation %s has no runsc container id", details.GenerationID)
 	}
 	return s.runtime.Destroy(ctx, runtimeID)
+}
+
+func sandboxContractID(generationID string) string {
+	return "contract_" + strings.TrimSpace(generationID)
+}
+
+func sandboxContractPayload(session store.Session, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts) map[string]any {
+	runscPlatform := strings.TrimSpace(details.RunscPlatform)
+	if runscPlatform == "" {
+		runscPlatform = "systrap"
+	}
+	var sandboxModelProxyBaseURL any
+	if value := strings.TrimSpace(details.ManifestAnthropicBaseURL); value != "" {
+		sandboxModelProxyBaseURL = value
+	}
+	mountPlan := map[string]any{
+		"workspace":  map[string]any{"source": session.Workspace, "destination": "/workspace", "mode": "rw"},
+		"agent_home": map[string]any{"source": session.AgentHomePath, "destination": "/agent-home", "mode": "rw"},
+		"control":    map[string]any{"source": details.ControlDirPath, "destination": "/harness-control", "mode": "ro"},
+		"bridge":     map[string]any{"source": details.BridgeDirPath, "destination": "/harness-control/bridge", "mode": "rw"},
+	}
+	if strings.TrimSpace(details.NetworkHostsPath) != "" {
+		mountPlan["network_hosts"] = map[string]any{"source": details.NetworkHostsPath, "destination": "/etc/hosts", "mode": "ro"}
+	}
+	payload := map[string]any{
+		"sandbox_contract_version": store.SandboxContractVersion,
+		"contract_schema_version":  1,
+		"contract_id":              sandboxContractID(details.GenerationID),
+		"session_id":               details.SessionID,
+		"generation_id":            details.GenerationID,
+		"driver":                   details.Agent,
+		"runtime_profile_id":       details.AgentRuntimeProfileID,
+		"network_profile_id":       details.NetworkProfileID,
+		"identity": map[string]any{
+			"sandbox_uid":               details.SandboxUID,
+			"sandbox_gid":               details.SandboxGID,
+			"sandbox_supplemental_gids": append([]int(nil), details.SandboxSupplementalGIDs...),
+			"model_access_allowed":      details.ModelAccessAllowed,
+		},
+		"mount_plan": mountPlan,
+		"network_identity": map[string]any{
+			"runsc_network":    details.RunscNetwork,
+			"sandbox_ip_cidr":  details.SandboxIPCIDR,
+			"host_gateway_ip":  details.HostGatewayIP,
+			"netns_name":       details.NetnsName,
+			"netns_path":       details.NetnsPath,
+			"host_veth":        details.HostVeth,
+			"sandbox_veth":     details.SandboxVeth,
+			"host_side_cidr":   details.HostSideCIDR,
+			"egress_policy_id": details.EgressPolicyID,
+		},
+		"runtime_adapter": map[string]any{
+			"kind":               "runsc",
+			"runsc_platform":     runscPlatform,
+			"runsc_version":      artifacts.RunscVersion,
+			"runsc_container_id": details.RunscContainerID,
+			"runsc_network":      details.RunscNetwork,
+			"runsc_overlay2":     details.RunscOverlay2,
+		},
+		"credential_policy": map[string]any{
+			"provider_credentials": "host-only",
+			"sandbox_secret_mount": "absent",
+			"proxy_token":          "absent",
+		},
+		"model_access": map[string]any{
+			"model_access_allowed":         details.ModelAccessAllowed,
+			"active_turn_required":         true,
+			"sandbox_model_proxy_base_url": sandboxModelProxyBaseURL,
+		},
+		"input_digests": map[string]any{
+			"bundle_digest":           artifacts.BundleDigest,
+			"runtime_config_digest":   artifacts.RuntimeConfigDigest,
+			"oci_spec_digest":         artifacts.SpecDigest,
+			"control_manifest_digest": artifacts.ProjectedManifestDigest,
+		},
+	}
+	return payload
 }
 
 func runtimeArtifactsFromDetails(details store.RuntimeGenerationDetails) runtime.GenerationArtifacts {

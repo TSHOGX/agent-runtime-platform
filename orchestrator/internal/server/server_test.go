@@ -2045,6 +2045,22 @@ func TestStartEnsuredGenerationRenewsLeaseDuringSlowPrepare(t *testing.T) {
 		t.Fatalf("start ensured generation did not finish")
 	}
 	waitForGenerationStatus(t, ctx, st, allocation.GenerationID, "idle")
+	contract, err := st.GetSandboxContractForGeneration(ctx, session.ID, allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get sandbox contract: %v", err)
+	}
+	if contract.SandboxContractVersion != store.SandboxContractVersion ||
+		contract.ContractID != sandboxContractID(allocation.GenerationID) {
+		t.Fatalf("unexpected sandbox contract: %+v", contract)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(contract.CanonicalPayload, &payload); err != nil {
+		t.Fatalf("decode sandbox contract payload: %v", err)
+	}
+	adapter, ok := payload["runtime_adapter"].(map[string]any)
+	if !ok || adapter["runsc_container_id"] != serverRunscContainerID(t, ctx, st, session.ID, allocation.GenerationID) {
+		t.Fatalf("sandbox contract missing runsc identity: %s", contract.CanonicalPayload)
+	}
 }
 
 func TestStartEnsuredGenerationDestroysRuntimeAfterOwnerLoss(t *testing.T) {
