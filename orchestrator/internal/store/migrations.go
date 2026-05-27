@@ -112,6 +112,7 @@ func defaultMigrations(options Options) []migration {
 		{version: 9, name: "phase7_checkpoint_policy", fn: migrateV9Phase7CheckpointPolicy},
 		{version: 10, name: "phase8_sandbox_contracts", fn: migrateV10Phase8SandboxContracts},
 		{version: 11, name: "phase8_data_volumes", fn: migrateV11Phase8DataVolumes},
+		{version: 12, name: "phase8_runtime_resource_instances", fn: migrateV12Phase8RuntimeResourceInstances},
 	}
 }
 
@@ -746,6 +747,88 @@ CREATE INDEX IF NOT EXISTS session_driver_homes_session_idx
   ON session_driver_homes (session_id);
 `)
 	return err
+}
+
+func migrateV12Phase8RuntimeResourceInstances(ctx context.Context, tx dbRunner) error {
+	if _, err := tx.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS runtime_resource_instances (
+  generation_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  contract_id TEXT NOT NULL,
+  sandbox_contract_version TEXT NOT NULL CHECK(sandbox_contract_version = 'sandbox-isolation-v1'),
+  worker_id TEXT,
+  host_id TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('allocated','materializing','ready','live','checkpoint_reserved','retiring','reconciling','absent_verified','destroyed')),
+  lease_expires_at TEXT,
+  idempotency_token TEXT,
+  runsc_container_id TEXT NOT NULL,
+  runsc_platform TEXT NOT NULL,
+  runsc_version TEXT NOT NULL,
+  runsc_binary_path TEXT NOT NULL,
+  runsc_binary_digest TEXT NOT NULL,
+  network_profile_id TEXT NOT NULL,
+  netns_name TEXT NOT NULL,
+  netns_path TEXT NOT NULL,
+  host_veth TEXT NOT NULL,
+  sandbox_veth TEXT NOT NULL,
+  host_gateway_ip TEXT NOT NULL,
+  sandbox_ip TEXT NOT NULL,
+  sandbox_ip_cidr TEXT NOT NULL,
+  host_side_cidr TEXT NOT NULL,
+  nft_table_name TEXT NOT NULL,
+  control_dir_path TEXT NOT NULL,
+  control_manifest_path TEXT NOT NULL,
+  bundle_dir_path TEXT NOT NULL,
+  spec_path TEXT NOT NULL,
+  checkpoint_path TEXT,
+  bridge_dir_path TEXT NOT NULL,
+  network_hosts_path TEXT,
+  log_dir_path TEXT NOT NULL,
+  resource_identity_payload TEXT NOT NULL,
+  resource_identity_digest TEXT NOT NULL,
+  evidence_json TEXT,
+  evidence_digest TEXT,
+  verified_at TEXT,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+  FOREIGN KEY(generation_id) REFERENCES runtime_generations(generation_id) ON DELETE CASCADE,
+  FOREIGN KEY(contract_id) REFERENCES sandbox_contracts(contract_id),
+  FOREIGN KEY(network_profile_id) REFERENCES network_profiles(network_profile_id)
+);
+`); err != nil {
+		return err
+	}
+	uniqueFields := []string{
+		"runsc_container_id",
+		"netns_name",
+		"netns_path",
+		"host_veth",
+		"sandbox_veth",
+		"host_gateway_ip",
+		"sandbox_ip",
+		"sandbox_ip_cidr",
+		"host_side_cidr",
+		"nft_table_name",
+		"control_dir_path",
+		"control_manifest_path",
+		"bundle_dir_path",
+		"spec_path",
+		"checkpoint_path",
+		"bridge_dir_path",
+		"network_hosts_path",
+		"log_dir_path",
+	}
+	for _, field := range uniqueFields {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
+CREATE UNIQUE INDEX IF NOT EXISTS runtime_resource_instances_%s_active_uq
+  ON runtime_resource_instances (%s)
+  WHERE %s IS NOT NULL
+    AND state NOT IN ('absent_verified','destroyed');
+`, field, field, field)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func columnExists(ctx context.Context, tx dbRunner, table, column string) (bool, error) {
