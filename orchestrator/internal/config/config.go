@@ -12,7 +12,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -63,7 +62,6 @@ type Phase7Config struct {
 	Bridge           BridgeConfig     `yaml:"bridge"`
 	Checkpoint       CheckpointConfig `yaml:"checkpoint"`
 	Reaper           ReaperConfig     `yaml:"reaper"`
-	Secrets          SecretsConfig    `yaml:"secrets"`
 	SandboxIdentity  SandboxIdentity  `yaml:"sandbox_identity"`
 }
 
@@ -160,11 +158,6 @@ type CheckpointConfig struct {
 type ReaperConfig struct {
 	FailedRetention          Duration `yaml:"failed_retention"`
 	CheckpointImageRetention Duration `yaml:"checkpoint_image_retention"`
-}
-
-type SecretsConfig struct {
-	Root       string `yaml:"root"`
-	ReadersGID int    `yaml:"readers_gid"`
 }
 
 type SandboxIdentity struct {
@@ -441,10 +434,6 @@ func defaultPhase7Config() Phase7Config {
 			FailedRetention:          Duration{Duration: 10 * time.Minute},
 			CheckpointImageRetention: Duration{Duration: 720 * time.Hour},
 		},
-		Secrets: SecretsConfig{
-			Root:       "/var/lib/harness/secrets",
-			ReadersGID: 65501,
-		},
 		SandboxIdentity: SandboxIdentity{
 			UID: 65534,
 			GID: 65534,
@@ -572,15 +561,6 @@ func validatePhase7Config(cfg Phase7Config) error {
 	}
 	if cfg.Reaper.CheckpointImageRetention.Duration < 0 {
 		return fmt.Errorf("harness.reaper.checkpoint_image_retention must be >= 0")
-	}
-	if strings.TrimSpace(cfg.Secrets.Root) == "" {
-		return fmt.Errorf("harness.secrets.root is required")
-	}
-	if cfg.Secrets.ReadersGID <= 0 {
-		return fmt.Errorf("harness.secrets.readers_gid must be > 0")
-	}
-	if err := validateSecretsRoot(cfg.Secrets); err != nil {
-		return err
 	}
 	if err := ValidateSandboxIdentity(cfg.SandboxIdentity); err != nil {
 		return err
@@ -828,30 +808,6 @@ func phase7ConfigWarnings(cfg Phase7Config) []string {
 	if cfg.Bridge.HeartbeatInterval.Duration >= cfg.Bridge.LeaseTTL.Duration/2 &&
 		cfg.Bridge.HeartbeatInterval.Duration < cfg.Bridge.LeaseTTL.Duration {
 		return []string{"harness.bridge.heartbeat_interval is at least half of harness.bridge.lease_ttl"}
-	}
-	return nil
-}
-
-func validateSecretsRoot(cfg SecretsConfig) error {
-	info, err := os.Stat(cfg.Root)
-	if errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("harness.secrets.root %q must exist", cfg.Root)
-	}
-	if err != nil {
-		return fmt.Errorf("stat harness.secrets.root %q: %w", cfg.Root, err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("harness.secrets.root %q must be a directory", cfg.Root)
-	}
-	if mode := info.Mode().Perm(); mode != 0o750 {
-		return fmt.Errorf("harness.secrets.root %q must have mode 0750, got %04o", cfg.Root, mode)
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return fmt.Errorf("harness.secrets.root %q group could not be inspected", cfg.Root)
-	}
-	if int(stat.Gid) != cfg.ReadersGID {
-		return fmt.Errorf("harness.secrets.root %q must have group %d, got %d", cfg.Root, cfg.ReadersGID, stat.Gid)
 	}
 	return nil
 }

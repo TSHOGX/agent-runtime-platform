@@ -96,12 +96,9 @@ harness:
   reaper:
     failed_retention: 10m
     checkpoint_image_retention: 720h
-  secrets:
-    root: /var/lib/harness/secrets
-    readers_gid: 65501
 ```
 
-The loader uses strict YAML decoding for the Phase 7 `harness:` schema. Legacy files containing only top-level `runtime:` / `claude:` sections still load for compatibility, but mixing them with `harness:` is rejected.
+The loader uses strict YAML decoding for the Phase 7 `harness:` schema. Legacy files containing only top-level `runtime:` / `claude:` sections still load for compatibility, but mixing them with `harness:` is rejected. Legacy `harness.secrets.*` keys are rejected; provider credentials stay host-side.
 
 With `session_retention: 0s`, retained non-terminal sessions keep counting toward `max_sessions` even after runtime resources are retired. The `/api/quota` response reports the session ceiling and live `/30` pool ceiling separately. Use `DELETE /api/sessions/<id>` to close sessions and free session quota; close preserves messages, artifacts, workspace, and agent-home paths while reclaiming runtime resources.
 

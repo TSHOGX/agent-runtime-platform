@@ -1,7 +1,6 @@
 package config
 
 import (
-	"errors"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -12,7 +11,6 @@ import (
 
 func TestLoadProjectConfigUsesPhase7HarnessSchema(t *testing.T) {
 	dir := t.TempDir()
-	secretsRoot := prepareSecretsRoot(t, dir, 1234)
 	path := filepath.Join(dir, "harness.yaml")
 	if err := os.WriteFile(path, []byte(`harness:
   run_dir: /tmp/harness-run
@@ -57,9 +55,6 @@ func TestLoadProjectConfigUsesPhase7HarnessSchema(t *testing.T) {
   reaper:
     failed_retention: 0s
     checkpoint_image_retention: 720h
-  secrets:
-    root: `+secretsRoot+`
-    readers_gid: 1234
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -111,9 +106,6 @@ func TestLoadProjectConfigUsesPhase7HarnessSchema(t *testing.T) {
 		phase7.Checkpoint.MonitorInterval.Duration != 11*time.Second {
 		t.Fatalf("unexpected checkpoint config: %+v", phase7.Checkpoint)
 	}
-	if phase7.Secrets.Root != secretsRoot || phase7.Secrets.ReadersGID != 1234 {
-		t.Fatalf("unexpected secrets config: %+v", phase7.Secrets)
-	}
 	if cfg.Runtime.RunscNetwork != "sandbox" || cfg.Runtime.RunscOverlay2 != "none" {
 		t.Fatalf("unexpected runtime defaults: %+v", cfg.Runtime)
 	}
@@ -161,12 +153,9 @@ claude:
 
 func TestLoadProjectConfigRejectsMixedHarnessAndLegacySections(t *testing.T) {
 	dir := t.TempDir()
-	secretsRoot := prepareSecretsRoot(t, dir, 1234)
 	path := filepath.Join(dir, "harness.yaml")
 	if err := os.WriteFile(path, []byte(`harness:
-  secrets:
-    root: `+secretsRoot+`
-    readers_gid: 1234
+  max_sessions: 10
 runtime:
   runsc_network: sandbox
 `), 0o644); err != nil {
@@ -181,14 +170,10 @@ runtime:
 
 func TestLoadProjectConfigRejectsUnknownKeys(t *testing.T) {
 	dir := t.TempDir()
-	secretsRoot := prepareSecretsRoot(t, dir, 1234)
 	path := filepath.Join(dir, "harness.yaml")
 	if err := os.WriteFile(path, []byte(`harness:
   session_retention: 1h
   surprise: true
-  secrets:
-    root: `+secretsRoot+`
-    readers_gid: 1234
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -201,13 +186,9 @@ func TestLoadProjectConfigRejectsUnknownKeys(t *testing.T) {
 
 func TestLoadProjectConfigRejectsObsoleteSessionTTLKey(t *testing.T) {
 	dir := t.TempDir()
-	secretsRoot := prepareSecretsRoot(t, dir, 1234)
 	path := filepath.Join(dir, "harness.yaml")
 	if err := os.WriteFile(path, []byte(`harness:
   session_ttl: 1h
-  secrets:
-    root: `+secretsRoot+`
-    readers_gid: 1234
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -215,6 +196,23 @@ func TestLoadProjectConfigRejectsObsoleteSessionTTLKey(t *testing.T) {
 	_, err := loadProjectConfig(path)
 	if err == nil || !strings.Contains(err.Error(), "field session_ttl not found") {
 		t.Fatalf("expected obsolete session_ttl error, got %v", err)
+	}
+}
+
+func TestLoadProjectConfigRejectsLegacySecretsConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "harness.yaml")
+	if err := os.WriteFile(path, []byte(`harness:
+  secrets:
+    root: /var/lib/harness/secrets
+    readers_gid: 65501
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := loadProjectConfig(path)
+	if err == nil || !strings.Contains(err.Error(), "field secrets not found") {
+		t.Fatalf("expected legacy secrets rejection, got %v", err)
 	}
 }
 
@@ -467,58 +465,6 @@ func TestValidatePhase7Config(t *testing.T) {
 			want: "checkpoint_image_retention must be >= 0",
 		},
 		{
-			name: "secrets root required",
-			mutate: func(cfg *Phase7Config) {
-				cfg.Secrets.Root = ""
-			},
-			want: "harness.secrets.root is required",
-		},
-		{
-			name: "secrets readers gid",
-			mutate: func(cfg *Phase7Config) {
-				cfg.Secrets.ReadersGID = 0
-			},
-			want: "harness.secrets.readers_gid must be > 0",
-		},
-		{
-			name: "secrets root missing",
-			mutate: func(cfg *Phase7Config) {
-				cfg.Secrets.Root = filepath.Join(t.TempDir(), "missing")
-			},
-			want: "must exist",
-		},
-		{
-			name: "secrets root file",
-			mutate: func(cfg *Phase7Config) {
-				path := filepath.Join(t.TempDir(), "secrets-file")
-				if err := os.WriteFile(path, []byte("not a directory"), 0o640); err != nil {
-					t.Fatalf("write secrets file: %v", err)
-				}
-				cfg.Secrets.Root = path
-			},
-			want: "must be a directory",
-		},
-		{
-			name: "secrets root mode",
-			mutate: func(cfg *Phase7Config) {
-				dir := t.TempDir()
-				root := filepath.Join(dir, "secrets")
-				if err := os.Mkdir(root, 0o755); err != nil {
-					t.Fatalf("mkdir secrets root: %v", err)
-				}
-				cfg.Secrets.Root = root
-				cfg.Secrets.ReadersGID = 1234
-			},
-			want: "must have mode 0750",
-		},
-		{
-			name: "secrets root group",
-			mutate: func(cfg *Phase7Config) {
-				cfg.Secrets.ReadersGID = 4321
-			},
-			want: "must have group 4321",
-		},
-		{
 			name: "sandbox uid",
 			mutate: func(cfg *Phase7Config) {
 				cfg.SandboxIdentity.UID = 0
@@ -550,10 +496,7 @@ func TestValidatePhase7Config(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dir := t.TempDir()
 			cfg := defaultPhase7Config()
-			cfg.Secrets.Root = prepareSecretsRoot(t, dir, 1234)
-			cfg.Secrets.ReadersGID = 1234
 			tt.mutate(&cfg)
 
 			err := validatePhase7Config(cfg)
@@ -582,11 +525,8 @@ func TestNormalizeSandboxIdentitySortsSupplementalGIDs(t *testing.T) {
 }
 
 func TestValidatePhase7ConfigAllowsZeroSessionRetention(t *testing.T) {
-	dir := t.TempDir()
 	cfg := defaultPhase7Config()
 	cfg.SessionRetention.Duration = 0
-	cfg.Secrets.Root = prepareSecretsRoot(t, dir, 1234)
-	cfg.Secrets.ReadersGID = 1234
 
 	if err := validatePhase7Config(cfg); err != nil {
 		t.Fatalf("zero session retention should be valid: %v", err)
@@ -648,12 +588,9 @@ func TestValidatePhase8IsolationRootsRejectsRelativeRoot(t *testing.T) {
 }
 
 func TestValidatePhase7ConfigAllowsMaxSessionsAboveCIDRCapacity(t *testing.T) {
-	dir := t.TempDir()
 	cfg := defaultPhase7Config()
 	cfg.MaxSessions = 10
 	cfg.Network.CIDRPool.Prefix = netip.MustParsePrefix("10.0.0.0/30")
-	cfg.Secrets.Root = prepareSecretsRoot(t, dir, 1234)
-	cfg.Secrets.ReadersGID = 1234
 
 	if err := validatePhase7Config(cfg); err != nil {
 		t.Fatalf("max_sessions should be independent from /30 capacity: %v", err)
@@ -766,9 +703,7 @@ func writeMinimalLoadConfig(t *testing.T) string {
 		t.Fatalf("mkdir config dir: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(configDir, "harness.yaml"), []byte(`harness:
-  secrets:
-    root: `+prepareSecretsRoot(t, repo, 1234)+`
-    readers_gid: 1234
+  max_sessions: 30
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -843,8 +778,6 @@ func TestCheckedInHarnessConfigLoads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load checked-in harness config: %v", err)
 	}
-	root := prepareSecretsRoot(t, t.TempDir(), cfg.Phase7.Secrets.ReadersGID)
-	cfg.Phase7.Secrets.Root = root
 	if err := validatePhase7Config(cfg.Phase7); err != nil {
 		t.Fatalf("validate checked-in harness config: %v", err)
 	}
@@ -859,9 +792,6 @@ func TestLoadValidatesMergedPhase7Config(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(configDir, "harness.yaml"), []byte(`harness:
   network:
     cidr_pool: 10.0.0.0/30
-  secrets:
-    root: `+prepareSecretsRoot(t, repo, 1234)+`
-    readers_gid: 1234
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -895,9 +825,6 @@ func TestLoadAutoCheckpointEnvOverride(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(configDir, "harness.yaml"), []byte(`harness:
   checkpoint:
     auto_enabled: false
-  secrets:
-    root: `+prepareSecretsRoot(t, repo, 1234)+`
-    readers_gid: 1234
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -922,27 +849,6 @@ func TestLoadAutoCheckpointEnvOverride(t *testing.T) {
 	if !cfg.Phase7.Checkpoint.AutoEnabled {
 		t.Fatalf("expected env override to enable checkpoint policy: %+v", cfg.Phase7.Checkpoint)
 	}
-}
-
-func prepareSecretsRoot(t *testing.T, parent string, gid int) string {
-	t.Helper()
-	if os.Geteuid() != 0 {
-		t.Skip("secret root ownership validation requires root")
-	}
-	root := filepath.Join(parent, "secrets")
-	if err := os.MkdirAll(root, 0o750); err != nil {
-		t.Fatalf("mkdir secrets root: %v", err)
-	}
-	if err := os.Chmod(root, 0o750); err != nil {
-		t.Fatalf("chmod secrets root: %v", err)
-	}
-	if err := os.Chown(root, os.Getuid(), gid); err != nil {
-		if errors.Is(err, os.ErrPermission) {
-			t.Skipf("chown secrets root: %v", err)
-		}
-		t.Fatalf("chown secrets root: %v", err)
-	}
-	return root
 }
 
 func sameStrings(got, want []string) bool {

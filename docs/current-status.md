@@ -15,7 +15,7 @@ Harness Platform now has a working end-to-end lab stack:
 - Per-session Claude HOME under `/var/lib/harness/agent-homes/<session_id>`, currently reached from the sandbox through a parent `/agent-homes` mount and kept outside `/workspace`.
 - Claude Code stream-json parsing into durable `emit_output` events, persisted assistant messages, and live UI deltas.
 - Shell sessions through the bridge-aware shell shim, with shell output persisted as assistant messages and interrupt support for running turns.
-- Phase 7 typed `config/harness.yaml` is loaded with strict YAML validation and drives per-generation network, probe, bridge, reaper, checkpoint, and secret settings.
+- Phase 7 typed `config/harness.yaml` is loaded with strict YAML validation and drives per-generation network, probe, bridge, reaper, and checkpoint settings. Phase 8 removes the legacy sandbox secret config keys from the active schema.
 - Agent Bridge claim/ack is the live turn execution path. Turns transition through `queued`, `leased`, `running`, and terminal states with CAS fencing and durable events.
 - Checkpoint/restore primitives are behind the Phase 7 control plane. Automatic idle checkpointing is policy-gated and disabled in the checked-in lab config.
 - Session/history retention is decoupled from runtime resource lifetime. `harness.session_retention: 0s` is the checked-in default, active sessions store `expires_at = NULL`, and retryable generation/runtime/turn failures no longer make the session terminal.
@@ -44,7 +44,7 @@ The Phase 7 lab candidate is qualified at `d0cdaf6` after these final follow-up 
 
 - `a7754da fix(runtime): tune bridge polling for live latency` - passes the 5 ms bridge poll interval through to sandbox bridge clients and keeps live turn-start latency under the 50 ms budget.
 - `108aa65 docs(plan): mark phase7 qualified` - updates the roadmap/status docs from pre-Phase-7 wording to the qualified Phase 7 baseline.
-- `d0cdaf6 fix(runtime): preserve secret root owner` - preserves the existing owner of `/var/lib/harness/secrets` while correcting the readers group, preventing root-started orchestrator runs from undoing the `orchestrator:harness-secret-readers` bootstrap ownership.
+- `d0cdaf6 fix(runtime): preserve secret root owner` - historical Phase 7 qualification work for the old sandbox secret root. Phase 8 supersedes that path by rejecting the legacy secret config keys.
 
 Latest release evidence: `/tmp/harness-phase7-external-gates.json`.
 
