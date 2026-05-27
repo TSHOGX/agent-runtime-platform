@@ -2061,6 +2061,16 @@ func TestStartEnsuredGenerationRenewsLeaseDuringSlowPrepare(t *testing.T) {
 	if !ok || adapter["runsc_container_id"] != serverRunscContainerID(t, ctx, st, session.ID, allocation.GenerationID) {
 		t.Fatalf("sandbox contract missing runsc identity: %s", contract.CanonicalPayload)
 	}
+	var manifestDigest, specDigest, bundleDigest string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT control_manifest_digest, oci_spec_digest, bundle_digest
+FROM sandbox_contract_artifacts
+WHERE contract_id = ?`, contract.ContractID).Scan(&manifestDigest, &specDigest, &bundleDigest); err != nil {
+		t.Fatalf("query sandbox contract artifacts: %v", err)
+	}
+	if manifestDigest != "manifest_digest" || specDigest != "spec_digest" || bundleDigest != "bundle_digest" {
+		t.Fatalf("unexpected sandbox contract artifact digests: manifest=%s spec=%s bundle=%s", manifestDigest, specDigest, bundleDigest)
+	}
 }
 
 func TestStartEnsuredGenerationDestroysRuntimeAfterOwnerLoss(t *testing.T) {
