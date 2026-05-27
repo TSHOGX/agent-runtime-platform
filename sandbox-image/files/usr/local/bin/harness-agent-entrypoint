@@ -59,7 +59,7 @@ emit("CLAUDE_RESUME", data.get("resume_claude", False))
 emit("CLAUDE_MODEL", data.get("model", "sonnet"))
 emit("CLAUDE_OUTPUT_FORMAT", data.get("output_format", "stream-json"))
 emit("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", data.get("claude_code_disable_nonessential_traffic", True))
-emit("ANTHROPIC_BASE_URL", data.get("anthropic_base_url"))
+emit("ANTHROPIC_BASE_URL", data.get("sandbox_model_proxy_base_url"))
 PY
   )" || exit 65
   eval "$CONTROL_EXPORTS"

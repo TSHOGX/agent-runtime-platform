@@ -148,7 +148,7 @@ type controlManifest struct {
 	ResumeClaude                         bool   `json:"resume_claude"`
 	RunscPlatform                        string `json:"runsc_platform"`
 	RunscVersion                         string `json:"runsc_version"`
-	AnthropicBaseURL                     string `json:"anthropic_base_url,omitempty"`
+	SandboxModelProxyBaseURL             string `json:"sandbox_model_proxy_base_url,omitempty"`
 	Model                                string `json:"model,omitempty"`
 	OutputFormat                         string `json:"output_format"`
 	WorkspacePath                        string `json:"workspace_path"`
@@ -875,7 +875,7 @@ func (r *Runtime) buildGenerationManifest(req StartRequest, runscVersion, bundle
 		ResumeClaude:                         req.ResumeClaude,
 		RunscPlatform:                        defaultString(details.RunscPlatform, "systrap"),
 		RunscVersion:                         runscVersion,
-		AnthropicBaseURL:                     details.ManifestAnthropicBaseURL,
+		SandboxModelProxyBaseURL:             details.ManifestAnthropicBaseURL,
 		Model:                                details.Model,
 		OutputFormat:                         details.OutputFormat,
 		WorkspacePath:                        "/workspace",
@@ -939,26 +939,26 @@ func projectedControlManifestDigest(manifest controlManifest) (string, error) {
 		return "", err
 	}
 	strictFields := map[string]struct{}{
-		"session_id":               {},
-		"generation_id":            {},
-		"sandbox_contract_version": {},
-		"network_profile_id":       {},
-		"agent_runtime_profile_id": {},
-		"agent":                    {},
-		"claude_session_uuid":      {},
-		"resume_claude":            {},
-		"runsc_platform":           {},
-		"runsc_version":            {},
-		"anthropic_base_url":       {},
-		"model":                    {},
-		"output_format":            {},
-		"workspace_path":           {},
-		"agent_home_path":          {},
-		"bundle_digest":            {},
-		"runtime_config_digest":    {},
-		"spec_digest":              {},
-		"egress_policy_digest":     {},
-		"manifest_version":         {},
+		"session_id":                   {},
+		"generation_id":                {},
+		"sandbox_contract_version":     {},
+		"network_profile_id":           {},
+		"agent_runtime_profile_id":     {},
+		"agent":                        {},
+		"claude_session_uuid":          {},
+		"resume_claude":                {},
+		"runsc_platform":               {},
+		"runsc_version":                {},
+		"sandbox_model_proxy_base_url": {},
+		"model":                        {},
+		"output_format":                {},
+		"workspace_path":               {},
+		"agent_home_path":              {},
+		"bundle_digest":                {},
+		"runtime_config_digest":        {},
+		"spec_digest":                  {},
+		"egress_policy_digest":         {},
+		"manifest_version":             {},
 		"claude_code_disable_nonessential_traffic": {},
 	}
 	regenerableFields := map[string]struct{}{

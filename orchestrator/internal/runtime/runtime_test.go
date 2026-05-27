@@ -1150,7 +1150,7 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndIsolatedRuntime(t *t
 	if !manifest.ResumeClaude {
 		t.Fatalf("expected resume flag to be set: %+v", manifest)
 	}
-	if manifest.AnthropicBaseURL != "http://harness-model-proxy.internal:8082" {
+	if manifest.SandboxModelProxyBaseURL != "http://harness-model-proxy.internal:8082" {
 		t.Fatalf("unexpected sandbox base URL: %+v", manifest)
 	}
 	if strings.Contains(string(data), `"anthropic_api_key":`) || strings.Contains(string(data), `"anthropic_auth_token":`) {
@@ -1293,7 +1293,7 @@ func TestPrepareClaudeHostOnlyGenerationHasNoSecretMount(t *testing.T) {
 		t.Fatalf("read host-only manifest: %v", err)
 	}
 	manifest := manifestFile.Payload
-	if manifest.AnthropicBaseURL != "http://harness-model-proxy.internal:8082" {
+	if manifest.SandboxModelProxyBaseURL != "http://harness-model-proxy.internal:8082" {
 		t.Fatalf("unexpected host-only base url: %+v", manifest)
 	}
 	assertControlManifestOmitsHostOnlyFields(t, manifestData)
@@ -1484,7 +1484,7 @@ func TestPrepareShellGenerationHasNoSecretMount(t *testing.T) {
 	if manifestFile.Payload.WorkspacePath != "/workspace" || manifestFile.Payload.AgentHomePath != "/agent-home" {
 		t.Fatalf("shell manifest must use isolated sandbox paths: %+v", manifestFile.Payload)
 	}
-	if manifestFile.Payload.AnthropicBaseURL != "" {
+	if manifestFile.Payload.SandboxModelProxyBaseURL != "" {
 		t.Fatalf("shell manifest must not require Claude base URL: %+v", manifestFile.Payload)
 	}
 	assertControlManifestOmitsHostOnlyFields(t, mustReadFile(t, details.ControlManifestPath))
@@ -1656,7 +1656,7 @@ func testControlManifest() controlManifest {
 		ResumeClaude:                         true,
 		RunscPlatform:                        "systrap",
 		RunscVersion:                         "runsc test",
-		AnthropicBaseURL:                     "http://harness-model-proxy.internal:8082",
+		SandboxModelProxyBaseURL:             "http://harness-model-proxy.internal:8082",
 		Model:                                "sonnet",
 		OutputFormat:                         "stream-json",
 		WorkspacePath:                        "/workspace",
