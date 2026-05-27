@@ -73,6 +73,7 @@ type GenerationResourceCleanup struct {
 	HostVethDeleted   bool
 	NftTableDeleted   bool
 	RunscState        string
+	RunscPinEvidence  string
 	IPNetns           string
 	IPLink            string
 	NFT               string
@@ -400,7 +401,7 @@ func (r *Runtime) Destroy(ctx context.Context, containerID string) error {
 	if containerID == "" {
 		return errors.New("runsc container id is required")
 	}
-	if err := r.deleteRunscContainer(ctx, containerID); err != nil {
+	if err := r.deleteRunscContainer(ctx, "runsc", containerID); err != nil {
 		return fmt.Errorf("runsc delete %s: %w", containerID, err)
 	}
 	r.evictContainerByRunscID(containerID)
@@ -450,7 +451,9 @@ func (r *Runtime) DestroyGenerationResources(ctx context.Context, details store.
 	if err != nil {
 		return cleanup, err
 	}
-	if err := r.deleteRunscContainer(ctx, containerID); err != nil {
+	runscBinary, runscPinEvidence, err := r.deleteGenerationRunscContainer(ctx, details, containerID)
+	cleanup.RunscPinEvidence = runscPinEvidence
+	if err != nil {
 		errs = append(errs, fmt.Errorf("delete runsc container %s: %w", containerID, err))
 	} else {
 		cleanup.RunscDeleted = true
@@ -481,7 +484,7 @@ func (r *Runtime) DestroyGenerationResources(ctx context.Context, details store.
 	if len(errs) > 0 {
 		return cleanup, errors.Join(errs...)
 	}
-	if err := r.recordGenerationResourceAbsenceEvidence(ctx, details, containerID, targets, &cleanup); err != nil {
+	if err := r.recordGenerationResourceAbsenceEvidence(ctx, details, runscBinary, containerID, targets, &cleanup); err != nil {
 		return cleanup, err
 	}
 	return cleanup, nil
@@ -557,12 +560,12 @@ func (r *Runtime) generationFilesystemCleanupTargets(details store.RuntimeGenera
 	return targets, nil
 }
 
-func (r *Runtime) recordGenerationResourceAbsenceEvidence(ctx context.Context, details store.RuntimeGenerationDetails, containerID string, targets []filesystemCleanupTarget, cleanup *GenerationResourceCleanup) error {
-	runscState, err := r.runscContainerAbsenceEvidence(ctx, containerID)
+func (r *Runtime) recordGenerationResourceAbsenceEvidence(ctx context.Context, details store.RuntimeGenerationDetails, runscBinary, containerID string, targets []filesystemCleanupTarget, cleanup *GenerationResourceCleanup) error {
+	runscState, err := r.runscContainerAbsenceEvidence(ctx, runscBinary, containerID)
 	if err != nil {
 		return err
 	}
-	cleanup.RunscState = runscState
+	cleanup.RunscState = appendEvidence(runscState, cleanup.RunscPinEvidence)
 	if strings.EqualFold(strings.TrimSpace(r.runscNetwork(details)), "sandbox") {
 		ipNetns, err := r.netnsAbsenceEvidence(ctx, details.NetnsName)
 		if err != nil {
@@ -592,15 +595,27 @@ func (r *Runtime) recordGenerationResourceAbsenceEvidence(ctx context.Context, d
 	return nil
 }
 
-func (r *Runtime) runscContainerAbsenceEvidence(ctx context.Context, containerID string) (string, error) {
-	output, err := r.runner.CombinedOutput(ctx, "runsc", "-root", r.cfg.RunscRoot, "state", containerID)
+func (r *Runtime) runscContainerAbsenceEvidence(ctx context.Context, runscBinary, containerID string) (string, error) {
+	runscBinary = defaultString(runscBinary, "runsc")
+	output, err := r.runner.CombinedOutput(ctx, runscBinary, "-root", r.cfg.RunscRoot, "state", containerID)
 	if err != nil {
 		if commandFailureContains(output, err, "does not exist", "not found", "no such container", "no such file") {
-			return "runsc_container:absent; check=runsc state " + containerID, nil
+			return "runsc_container:absent; check=" + runscBinary + " state " + containerID, nil
 		}
 		return "", fmt.Errorf("verify runsc container %s absence: %w: %s", containerID, err, strings.TrimSpace(string(output)))
 	}
 	return "", fmt.Errorf("verify runsc container %s absence: container still present", containerID)
+}
+
+func appendEvidence(base, extra string) string {
+	extra = strings.TrimSpace(extra)
+	if extra == "" {
+		return base
+	}
+	if strings.TrimSpace(base) == "" {
+		return extra
+	}
+	return base + "; " + extra
 }
 
 func (r *Runtime) netnsAbsenceEvidence(ctx context.Context, netnsName string) (string, error) {
@@ -850,20 +865,132 @@ func (r *Runtime) deleteNetworkResource(ctx context.Context, name string, args [
 	return fmt.Errorf("destroy sandbox network resource %q: %w: %s", strings.Join(append([]string{name}, args...), " "), err, strings.TrimSpace(string(output)))
 }
 
-func (r *Runtime) deleteRunscContainer(ctx context.Context, containerID string) error {
-	_, _ = r.runner.CombinedOutput(ctx, "runsc", "-root", r.cfg.RunscRoot, "kill", containerID, "KILL")
-	output, err := r.runner.CombinedOutput(ctx, "runsc", "-root", r.cfg.RunscRoot, "delete", containerID)
+func (r *Runtime) deleteGenerationRunscContainer(ctx context.Context, details store.RuntimeGenerationDetails, containerID string) (string, string, error) {
+	if !hasRecordedRunscBinaryPin(details) {
+		return "runsc", "", r.deleteRunscContainer(ctx, "runsc", containerID)
+	}
+	current := r.currentRunscPin(ctx)
+	currentBinary := defaultString(current.BinaryPath, "runsc")
+	pinned := runscPinFromDetails(details)
+	if cleanupRunscPinMatches(current, pinned) {
+		return currentBinary, "", r.deleteRunscContainer(ctx, currentBinary, containerID)
+	}
+	evidence := cleanupRunscPinMismatchEvidence(current, pinned, "current")
+	currentResult, currentErr := r.deleteRunscContainerDetailed(ctx, currentBinary, containerID)
+	if currentErr == nil && !currentResult.Missing {
+		return currentBinary, evidence, nil
+	}
+	if currentErr == nil && currentResult.Missing {
+		currentErr = fmt.Errorf("current runsc reported container missing under mismatched pin")
+	}
+	compatibleBinary, err := verifiedRecordedRunscBinary(pinned)
+	if err != nil {
+		return currentBinary, evidence, fmt.Errorf("current runsc pin mismatch; current delete failed: %w; recorded runsc unavailable: %v", currentErr, err)
+	}
+	recordedErr := r.deleteRunscContainer(ctx, compatibleBinary, containerID)
+	if recordedErr != nil {
+		return compatibleBinary, cleanupRunscPinMismatchEvidence(current, pinned, "recorded"), fmt.Errorf("current runsc pin mismatch; current delete failed: %w; recorded delete failed: %v", currentErr, recordedErr)
+	}
+	return compatibleBinary, cleanupRunscPinMismatchEvidence(current, pinned, "recorded"), nil
+}
+
+func hasRecordedRunscBinaryPin(details store.RuntimeGenerationDetails) bool {
+	return strings.TrimSpace(details.RunscBinaryPath) != "" && strings.TrimSpace(details.RunscBinaryDigest) != ""
+}
+
+func cleanupRunscPinMatches(current, pinned runscPin) bool {
+	checks := []struct {
+		current string
+		pinned  string
+	}{
+		{current.Platform, pinned.Platform},
+		{current.Version, pinned.Version},
+		{current.BinaryPath, pinned.BinaryPath},
+		{current.BinaryDigest, pinned.BinaryDigest},
+	}
+	for _, check := range checks {
+		if strings.TrimSpace(check.pinned) != "" && check.current != check.pinned {
+			return false
+		}
+	}
+	return true
+}
+
+func cleanupRunscPinMismatchEvidence(current, pinned runscPin, cleanupBinary string) string {
+	return fmt.Sprintf("runsc_pin:mismatch; current_platform=%s; pinned_platform=%s; current_version=%s; pinned_version=%s; current_binary_path=%s; pinned_binary_path=%s; current_binary_digest=%s; pinned_binary_digest=%s; cleanup_binary=%s",
+		current.Platform,
+		pinned.Platform,
+		current.Version,
+		pinned.Version,
+		current.BinaryPath,
+		pinned.BinaryPath,
+		current.BinaryDigest,
+		pinned.BinaryDigest,
+		cleanupBinary,
+	)
+}
+
+func verifiedRecordedRunscBinary(pinned runscPin) (string, error) {
+	path := strings.TrimSpace(pinned.BinaryPath)
+	if path == "" {
+		return "", fmt.Errorf("recorded runsc binary path is required")
+	}
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("recorded runsc binary path %q must be absolute", path)
+	}
+	cleaned := filepath.Clean(path)
+	canonical, err := filepath.EvalSymlinks(cleaned)
+	if err != nil {
+		return "", fmt.Errorf("resolve recorded runsc binary path %q: %w", path, err)
+	}
+	canonical = filepath.Clean(canonical)
+	if canonical != cleaned {
+		return "", fmt.Errorf("recorded runsc binary path %q is not canonical, resolves to %q", cleaned, canonical)
+	}
+	info, err := os.Stat(canonical)
+	if err != nil {
+		return "", fmt.Errorf("stat recorded runsc binary %q: %w", canonical, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("recorded runsc binary %q is not a regular file", canonical)
+	}
+	if info.Mode()&0o111 == 0 {
+		return "", fmt.Errorf("recorded runsc binary %q is not executable", canonical)
+	}
+	digest, err := fileSHA256(canonical)
+	if err != nil {
+		return "", fmt.Errorf("digest recorded runsc binary %q: %w", canonical, err)
+	}
+	if got, want := "sha256:"+digest, strings.TrimSpace(pinned.BinaryDigest); got != want {
+		return "", fmt.Errorf("recorded runsc binary digest %s, want %s", got, want)
+	}
+	return canonical, nil
+}
+
+type runscContainerDeleteResult struct {
+	Missing bool
+}
+
+func (r *Runtime) deleteRunscContainer(ctx context.Context, runscBinary, containerID string) error {
+	_, err := r.deleteRunscContainerDetailed(ctx, runscBinary, containerID)
+	return err
+}
+
+func (r *Runtime) deleteRunscContainerDetailed(ctx context.Context, runscBinary, containerID string) (runscContainerDeleteResult, error) {
+	runscBinary = defaultString(runscBinary, "runsc")
+	_, _ = r.runner.CombinedOutput(ctx, runscBinary, "-root", r.cfg.RunscRoot, "kill", containerID, "KILL")
+	output, err := r.runner.CombinedOutput(ctx, runscBinary, "-root", r.cfg.RunscRoot, "delete", containerID)
 	if err != nil {
 		if commandFailureContains(output, err, "does not exist", "not found", "no such container", "no such file") {
-			return nil
+			return runscContainerDeleteResult{Missing: true}, nil
 		}
-		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
+		return runscContainerDeleteResult{}, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
 	}
-	return nil
+	return runscContainerDeleteResult{}, nil
 }
 
 func (r *Runtime) cleanupRunscContainer(ctx context.Context, containerID string) {
-	_ = r.deleteRunscContainer(ctx, containerID)
+	_ = r.deleteRunscContainer(ctx, "runsc", containerID)
 }
 
 func (r *Runtime) removeContainer(container *Container) {
