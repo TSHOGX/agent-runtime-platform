@@ -116,11 +116,6 @@ func TestProjectedControlManifestDigestIgnoresRegenerableFields(t *testing.T) {
 	changed := base
 	changed.CreatedAt = "2030-01-01T00:00:00Z"
 	changed.AttemptID = "attempt-2"
-	changed.HostHostname = "other-host"
-	changed.BridgeDirPath = "/tmp/other-bridge"
-	changed.NetnsName = "other-netns"
-	changed.HostGatewayIP = "10.1.2.3"
-	changed.SandboxSourceIP = "10.1.2.4"
 	second, err := projectedControlManifestDigest(changed)
 	if err != nil {
 		t.Fatalf("project changed manifest: %v", err)
@@ -136,6 +131,31 @@ func TestProjectedControlManifestDigestIgnoresRegenerableFields(t *testing.T) {
 	}
 	if first == third {
 		t.Fatalf("strict field change did not change projected digest: %s", first)
+	}
+}
+
+func TestProjectedControlManifestDigestRejectsHostOnlyFields(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*controlManifest)
+		field  string
+	}{
+		{name: "host hostname", mutate: func(m *controlManifest) { m.HostHostname = "host-a" }, field: "host_hostname"},
+		{name: "netns name", mutate: func(m *controlManifest) { m.NetnsName = "harness-gen-a" }, field: "netns_name"},
+		{name: "host gateway", mutate: func(m *controlManifest) { m.HostGatewayIP = "10.200.1.1" }, field: "host_gateway_ip"},
+		{name: "sandbox source", mutate: func(m *controlManifest) { m.SandboxSourceIP = "10.200.1.2" }, field: "sandbox_source_ip"},
+		{name: "bridge dir", mutate: func(m *controlManifest) { m.BridgeDirPath = "/tmp/bridge-a" }, field: "bridge_dir_path"},
+		{name: "proxy bind", mutate: func(m *controlManifest) { m.ProxyBindURL = "http://0.0.0.0:8082" }, field: "proxy_bind_url"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			manifest := testControlManifest()
+			tc.mutate(&manifest)
+			_, err := projectedControlManifestDigest(manifest)
+			if err == nil || !strings.Contains(err.Error(), `unclassified control manifest field "`+tc.field+`"`) {
+				t.Fatalf("expected %s rejection, got %v", tc.field, err)
+			}
+		})
 	}
 }
 
@@ -1117,9 +1137,6 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndSecrets(t *testing.T
 	if manifest.AnthropicBaseURL != "http://10.200.1.1:8082" {
 		t.Fatalf("unexpected sandbox base URL: %+v", manifest)
 	}
-	if manifest.SandboxSourceIP != "10.200.1.2" {
-		t.Fatalf("unexpected sandbox source ip: %+v", manifest)
-	}
 	if manifest.AnthropicAPIKeySecretID != "anthropic_api_key" || manifest.AnthropicAuthTokenSecretID != "anthropic_auth_token" || manifest.SecretVersion != "local" {
 		t.Fatalf("unexpected secret refs: %+v", manifest)
 	}
@@ -1132,6 +1149,7 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndSecrets(t *testing.T
 	if manifest.Model != "sonnet" || manifest.OutputFormat != "stream-json" {
 		t.Fatalf("unexpected Claude defaults: %+v", manifest)
 	}
+	assertControlManifestOmitsHostOnlyFields(t, data)
 
 	var spec runtimeSpec
 	specData, err := os.ReadFile(details.SpecPath)
@@ -1245,6 +1263,7 @@ func TestPrepareClaudeHostOnlyGenerationHasNoSecretMount(t *testing.T) {
 		manifest.SecretVersion != "" {
 		t.Fatalf("host-only manifest must not reference secrets: %+v", manifest)
 	}
+	assertControlManifestOmitsHostOnlyFields(t, manifestData)
 	if strings.Contains(string(manifestData), "/harness-secrets") ||
 		strings.Contains(string(manifestData), "anthropic_api_key") ||
 		strings.Contains(string(manifestData), "anthropic_auth_token") {
@@ -1460,6 +1479,7 @@ func TestPrepareShellGenerationHasNoSecretMount(t *testing.T) {
 	if manifestFile.Payload.AnthropicBaseURL != "" {
 		t.Fatalf("shell manifest must not require Claude base URL: %+v", manifestFile.Payload)
 	}
+	assertControlManifestOmitsHostOnlyFields(t, mustReadFile(t, details.ControlManifestPath))
 }
 
 func TestPrepareShellGenerationRejectsSecretReferences(t *testing.T) {
@@ -1620,18 +1640,12 @@ func testControlManifest() controlManifest {
 		OutputFormat:                         "stream-json",
 		WorkspacePath:                        "/sessions/sess_1",
 		AgentHomePath:                        "/agent-homes/sess_1",
-		HostHostname:                         "host-a",
-		NetnsName:                            "harness-gen-a",
-		HostGatewayIP:                        "10.200.1.1",
-		SandboxSourceIP:                      "10.200.1.2",
-		BridgeDirPath:                        "/tmp/bridge-a",
 		BundleDigest:                         "bundle_digest",
 		RuntimeConfigDigest:                  "runtime_config_digest",
 		SpecDigest:                           "spec_digest",
 		EgressPolicyDigest:                   "egress_digest",
 		ManifestVersion:                      1,
 		ClaudeCodeDisableNonessentialTraffic: true,
-		ProxyBindURL:                         "http://0.0.0.0:8082",
 	}
 }
 
@@ -1729,6 +1743,30 @@ func assertSecretFile(t *testing.T, path string) {
 		t.Fatalf("secret file %s mode=%04o want 0440", path, mode)
 	}
 	assertPathGID(t, info, path, testSecretReadersGID())
+}
+
+func assertControlManifestOmitsHostOnlyFields(t *testing.T, data []byte) {
+	t.Helper()
+	var file controlManifestFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		t.Fatalf("control manifest json: %v", err)
+	}
+	payload, err := json.Marshal(file.Payload)
+	if err != nil {
+		t.Fatalf("control manifest payload json: %v", err)
+	}
+	for _, forbidden := range []string{
+		"host_hostname",
+		"netns_name",
+		"host_gateway_ip",
+		"sandbox_source_ip",
+		"bridge_dir_path",
+		"proxy_bind_url",
+	} {
+		if strings.Contains(string(payload), `"`+forbidden+`"`) {
+			t.Fatalf("control manifest must omit host-only field %s: %s", forbidden, payload)
+		}
+	}
 }
 
 func assertPathGID(t *testing.T, info os.FileInfo, path string, want int) {

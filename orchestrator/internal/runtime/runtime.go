@@ -159,18 +159,18 @@ type controlManifest struct {
 	OutputFormat                         string `json:"output_format"`
 	WorkspacePath                        string `json:"workspace_path"`
 	AgentHomePath                        string `json:"agent_home_path"`
-	HostHostname                         string `json:"host_hostname"`
-	NetnsName                            string `json:"netns_name"`
-	HostGatewayIP                        string `json:"host_gateway_ip"`
-	SandboxSourceIP                      string `json:"sandbox_source_ip"`
-	BridgeDirPath                        string `json:"bridge_dir_path"`
+	HostHostname                         string `json:"host_hostname,omitempty"`
+	NetnsName                            string `json:"netns_name,omitempty"`
+	HostGatewayIP                        string `json:"host_gateway_ip,omitempty"`
+	SandboxSourceIP                      string `json:"sandbox_source_ip,omitempty"`
+	BridgeDirPath                        string `json:"bridge_dir_path,omitempty"`
 	BundleDigest                         string `json:"bundle_digest"`
 	RuntimeConfigDigest                  string `json:"runtime_config_digest"`
 	SpecDigest                           string `json:"spec_digest"`
 	EgressPolicyDigest                   string `json:"egress_policy_digest"`
 	ManifestVersion                      int    `json:"manifest_version"`
 	ClaudeCodeDisableNonessentialTraffic bool   `json:"claude_code_disable_nonessential_traffic"`
-	ProxyBindURL                         string `json:"proxy_bind_url"`
+	ProxyBindURL                         string `json:"proxy_bind_url,omitempty"`
 }
 
 type controlManifestFile struct {
@@ -1078,10 +1078,6 @@ func validateSecretVersion(path string, readersGID int) error {
 
 func (r *Runtime) buildGenerationManifest(req StartRequest, runscVersion, bundleDigest, runtimeConfigDigest, specDigest string) (controlManifest, error) {
 	details := req.Generation
-	hostname, err := os.Hostname()
-	if err != nil {
-		return controlManifest{}, err
-	}
 	agentHomePath := filepath.Join("/agent-homes", req.SessionID)
 	workspacePath := filepath.Join("/sessions", req.SessionID)
 	if isPhase8ShellRequest(req) {
@@ -1091,10 +1087,6 @@ func (r *Runtime) buildGenerationManifest(req StartRequest, runscVersion, bundle
 	secretMountPath := ""
 	if details.RequiresSecretDrop {
 		secretMountPath = "/harness-secrets"
-	}
-	sandboxSourceIP, err := sandboxSourceIP(details.SandboxIPCIDR)
-	if err != nil {
-		return controlManifest{}, err
 	}
 	return controlManifest{
 		SessionID:                            req.SessionID,
@@ -1117,30 +1109,13 @@ func (r *Runtime) buildGenerationManifest(req StartRequest, runscVersion, bundle
 		OutputFormat:                         details.OutputFormat,
 		WorkspacePath:                        workspacePath,
 		AgentHomePath:                        agentHomePath,
-		HostHostname:                         hostname,
-		NetnsName:                            details.NetnsName,
-		HostGatewayIP:                        details.HostGatewayIP,
-		SandboxSourceIP:                      sandboxSourceIP,
-		BridgeDirPath:                        details.BridgeDirPath,
 		BundleDigest:                         bundleDigest,
 		RuntimeConfigDigest:                  runtimeConfigDigest,
 		SpecDigest:                           specDigest,
 		EgressPolicyDigest:                   details.EgressPolicyDigest,
 		ManifestVersion:                      1,
 		ClaudeCodeDisableNonessentialTraffic: details.DisableNonessentialTraffic,
-		ProxyBindURL:                         r.cfg.Claude.ProxyBindURL,
 	}, nil
-}
-
-func sandboxSourceIP(sandboxCIDR string) (string, error) {
-	if strings.TrimSpace(sandboxCIDR) == "" {
-		return "", nil
-	}
-	prefix, err := netip.ParsePrefix(strings.TrimSpace(sandboxCIDR))
-	if err != nil {
-		return "", fmt.Errorf("invalid sandbox ip cidr %q: %w", sandboxCIDR, err)
-	}
-	return prefix.Addr().String(), nil
 }
 
 func validateGenerationDetails(req StartRequest) error {
@@ -1215,16 +1190,10 @@ func projectedControlManifestDigest(manifest controlManifest) (string, error) {
 		"egress_policy_digest":           {},
 		"manifest_version":               {},
 		"claude_code_disable_nonessential_traffic": {},
-		"proxy_bind_url": {},
 	}
 	regenerableFields := map[string]struct{}{
-		"created_at":        {},
-		"attempt_id":        {},
-		"host_hostname":     {},
-		"netns_name":        {},
-		"host_gateway_ip":   {},
-		"sandbox_source_ip": {},
-		"bridge_dir_path":   {},
+		"created_at": {},
+		"attempt_id": {},
 	}
 	projected := map[string]any{}
 	for key, value := range fields {
