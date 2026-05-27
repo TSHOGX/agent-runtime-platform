@@ -105,6 +105,33 @@ func TestRuntimeStartRestoreRequiresCheckpointPath(t *testing.T) {
 	}
 }
 
+func TestRuntimeStartRestoreRequiresStoredArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	checkpointPath := filepath.Join(dir, "checkpoint")
+	writeCheckpointFiles(t, checkpointPath)
+	runner := &recordingCommandRunner{}
+	rt := New(Config{DefaultAgent: "claude", CommandRunner: runner})
+	details := testGenerationDetails(dir, "gen_restore_missing_artifacts")
+	details.CheckpointPath = checkpointPath
+
+	res := rt.Start(context.Background(), StartRequest{
+		SessionID:             details.SessionID,
+		GenerationID:          details.GenerationID,
+		Agent:                 "claude",
+		RestoreFromCheckpoint: true,
+		Generation:            details,
+	}, nil)
+	if res.Err == nil {
+		t.Fatal("expected missing stored artifact error")
+	}
+	if !strings.Contains(res.Err.Error(), "restore requires stored generation artifact") {
+		t.Fatalf("expected stored artifact error, got %v", res.Err)
+	}
+	if got := runner.Commands(); len(got) != 0 {
+		t.Fatalf("restore should reject before runsc commands, got %v", got)
+	}
+}
+
 func TestProjectedControlManifestDigestIgnoresRegenerableFields(t *testing.T) {
 	base := testControlManifest()
 	first, err := projectedControlManifestDigest(base)
@@ -306,6 +333,13 @@ func TestRuntimeStartRestoreRejectsMetadataBeforeRunscRestore(t *testing.T) {
 	details.CheckpointAgentRuntimeProfileID = details.AgentRuntimeProfileID
 	details.CheckpointRunscPlatform = details.RunscPlatform
 	details.CheckpointRunscVersion = "runsc old"
+	details.CheckpointRunscBinaryPath = "runsc"
+	details.CheckpointRunscBinaryDigest = "sha256:runsc"
+	details.CheckpointBundleDigest = "bundle_digest"
+	details.CheckpointRuntimeConfigDigest = "runtime_config_digest"
+	details.CheckpointControlManifestDigest = "control_manifest_digest"
+	currentRunscPath, currentRunscDigest := runscBinaryMetadata()
+	artifacts := restorePreparedArtifacts(details, "runsc current", currentRunscPath, currentRunscDigest)
 
 	res := rt.Start(context.Background(), StartRequest{
 		SessionID:             "sess_1",
@@ -313,6 +347,7 @@ func TestRuntimeStartRestoreRejectsMetadataBeforeRunscRestore(t *testing.T) {
 		Agent:                 "sh",
 		RestoreFromCheckpoint: true,
 		Generation:            details,
+		PreparedArtifacts:     artifacts,
 	}, nil)
 	if res.Err == nil {
 		t.Fatal("expected restore metadata mismatch")
@@ -379,7 +414,7 @@ func TestRuntimeStartRejectsRunscPinMismatchBeforeRunscRun(t *testing.T) {
 
 func TestRuntimeStartRestoreRejectsRunscBinaryMismatchBeforeRunscRestore(t *testing.T) {
 	dir := t.TempDir()
-	runscPath, _ := installFakeRunsc(t, dir, "current")
+	runscPath, digest := installFakeRunsc(t, dir, "current")
 	checkpointPath := filepath.Join(dir, "checkpoint")
 	writeCheckpointFiles(t, checkpointPath)
 	runner := &recordingCommandRunner{
@@ -405,6 +440,10 @@ func TestRuntimeStartRestoreRejectsRunscBinaryMismatchBeforeRunscRestore(t *test
 	details.CheckpointRunscVersion = "runsc current"
 	details.CheckpointRunscBinaryPath = runscPath
 	details.CheckpointRunscBinaryDigest = "sha256:stale"
+	details.CheckpointBundleDigest = "bundle_digest"
+	details.CheckpointRuntimeConfigDigest = "runtime_config_digest"
+	details.CheckpointControlManifestDigest = "control_manifest_digest"
+	artifacts := restorePreparedArtifacts(details, "runsc current", runscPath, digest)
 
 	res := rt.Start(context.Background(), StartRequest{
 		SessionID:             details.SessionID,
@@ -412,6 +451,7 @@ func TestRuntimeStartRestoreRejectsRunscBinaryMismatchBeforeRunscRestore(t *test
 		Agent:                 "claude",
 		RestoreFromCheckpoint: true,
 		Generation:            details,
+		PreparedArtifacts:     artifacts,
 	}, nil)
 	if res.Err == nil {
 		t.Fatal("expected restore runsc binary mismatch")
@@ -1841,6 +1881,22 @@ func testGenerationDetails(dir, generationID string) store.RuntimeGenerationDeta
 		SandboxGID:                 testSandboxGID(),
 		RequiresSecretDrop:         false,
 		ManifestAnthropicBaseURL:   "http://harness-model-proxy.internal:8082",
+	}
+}
+
+func restorePreparedArtifacts(details store.RuntimeGenerationDetails, runscVersion, runscPath, runscDigest string) GenerationArtifacts {
+	return GenerationArtifacts{
+		BundleDir:               details.BundleDirPath,
+		SpecPath:                details.SpecPath,
+		ManifestPath:            details.ControlManifestPath,
+		ManifestDigest:          "control_manifest_digest",
+		ProjectedManifestDigest: "control_manifest_digest",
+		BundleDigest:            "bundle_digest",
+		RuntimeConfigDigest:     "runtime_config_digest",
+		SpecDigest:              "spec_digest",
+		RunscVersion:            runscVersion,
+		RunscBinaryPath:         runscPath,
+		RunscBinaryDigest:       runscDigest,
 	}
 }
 

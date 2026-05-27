@@ -339,6 +339,46 @@ func (r *Runtime) generationArtifacts(ctx context.Context, req StartRequest) (Ge
 	return r.renderGenerationArtifacts(ctx, req)
 }
 
+func restoreGenerationArtifacts(req StartRequest) (GenerationArtifacts, error) {
+	if strings.TrimSpace(req.Generation.GenerationID) == "" {
+		return GenerationArtifacts{}, fmt.Errorf("generation details are required")
+	}
+	artifacts := req.PreparedArtifacts
+	required := map[string]string{
+		"bundle dir":                        artifacts.BundleDir,
+		"spec path":                         artifacts.SpecPath,
+		"control manifest path":             artifacts.ManifestPath,
+		"control manifest digest":           artifacts.ManifestDigest,
+		"projected control manifest digest": artifacts.ProjectedManifestDigest,
+		"bundle digest":                     artifacts.BundleDigest,
+		"runtime config digest":             artifacts.RuntimeConfigDigest,
+		"spec digest":                       artifacts.SpecDigest,
+		"runsc version":                     artifacts.RunscVersion,
+		"runsc binary path":                 artifacts.RunscBinaryPath,
+		"runsc binary digest":               artifacts.RunscBinaryDigest,
+	}
+	for label, value := range required {
+		if strings.TrimSpace(value) == "" {
+			return GenerationArtifacts{}, fmt.Errorf("restore requires stored generation artifact %s", label)
+		}
+	}
+	checks := []struct {
+		label string
+		got   string
+		want  string
+	}{
+		{"bundle dir", artifacts.BundleDir, req.Generation.BundleDirPath},
+		{"spec path", artifacts.SpecPath, req.Generation.SpecPath},
+		{"control manifest path", artifacts.ManifestPath, req.Generation.ControlManifestPath},
+	}
+	for _, check := range checks {
+		if filepath.Clean(check.got) != filepath.Clean(check.want) {
+			return GenerationArtifacts{}, fmt.Errorf("restore artifact %s %q does not match generation path %q", check.label, check.got, check.want)
+		}
+	}
+	return artifacts, nil
+}
+
 func resolveAgent(agent, fallback string) (string, error) {
 	agent = strings.TrimSpace(agent)
 	if agent == "" {
@@ -2414,13 +2454,11 @@ func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, ou
 
 	hub.Publish(OutputEvent{Stream: "runtime", Line: "resuming from checkpoint"})
 
-	// Restore re-renders regenerable host artifacts before comparing them with
-	// checkpoint metadata, then uses runsc restore instead of run.
 	checkpointPath, err := r.resolveCheckpointPath(req)
 	if err != nil {
 		return Result{Err: err}
 	}
-	artifacts, err := r.renderGenerationArtifacts(ctx, req)
+	artifacts, err := restoreGenerationArtifacts(req)
 	if err != nil {
 		return Result{Err: err}
 	}

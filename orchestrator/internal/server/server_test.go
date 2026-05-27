@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -1356,6 +1357,8 @@ SET checkpoint_path = ?
 WHERE generation_id = ?`, checkpointPath, old.GenerationID); err != nil {
 		t.Fatalf("record checkpoint path: %v", err)
 	}
+	runscPath, runscDigest := currentRunscBinaryMetadataForServerTest()
+	recordServerRuntimeArtifactsWithRunsc(t, ctx, st, old.GenerationID, "restore_manifest_digest", "runsc test", runscPath, runscDigest)
 	markServerGenerationCheckpointed(t, ctx, st, session.ID, old.GenerationID, time.Now().UTC())
 
 	realRuntime := runtime.New(runtime.Config{
@@ -4023,9 +4026,17 @@ func testGenerationArtifacts() runtime.GenerationArtifacts {
 func recordServerRuntimeArtifacts(t *testing.T, ctx context.Context, st *store.Store, generationID, manifestDigest, runscVersion string) {
 	t.Helper()
 	artifacts := testGenerationArtifacts()
+	recordServerRuntimeArtifactsWithRunsc(t, ctx, st, generationID, manifestDigest, runscVersion, artifacts.RunscBinaryPath, artifacts.RunscBinaryDigest)
+}
+
+func recordServerRuntimeArtifactsWithRunsc(t *testing.T, ctx context.Context, st *store.Store, generationID, manifestDigest, runscVersion, runscPath, runscDigest string) {
+	t.Helper()
+	artifacts := testGenerationArtifacts()
 	artifacts.ManifestDigest = manifestDigest
 	artifacts.ProjectedManifestDigest = manifestDigest
 	artifacts.RunscVersion = runscVersion
+	artifacts.RunscBinaryPath = runscPath
+	artifacts.RunscBinaryDigest = runscDigest
 	if err := st.RecordGenerationRuntimeArtifactDigests(ctx, generationID, store.GenerationRuntimeArtifactDigests{
 		ControlManifestDigest:          artifacts.ManifestDigest,
 		ProjectedControlManifestDigest: artifacts.ProjectedManifestDigest,
@@ -4038,6 +4049,23 @@ func recordServerRuntimeArtifacts(t *testing.T, ctx context.Context, st *store.S
 	}); err != nil {
 		t.Fatalf("record runtime artifacts: %v", err)
 	}
+}
+
+func currentRunscBinaryMetadataForServerTest() (string, string) {
+	path, err := exec.LookPath("runsc")
+	if err != nil {
+		return "runsc", "unavailable:" + err.Error()
+	}
+	canonical, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		canonical = filepath.Clean(path)
+	}
+	data, err := os.ReadFile(canonical)
+	if err != nil {
+		return canonical, "unavailable:" + err.Error()
+	}
+	sum := sha256.Sum256(data)
+	return canonical, fmt.Sprintf("sha256:%x", sum[:])
 }
 
 func createServerRuntimeResourceLive(t *testing.T, ctx context.Context, st *store.Store, sessionID string, allocation store.GenerationAllocation, ownerUUID, hostID string, now time.Time) store.RuntimeResourceInstance {
