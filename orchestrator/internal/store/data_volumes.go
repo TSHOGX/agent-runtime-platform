@@ -409,17 +409,31 @@ func normalizeDataVolumeConfig(cfg DataVolumeProvisionerConfig) (normalizedDataV
 	if err := validateRuntimeIdentity(identity); err != nil {
 		return normalizedDataVolumeConfig{}, err
 	}
-	sessionsRoot, err := dataVolumeCleanAbsoluteRoot(cfg.SessionsRoot, "sessions root")
+	sessionsRoot, err := dataVolumeCanonicalRoot(cfg.SessionsRoot, "sessions root")
 	if err != nil {
 		return normalizedDataVolumeConfig{}, err
 	}
-	agentHomesRoot, err := dataVolumeCleanAbsoluteRoot(cfg.AgentHomesRoot, "agent homes root")
+	agentHomesRoot, err := dataVolumeCanonicalRoot(cfg.AgentHomesRoot, "agent homes root")
 	if err != nil {
 		return normalizedDataVolumeConfig{}, err
 	}
-	evidenceRoot, err := dataVolumeCleanAbsoluteRoot(cfg.EvidenceRoot, "data volume evidence root")
+	evidenceRoot, err := dataVolumeCanonicalRoot(cfg.EvidenceRoot, "data volume evidence root")
 	if err != nil {
 		return normalizedDataVolumeConfig{}, err
+	}
+	if dataVolumeRootsOverlap(sessionsRoot, agentHomesRoot) {
+		return normalizedDataVolumeConfig{}, fmt.Errorf("data volume sessions root %q overlaps agent homes root %q", sessionsRoot, agentHomesRoot)
+	}
+	for _, root := range []struct {
+		label string
+		path  string
+	}{
+		{label: "sessions root", path: sessionsRoot},
+		{label: "agent homes root", path: agentHomesRoot},
+	} {
+		if dataVolumeRootsOverlap(evidenceRoot, root.path) {
+			return normalizedDataVolumeConfig{}, fmt.Errorf("data volume evidence root %q overlaps %s %q", evidenceRoot, root.label, root.path)
+		}
 	}
 	return normalizedDataVolumeConfig{
 		SessionsRoot:    sessionsRoot,
@@ -457,12 +471,59 @@ func validateRuntimeIdentity(identity RuntimeIdentity) error {
 	return nil
 }
 
-func dataVolumeCleanAbsoluteRoot(path, label string) (string, error) {
+func dataVolumeCanonicalRoot(path, label string) (string, error) {
 	path = strings.TrimSpace(path)
 	if path == "" || !filepath.IsAbs(path) {
 		return "", fmt.Errorf("%s is required and must be absolute", label)
 	}
-	return filepath.Clean(path), nil
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("%s %q must be absolute: %w", label, path, err)
+	}
+	cleaned := filepath.Clean(absolute)
+	if cleaned == string(filepath.Separator) {
+		return "", fmt.Errorf("%s must not be filesystem root", label)
+	}
+	if resolved, err := filepath.EvalSymlinks(cleaned); err == nil {
+		return filepath.Clean(resolved), nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("resolve %s %q: %w", label, cleaned, err)
+	}
+	existing, missing, err := dataVolumeDeepestExistingRoot(cleaned)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s %q: %w", label, cleaned, err)
+	}
+	if existing == "" {
+		return cleaned, nil
+	}
+	resolved, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s existing prefix %q: %w", label, existing, err)
+	}
+	return filepath.Clean(filepath.Join(append([]string{resolved}, missing...)...)), nil
+}
+
+func dataVolumeDeepestExistingRoot(path string) (string, []string, error) {
+	var missing []string
+	for current := filepath.Clean(path); ; current = filepath.Dir(current) {
+		if _, err := os.Lstat(current); err == nil {
+			for i, j := 0, len(missing)-1; i < j; i, j = i+1, j-1 {
+				missing[i], missing[j] = missing[j], missing[i]
+			}
+			return current, missing, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", nil, err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", nil, nil
+		}
+		missing = append(missing, filepath.Base(current))
+	}
+}
+
+func dataVolumeRootsOverlap(a, b string) bool {
+	return dataVolumePathWithinRoot(a, b) || dataVolumePathWithinRoot(b, a)
 }
 
 func dataVolumeSafePathComponent(label, value string) (string, error) {

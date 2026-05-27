@@ -264,6 +264,72 @@ func TestVerifySessionDriverHomeVolumeRejectsConfigMismatch(t *testing.T) {
 	}
 }
 
+func TestNormalizeDataVolumeConfigRejectsOverlappingRoots(t *testing.T) {
+	cfg := testDataVolumeConfig(t)
+	tests := []struct {
+		name   string
+		mutate func(*DataVolumeProvisionerConfig)
+		want   string
+	}{
+		{
+			name: "evidence under sessions",
+			mutate: func(cfg *DataVolumeProvisionerConfig) {
+				cfg.EvidenceRoot = filepath.Join(cfg.SessionsRoot, ".evidence")
+			},
+			want: "overlaps sessions root",
+		},
+		{
+			name: "evidence under agent homes",
+			mutate: func(cfg *DataVolumeProvisionerConfig) {
+				cfg.EvidenceRoot = filepath.Join(cfg.AgentHomesRoot, ".evidence")
+			},
+			want: "overlaps agent homes root",
+		},
+		{
+			name: "sessions under agent homes",
+			mutate: func(cfg *DataVolumeProvisionerConfig) {
+				cfg.SessionsRoot = filepath.Join(cfg.AgentHomesRoot, "sessions")
+			},
+			want: "overlaps agent homes root",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := cfg
+			tc.mutate(&cfg)
+			_, err := normalizeDataVolumeConfig(cfg)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q rejection, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestNormalizeDataVolumeConfigResolvesSymlinkedRoots(t *testing.T) {
+	dir := t.TempDir()
+	realSessions := filepath.Join(dir, "real-sessions")
+	if err := os.MkdirAll(realSessions, 0o755); err != nil {
+		t.Fatalf("mkdir real sessions: %v", err)
+	}
+	linkSessions := filepath.Join(dir, "sessions-link")
+	if err := os.Symlink(realSessions, linkSessions); err != nil {
+		t.Fatalf("symlink sessions root: %v", err)
+	}
+	cfg := DataVolumeProvisionerConfig{
+		SessionsRoot:    linkSessions,
+		AgentHomesRoot:  filepath.Join(dir, "agent-homes"),
+		EvidenceRoot:    filepath.Join(dir, "evidence"),
+		RuntimeIdentity: RuntimeIdentity{UID: 7000, GID: 7001},
+	}
+	normalized, err := normalizeDataVolumeConfig(cfg)
+	if err != nil {
+		t.Fatalf("normalize data volume config: %v", err)
+	}
+	if normalized.SessionsRoot != realSessions {
+		t.Fatalf("sessions root was not canonicalized through symlink: got %q want %q", normalized.SessionsRoot, realSessions)
+	}
+}
+
 func testDataVolumeConfig(t *testing.T) DataVolumeProvisionerConfig {
 	t.Helper()
 	dir := t.TempDir()
