@@ -75,6 +75,7 @@ type RuntimeGenerationDetails struct {
 	NetworkProfileID                string
 	AgentRuntimeProfileID           string
 	RunscPlatform                   string
+	SandboxContractVersion          string
 	ControlDirPath                  string
 	ControlManifestPath             string
 	BundleDirPath                   string
@@ -393,12 +394,12 @@ ON CONFLICT(egress_policy_id) DO NOTHING`,
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO runtime_generations (
   generation_id, session_id, status, network_profile_id,
-  agent_runtime_profile_id, runsc_platform, lease_owner,
+  agent_runtime_profile_id, runsc_platform, sandbox_contract_version, lease_owner,
   lease_expires_at, last_seen_at, auto_checkpoint_enabled
-) VALUES (?, ?, 'allocating', ?, ?, 'systrap', ?, ?, ?, COALESCE((
+) VALUES (?, ?, 'allocating', ?, ?, 'systrap', ?, ?, ?, ?, COALESCE((
   SELECT auto_checkpoint_enabled FROM sessions WHERE id = ?
 ), 0))`,
-		generationID, p.SessionID, networkProfileID, agentRuntimeProfileID, p.Owner, formatTime(leaseExpires), now, p.SessionID); err != nil {
+		generationID, p.SessionID, networkProfileID, agentRuntimeProfileID, SandboxContractVersion, p.Owner, formatTime(leaseExpires), now, p.SessionID); err != nil {
 		return GenerationAllocation{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -422,12 +423,12 @@ INSERT INTO runtime_generation_resources (
   generation_id, network_profile_id, agent_runtime_profile_id,
   control_dir_path, control_manifest_path, bundle_dir_path, spec_path,
   checkpoint_path, secrets_dir_path, bridge_dir_path, network_hosts_path, log_dir_path,
-  runsc_container_id, resource_state, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'allocating', ?)`,
+  sandbox_contract_version, runsc_container_id, resource_state, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'allocating', ?)`,
 		generationID, networkProfileID, agentRuntimeProfileID,
 		resources.ControlDirPath, resources.ControlManifestPath, resources.BundleDirPath, resources.SpecPath,
 		nullableString(resources.CheckpointPath), nullableString(resources.SecretsDirPath), resources.BridgeDirPath,
-		nullableString(resources.NetworkHostsPath), resources.LogDirPath, runscContainerID, now); err != nil {
+		nullableString(resources.NetworkHostsPath), resources.LogDirPath, SandboxContractVersion, runscContainerID, now); err != nil {
 		return GenerationAllocation{}, err
 	}
 	if err := updateSessionActiveGenerationTx(ctx, tx, SessionActiveGenerationCASParams{
@@ -2084,6 +2085,7 @@ SELECT
   g.network_profile_id,
   g.agent_runtime_profile_id,
   COALESCE(g.runsc_platform, ''),
+  COALESCE(g.sandbox_contract_version, ''),
   r.control_dir_path,
   r.control_manifest_path,
   r.bundle_dir_path,
@@ -2158,6 +2160,7 @@ WHERE g.session_id = ?
 		&details.NetworkProfileID,
 		&details.AgentRuntimeProfileID,
 		&details.RunscPlatform,
+		&details.SandboxContractVersion,
 		&details.ControlDirPath,
 		&details.ControlManifestPath,
 		&details.BundleDirPath,

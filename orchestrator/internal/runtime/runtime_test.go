@@ -1137,6 +1137,9 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndIsolatedRuntime(t *t
 	if manifest.ManifestVersion != 1 {
 		t.Fatalf("manifest_version=%d want 1", manifest.ManifestVersion)
 	}
+	if manifest.SandboxContractVersion != store.SandboxContractVersion {
+		t.Fatalf("sandbox_contract_version=%q want %q", manifest.SandboxContractVersion, store.SandboxContractVersion)
+	}
 	if manifest.WorkspacePath != "/workspace" || manifest.AgentHomePath != "/agent-home" {
 		t.Fatalf("unexpected workspace/home paths: %+v", manifest)
 	}
@@ -1564,6 +1567,7 @@ func testGenerationDetails(dir, generationID string) store.RuntimeGenerationDeta
 		NetworkProfileID:           "net_" + generationID,
 		AgentRuntimeProfileID:      "arp_" + generationID,
 		RunscPlatform:              "systrap",
+		SandboxContractVersion:     store.SandboxContractVersion,
 		ControlDirPath:             filepath.Join(dir, "run", "control", "gen-"+generationID),
 		ControlManifestPath:        filepath.Join(dir, "run", "control", "gen-"+generationID, "session.json"),
 		BundleDirPath:              filepath.Join(dir, "run", "runtime", "gen-"+generationID),
@@ -1638,6 +1642,7 @@ func testControlManifest() controlManifest {
 	return controlManifest{
 		SessionID:                            "sess_1",
 		GenerationID:                         "gen_a",
+		SandboxContractVersion:               store.SandboxContractVersion,
 		CreatedAt:                            "2026-01-01T00:00:00Z",
 		AttemptID:                            "attempt-1",
 		NetworkProfileID:                     "net_a",

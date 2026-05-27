@@ -138,6 +138,7 @@ type checkpointImageManifestFile struct {
 type controlManifest struct {
 	SessionID                            string `json:"session_id"`
 	GenerationID                         string `json:"generation_id"`
+	SandboxContractVersion               string `json:"sandbox_contract_version"`
 	CreatedAt                            string `json:"created_at"`
 	AttemptID                            string `json:"attempt_id"`
 	NetworkProfileID                     string `json:"network_profile_id"`
@@ -857,6 +858,7 @@ func (r *Runtime) buildGenerationManifest(req StartRequest, runscVersion, bundle
 	return controlManifest{
 		SessionID:                            req.SessionID,
 		GenerationID:                         details.GenerationID,
+		SandboxContractVersion:               defaultString(details.SandboxContractVersion, store.SandboxContractVersion),
 		CreatedAt:                            time.Now().UTC().Format(time.RFC3339Nano),
 		AttemptID:                            "attempt-0",
 		NetworkProfileID:                     details.NetworkProfileID,
@@ -932,6 +934,7 @@ func projectedControlManifestDigest(manifest controlManifest) (string, error) {
 	strictFields := map[string]struct{}{
 		"session_id":               {},
 		"generation_id":            {},
+		"sandbox_contract_version": {},
 		"network_profile_id":       {},
 		"agent_runtime_profile_id": {},
 		"agent":                    {},

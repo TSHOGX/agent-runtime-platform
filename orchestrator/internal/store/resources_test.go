@@ -66,6 +66,9 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ne
 	if details.RunscContainerID != "harness-gen-"+allocation.GenerationID {
 		t.Fatalf("runsc container id = %q, want generation-scoped id", details.RunscContainerID)
 	}
+	if details.SandboxContractVersion != SandboxContractVersion {
+		t.Fatalf("sandbox contract version = %q, want %q", details.SandboxContractVersion, SandboxContractVersion)
+	}
 	if details.SandboxUID != 7000 ||
 		details.SandboxGID != 7001 ||
 		!slices.Equal(details.SandboxSupplementalGIDs, []int{43, 44}) {
