@@ -417,6 +417,22 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 	if err != nil {
 		return err
 	}
+	dataVolumes, err := s.ensureSessionRuntimeDataVolumes(ctx, session)
+	if err != nil {
+		if leaseErr := leaseKeeper.err(); leaseErr != nil {
+			return leaseErr
+		}
+		if ensured.RestoreFromCheckpoint {
+			if retireErr := s.retireGenerationForRestoreFallback(session.ID, allocation.GenerationID, allocation.Owner, err); retireErr != nil {
+				return retireErr
+			}
+			return err
+		}
+		if ensured.IsNew {
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+		}
+		return err
+	}
 	preparedArtifacts := runtimeArtifactsFromDetails(generationDetails)
 	resourceWorkerID := runtimeResourceWorkerID(s.ownerUUID, allocation.Owner)
 	resourceHostID := runtimeResourceHostID()
@@ -438,7 +454,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		}
 	}
 	if ensured.IsNew {
-		preparedArtifacts, err = s.runtime.PrepareGeneration(startCtx, s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, runtime.GenerationArtifacts{}))
+		preparedArtifacts, err = s.runtime.PrepareGeneration(startCtx, s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, runtime.GenerationArtifacts{}, dataVolumes))
 		if err != nil {
 			if leaseErr := leaseKeeper.err(); leaseErr != nil {
 				return leaseErr
@@ -473,7 +489,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			SessionID:              session.ID,
 			GenerationID:           allocation.GenerationID,
 			SandboxContractVersion: store.SandboxContractVersion,
-			Payload:                sandboxContractPayload(session, generationDetails, preparedArtifacts, resourceIdentityDigest),
+			Payload:                sandboxContractPayload(generationDetails, preparedArtifacts, resourceIdentityDigest, dataVolumes),
 			Now:                    time.Now().UTC(),
 		}); err != nil {
 			if leaseErr := leaseKeeper.err(); leaseErr != nil {
@@ -573,7 +589,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 	if runtimeResourceCreated {
 		generationDetails = runtimeDetailsWithResourceInstance(generationDetails, runtimeResourceInstance)
 	}
-	startReq := s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, preparedArtifacts)
+	startReq := s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, preparedArtifacts, dataVolumes)
 	startReq.RestoreFromCheckpoint = ensured.RestoreFromCheckpoint
 	result := s.runtime.Start(startCtx, startReq, nil)
 	if result.Err != nil {
@@ -990,7 +1006,12 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request, sessionID 
 	writeJSON(w, http.StatusOK, map[string]any{"messages": messages})
 }
 
-func (s *Server) runtimeStartRequest(session store.Session, generationID string, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts) runtime.StartRequest {
+type sessionRuntimeDataVolumes struct {
+	Workspace  store.SessionWorkspaceVolume
+	DriverHome store.SessionDriverHomeVolume
+}
+
+func (s *Server) runtimeStartRequest(session store.Session, generationID string, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, volumes sessionRuntimeDataVolumes) runtime.StartRequest {
 	return runtime.StartRequest{
 		SessionID:         session.ID,
 		GenerationID:      generationID,
@@ -1000,7 +1021,35 @@ func (s *Server) runtimeStartRequest(session store.Session, generationID string,
 		ResumeClaude:      session.Status != string(sessionstate.Created),
 		Generation:        details,
 		PreparedArtifacts: artifacts,
+		WorkspaceHostPath: volumes.Workspace.HostPath,
+		AgentHomeHostPath: volumes.DriverHome.HostPath,
 	}
+}
+
+func (s *Server) ensureSessionRuntimeDataVolumes(ctx context.Context, session store.Session) (sessionRuntimeDataVolumes, error) {
+	volumeConfig, err := s.dataVolumeProvisionerConfig()
+	if err != nil {
+		return sessionRuntimeDataVolumes{}, err
+	}
+	now := time.Now().UTC()
+	workspace, err := s.store.ProvisionSessionWorkspace(ctx, store.ProvisionSessionWorkspaceParams{
+		SessionID: session.ID,
+		Config:    volumeConfig,
+		Now:       now,
+	})
+	if err != nil {
+		return sessionRuntimeDataVolumes{}, fmt.Errorf("provision session workspace volume: %w", err)
+	}
+	driverHome, err := s.store.ProvisionSessionDriverHome(ctx, store.ProvisionSessionDriverHomeParams{
+		SessionID: session.ID,
+		Driver:    session.Agent,
+		Config:    volumeConfig,
+		Now:       now,
+	})
+	if err != nil {
+		return sessionRuntimeDataVolumes{}, fmt.Errorf("provision session driver home volume: %w", err)
+	}
+	return sessionRuntimeDataVolumes{Workspace: workspace, DriverHome: driverHome}, nil
 }
 
 func (s *Server) destroyGenerationRuntime(ctx context.Context, details store.RuntimeGenerationDetails) error {
@@ -1015,7 +1064,7 @@ func sandboxContractID(generationID string) string {
 	return "contract_" + strings.TrimSpace(generationID)
 }
 
-func sandboxContractPayload(session store.Session, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, resourceIdentityDigest string) map[string]any {
+func sandboxContractPayload(details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, resourceIdentityDigest string, volumes sessionRuntimeDataVolumes) map[string]any {
 	runscPlatform := strings.TrimSpace(details.RunscPlatform)
 	if runscPlatform == "" {
 		runscPlatform = "systrap"
@@ -1025,8 +1074,8 @@ func sandboxContractPayload(session store.Session, details store.RuntimeGenerati
 		sandboxModelProxyBaseURL = value
 	}
 	mountPlan := map[string]any{
-		"workspace":  map[string]any{"source": session.Workspace, "destination": "/workspace", "mode": "rw"},
-		"agent_home": map[string]any{"source": session.AgentHomePath, "destination": "/agent-home", "mode": "rw"},
+		"workspace":  map[string]any{"source": volumes.Workspace.HostPath, "destination": "/workspace", "mode": "rw"},
+		"agent_home": map[string]any{"source": volumes.DriverHome.HostPath, "destination": "/agent-home", "mode": "rw"},
 		"control":    map[string]any{"source": details.ControlDirPath, "destination": "/harness-control", "mode": "ro"},
 		"bridge":     map[string]any{"source": details.BridgeDirPath, "destination": "/harness-control/bridge", "mode": "rw"},
 	}
@@ -1072,6 +1121,31 @@ func sandboxContractPayload(session store.Session, details store.RuntimeGenerati
 		},
 		"resource_identity": map[string]any{
 			"resource_identity_digest": resourceIdentityDigest,
+		},
+		"data_volumes": map[string]any{
+			"workspace": map[string]any{
+				"table":                      "session_workspaces",
+				"session_id":                 volumes.Workspace.SessionID,
+				"host_path":                  volumes.Workspace.HostPath,
+				"layout_version":             volumes.Workspace.LayoutVersion,
+				"runtime_identity_digest":    volumes.Workspace.RuntimeIdentityDigest,
+				"provisioning_marker_path":   volumes.Workspace.ProvisioningMarkerPath,
+				"provisioning_marker_digest": volumes.Workspace.ProvisioningMarkerDigest,
+				"sandbox_destination":        "/workspace",
+				"provisioning_evidence_root": filepath.Dir(filepath.Dir(volumes.Workspace.ProvisioningMarkerPath)),
+			},
+			"agent_home": map[string]any{
+				"table":                      "session_driver_homes",
+				"session_id":                 volumes.DriverHome.SessionID,
+				"driver":                     volumes.DriverHome.Driver,
+				"host_path":                  volumes.DriverHome.HostPath,
+				"layout_version":             volumes.DriverHome.LayoutVersion,
+				"runtime_identity_digest":    volumes.DriverHome.RuntimeIdentityDigest,
+				"provisioning_marker_path":   volumes.DriverHome.ProvisioningMarkerPath,
+				"provisioning_marker_digest": volumes.DriverHome.ProvisioningMarkerDigest,
+				"sandbox_destination":        "/agent-home",
+				"provisioning_evidence_root": filepath.Dir(filepath.Dir(filepath.Dir(volumes.DriverHome.ProvisioningMarkerPath))),
+			},
 		},
 		"credential_policy": map[string]any{
 			"provider_credentials": "host-only",

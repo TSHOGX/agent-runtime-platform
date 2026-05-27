@@ -49,6 +49,12 @@ type VerifySessionWorkspaceVolumeParams struct {
 	Config    DataVolumeProvisionerConfig
 }
 
+type VerifySessionDriverHomeVolumeParams struct {
+	SessionID string
+	Driver    string
+	Config    DataVolumeProvisionerConfig
+}
+
 type SessionWorkspaceVolume struct {
 	SessionID                string
 	HostPath                 string
@@ -338,6 +344,37 @@ func (s *Store) GetSessionDriverHomeVolume(ctx context.Context, sessionID, drive
 		return SessionDriverHomeVolume{}, err
 	}
 	if err := verifyDataVolumeMarker(volume.ProvisioningMarkerPath, volume.ProvisioningMarkerDigest); err != nil {
+		return SessionDriverHomeVolume{}, err
+	}
+	return volume, nil
+}
+
+func (s *Store) VerifySessionDriverHomeVolume(ctx context.Context, p VerifySessionDriverHomeVolumeParams) (SessionDriverHomeVolume, error) {
+	cfg, err := normalizeDataVolumeConfig(p.Config)
+	if err != nil {
+		return SessionDriverHomeVolume{}, err
+	}
+	sessionID, err := dataVolumeSafePathComponent("session id", p.SessionID)
+	if err != nil {
+		return SessionDriverHomeVolume{}, err
+	}
+	driver, err := dataVolumeSafePathComponent("driver", p.Driver)
+	if err != nil {
+		return SessionDriverHomeVolume{}, err
+	}
+	static := dataVolumeStatic{
+		kind:       dataVolumeDriverHome,
+		sessionID:  sessionID,
+		driver:     driver,
+		hostPath:   filepath.Join(cfg.AgentHomesRoot, sessionID, driver),
+		markerPath: filepath.Join(cfg.EvidenceRoot, "driver-homes", sessionID, driver+".json"),
+		cfg:        cfg,
+	}
+	volume, err := s.getSessionDriverHome(ctx, sessionID, driver)
+	if err != nil {
+		return SessionDriverHomeVolume{}, err
+	}
+	if err := validateExistingDriverHomeVolume(volume, static); err != nil {
 		return SessionDriverHomeVolume{}, err
 	}
 	return volume, nil

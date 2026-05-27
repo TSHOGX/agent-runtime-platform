@@ -104,6 +104,8 @@ type StartRequest struct {
 	Done                  <-chan struct{}
 	Generation            store.RuntimeGenerationDetails
 	PreparedArtifacts     GenerationArtifacts
+	WorkspaceHostPath     string
+	AgentHomeHostPath     string
 }
 
 type Output struct {
@@ -1471,6 +1473,20 @@ func (r *Runtime) prepareSandboxIsolationDataDirs(req StartRequest) error {
 }
 
 func (r *Runtime) sandboxIsolationDataPaths(req StartRequest) (string, string, error) {
+	if strings.TrimSpace(req.WorkspaceHostPath) != "" || strings.TrimSpace(req.AgentHomeHostPath) != "" {
+		if strings.TrimSpace(req.WorkspaceHostPath) == "" || strings.TrimSpace(req.AgentHomeHostPath) == "" {
+			return "", "", fmt.Errorf("workspace and agent home data volume paths must be provided together")
+		}
+		workspaceHostPath, err := cleanSandboxDataPath(req.WorkspaceHostPath, "workspace data volume path")
+		if err != nil {
+			return "", "", err
+		}
+		agentHomeHostPath, err := cleanSandboxDataPath(req.AgentHomeHostPath, "agent home data volume path")
+		if err != nil {
+			return "", "", err
+		}
+		return workspaceHostPath, agentHomeHostPath, nil
+	}
 	sessionsRoot, err := cleanAbsoluteRoot(r.cfg.SessionsRoot, "sessions root")
 	if err != nil {
 		return "", "", err
@@ -1488,6 +1504,25 @@ func (r *Runtime) sandboxIsolationDataPaths(req StartRequest) (string, string, e
 		return "", "", err
 	}
 	return filepath.Join(sessionsRoot, sessionComponent), filepath.Join(agentHomesRoot, sessionComponent, driverComponent), nil
+}
+
+func cleanSandboxDataPath(path, label string) (string, error) {
+	for _, part := range strings.Split(path, string(filepath.Separator)) {
+		if part == ".." {
+			return "", fmt.Errorf("%s %q must not contain '..'", label, path)
+		}
+	}
+	cleaned := cleanAbsolutePath(path)
+	if cleaned == "" {
+		return "", fmt.Errorf("%s is required and must be absolute", label)
+	}
+	if cleaned == string(filepath.Separator) {
+		return "", fmt.Errorf("%s must not be filesystem root", label)
+	}
+	if cleaned != strings.TrimSpace(path) {
+		return "", fmt.Errorf("%s %q must be canonical", label, path)
+	}
+	return cleaned, nil
 }
 
 func sandboxAgent(req StartRequest) string {

@@ -1655,6 +1655,48 @@ func TestPrepareShellGenerationHasNoSecretMount(t *testing.T) {
 	assertControlManifestOmitsHostOnlyFields(t, mustReadFile(t, details.ControlManifestPath))
 }
 
+func TestPrepareGenerationUsesProvidedDataVolumePaths(t *testing.T) {
+	dir := t.TempDir()
+	rt := New(Config{
+		SessionsRoot:   filepath.Join(dir, "legacy-sessions"),
+		AgentHomesRoot: filepath.Join(dir, "legacy-agent-homes"),
+		BundleRoot:     filepath.Join(dir, "bundle", "out"),
+		RootFSPath:     filepath.Join(dir, "rootfs"),
+		RunscNetwork:   "host",
+		SandboxUID:     testSandboxUID(),
+		SandboxGID:     testSandboxGID(),
+	})
+	details := testGenerationDetails(dir, "gen_data_volume_paths")
+	details.SessionID = "sess_data_volume_paths"
+	details.Agent = "sh"
+	details.OutputFormat = "shell_pty"
+	details.RequiresSecretDrop = false
+	details.ManifestAnthropicBaseURL = ""
+	workspacePath := filepath.Join(dir, "volumes", "workspaces", details.SessionID)
+	agentHomePath := filepath.Join(dir, "volumes", "driver-homes", details.SessionID, "sh")
+
+	if _, err := rt.PrepareGeneration(context.Background(), StartRequest{
+		SessionID:         details.SessionID,
+		GenerationID:      details.GenerationID,
+		Agent:             "sh",
+		Generation:        details,
+		WorkspaceHostPath: workspacePath,
+		AgentHomeHostPath: agentHomePath,
+	}); err != nil {
+		t.Fatalf("prepare generation: %v", err)
+	}
+	var spec runtimeSpec
+	if err := json.Unmarshal(mustReadFile(t, details.SpecPath), &spec); err != nil {
+		t.Fatalf("read runtime spec: %v", err)
+	}
+	if mountSource(spec.Mounts, "/workspace") != workspacePath {
+		t.Fatalf("workspace mount source=%q want %q", mountSource(spec.Mounts, "/workspace"), workspacePath)
+	}
+	if mountSource(spec.Mounts, "/agent-home") != agentHomePath {
+		t.Fatalf("agent-home mount source=%q want %q", mountSource(spec.Mounts, "/agent-home"), agentHomePath)
+	}
+}
+
 func TestPrepareSandboxGenerationRejectsSecretReferences(t *testing.T) {
 	tests := []struct {
 		name         string

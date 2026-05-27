@@ -2066,6 +2066,36 @@ func TestStartEnsuredGenerationRenewsLeaseDuringSlowPrepare(t *testing.T) {
 		t.Fatalf("start ensured generation did not finish")
 	}
 	waitForGenerationStatus(t, ctx, st, allocation.GenerationID, "idle")
+	volumeConfig, err := srv.dataVolumeProvisionerConfig()
+	if err != nil {
+		t.Fatalf("data volume config: %v", err)
+	}
+	workspaceVolume, err := st.VerifySessionWorkspaceVolume(ctx, store.VerifySessionWorkspaceVolumeParams{
+		SessionID: session.ID,
+		Config:    volumeConfig,
+	})
+	if err != nil {
+		t.Fatalf("verify workspace volume: %v", err)
+	}
+	driverHomeVolume, err := st.VerifySessionDriverHomeVolume(ctx, store.VerifySessionDriverHomeVolumeParams{
+		SessionID: session.ID,
+		Driver:    session.Agent,
+		Config:    volumeConfig,
+	})
+	if err != nil {
+		t.Fatalf("verify driver home volume: %v", err)
+	}
+	prepares, starts := rt.requests()
+	if len(prepares) != 1 || len(starts) != 1 {
+		t.Fatalf("runtime requests prepare=%d start=%d", len(prepares), len(starts))
+	}
+	if prepares[0].WorkspaceHostPath != workspaceVolume.HostPath ||
+		prepares[0].AgentHomeHostPath != driverHomeVolume.HostPath ||
+		starts[0].WorkspaceHostPath != workspaceVolume.HostPath ||
+		starts[0].AgentHomeHostPath != driverHomeVolume.HostPath {
+		t.Fatalf("runtime did not receive data volume paths: prepare=%+v start=%+v workspace=%+v home=%+v",
+			prepares[0], starts[0], workspaceVolume, driverHomeVolume)
+	}
 	instance, err := st.GetRuntimeResourceInstance(ctx, allocation.GenerationID)
 	if err != nil {
 		t.Fatalf("get runtime resource instance: %v", err)
@@ -2101,6 +2131,30 @@ func TestStartEnsuredGenerationRenewsLeaseDuringSlowPrepare(t *testing.T) {
 	resourceIdentity, ok := payload["resource_identity"].(map[string]any)
 	if !ok || resourceIdentity["resource_identity_digest"] != instance.ResourceIdentityDigest {
 		t.Fatalf("sandbox contract missing resource identity digest: %s instance=%+v", contract.CanonicalPayload, instance)
+	}
+	mountPlan, ok := payload["mount_plan"].(map[string]any)
+	if !ok {
+		t.Fatalf("sandbox contract missing mount plan: %s", contract.CanonicalPayload)
+	}
+	workspaceMount, ok := mountPlan["workspace"].(map[string]any)
+	if !ok || workspaceMount["source"] != workspaceVolume.HostPath {
+		t.Fatalf("sandbox contract workspace mount does not use data volume: %s", contract.CanonicalPayload)
+	}
+	agentHomeMount, ok := mountPlan["agent_home"].(map[string]any)
+	if !ok || agentHomeMount["source"] != driverHomeVolume.HostPath {
+		t.Fatalf("sandbox contract agent home mount does not use data volume: %s", contract.CanonicalPayload)
+	}
+	dataVolumes, ok := payload["data_volumes"].(map[string]any)
+	if !ok {
+		t.Fatalf("sandbox contract missing data volume ownership: %s", contract.CanonicalPayload)
+	}
+	workspacePayload, ok := dataVolumes["workspace"].(map[string]any)
+	if !ok || workspacePayload["provisioning_marker_digest"] != workspaceVolume.ProvisioningMarkerDigest {
+		t.Fatalf("sandbox contract workspace data volume evidence mismatch: %s", contract.CanonicalPayload)
+	}
+	driverHomePayload, ok := dataVolumes["agent_home"].(map[string]any)
+	if !ok || driverHomePayload["provisioning_marker_digest"] != driverHomeVolume.ProvisioningMarkerDigest {
+		t.Fatalf("sandbox contract driver home data volume evidence mismatch: %s", contract.CanonicalPayload)
 	}
 	var manifestDigest, specDigest, bundleDigest string
 	if err := st.DBForTest().QueryRowContext(ctx, `
@@ -2186,6 +2240,29 @@ func TestRuntimeResourceInstanceCheckpointRestoreTransitions(t *testing.T) {
 		starts[1].Generation.RunscBinaryDigest != instance.RunscBinaryDigest ||
 		starts[1].Generation.NetnsName != instance.NetnsName {
 		t.Fatalf("restore start did not use runtime resource identity: start=%+v instance=%+v", starts[1].Generation, instance)
+	}
+	volumeConfig, err := srv.dataVolumeProvisionerConfig()
+	if err != nil {
+		t.Fatalf("data volume config: %v", err)
+	}
+	workspaceVolume, err := st.VerifySessionWorkspaceVolume(ctx, store.VerifySessionWorkspaceVolumeParams{
+		SessionID: session.ID,
+		Config:    volumeConfig,
+	})
+	if err != nil {
+		t.Fatalf("verify workspace volume: %v", err)
+	}
+	driverHomeVolume, err := st.VerifySessionDriverHomeVolume(ctx, store.VerifySessionDriverHomeVolumeParams{
+		SessionID: session.ID,
+		Driver:    session.Agent,
+		Config:    volumeConfig,
+	})
+	if err != nil {
+		t.Fatalf("verify driver home volume: %v", err)
+	}
+	if starts[1].WorkspaceHostPath != workspaceVolume.HostPath ||
+		starts[1].AgentHomeHostPath != driverHomeVolume.HostPath {
+		t.Fatalf("restore start did not use data volume paths: start=%+v workspace=%+v home=%+v", starts[1], workspaceVolume, driverHomeVolume)
 	}
 }
 
@@ -4124,6 +4201,12 @@ func newServerTestWatcher(t *testing.T, sessionsRoot string, st *store.Store, hu
 func testServerConfig(dir string) config.Config {
 	return config.Config{
 		SessionsRoot:     filepath.Join(dir, "sessions"),
+		AgentHomesRoot:   filepath.Join(dir, "agent-homes"),
+		CheckpointsRoot:  filepath.Join(dir, "checkpoints"),
+		BundleRoot:       filepath.Join(dir, "bundle"),
+		RootFSPath:       filepath.Join(dir, "rootfs"),
+		DBPath:           filepath.Join(dir, "state", "orchestrator.db"),
+		RepoRoot:         dir,
 		SessionRetention: time.Hour,
 		MaxSessions:      10,
 		DefaultAgent:     "claude",

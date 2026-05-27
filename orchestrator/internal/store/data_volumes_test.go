@@ -238,6 +238,32 @@ WHERE session_id = ?`, digest, volume.SessionID); err != nil {
 	}
 }
 
+func TestVerifySessionDriverHomeVolumeRejectsConfigMismatch(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openOwnedStore(t, ctx)
+	createStoreSession(t, ctx, st, "sess_driver_verify")
+	cfg := testDataVolumeConfig(t)
+	if _, err := st.ProvisionSessionDriverHome(ctx, ProvisionSessionDriverHomeParams{
+		SessionID: "sess_driver_verify",
+		Driver:    "claude",
+		Config:    cfg,
+		Now:       time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("provision driver home: %v", err)
+	}
+
+	other := cfg
+	other.AgentHomesRoot = filepath.Join(t.TempDir(), "agent-homes")
+	_, err := st.VerifySessionDriverHomeVolume(ctx, VerifySessionDriverHomeVolumeParams{
+		SessionID: "sess_driver_verify",
+		Driver:    "claude",
+		Config:    other,
+	})
+	if err == nil || !strings.Contains(err.Error(), "expected provisioning config") {
+		t.Fatalf("expected driver home config mismatch, got %v", err)
+	}
+}
+
 func testDataVolumeConfig(t *testing.T) DataVolumeProvisionerConfig {
 	t.Helper()
 	dir := t.TempDir()
