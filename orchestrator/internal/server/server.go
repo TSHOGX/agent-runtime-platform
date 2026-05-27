@@ -808,7 +808,6 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request, sessionID 
 func (s *Server) runtimeStartRequest(session store.Session, generationID string, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts) runtime.StartRequest {
 	return runtime.StartRequest{
 		SessionID:         session.ID,
-		RestoreID:         details.RunscContainerID,
 		GenerationID:      generationID,
 		Agent:             session.Agent,
 		WaitForTurn:       false,

@@ -325,8 +325,8 @@ func TestRuntimeStartRestoreRejectsMetadataBeforeRunscRestore(t *testing.T) {
 
 func TestCleanupExitedContainerDoesNotRemoveReplacement(t *testing.T) {
 	rt := New(Config{})
-	oldContainer := &Container{SessionID: "sess_1", RestoreID: "phase3-sess_1"}
-	newContainer := &Container{SessionID: "sess_1", RestoreID: "phase3-sess_1"}
+	oldContainer := &Container{SessionID: "sess_1", RunscContainerID: "harness-gen-gen_old"}
+	newContainer := &Container{SessionID: "sess_1", RunscContainerID: "harness-gen-gen_new"}
 
 	rt.containers["sess_1"] = newContainer
 	rt.cleanupExitedContainer(oldContainer)
@@ -341,13 +341,13 @@ func TestRuntimeStartDoesNotReuseContainerForDifferentGeneration(t *testing.T) {
 	stdin := &recordingWriteCloser{}
 	canceled := make(chan struct{})
 	rt.containers["sess_1"] = &Container{
-		SessionID:    "sess_1",
-		GenerationID: "gen_old",
-		RestoreID:    "phase3-sess_1",
-		Agent:        "claude",
-		Stdin:        stdin,
-		OutputHub:    NewOutputHub(),
-		Cancel:       func() { close(canceled) },
+		SessionID:        "sess_1",
+		GenerationID:     "gen_old",
+		RunscContainerID: "harness-gen-gen_old",
+		Agent:            "claude",
+		Stdin:            stdin,
+		OutputHub:        NewOutputHub(),
+		Cancel:           func() { close(canceled) },
 	}
 
 	res := rt.Start(context.Background(), StartRequest{
@@ -381,17 +381,17 @@ func TestRuntimeStartDoesNotReuseContainerForDifferentGeneration(t *testing.T) {
 	}
 }
 
-func TestEvictContainerByRestoreIDCancelsAndRemovesMatchingContainer(t *testing.T) {
+func TestEvictContainerByRunscIDCancelsAndRemovesMatchingContainer(t *testing.T) {
 	rt := New(Config{})
 	canceled := make(chan struct{})
 	rt.containers["sess_1"] = &Container{
-		SessionID: "sess_1",
-		RestoreID: "phase3-sess_1",
-		Cancel:    func() { close(canceled) },
+		SessionID:        "sess_1",
+		RunscContainerID: "harness-gen-gen_1",
+		Cancel:           func() { close(canceled) },
 	}
-	rt.containers["sess_2"] = &Container{SessionID: "sess_2", RestoreID: "phase3-sess_2"}
+	rt.containers["sess_2"] = &Container{SessionID: "sess_2", RunscContainerID: "harness-gen-gen_2"}
 
-	rt.evictContainerByRestoreID("phase3-sess_1")
+	rt.evictContainerByRunscID("harness-gen-gen_1")
 
 	select {
 	case <-canceled:
@@ -408,7 +408,7 @@ func TestEvictContainerByRestoreIDCancelsAndRemovesMatchingContainer(t *testing.
 
 func TestCheckpointRequiresGenerationIdentity(t *testing.T) {
 	rt := New(Config{})
-	rt.containers["sess_1"] = &Container{SessionID: "sess_1", GenerationID: "gen_a", RestoreID: "phase3-sess_1"}
+	rt.containers["sess_1"] = &Container{SessionID: "sess_1", GenerationID: "gen_a", RunscContainerID: "harness-gen-gen_a"}
 
 	err := rt.Checkpoint(context.Background(), CheckpointRequest{SessionID: "sess_1"})
 	if err == nil || !strings.Contains(err.Error(), "generation id is required") {
@@ -428,11 +428,11 @@ func TestSendMessageDoesNotReconfigureLiveSandboxNetwork(t *testing.T) {
 	hub := NewOutputHub()
 	stdin := &recordingWriteCloser{}
 	container := &Container{
-		SessionID: "sess_1",
-		RestoreID: "phase3-sess_1",
-		Agent:     "claude",
-		Stdin:     stdin,
-		OutputHub: hub,
+		SessionID:        "sess_1",
+		RunscContainerID: "harness-gen-gen_a",
+		Agent:            "claude",
+		Stdin:            stdin,
+		OutputHub:        hub,
 	}
 
 	done := make(chan struct{})

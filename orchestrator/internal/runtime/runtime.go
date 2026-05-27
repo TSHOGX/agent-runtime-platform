@@ -93,7 +93,6 @@ type ClaudeConfig struct {
 
 type StartRequest struct {
 	SessionID             string
-	RestoreID             string
 	GenerationID          string
 	Agent                 string
 	FirstMessage          string
@@ -229,17 +228,17 @@ type Runtime struct {
 }
 
 type Container struct {
-	SessionID    string
-	GenerationID string
-	RestoreID    string
-	Agent        string
-	Cmd          *exec.Cmd
-	Stdin        io.WriteCloser
-	Stdout       io.ReadCloser
-	Stderr       io.ReadCloser
-	Cancel       context.CancelFunc
-	InputMu      sync.Mutex
-	OutputHub    *OutputHub // Per-container pub/sub for output events
+	SessionID        string
+	GenerationID     string
+	RunscContainerID string
+	Agent            string
+	Cmd              *exec.Cmd
+	Stdin            io.WriteCloser
+	Stdout           io.ReadCloser
+	Stderr           io.ReadCloser
+	Cancel           context.CancelFunc
+	InputMu          sync.Mutex
+	OutputHub        *OutputHub // Per-container pub/sub for output events
 }
 
 func New(cfg Config) *Runtime {
@@ -350,7 +349,7 @@ func (r *Runtime) Destroy(ctx context.Context, containerID string) error {
 	if err := r.deleteRunscContainer(ctx, containerID); err != nil {
 		return fmt.Errorf("runsc delete %s: %w", containerID, err)
 	}
-	r.evictContainerByRestoreID(containerID)
+	r.evictContainerByRunscID(containerID)
 	return nil
 }
 
@@ -671,7 +670,7 @@ func (r *Runtime) cleanupExitedContainer(container *Container) {
 	}
 	r.mu.Unlock()
 	if current == container {
-		r.cleanupRunscContainer(context.Background(), container.RestoreID)
+		r.cleanupRunscContainer(context.Background(), container.RunscContainerID)
 	}
 }
 
@@ -680,14 +679,14 @@ func (r *Runtime) stopContainer(container *Container) {
 	if container.Cancel != nil {
 		container.Cancel()
 	}
-	r.cleanupRunscContainer(context.Background(), container.RestoreID)
+	r.cleanupRunscContainer(context.Background(), container.RunscContainerID)
 }
 
-func (r *Runtime) evictContainerByRestoreID(restoreID string) {
+func (r *Runtime) evictContainerByRunscID(runscContainerID string) {
 	var evicted []*Container
 	r.mu.Lock()
 	for sessionID, container := range r.containers {
-		if container.RestoreID == restoreID {
+		if container.RunscContainerID == runscContainerID {
 			delete(r.containers, sessionID)
 			evicted = append(evicted, container)
 		}
@@ -2002,16 +2001,16 @@ func (r *Runtime) startFresh(ctx context.Context, req StartRequest, output func(
 
 	// Store container
 	container := &Container{
-		SessionID:    req.SessionID,
-		GenerationID: req.GenerationID,
-		RestoreID:    containerID,
-		Agent:        req.Agent,
-		Cmd:          cmd,
-		Stdin:        stdin,
-		Stdout:       stdout,
-		Stderr:       stderr,
-		Cancel:       cancelCmd,
-		OutputHub:    hub,
+		SessionID:        req.SessionID,
+		GenerationID:     req.GenerationID,
+		RunscContainerID: containerID,
+		Agent:            req.Agent,
+		Cmd:              cmd,
+		Stdin:            stdin,
+		Stdout:           stdout,
+		Stderr:           stderr,
+		Cancel:           cancelCmd,
+		OutputHub:        hub,
 	}
 
 	r.mu.Lock()
@@ -2126,16 +2125,16 @@ func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, ou
 	}
 
 	container := &Container{
-		SessionID:    req.SessionID,
-		GenerationID: req.GenerationID,
-		RestoreID:    containerID,
-		Agent:        req.Agent,
-		Cmd:          cmd,
-		Stdin:        stdin,
-		Stdout:       stdout,
-		Stderr:       stderr,
-		Cancel:       cancelCmd,
-		OutputHub:    hub,
+		SessionID:        req.SessionID,
+		GenerationID:     req.GenerationID,
+		RunscContainerID: containerID,
+		Agent:            req.Agent,
+		Cmd:              cmd,
+		Stdin:            stdin,
+		Stdout:           stdout,
+		Stderr:           stderr,
+		Cancel:           cancelCmd,
+		OutputHub:        hub,
 	}
 
 	r.mu.Lock()
@@ -2380,7 +2379,7 @@ func (r *Runtime) Checkpoint(ctx context.Context, req CheckpointRequest) error {
 		"-overlay2", r.cfg.RunscOverlay2,
 		"checkpoint",
 		"-image-path", checkpointPath,
-		container.RestoreID,
+		container.RunscContainerID,
 	)
 
 	if output, err := cmd.CombinedOutput(); err != nil {
