@@ -161,22 +161,35 @@ func TestProjectedControlManifestDigestIgnoresRegenerableFields(t *testing.T) {
 
 func TestProjectedControlManifestDigestRejectsHostOnlyFields(t *testing.T) {
 	tests := []struct {
-		name   string
-		mutate func(*controlManifest)
-		field  string
+		name  string
+		field string
+		value string
 	}{
-		{name: "host hostname", mutate: func(m *controlManifest) { m.HostHostname = "host-a" }, field: "host_hostname"},
-		{name: "netns name", mutate: func(m *controlManifest) { m.NetnsName = "harness-gen-a" }, field: "netns_name"},
-		{name: "host gateway", mutate: func(m *controlManifest) { m.HostGatewayIP = "10.200.1.1" }, field: "host_gateway_ip"},
-		{name: "sandbox source", mutate: func(m *controlManifest) { m.SandboxSourceIP = "10.200.1.2" }, field: "sandbox_source_ip"},
-		{name: "bridge dir", mutate: func(m *controlManifest) { m.BridgeDirPath = "/tmp/bridge-a" }, field: "bridge_dir_path"},
-		{name: "proxy bind", mutate: func(m *controlManifest) { m.ProxyBindURL = "http://0.0.0.0:8082" }, field: "proxy_bind_url"},
+		{name: "host hostname", field: "host_hostname", value: "host-a"},
+		{name: "netns name", field: "netns_name", value: "harness-gen-a"},
+		{name: "netns path", field: "netns_path", value: "/var/run/netns/harness-gen-a"},
+		{name: "host veth", field: "host_veth", value: "hgenah"},
+		{name: "sandbox veth", field: "sandbox_veth", value: "hgenas"},
+		{name: "nft table", field: "nft_table_name", value: "harness_gen_a"},
+		{name: "host gateway", field: "host_gateway_ip", value: "10.200.1.1"},
+		{name: "sandbox source", field: "sandbox_source_ip", value: "10.200.1.2"},
+		{name: "bridge dir", field: "bridge_dir_path", value: "/tmp/bridge-a"},
+		{name: "proxy bind", field: "proxy_bind_url", value: "http://0.0.0.0:8082"},
+		{name: "runsc path", field: "runsc_binary_path", value: "/usr/local/bin/runsc"},
+		{name: "checkpoint path", field: "checkpoint_path", value: "/tmp/checkpoint"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			manifest := testControlManifest()
-			tc.mutate(&manifest)
-			_, err := projectedControlManifestDigest(manifest)
+			data, err := json.Marshal(testControlManifest())
+			if err != nil {
+				t.Fatalf("marshal test manifest: %v", err)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(data, &payload); err != nil {
+				t.Fatalf("unmarshal test manifest: %v", err)
+			}
+			payload[tc.field] = tc.value
+			_, err = projectedControlManifestPayloadDigest(payload)
 			if err == nil || !strings.Contains(err.Error(), `unclassified control manifest field "`+tc.field+`"`) {
 				t.Fatalf("expected %s rejection, got %v", tc.field, err)
 			}
@@ -184,8 +197,8 @@ func TestProjectedControlManifestDigestRejectsHostOnlyFields(t *testing.T) {
 	}
 }
 
-func TestCanonicalManifestDigestMatchesSandboxFixture(t *testing.T) {
-	data := mustReadFile(t, filepath.Join("..", "..", "..", "docs", "phase7", "fixtures", "control-manifest-payload.json"))
+func TestCanonicalManifestDigestMatchesSandboxProjectionFixture(t *testing.T) {
+	data := mustReadFile(t, filepath.Join("..", "..", "..", "docs", "phase8", "fixtures", "control-manifest-payload.json"))
 	var payload any
 	if err := json.Unmarshal(data, &payload); err != nil {
 		t.Fatalf("read canonical manifest fixture: %v", err)
@@ -194,8 +207,8 @@ func TestCanonicalManifestDigestMatchesSandboxFixture(t *testing.T) {
 	if err != nil {
 		t.Fatalf("canonicalize manifest fixture: %v", err)
 	}
-	const wantCanonical = `{"agent":"sh","agent_home_path":"/agent-homes/sess_fixture","agent_runtime_profile_id":"arp_fixture","attempt_id":"attempt_fixture","bridge_dir_path":"/run/bridge/gen_fixture","bundle_digest":"bundle_digest_fixture","claude_code_disable_nonessential_traffic":true,"created_at":"2026-05-25T00:00:00Z","egress_policy_digest":"egress_digest_fixture","generation_id":"gen_fixture","host_gateway_ip":"10.240.0.1","host_hostname":"host-fixture","manifest_version":1,"netns_name":"hns-fixture","network_profile_id":"net_fixture","output_format":"stream-json","proxy_bind_url":"http://10.240.0.1:8082","resume_claude":false,"runsc_platform":"systrap","runsc_version":"runsc release-20260511.0","runtime_config_digest":"runtime_config_digest_fixture","sandbox_source_ip":"10.240.0.2","session_id":"sess_fixture","spec_digest":"spec_digest_fixture","workspace_path":"/sessions/sess_fixture"}`
-	const wantDigest = "2dcc2b3e69e7792c65fb521284d627253787e77f60202482e2839fe1fd97a341"
+	const wantCanonical = `{"agent":"sh","agent_home_path":"/agent-home","agent_runtime_profile_id":"arp_fixture","attempt_id":"attempt_fixture","bundle_digest":"bundle_digest_fixture","claude_code_disable_nonessential_traffic":true,"created_at":"2026-05-25T00:00:00Z","egress_policy_digest":"egress_digest_fixture","generation_id":"gen_fixture","manifest_version":1,"network_profile_id":"net_fixture","output_format":"stream-json","resume_claude":false,"runsc_platform":"systrap","runsc_version":"runsc release-20260511.0","runtime_config_digest":"runtime_config_digest_fixture","sandbox_contract_version":"sandbox-isolation-v1","session_id":"sess_fixture","spec_digest":"spec_digest_fixture","workspace_path":"/workspace"}`
+	const wantDigest = "2b25f059344966e1dfb6f714a3e075d20d2053652dd41776339f2ab39d6d59a0"
 	if string(canonical) != wantCanonical {
 		t.Fatalf("canonical fixture mismatch:\ngot  %s\nwant %s", canonical, wantCanonical)
 	}
@@ -1405,7 +1418,7 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndIsolatedRuntime(t *t
 	if manifest.Model != "sonnet" || manifest.OutputFormat != "stream-json" {
 		t.Fatalf("unexpected Claude defaults: %+v", manifest)
 	}
-	assertControlManifestOmitsHostOnlyFields(t, data)
+	assertControlManifestOmitsHostOnlyFields(t, data, controlManifestForbiddenHostValues(details)...)
 
 	var spec runtimeSpec
 	specData, err := os.ReadFile(details.SpecPath)
@@ -1539,7 +1552,7 @@ func TestPrepareClaudeHostOnlyGenerationHasNoSecretMount(t *testing.T) {
 	if manifest.SandboxModelProxyBaseURL != "http://harness-model-proxy.internal:8082" {
 		t.Fatalf("unexpected host-only base url: %+v", manifest)
 	}
-	assertControlManifestOmitsHostOnlyFields(t, manifestData)
+	assertControlManifestOmitsHostOnlyFields(t, manifestData, controlManifestForbiddenHostValues(details)...)
 	if strings.Contains(string(manifestData), "/harness-secrets") ||
 		strings.Contains(string(manifestData), "anthropic_api_key") ||
 		strings.Contains(string(manifestData), "anthropic_auth_token") {
@@ -1730,7 +1743,7 @@ func TestPrepareShellGenerationHasNoSecretMount(t *testing.T) {
 	if manifestFile.Payload.SandboxModelProxyBaseURL != "" {
 		t.Fatalf("shell manifest must not require Claude base URL: %+v", manifestFile.Payload)
 	}
-	assertControlManifestOmitsHostOnlyFields(t, mustReadFile(t, details.ControlManifestPath))
+	assertControlManifestOmitsHostOnlyFields(t, mustReadFile(t, details.ControlManifestPath), controlManifestForbiddenHostValues(details)...)
 }
 
 func TestPrepareGenerationUsesProvidedDataVolumePaths(t *testing.T) {
@@ -2038,28 +2051,87 @@ func mustJSONForTest(t *testing.T, value any) string {
 	return string(data)
 }
 
-func assertControlManifestOmitsHostOnlyFields(t *testing.T, data []byte) {
+func assertControlManifestOmitsHostOnlyFields(t *testing.T, data []byte, forbiddenValues ...string) {
 	t.Helper()
-	var file controlManifestFile
+	var file struct {
+		Payload map[string]json.RawMessage `json:"payload"`
+		Digest  string                     `json:"digest"`
+	}
 	if err := json.Unmarshal(data, &file); err != nil {
 		t.Fatalf("control manifest json: %v", err)
 	}
-	payload, err := json.Marshal(file.Payload)
-	if err != nil {
-		t.Fatalf("control manifest payload json: %v", err)
+	strictFields, regenerableFields := controlManifestProjectionFields()
+	for field := range file.Payload {
+		if _, ok := strictFields[field]; ok {
+			continue
+		}
+		if _, ok := regenerableFields[field]; ok {
+			continue
+		}
+		t.Fatalf("control manifest contains unclassified field %s: %s", field, data)
 	}
 	for _, forbidden := range []string{
 		"host_hostname",
 		"netns_name",
+		"netns_path",
+		"host_veth",
+		"sandbox_veth",
 		"host_gateway_ip",
+		"nft_table_name",
 		"sandbox_source_ip",
 		"bridge_dir_path",
 		"proxy_bind_url",
+		"runsc_binary_path",
+		"checkpoint_path",
+		"log_dir_path",
+		"rootfs_path",
 	} {
-		if strings.Contains(string(payload), `"`+forbidden+`"`) {
-			t.Fatalf("control manifest must omit host-only field %s: %s", forbidden, payload)
+		if _, ok := file.Payload[forbidden]; ok {
+			t.Fatalf("control manifest must omit host-only field %s: %s", forbidden, data)
+		}
+		if strings.Contains(string(data), `"`+forbidden+`"`) {
+			t.Fatalf("control manifest must omit host-only field %s: %s", forbidden, data)
 		}
 	}
+	for _, forbidden := range forbiddenValues {
+		forbidden = strings.TrimSpace(forbidden)
+		if forbidden == "" {
+			continue
+		}
+		if strings.Contains(string(data), forbidden) {
+			t.Fatalf("control manifest must omit host-only value %q: %s", forbidden, data)
+		}
+	}
+}
+
+func controlManifestForbiddenHostValues(details store.RuntimeGenerationDetails) []string {
+	values := []string{
+		details.ControlDirPath,
+		details.BundleDirPath,
+		details.SpecPath,
+		details.CheckpointPath,
+		details.BridgeDirPath,
+		details.NetworkHostsPath,
+		details.LogDirPath,
+		details.SecretsDirPath,
+		details.HostGatewayIP,
+		details.SandboxIPCIDR,
+		details.HostSideCIDR,
+		details.NetnsName,
+		details.NetnsPath,
+		details.HostVeth,
+		details.SandboxVeth,
+		details.NftTableName,
+		details.SandboxBaseURL,
+		details.HostProxyBindURL,
+	}
+	if sandboxIP, _, ok := strings.Cut(details.SandboxIPCIDR, "/"); ok {
+		values = append(values, sandboxIP)
+	}
+	if table := generationNftTableName(details); table != "" {
+		values = append(values, table)
+	}
+	return values
 }
 
 func closedDone() <-chan struct{} {

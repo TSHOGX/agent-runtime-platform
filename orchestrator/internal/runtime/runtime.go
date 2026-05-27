@@ -162,18 +162,12 @@ type controlManifest struct {
 	OutputFormat                         string `json:"output_format"`
 	WorkspacePath                        string `json:"workspace_path"`
 	AgentHomePath                        string `json:"agent_home_path"`
-	HostHostname                         string `json:"host_hostname,omitempty"`
-	NetnsName                            string `json:"netns_name,omitempty"`
-	HostGatewayIP                        string `json:"host_gateway_ip,omitempty"`
-	SandboxSourceIP                      string `json:"sandbox_source_ip,omitempty"`
-	BridgeDirPath                        string `json:"bridge_dir_path,omitempty"`
 	BundleDigest                         string `json:"bundle_digest"`
 	RuntimeConfigDigest                  string `json:"runtime_config_digest"`
 	SpecDigest                           string `json:"spec_digest"`
 	EgressPolicyDigest                   string `json:"egress_policy_digest"`
 	ManifestVersion                      int    `json:"manifest_version"`
 	ClaudeCodeDisableNonessentialTraffic bool   `json:"claude_code_disable_nonessential_traffic"`
-	ProxyBindURL                         string `json:"proxy_bind_url,omitempty"`
 }
 
 type controlManifestFile struct {
@@ -1146,7 +1140,11 @@ func wrapControlManifest(manifest controlManifest) (string, controlManifestFile,
 }
 
 func projectedControlManifestDigest(manifest controlManifest) (string, error) {
-	data, err := json.Marshal(manifest)
+	return projectedControlManifestPayloadDigest(manifest)
+}
+
+func projectedControlManifestPayloadDigest(payload any) (string, error) {
+	data, err := json.Marshal(payload)
 	if err != nil {
 		return "", err
 	}
@@ -1154,6 +1152,25 @@ func projectedControlManifestDigest(manifest controlManifest) (string, error) {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return "", err
 	}
+	strictFields, regenerableFields := controlManifestProjectionFields()
+	projected := map[string]any{}
+	for key, value := range fields {
+		if _, ok := regenerableFields[key]; ok {
+			continue
+		}
+		if _, ok := strictFields[key]; !ok {
+			return "", fmt.Errorf("unclassified control manifest field %q", key)
+		}
+		projected[key] = value
+	}
+	payloadBytes, err := canonicalJSON(projected)
+	if err != nil {
+		return "", err
+	}
+	return digestHex(payloadBytes), nil
+}
+
+func controlManifestProjectionFields() (map[string]struct{}, map[string]struct{}) {
 	strictFields := map[string]struct{}{
 		"session_id":                   {},
 		"generation_id":                {},
@@ -1181,21 +1198,7 @@ func projectedControlManifestDigest(manifest controlManifest) (string, error) {
 		"created_at": {},
 		"attempt_id": {},
 	}
-	projected := map[string]any{}
-	for key, value := range fields {
-		if _, ok := regenerableFields[key]; ok {
-			continue
-		}
-		if _, ok := strictFields[key]; !ok {
-			return "", fmt.Errorf("unclassified control manifest field %q", key)
-		}
-		projected[key] = value
-	}
-	payloadBytes, err := canonicalJSON(projected)
-	if err != nil {
-		return "", err
-	}
-	return digestHex(payloadBytes), nil
+	return strictFields, regenerableFields
 }
 
 func (r *Runtime) renderRuntimeSpec(req StartRequest) (runtimeSpec, string, error) {
