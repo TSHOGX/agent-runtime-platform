@@ -1198,6 +1198,131 @@ func (s *Server) runtimeResourceInstanceIfExists(ctx context.Context, generation
 	return instance, true, nil
 }
 
+func (s *Server) claimRuntimeResourceCleanup(ctx context.Context, instance store.RuntimeResourceInstance, now time.Time) error {
+	switch instance.State {
+	case store.RuntimeResourceRetiring, store.RuntimeResourceReconciling, store.RuntimeResourceAbsentVerified, store.RuntimeResourceDestroyed:
+		return nil
+	}
+	if err := s.store.ClaimRuntimeResourceRetiring(ctx, store.RuntimeResourceRetireParams{
+		GenerationID: instance.GenerationID,
+		WorkerID:     instance.WorkerID,
+		HostID:       instance.HostID,
+		Now:          now,
+	}); err != nil {
+		return fmt.Errorf("claim runtime resource retiring: %w", err)
+	}
+	return nil
+}
+
+func (s *Server) completeRuntimeResourceCleanup(ctx context.Context, instance store.RuntimeResourceInstance, cleanup runtime.GenerationResourceCleanup, now time.Time) error {
+	evidence := runtimeResourceCleanupEvidence(instance, cleanup)
+	current, err := s.store.GetRuntimeResourceInstance(ctx, instance.GenerationID)
+	if err != nil {
+		return err
+	}
+	switch current.State {
+	case store.RuntimeResourceDestroyed:
+		return nil
+	case store.RuntimeResourceAbsentVerified:
+	case store.RuntimeResourceReconciling:
+	default:
+		if err := s.store.MarkRuntimeResourceReconciling(ctx, store.RuntimeResourceEvidenceParams{
+			GenerationID: instance.GenerationID,
+			WorkerID:     current.WorkerID,
+			HostID:       instance.HostID,
+			Evidence:     evidence,
+			Now:          now,
+		}); err != nil {
+			return err
+		}
+	}
+	current, err = s.store.GetRuntimeResourceInstance(ctx, instance.GenerationID)
+	if err != nil {
+		return err
+	}
+	if current.State == store.RuntimeResourceReconciling {
+		if err := s.store.MarkRuntimeResourceAbsentVerified(ctx, store.RuntimeResourceEvidenceParams{
+			GenerationID: instance.GenerationID,
+			WorkerID:     current.WorkerID,
+			HostID:       instance.HostID,
+			Evidence:     evidence,
+			Now:          now,
+		}); err != nil {
+			return err
+		}
+	}
+	if err := s.store.MarkRuntimeResourceDestroyed(ctx, store.RuntimeResourceRetireParams{
+		GenerationID: instance.GenerationID,
+		WorkerID:     current.WorkerID,
+		HostID:       instance.HostID,
+		Now:          now,
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func runtimeDetailsWithResourceInstance(details store.RuntimeGenerationDetails, instance store.RuntimeResourceInstance) store.RuntimeGenerationDetails {
+	details.RunscContainerID = instance.RunscContainerID
+	details.RunscPlatform = instance.RunscPlatform
+	details.RunscVersion = instance.RunscVersion
+	details.RunscBinaryPath = instance.RunscBinaryPath
+	details.RunscBinaryDigest = instance.RunscBinaryDigest
+	details.NetworkProfileID = instance.NetworkProfileID
+	details.NetnsName = instance.NetnsName
+	details.NetnsPath = instance.NetnsPath
+	details.HostVeth = instance.HostVeth
+	details.SandboxVeth = instance.SandboxVeth
+	details.HostGatewayIP = instance.HostGatewayIP
+	details.SandboxIPCIDR = instance.SandboxIPCIDR
+	details.HostSideCIDR = instance.HostSideCIDR
+	details.ControlDirPath = instance.ControlDirPath
+	details.ControlManifestPath = instance.ControlManifestPath
+	details.BundleDirPath = instance.BundleDirPath
+	details.SpecPath = instance.SpecPath
+	details.CheckpointPath = instance.CheckpointPath
+	details.BridgeDirPath = instance.BridgeDirPath
+	details.NetworkHostsPath = instance.NetworkHostsPath
+	details.LogDirPath = instance.LogDirPath
+	return details
+}
+
+func runtimeResourceCleanupEvidence(instance store.RuntimeResourceInstance, cleanup runtime.GenerationResourceCleanup) store.ResourceReconciliationEvidence {
+	filesystem := map[string]string{}
+	addFilesystemEvidence := func(label, path string, deleted bool) {
+		if strings.TrimSpace(path) == "" {
+			return
+		}
+		state := "absent"
+		if !deleted {
+			state = "absent_or_previously_removed"
+		}
+		filesystem[label+":"+path] = state
+	}
+	addFilesystemEvidence("checkpoint", instance.CheckpointPath, cleanup.CheckpointDeleted)
+	addFilesystemEvidence("control", instance.ControlDirPath, cleanup.ControlDirDeleted)
+	addFilesystemEvidence("bundle", instance.BundleDirPath, cleanup.BundleDirDeleted)
+	addFilesystemEvidence("spec", instance.SpecPath, cleanup.BundleDirDeleted)
+	addFilesystemEvidence("bridge", instance.BridgeDirPath, cleanup.BridgeDirDeleted)
+	addFilesystemEvidence("network_hosts", instance.NetworkHostsPath, cleanup.NetworkDirDeleted)
+	addFilesystemEvidence("logs", instance.LogDirPath, cleanup.LogDirDeleted)
+	return store.ResourceReconciliationEvidence{
+		HostID:          instance.HostID,
+		RunscState:      "cleanup_completed",
+		IPNetns:         cleanupEvidenceState("netns", cleanup.NetnsDeleted),
+		IPLink:          cleanupEvidenceState("host_veth", cleanup.HostVethDeleted),
+		NFT:             cleanupEvidenceState("nft_table", cleanup.NftTableDeleted),
+		FilesystemLstat: filesystem,
+	}
+}
+
+func cleanupEvidenceState(label string, deleted bool) string {
+	if deleted {
+		return label + ":absent"
+	}
+	return label + ":absent_or_previously_removed"
+}
+
 func runtimeResourceWorkerID(ownerUUID, leaseOwner string) string {
 	workerID := strings.TrimSpace(ownerUUID)
 	if workerID != "" {
@@ -1604,7 +1729,18 @@ func (s *Server) cleanupGenerationResources(ctx context.Context, sessionID, gene
 	if err != nil {
 		return fmt.Errorf("lookup generation resources: %w", err)
 	}
-	if _, err := s.runtime.DestroyGenerationResources(ctx, details); err != nil {
+	resourceInstance, resourceTracked, err := s.runtimeResourceInstanceIfExists(ctx, generationID)
+	if err != nil {
+		return fmt.Errorf("lookup runtime resource instance: %w", err)
+	}
+	if resourceTracked {
+		if err := s.claimRuntimeResourceCleanup(ctx, resourceInstance, now); err != nil {
+			return err
+		}
+		details = runtimeDetailsWithResourceInstance(details, resourceInstance)
+	}
+	cleanup, err := s.runtime.DestroyGenerationResources(ctx, details)
+	if err != nil {
 		return fmt.Errorf("destroy generation resources: %w", err)
 	}
 	if err := s.store.MarkGenerationResourcesDestroyed(ctx, store.DestroyGenerationResourcesParams{
@@ -1613,6 +1749,11 @@ func (s *Server) cleanupGenerationResources(ctx context.Context, sessionID, gene
 		Now:          now,
 	}); err != nil {
 		return fmt.Errorf("mark generation resources destroyed: %w", err)
+	}
+	if resourceTracked {
+		if err := s.completeRuntimeResourceCleanup(ctx, resourceInstance, cleanup, now); err != nil {
+			return fmt.Errorf("mark runtime resource destroyed: %w", err)
+		}
 	}
 	return nil
 }

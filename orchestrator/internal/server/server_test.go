@@ -1976,6 +1976,23 @@ WHERE session_id = ?
 	if turns != 0 {
 		t.Fatalf("runtime start failure should happen before turn creation, got %d turns", turns)
 	}
+	var failedGenerationID string
+	if err := st.DBForTest().QueryRowContext(ctx, `SELECT generation_id FROM runtime_generations WHERE session_id = ?`, session.ID).Scan(&failedGenerationID); err != nil {
+		t.Fatalf("query failed generation id: %v", err)
+	}
+	if err := srv.cleanupGenerationResources(ctx, session.ID, failedGenerationID, time.Now().UTC()); err != nil {
+		t.Fatalf("cleanup failed generation resources: %v", err)
+	}
+	instance, err := st.GetRuntimeResourceInstance(ctx, failedGenerationID)
+	if err != nil {
+		t.Fatalf("get cleaned runtime resource instance: %v", err)
+	}
+	if instance.State != store.RuntimeResourceDestroyed ||
+		instance.EvidenceDigest == "" ||
+		len(instance.EvidenceJSON) == 0 ||
+		instance.VerifiedAt == nil {
+		t.Fatalf("runtime resource cleanup did not record destroyed evidence: %+v", instance)
+	}
 
 	srv.runtime = instantRuntime{}
 	retryReq := httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(`{"content":"retry"}`))
