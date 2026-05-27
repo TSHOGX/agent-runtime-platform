@@ -110,6 +110,7 @@ func defaultMigrations(options Options) []migration {
 		{version: 7, name: "phase7_proxy_event_uniqueness", fn: migrateV7Phase7ProxyEventUniqueness},
 		{version: 8, name: "phase7_event_retention_index", fn: migrateV8Phase7EventRetentionIndex},
 		{version: 9, name: "phase7_checkpoint_policy", fn: migrateV9Phase7CheckpointPolicy},
+		{version: 10, name: "phase8_sandbox_contracts", fn: migrateV10Phase8SandboxContracts},
 	}
 }
 
@@ -629,6 +630,83 @@ func migrateV9Phase7CheckpointPolicy(ctx context.Context, tx dbRunner) error {
 		}
 	}
 	return nil
+}
+
+func migrateV10Phase8SandboxContracts(ctx context.Context, tx dbRunner) error {
+	if _, err := tx.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS sandbox_contracts (
+  contract_id TEXT PRIMARY KEY,
+  generation_id TEXT NOT NULL UNIQUE,
+  session_id TEXT NOT NULL,
+  sandbox_contract_version TEXT NOT NULL CHECK(sandbox_contract_version = 'sandbox-isolation-v1'),
+  canonical_payload TEXT NOT NULL,
+  sandbox_contract_digest TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+  FOREIGN KEY(generation_id) REFERENCES runtime_generations(generation_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS sandbox_contract_artifacts (
+  contract_id TEXT PRIMARY KEY,
+  sandbox_contract_digest TEXT NOT NULL,
+  network_hosts_digest TEXT,
+  control_manifest_digest TEXT NOT NULL,
+  oci_spec_digest TEXT NOT NULL,
+  bundle_digest TEXT NOT NULL,
+  checkpoint_metadata_digest TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(contract_id) REFERENCES sandbox_contracts(contract_id) ON DELETE CASCADE
+);
+`); err != nil {
+		return err
+	}
+	columns := []struct {
+		table string
+		name  string
+		ddl   string
+	}{
+		{table: "runtime_generations", name: "sandbox_contract_id", ddl: "ALTER TABLE runtime_generations ADD COLUMN sandbox_contract_id TEXT REFERENCES sandbox_contracts(contract_id)"},
+		{table: "runtime_generations", name: "sandbox_contract_version", ddl: "ALTER TABLE runtime_generations ADD COLUMN sandbox_contract_version TEXT"},
+		{table: "runtime_generations", name: "checkpoint_runsc_binary_path", ddl: "ALTER TABLE runtime_generations ADD COLUMN checkpoint_runsc_binary_path TEXT"},
+		{table: "runtime_generations", name: "checkpoint_runsc_binary_digest", ddl: "ALTER TABLE runtime_generations ADD COLUMN checkpoint_runsc_binary_digest TEXT"},
+		{table: "runtime_generation_resources", name: "contract_id", ddl: "ALTER TABLE runtime_generation_resources ADD COLUMN contract_id TEXT REFERENCES sandbox_contracts(contract_id)"},
+		{table: "runtime_generation_resources", name: "sandbox_contract_version", ddl: "ALTER TABLE runtime_generation_resources ADD COLUMN sandbox_contract_version TEXT"},
+		{table: "runtime_generation_resources", name: "runsc_container_id", ddl: "ALTER TABLE runtime_generation_resources ADD COLUMN runsc_container_id TEXT"},
+		{table: "runtime_generation_resources", name: "runsc_platform", ddl: "ALTER TABLE runtime_generation_resources ADD COLUMN runsc_platform TEXT"},
+		{table: "runtime_generation_resources", name: "runsc_binary_path", ddl: "ALTER TABLE runtime_generation_resources ADD COLUMN runsc_binary_path TEXT"},
+		{table: "runtime_generation_resources", name: "runsc_binary_digest", ddl: "ALTER TABLE runtime_generation_resources ADD COLUMN runsc_binary_digest TEXT"},
+		{table: "runtime_generation_resources", name: "sandbox_ip", ddl: "ALTER TABLE runtime_generation_resources ADD COLUMN sandbox_ip TEXT"},
+		{table: "runtime_generation_resources", name: "network_hosts_path", ddl: "ALTER TABLE runtime_generation_resources ADD COLUMN network_hosts_path TEXT"},
+		{table: "runtime_generation_resources", name: "resource_identity_payload", ddl: "ALTER TABLE runtime_generation_resources ADD COLUMN resource_identity_payload TEXT"},
+		{table: "runtime_generation_resources", name: "resource_identity_digest", ddl: "ALTER TABLE runtime_generation_resources ADD COLUMN resource_identity_digest TEXT"},
+	}
+	for _, column := range columns {
+		exists, err := columnExists(ctx, tx, column.table, column.name)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, column.ddl); err != nil {
+			return err
+		}
+	}
+	_, err := tx.ExecContext(ctx, `
+CREATE UNIQUE INDEX IF NOT EXISTS runtime_generations_sandbox_contract_id_uq
+  ON runtime_generations (sandbox_contract_id)
+  WHERE sandbox_contract_id IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS runtime_generation_resources_contract_id_uq
+  ON runtime_generation_resources (contract_id)
+  WHERE contract_id IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS runtime_generation_resources_runsc_container_id_non_destroyed_uq
+  ON runtime_generation_resources (runsc_container_id)
+  WHERE runsc_container_id IS NOT NULL
+    AND resource_state != 'destroyed';
+`)
+	return err
 }
 
 func columnExists(ctx context.Context, tx dbRunner, table, column string) (bool, error) {

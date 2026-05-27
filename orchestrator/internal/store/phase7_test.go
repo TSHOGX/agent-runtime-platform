@@ -32,11 +32,12 @@ func TestPhase7MigrationsCreateSchemaAndBackfillLegacySessions(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	assertMigrationVersions(t, st.db, 9)
+	assertMigrationVersions(t, st.db, 10)
 	for _, table := range []string{
 		"runtime_generations", "runtime_generation_resources", "turns", "events",
 		"active_model_request_contexts", "network_profiles", "agent_runtime_profiles",
-		"egress_policies", "orchestrator_owner",
+		"egress_policies", "orchestrator_owner", "sandbox_contracts",
+		"sandbox_contract_artifacts",
 	} {
 		assertTableExists(t, st.db, table)
 	}
@@ -46,10 +47,16 @@ func TestPhase7MigrationsCreateSchemaAndBackfillLegacySessions(t *testing.T) {
 	for _, column := range []string{"auto_checkpoint_enabled"} {
 		assertColumnExists(t, st.db, "runtime_generations", column)
 	}
+	for _, column := range []string{"sandbox_contract_id", "sandbox_contract_version", "checkpoint_runsc_binary_path", "checkpoint_runsc_binary_digest"} {
+		assertColumnExists(t, st.db, "runtime_generations", column)
+	}
 	for _, column := range []string{"projected_control_manifest_digest", "bundle_digest", "runtime_config_digest", "spec_digest"} {
 		assertColumnExists(t, st.db, "runtime_generation_resources", column)
 	}
-	for _, index := range []string{"events_proxy_started_request_uq", "events_proxy_finished_request_uq", "events_created_at_idx"} {
+	for _, column := range []string{"contract_id", "sandbox_contract_version", "runsc_container_id", "runsc_platform", "runsc_binary_path", "runsc_binary_digest", "sandbox_ip", "network_hosts_path", "resource_identity_payload", "resource_identity_digest"} {
+		assertColumnExists(t, st.db, "runtime_generation_resources", column)
+	}
+	for _, index := range []string{"events_proxy_started_request_uq", "events_proxy_finished_request_uq", "events_created_at_idx", "runtime_generations_sandbox_contract_id_uq", "runtime_generation_resources_contract_id_uq"} {
 		assertIndexExists(t, st.db, index)
 	}
 
@@ -105,7 +112,7 @@ func TestPhase7MigrationsAreIdempotent(t *testing.T) {
 	if err := st.migrate(ctx); err != nil {
 		t.Fatalf("rerun migrate: %v", err)
 	}
-	assertMigrationVersions(t, st.db, 9)
+	assertMigrationVersions(t, st.db, 10)
 	_ = st.Close()
 
 	st, err = Open(ctx, path)
@@ -113,7 +120,7 @@ func TestPhase7MigrationsAreIdempotent(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	assertMigrationVersions(t, st.db, 9)
+	assertMigrationVersions(t, st.db, 10)
 }
 
 func TestPhase7EventTimeMigrationNormalizesLegacyTimestamps(t *testing.T) {
