@@ -762,18 +762,20 @@ func (s *Server) resourceAllocatorConfig(agent string) store.ResourceAllocatorCo
 		outputFormat = "shell_pty"
 	}
 	return store.ResourceAllocatorConfig{
-		RunDir:                     s.cfg.Phase7.RunDir,
-		CIDRPool:                   s.cfg.Phase7.Network.CIDRPool.Prefix,
-		EgressDorisFEHosts:         s.cfg.Phase7.Network.Egress.DorisFEHosts,
-		EgressDorisBEHosts:         s.cfg.Phase7.Network.Egress.DorisBEHosts,
-		EgressDorisPorts:           s.cfg.Phase7.Network.Egress.DorisPorts,
-		EgressDNSPolicy:            string(s.cfg.Phase7.Network.Egress.DNSPolicy),
-		HostProxyBindURL:           s.cfg.Claude.ProxyBindURL,
-		ProxyPort:                  8082,
-		Agent:                      agent,
-		AgentModel:                 s.cfg.Claude.Model,
-		AgentOutputFormat:          outputFormat,
-		DisableNonessentialTraffic: s.cfg.Claude.DisableNonessentialTraffic,
+		RunDir:                      s.cfg.Phase7.RunDir,
+		CIDRPool:                    s.cfg.Phase7.Network.CIDRPool.Prefix,
+		EgressDorisFEHosts:          s.cfg.Phase7.Network.Egress.DorisFEHosts,
+		EgressDorisBEHosts:          s.cfg.Phase7.Network.Egress.DorisBEHosts,
+		EgressDorisPorts:            s.cfg.Phase7.Network.Egress.DorisPorts,
+		EgressDNSPolicy:             string(s.cfg.Phase7.Network.Egress.DNSPolicy),
+		HostProxyBindURL:            s.cfg.Claude.ProxyBindURL,
+		ProxyPort:                   8082,
+		Agent:                       agent,
+		AgentModel:                  s.cfg.Claude.Model,
+		AgentOutputFormat:           outputFormat,
+		DisableNonessentialTraffic:  s.cfg.Claude.DisableNonessentialTraffic,
+		ProviderCredentialsHostOnly: agent == string(agents.Claude),
+		SandboxModelProxyBaseURL:    s.cfg.Claude.SandboxBaseURL,
 	}
 }
 

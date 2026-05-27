@@ -3769,24 +3769,45 @@ func serverTestSandboxGID() int {
 	return 65534
 }
 
+func TestResourceAllocatorConfigUsesHostOnlyClaudeCredentials(t *testing.T) {
+	cfg := testServerConfig(t.TempDir())
+	cfg.Claude.SandboxBaseURL = "http://harness-model-proxy.internal:8082"
+	srv := &Server{cfg: cfg}
+
+	claudeConfig := srv.resourceAllocatorConfig("claude")
+	if !claudeConfig.ProviderCredentialsHostOnly {
+		t.Fatalf("claude allocator should keep provider credentials host-only: %+v", claudeConfig)
+	}
+	if claudeConfig.SandboxModelProxyBaseURL != "http://harness-model-proxy.internal:8082" {
+		t.Fatalf("claude sandbox model proxy base url = %q", claudeConfig.SandboxModelProxyBaseURL)
+	}
+
+	shellConfig := srv.resourceAllocatorConfig("sh")
+	if shellConfig.ProviderCredentialsHostOnly || shellConfig.SandboxModelProxyBaseURL != "http://harness-model-proxy.internal:8082" {
+		t.Fatalf("shell allocator should not request host-only provider credentials: %+v", shellConfig)
+	}
+}
+
 func serverTestAllocatorConfig(cfg config.Config, agent string) store.ResourceAllocatorConfig {
 	outputFormat := cfg.Claude.OutputFormat
 	if agent == "sh" {
 		outputFormat = "shell_pty"
 	}
 	return store.ResourceAllocatorConfig{
-		RunDir:                     cfg.Phase7.RunDir,
-		CIDRPool:                   cfg.Phase7.Network.CIDRPool.Prefix,
-		EgressDorisFEHosts:         cfg.Phase7.Network.Egress.DorisFEHosts,
-		EgressDorisBEHosts:         cfg.Phase7.Network.Egress.DorisBEHosts,
-		EgressDorisPorts:           cfg.Phase7.Network.Egress.DorisPorts,
-		EgressDNSPolicy:            string(cfg.Phase7.Network.Egress.DNSPolicy),
-		HostProxyBindURL:           cfg.Claude.ProxyBindURL,
-		ProxyPort:                  8082,
-		Agent:                      agent,
-		AgentModel:                 cfg.Claude.Model,
-		AgentOutputFormat:          outputFormat,
-		DisableNonessentialTraffic: cfg.Claude.DisableNonessentialTraffic,
+		RunDir:                      cfg.Phase7.RunDir,
+		CIDRPool:                    cfg.Phase7.Network.CIDRPool.Prefix,
+		EgressDorisFEHosts:          cfg.Phase7.Network.Egress.DorisFEHosts,
+		EgressDorisBEHosts:          cfg.Phase7.Network.Egress.DorisBEHosts,
+		EgressDorisPorts:            cfg.Phase7.Network.Egress.DorisPorts,
+		EgressDNSPolicy:             string(cfg.Phase7.Network.Egress.DNSPolicy),
+		HostProxyBindURL:            cfg.Claude.ProxyBindURL,
+		ProxyPort:                   8082,
+		Agent:                       agent,
+		AgentModel:                  cfg.Claude.Model,
+		AgentOutputFormat:           outputFormat,
+		DisableNonessentialTraffic:  cfg.Claude.DisableNonessentialTraffic,
+		ProviderCredentialsHostOnly: agent == "claude",
+		SandboxModelProxyBaseURL:    cfg.Claude.SandboxBaseURL,
 	}
 }
 

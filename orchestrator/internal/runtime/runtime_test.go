@@ -1202,6 +1202,76 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndSecrets(t *testing.T
 	assertSecretFile(t, filepath.Join(details.SecretsDirPath, "anthropic_api_key", "local"))
 }
 
+func TestPrepareClaudeHostOnlyGenerationHasNoSecretMount(t *testing.T) {
+	dir := t.TempDir()
+	rt := New(Config{
+		SessionsRoot:       filepath.Join(dir, "sessions"),
+		AgentHomesRoot:     filepath.Join(dir, "agent-homes"),
+		BundleRoot:         filepath.Join(dir, "bundle", "out"),
+		RootFSPath:         filepath.Join(dir, "rootfs"),
+		BridgeHeartbeat:    20 * time.Second,
+		BridgePollInterval: 5 * time.Millisecond,
+		Claude: ClaudeConfig{
+			ProxyBindURL:               "http://0.0.0.0:8082",
+			Model:                      "sonnet",
+			OutputFormat:               "stream-json",
+			DisableNonessentialTraffic: true,
+		},
+	})
+	details := testGenerationDetails(dir, "gen_host_only")
+	details.RequiresSecretDrop = false
+	details.ManifestAnthropicBaseURL = "http://harness-model-proxy.internal:8082"
+	details.AnthropicAPIKeySecretID = ""
+	details.AnthropicAuthTokenSecretID = ""
+	details.SecretVersion = ""
+	details.SecretsDirPath = ""
+
+	if _, err := rt.PrepareGeneration(context.Background(), StartRequest{
+		SessionID:         "sess_1",
+		GenerationID:      details.GenerationID,
+		Agent:             "claude",
+		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
+		Generation:        details,
+	}); err != nil {
+		t.Fatalf("prepare host-only claude generation: %v", err)
+	}
+
+	manifestData := mustReadFile(t, details.ControlManifestPath)
+	var manifestFile controlManifestFile
+	if err := json.Unmarshal(manifestData, &manifestFile); err != nil {
+		t.Fatalf("read host-only manifest: %v", err)
+	}
+	manifest := manifestFile.Payload
+	if manifest.AnthropicBaseURL != "http://harness-model-proxy.internal:8082" {
+		t.Fatalf("unexpected host-only base url: %+v", manifest)
+	}
+	if manifest.SecretMountPath != "" ||
+		manifest.AnthropicAPIKeySecretID != "" ||
+		manifest.AnthropicAuthTokenSecretID != "" ||
+		manifest.SecretVersion != "" {
+		t.Fatalf("host-only manifest must not reference secrets: %+v", manifest)
+	}
+	if strings.Contains(string(manifestData), "/harness-secrets") ||
+		strings.Contains(string(manifestData), "anthropic_api_key") ||
+		strings.Contains(string(manifestData), "anthropic_auth_token") {
+		t.Fatalf("host-only manifest contains legacy secret references: %s", manifestData)
+	}
+
+	specData := mustReadFile(t, details.SpecPath)
+	if strings.Contains(string(specData), "/harness-secrets") ||
+		strings.Contains(string(specData), "anthropic_api_key") ||
+		strings.Contains(string(specData), "anthropic_auth_token") {
+		t.Fatalf("host-only spec contains legacy secret references: %s", specData)
+	}
+	var spec runtimeSpec
+	if err := json.Unmarshal(specData, &spec); err != nil {
+		t.Fatalf("read host-only spec: %v", err)
+	}
+	if mountByDestination(spec.Mounts, "/harness-secrets") != nil {
+		t.Fatalf("host-only spec must not mount secrets: %+v", spec.Mounts)
+	}
+}
+
 func TestPrepareGenerationConcurrentSessionsUseDistinctControlManifests(t *testing.T) {
 	dir := t.TempDir()
 	rt := New(Config{

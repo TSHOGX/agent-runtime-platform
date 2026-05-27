@@ -717,6 +717,44 @@ func TestAllocateShellGenerationHasNoSecretReferences(t *testing.T) {
 	}
 }
 
+func TestAllocateClaudeHostOnlyGenerationHasNoSecretReferences(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	createStoreSession(t, ctx, st, "sess_claude_host_only")
+	cfg := testAllocatorConfig(t)
+	cfg.ProviderCredentialsHostOnly = true
+	cfg.SandboxModelProxyBaseURL = "http://harness-model-proxy.internal:8082"
+
+	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_claude_host_only",
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    cfg,
+	})
+	if err != nil {
+		t.Fatalf("allocate host-only claude generation: %v", err)
+	}
+	details, err := st.GetRuntimeGenerationDetails(ctx, "sess_claude_host_only", allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get host-only claude generation details: %v", err)
+	}
+	if details.Agent != "claude" ||
+		details.RequiresSecretDrop ||
+		details.SecretsDirPath != "" ||
+		details.AnthropicAPIKeySecretID != "" ||
+		details.AnthropicAuthTokenSecretID != "" ||
+		details.SecretVersion != "" {
+		t.Fatalf("host-only claude generation should not carry secrets: %+v", details)
+	}
+	if !details.ModelAccessAllowed {
+		t.Fatalf("host-only claude generation should allow model access: %+v", details)
+	}
+	if details.ManifestAnthropicBaseURL != "http://harness-model-proxy.internal:8082" {
+		t.Fatalf("manifest base url = %q", details.ManifestAnthropicBaseURL)
+	}
+}
+
 func TestAllocatorReturnsPoolExhaustedBeforeRows(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)

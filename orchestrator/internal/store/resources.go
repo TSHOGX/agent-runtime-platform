@@ -22,22 +22,24 @@ var ErrPoolExhausted = errors.New("pool exhausted")
 var ErrStaleCheckpointRestore = errors.New("stale checkpoint restore")
 
 type ResourceAllocatorConfig struct {
-	RunDir                     string
-	CIDRPool                   netip.Prefix
-	EgressDorisFEHosts         []string
-	EgressDorisBEHosts         []string
-	EgressDorisPorts           []int
-	EgressDNSPolicy            string
-	HostProxyBindURL           string
-	ProxyPort                  int
-	Agent                      string
-	AgentModel                 string
-	AgentOutputFormat          string
-	DisableNonessentialTraffic bool
-	ModelAccessAllowed         *bool
-	AnthropicAPIKeySecretID    string
-	AnthropicAuthTokenSecretID string
-	SecretVersion              string
+	RunDir                      string
+	CIDRPool                    netip.Prefix
+	EgressDorisFEHosts          []string
+	EgressDorisBEHosts          []string
+	EgressDorisPorts            []int
+	EgressDNSPolicy             string
+	HostProxyBindURL            string
+	ProxyPort                   int
+	Agent                       string
+	AgentModel                  string
+	AgentOutputFormat           string
+	DisableNonessentialTraffic  bool
+	ModelAccessAllowed          *bool
+	ProviderCredentialsHostOnly bool
+	SandboxModelProxyBaseURL    string
+	AnthropicAPIKeySecretID     string
+	AnthropicAuthTokenSecretID  string
+	SecretVersion               string
 }
 
 type AllocateGenerationParams struct {
@@ -295,7 +297,7 @@ func (s *Store) AllocateGeneration(ctx context.Context, p AllocateGenerationPara
 	networkProfileID := "net_" + generationID
 	agentRuntimeProfileID := agentRuntimeProfileID(generationID)
 	resources := buildResourcePaths(p.Config.RunDir, generationID)
-	if p.Config.agent() == "sh" {
+	if !p.Config.requiresSecretDrop() {
 		resources.SecretsDirPath = ""
 	}
 	egressPolicyID := egressPolicyID(p.Config)
@@ -2554,7 +2556,7 @@ func (c ResourceAllocatorConfig) outputFormat() string {
 }
 
 func (c ResourceAllocatorConfig) requiresSecretDrop() bool {
-	return c.agent() == "claude"
+	return c.agent() == "claude" && !c.providerCredentialsHostOnly()
 }
 
 func (c ResourceAllocatorConfig) modelAccessAllowed() bool {
@@ -2564,15 +2566,22 @@ func (c ResourceAllocatorConfig) modelAccessAllowed() bool {
 	return c.agent() == "claude"
 }
 
+func (c ResourceAllocatorConfig) providerCredentialsHostOnly() bool {
+	return c.agent() == "claude" && c.ProviderCredentialsHostOnly
+}
+
 func (c ResourceAllocatorConfig) manifestAnthropicBaseURL(baseURL string) string {
 	if c.agent() == "sh" {
 		return ""
+	}
+	if c.providerCredentialsHostOnly() && strings.TrimSpace(c.SandboxModelProxyBaseURL) != "" {
+		return strings.TrimSpace(c.SandboxModelProxyBaseURL)
 	}
 	return strings.TrimSpace(baseURL)
 }
 
 func (c ResourceAllocatorConfig) apiKeySecretID() string {
-	if c.agent() == "sh" {
+	if c.agent() == "sh" || c.providerCredentialsHostOnly() {
 		return ""
 	}
 	if strings.TrimSpace(c.AnthropicAPIKeySecretID) == "" {
@@ -2582,7 +2591,7 @@ func (c ResourceAllocatorConfig) apiKeySecretID() string {
 }
 
 func (c ResourceAllocatorConfig) authTokenSecretID() string {
-	if c.agent() == "sh" {
+	if c.agent() == "sh" || c.providerCredentialsHostOnly() {
 		return ""
 	}
 	if strings.TrimSpace(c.AnthropicAuthTokenSecretID) == "" {
@@ -2592,7 +2601,7 @@ func (c ResourceAllocatorConfig) authTokenSecretID() string {
 }
 
 func (c ResourceAllocatorConfig) secretVersion() string {
-	if c.agent() == "sh" {
+	if c.agent() == "sh" || c.providerCredentialsHostOnly() {
 		return ""
 	}
 	if strings.TrimSpace(c.SecretVersion) == "" {

@@ -101,12 +101,20 @@ check_expected "${SECRET_VERSION:-}" "${HARNESS_EXPECTED_SECRET_VERSION:-}" "sec
 
 if [ "${HARNESS_AGENT:-claude}" = "claude" ]; then
   : "${ANTHROPIC_BASE_URL:?ANTHROPIC_BASE_URL is required for claude agent}"
-  : "${SECRET_MOUNT_PATH:?SECRET_MOUNT_PATH is required for claude agent}"
-  : "${ANTHROPIC_API_KEY_SECRET_ID:?ANTHROPIC_API_KEY_SECRET_ID is required for claude agent}"
-  : "${ANTHROPIC_AUTH_TOKEN_SECRET_ID:?ANTHROPIC_AUTH_TOKEN_SECRET_ID is required for claude agent}"
-  : "${SECRET_VERSION:?SECRET_VERSION is required for claude agent}"
-  : "${HARNESS_SECRET_READERS_GID:?HARNESS_SECRET_READERS_GID is required for claude agent}"
-  export ANTHROPIC_BASE_URL SECRET_MOUNT_PATH ANTHROPIC_API_KEY_SECRET_ID ANTHROPIC_AUTH_TOKEN_SECRET_ID SECRET_VERSION
+  SECRET_BACKED_CLAUDE=0
+  if [ -n "${SECRET_MOUNT_PATH:-}" ] || [ -n "${ANTHROPIC_API_KEY_SECRET_ID:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN_SECRET_ID:-}" ] || [ -n "${SECRET_VERSION:-}" ]; then
+    SECRET_BACKED_CLAUDE=1
+  fi
+  if [ "$SECRET_BACKED_CLAUDE" = "1" ]; then
+    : "${SECRET_MOUNT_PATH:?SECRET_MOUNT_PATH is required for secret-backed claude agent}"
+    : "${ANTHROPIC_API_KEY_SECRET_ID:?ANTHROPIC_API_KEY_SECRET_ID is required for secret-backed claude agent}"
+    : "${ANTHROPIC_AUTH_TOKEN_SECRET_ID:?ANTHROPIC_AUTH_TOKEN_SECRET_ID is required for secret-backed claude agent}"
+    : "${SECRET_VERSION:?SECRET_VERSION is required for secret-backed claude agent}"
+    : "${HARNESS_SECRET_READERS_GID:?HARNESS_SECRET_READERS_GID is required for secret-backed claude agent}"
+    export ANTHROPIC_BASE_URL SECRET_MOUNT_PATH ANTHROPIC_API_KEY_SECRET_ID ANTHROPIC_AUTH_TOKEN_SECRET_ID SECRET_VERSION
+  else
+    export ANTHROPIC_BASE_URL
+  fi
 fi
 
 if [ "${HARNESS_BRIDGE_MODE:-}" = "probe" ]; then
@@ -180,20 +188,35 @@ case "${HARNESS_AGENT:-claude}" in
         set -- "$@" --resume "$CLAUDE_SESSION_UUID"
       fi
       set +e
-      printf '%s\n' "$turn" | setpriv --reuid "$AGENT_UID" --regid "$AGENT_GID" --groups "$HARNESS_SECRET_READERS_GID" \
-        env HOME="$AGENT_HOME" USER="$AGENT_USER" LOGNAME="$AGENT_USER" \
-        ANTHROPIC_BASE_URL="$ANTHROPIC_BASE_URL" \
-        SECRET_MOUNT_PATH="$SECRET_MOUNT_PATH" \
-        ANTHROPIC_API_KEY_SECRET_ID="$ANTHROPIC_API_KEY_SECRET_ID" \
-        ANTHROPIC_AUTH_TOKEN_SECRET_ID="$ANTHROPIC_AUTH_TOKEN_SECRET_ID" \
-        SECRET_VERSION="$SECRET_VERSION" \
-        sh -c '
-          ANTHROPIC_API_KEY="$(cat "$SECRET_MOUNT_PATH/$ANTHROPIC_API_KEY_SECRET_ID/$SECRET_VERSION")"
-          ANTHROPIC_AUTH_TOKEN="$(cat "$SECRET_MOUNT_PATH/$ANTHROPIC_AUTH_TOKEN_SECRET_ID/$SECRET_VERSION")"
-          export ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
-          exec "$@"
-        ' sh "$@"
-      status=$?
+      if [ "${SECRET_BACKED_CLAUDE:-0}" = "1" ]; then
+        printf '%s\n' "$turn" | setpriv --reuid "$AGENT_UID" --regid "$AGENT_GID" --groups "$HARNESS_SECRET_READERS_GID" \
+          env HOME="$AGENT_HOME" USER="$AGENT_USER" LOGNAME="$AGENT_USER" \
+          ANTHROPIC_BASE_URL="$ANTHROPIC_BASE_URL" \
+          SECRET_MOUNT_PATH="$SECRET_MOUNT_PATH" \
+          ANTHROPIC_API_KEY_SECRET_ID="$ANTHROPIC_API_KEY_SECRET_ID" \
+          ANTHROPIC_AUTH_TOKEN_SECRET_ID="$ANTHROPIC_AUTH_TOKEN_SECRET_ID" \
+          SECRET_VERSION="$SECRET_VERSION" \
+          sh -c '
+            ANTHROPIC_API_KEY="$(cat "$SECRET_MOUNT_PATH/$ANTHROPIC_API_KEY_SECRET_ID/$SECRET_VERSION")"
+            ANTHROPIC_AUTH_TOKEN="$(cat "$SECRET_MOUNT_PATH/$ANTHROPIC_AUTH_TOKEN_SECRET_ID/$SECRET_VERSION")"
+            export ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
+            exec "$@"
+          ' sh "$@"
+        status=$?
+      else
+        ANTHROPIC_API_KEY="${HARNESS_PROXY_DUMMY_API_KEY:-harness-model-proxy-dummy-key}"
+        export ANTHROPIC_API_KEY
+        printf '%s\n' "$turn" | setpriv --reuid "$AGENT_UID" --regid "$AGENT_GID" --clear-groups \
+          env HOME="$AGENT_HOME" USER="$AGENT_USER" LOGNAME="$AGENT_USER" \
+          ANTHROPIC_BASE_URL="$ANTHROPIC_BASE_URL" \
+          sh -c '
+            export ANTHROPIC_BASE_URL ANTHROPIC_API_KEY
+            unset ANTHROPIC_AUTH_TOKEN
+            exec "$@"
+          ' sh "$@"
+        status=$?
+        unset ANTHROPIC_API_KEY
+      fi
       set -e
       if [ "$status" -ne 0 ]; then
         echo "[entrypoint] claude turn exited with status $status" >&2

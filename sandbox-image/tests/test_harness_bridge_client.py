@@ -411,6 +411,12 @@ class BridgeClientTest(unittest.TestCase):
         self.assertEqual(message_call.kwargs["headers"]["x-api-key"], "test-key")
         self.assertEqual(message_call.kwargs["headers"]["authorization"], "Bearer test-token")
 
+    def test_network_probe_skips_message_probe_without_api_key(self):
+        with mock.patch.object(bridge, "http_status", return_value=200) as http_status:
+            bridge.run_network_probe("http://10.240.0.1:8082", {200}, {400}, 0.1, "")
+
+        http_status.assert_called_once_with("http://10.240.0.1:8082/healthz", timeout=0.1)
+
     def test_network_probe_rejects_unaccepted_statuses(self):
         with mock.patch.object(bridge, "http_status", return_value=204):
             with self.assertRaisesRegex(RuntimeError, r"probe GET /healthz returned 204"):
@@ -542,6 +548,62 @@ class BridgeClientTest(unittest.TestCase):
         self.assertIn('ANTHROPIC_API_KEY="$(cat "$SECRET_MOUNT_PATH/$ANTHROPIC_API_KEY_SECRET_ID/$SECRET_VERSION")"', shell_script)
         self.assertIn("/usr/local/bin/claude", command)
         self.assertNotIn("ANTHROPIC_API_KEY", captured["env"])
+        self.assertIn('"text":"hello"', captured["process"].stdin.writes[0])
+
+    def test_claude_runner_uses_dummy_key_without_secret_mount(self):
+        class FakeStdin:
+            def __init__(self):
+                self.writes = []
+
+            def write(self, value):
+                self.writes.append(value)
+
+            def close(self):
+                pass
+
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = FakeStdin()
+                self.stdout = iter(['{"type":"result","result":"ok"}\n'])
+
+            def wait(self):
+                return 0
+
+        captured = {}
+
+        def popen(command, **kwargs):
+            captured["command"] = command
+            captured["env"] = kwargs.get("env") or {}
+            captured["process"] = FakeProcess()
+            return captured["process"]
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "CLAUDE_SESSION_UUID": "11111111-2222-3333-4444-555555555555",
+                "SESSION_ID": "sess",
+                "HARNESS_AGENT_HOME": "/agent-homes/sess",
+                "HARNESS_AGENT_UID": "65534",
+                "HARNESS_AGENT_GID": "65534",
+                "ANTHROPIC_BASE_URL": "http://harness-model-proxy.internal:8082",
+            },
+            clear=True,
+        ):
+            with mock.patch.object(bridge.subprocess, "Popen", side_effect=popen):
+                status, error_class, error = bridge.ClaudeTurnRunner().run_turn(
+                    "hello",
+                    lambda stream, line: None,
+                )
+
+        self.assertEqual((status, error_class, error), ("completed", "", ""))
+        command = captured["command"]
+        self.assertIn("--clear-groups", command)
+        self.assertNotIn("--groups", command)
+        self.assertNotIn("SECRET_MOUNT_PATH", " ".join(command))
+        self.assertNotIn("ANTHROPIC_API_KEY=", " ".join(command))
+        self.assertEqual(captured["env"]["ANTHROPIC_API_KEY"], bridge.HOST_ONLY_DUMMY_API_KEY)
+        self.assertEqual(captured["env"]["ANTHROPIC_BASE_URL"], "http://harness-model-proxy.internal:8082")
+        self.assertNotIn("ANTHROPIC_AUTH_TOKEN", captured["env"])
         self.assertIn('"text":"hello"', captured["process"].stdin.writes[0])
 
     def test_claude_runner_resumes_after_first_turn(self):
@@ -694,6 +756,14 @@ class EntrypointStaticTest(unittest.TestCase):
         self.assertIn("HARNESS_AGENT_GID is required", text)
         self.assertNotIn('AGENT_UID="65534"', text)
         self.assertNotIn('AGENT_GID="65534"', text)
+
+    def test_entrypoint_supports_host_only_claude_credentials(self):
+        entrypoint = SCRIPT.with_name("harness-agent-entrypoint")
+        text = entrypoint.read_text(encoding="utf-8")
+        self.assertIn("SECRET_BACKED_CLAUDE=0", text)
+        self.assertIn("secret-backed claude agent", text)
+        self.assertIn("--clear-groups", text)
+        self.assertIn("HARNESS_PROXY_DUMMY_API_KEY:-harness-model-proxy-dummy-key", text)
 
     def test_claim_loop_starts_after_workspace_and_agent_home_setup(self):
         entrypoint = SCRIPT.with_name("harness-agent-entrypoint")
