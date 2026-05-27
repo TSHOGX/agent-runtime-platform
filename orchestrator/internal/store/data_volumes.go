@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -145,7 +146,7 @@ func (s *Store) ProvisionSessionWorkspace(ctx context.Context, p ProvisionSessio
 	if err != nil {
 		return SessionWorkspaceVolume{}, err
 	}
-	if err := writeDataVolumeMarker(markerPath, markerBytes, markerDigest); err != nil {
+	if err := writeDataVolumeMarker(markerPath, cfg.EvidenceRoot, markerBytes, markerDigest); err != nil {
 		return SessionWorkspaceVolume{}, err
 	}
 	row := SessionWorkspaceVolume{
@@ -209,7 +210,7 @@ func (s *Store) ProvisionSessionDriverHome(ctx context.Context, p ProvisionSessi
 	if err != nil {
 		return SessionDriverHomeVolume{}, err
 	}
-	if err := writeDataVolumeMarker(markerPath, markerBytes, markerDigest); err != nil {
+	if err := writeDataVolumeMarker(markerPath, cfg.EvidenceRoot, markerBytes, markerDigest); err != nil {
 		return SessionDriverHomeVolume{}, err
 	}
 	row := SessionDriverHomeVolume{
@@ -615,12 +616,19 @@ func buildDataVolumeMarker(static dataVolumeStatic, provisionedAt time.Time) (da
 	return marker, data, SandboxContractDigest(data), nil
 }
 
-func writeDataVolumeMarker(path string, payload []byte, digest string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create data volume marker dir: %w", err)
+func writeDataVolumeMarker(path, evidenceRoot string, payload []byte, digest string) error {
+	if err := ensureDataVolumeMarkerDir(evidenceRoot, filepath.Dir(path)); err != nil {
+		return err
 	}
-	existing, err := os.ReadFile(path)
+	info, err := os.Lstat(path)
 	if err == nil {
+		if err := verifyRootOwnedRegularDataVolumeMarkerInfo(path, info); err != nil {
+			return err
+		}
+		existing, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read data volume marker %q: %w", path, err)
+		}
 		if bytes.Equal(existing, payload) && SandboxContractDigest(existing) == digest {
 			return nil
 		}
@@ -630,16 +638,34 @@ func writeDataVolumeMarker(path string, payload []byte, digest string) error {
 		return fmt.Errorf("read data volume marker %q: %w", path, err)
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, payload, 0o644); err != nil {
+	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
 		return fmt.Errorf("write data volume marker: %w", err)
 	}
+	if _, err := file.Write(payload); err != nil {
+		_ = file.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("write data volume marker: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("write data volume marker: %w", err)
+	}
+	if err := verifyRootOwnedRegularDataVolumeMarker(tmp); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
 	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
 		return fmt.Errorf("rename data volume marker: %w", err)
 	}
-	return nil
+	return verifyRootOwnedRegularDataVolumeMarker(path)
 }
 
 func readVerifiedDataVolumeMarker(path, digest string) ([]byte, error) {
+	if err := verifyRootOwnedRegularDataVolumeMarker(path); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read data volume marker %q: %w", path, err)
@@ -655,6 +681,101 @@ func readVerifiedDataVolumeMarker(path, digest string) ([]byte, error) {
 		return nil, fmt.Errorf("data volume marker %q is not canonical", path)
 	}
 	return data, nil
+}
+
+func ensureDataVolumeMarkerDir(evidenceRoot, markerDir string) error {
+	evidenceRoot = filepath.Clean(evidenceRoot)
+	markerDir = filepath.Clean(markerDir)
+	if evidenceRoot == string(filepath.Separator) {
+		return fmt.Errorf("data volume evidence root must not be filesystem root")
+	}
+	if !dataVolumePathWithinRoot(markerDir, evidenceRoot) {
+		return fmt.Errorf("data volume marker dir %q is outside evidence root %q", markerDir, evidenceRoot)
+	}
+	if err := os.MkdirAll(evidenceRoot, 0o755); err != nil {
+		return fmt.Errorf("create data volume evidence root: %w", err)
+	}
+	if err := verifyRootOwnedDataVolumeDir(evidenceRoot, "data volume evidence root"); err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(evidenceRoot, markerDir)
+	if err != nil {
+		return fmt.Errorf("resolve data volume marker dir %q: %w", markerDir, err)
+	}
+	if rel == "." {
+		return nil
+	}
+	current := evidenceRoot
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		if part == "" || part == "." || part == ".." {
+			return fmt.Errorf("data volume marker dir %q is not canonical under evidence root %q", markerDir, evidenceRoot)
+		}
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			if err := os.Mkdir(current, 0o755); err != nil {
+				return fmt.Errorf("create data volume marker dir %q: %w", current, err)
+			}
+			info, err = os.Lstat(current)
+		}
+		if err != nil {
+			return fmt.Errorf("stat data volume marker dir %q: %w", current, err)
+		}
+		if err := verifyRootOwnedDataVolumeDirInfo(current, info, "data volume marker dir"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func verifyRootOwnedDataVolumeDir(path, label string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("stat %s %q: %w", label, path, err)
+	}
+	return verifyRootOwnedDataVolumeDirInfo(path, info, label)
+}
+
+func verifyRootOwnedDataVolumeDirInfo(path string, info os.FileInfo, label string) error {
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s %q must not be a symlink", label, path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s %q must be a directory", label, path)
+	}
+	return verifyRootOwnedProtectedDataVolumePath(path, info, label)
+}
+
+func verifyRootOwnedRegularDataVolumeMarker(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("stat data volume marker %q: %w", path, err)
+	}
+	return verifyRootOwnedRegularDataVolumeMarkerInfo(path, info)
+}
+
+func verifyRootOwnedRegularDataVolumeMarkerInfo(path string, info os.FileInfo) error {
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("data volume marker %q must not be a symlink", path)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("data volume marker %q must be a regular file", path)
+	}
+	return verifyRootOwnedProtectedDataVolumePath(path, info, "data volume marker")
+}
+
+func verifyRootOwnedProtectedDataVolumePath(path string, info os.FileInfo, label string) error {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("stat ownership unavailable for %s %q", label, path)
+	}
+	if stat.Uid != 0 {
+		return fmt.Errorf("%s %q must be root-owned, got uid %d", label, path, stat.Uid)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("%s %q must not be group/world writable", label, path)
+	}
+	return nil
 }
 
 func verifyDataVolumeMarker(path, digest string) error {

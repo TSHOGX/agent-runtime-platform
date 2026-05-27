@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -37,6 +38,9 @@ func TestProvisionSessionWorkspaceCreatesRowAndMarker(t *testing.T) {
 		t.Fatalf("workspace dir missing: %v", err)
 	}
 	assertMarkerDigest(t, volume.ProvisioningMarkerPath, volume.ProvisioningMarkerDigest)
+	assertRootOwnedProtectedDir(t, cfg.EvidenceRoot)
+	assertRootOwnedProtectedDir(t, filepath.Join(cfg.EvidenceRoot, "workspaces"))
+	assertRootOwnedProtectedFile(t, volume.ProvisioningMarkerPath)
 	marker := readMarker(t, volume.ProvisioningMarkerPath)
 	if marker["volume_type"] != string(dataVolumeWorkspace) ||
 		marker["session_id"] != "sess_workspace" ||
@@ -77,6 +81,79 @@ func TestProvisionSessionDriverHomeCreatesDriverScopedRows(t *testing.T) {
 	}
 	assertMarkerDigest(t, claude.ProvisioningMarkerPath, claude.ProvisioningMarkerDigest)
 	assertMarkerDigest(t, shell.ProvisioningMarkerPath, shell.ProvisioningMarkerDigest)
+}
+
+func TestProvisionSessionWorkspaceRejectsWritableEvidenceRoot(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openOwnedStore(t, ctx)
+	createStoreSession(t, ctx, st, "sess_writable_evidence")
+	cfg := testDataVolumeConfig(t)
+	if err := os.MkdirAll(cfg.EvidenceRoot, 0o755); err != nil {
+		t.Fatalf("mkdir evidence root: %v", err)
+	}
+	if err := os.Chmod(cfg.EvidenceRoot, 0o777); err != nil {
+		t.Fatalf("chmod evidence root: %v", err)
+	}
+
+	_, err := st.ProvisionSessionWorkspace(ctx, ProvisionSessionWorkspaceParams{
+		SessionID: "sess_writable_evidence",
+		Config:    cfg,
+		Now:       time.Now().UTC(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "must not be group/world writable") {
+		t.Fatalf("expected writable evidence root rejection, got %v", err)
+	}
+}
+
+func TestProvisionSessionWorkspaceRejectsNonRootEvidenceRoot(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to create a non-root-owned evidence root")
+	}
+	ctx := context.Background()
+	st, _ := openOwnedStore(t, ctx)
+	createStoreSession(t, ctx, st, "sess_nonroot_evidence")
+	cfg := testDataVolumeConfig(t)
+	if err := os.MkdirAll(cfg.EvidenceRoot, 0o755); err != nil {
+		t.Fatalf("mkdir evidence root: %v", err)
+	}
+	if err := os.Chown(cfg.EvidenceRoot, 12345, 12345); err != nil {
+		t.Fatalf("chown evidence root: %v", err)
+	}
+
+	_, err := st.ProvisionSessionWorkspace(ctx, ProvisionSessionWorkspaceParams{
+		SessionID: "sess_nonroot_evidence",
+		Config:    cfg,
+		Now:       time.Now().UTC(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "must be root-owned") {
+		t.Fatalf("expected non-root evidence root rejection, got %v", err)
+	}
+}
+
+func TestProvisionSessionWorkspaceRejectsSymlinkedMarkerDir(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openOwnedStore(t, ctx)
+	createStoreSession(t, ctx, st, "sess_symlink_marker")
+	cfg := testDataVolumeConfig(t)
+	if err := os.MkdirAll(cfg.EvidenceRoot, 0o755); err != nil {
+		t.Fatalf("mkdir evidence root: %v", err)
+	}
+	target := filepath.Join(t.TempDir(), "marker-target")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatalf("mkdir marker target: %v", err)
+	}
+	if err := os.Symlink(target, filepath.Join(cfg.EvidenceRoot, "workspaces")); err != nil {
+		t.Fatalf("symlink marker dir: %v", err)
+	}
+
+	_, err := st.ProvisionSessionWorkspace(ctx, ProvisionSessionWorkspaceParams{
+		SessionID: "sess_symlink_marker",
+		Config:    cfg,
+		Now:       time.Now().UTC(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "must not be a symlink") {
+		t.Fatalf("expected symlink marker dir rejection, got %v", err)
+	}
 }
 
 func TestProvisionSessionWorkspaceRejectsNonEmptyFreshDirectory(t *testing.T) {
@@ -367,4 +444,41 @@ func readMarker(t *testing.T, path string) map[string]any {
 		t.Fatalf("decode marker %s: %v", path, err)
 	}
 	return marker
+}
+
+func assertRootOwnedProtectedDir(t *testing.T, path string) {
+	t.Helper()
+	assertRootOwnedProtectedPath(t, path, true)
+}
+
+func assertRootOwnedProtectedFile(t *testing.T, path string) {
+	t.Helper()
+	assertRootOwnedProtectedPath(t, path, false)
+}
+
+func assertRootOwnedProtectedPath(t *testing.T, path string, wantDir bool) {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("stat protected path %s: %v", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("protected path %s is a symlink", path)
+	}
+	if wantDir && !info.IsDir() {
+		t.Fatalf("protected path %s is not a directory", path)
+	}
+	if !wantDir && !info.Mode().IsRegular() {
+		t.Fatalf("protected path %s is not a regular file", path)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("stat ownership unavailable for %s", path)
+	}
+	if stat.Uid != 0 {
+		t.Fatalf("protected path %s uid=%d want 0", path, stat.Uid)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		t.Fatalf("protected path %s mode=%#o is group/world writable", path, info.Mode().Perm())
+	}
 }
