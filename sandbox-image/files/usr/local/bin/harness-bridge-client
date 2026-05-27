@@ -379,19 +379,24 @@ class ClaudeTurnRunner:
         else:
             env["ANTHROPIC_BASE_URL"] = os.environ.get("ANTHROPIC_BASE_URL", "")
             env["ANTHROPIC_API_KEY"] = HOST_ONLY_DUMMY_API_KEY
-            command = [
-                "setpriv",
-                "--reuid",
-                os.environ.get("HARNESS_AGENT_UID", "65534"),
-                "--regid",
-                os.environ.get("HARNESS_AGENT_GID", "65534"),
-                "--clear-groups",
-                "env",
-                f"HOME={agent_home}",
-                "USER=harness",
-                "LOGNAME=harness",
-                *claude_command,
-            ]
+            target_uid = os.environ.get("HARNESS_AGENT_UID", "65534")
+            target_gid = os.environ.get("HARNESS_AGENT_GID", "65534")
+            if str(os.geteuid()) == target_uid and str(os.getegid()) == target_gid:
+                command = claude_command
+            else:
+                command = [
+                    "setpriv",
+                    "--reuid",
+                    target_uid,
+                    "--regid",
+                    target_gid,
+                    "--clear-groups",
+                    "env",
+                    f"HOME={agent_home}",
+                    "USER=harness",
+                    "LOGNAME=harness",
+                    *claude_command,
+                ]
         frame = json.dumps(
             {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": content}]}},
             ensure_ascii=False,

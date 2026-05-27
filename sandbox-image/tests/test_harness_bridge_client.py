@@ -606,6 +606,58 @@ class BridgeClientTest(unittest.TestCase):
         self.assertNotIn("ANTHROPIC_AUTH_TOKEN", captured["env"])
         self.assertIn('"text":"hello"', captured["process"].stdin.writes[0])
 
+    def test_claude_runner_skips_setpriv_when_already_sandbox_identity(self):
+        class FakeStdin:
+            def __init__(self):
+                self.writes = []
+
+            def write(self, value):
+                self.writes.append(value)
+
+            def close(self):
+                pass
+
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = FakeStdin()
+                self.stdout = iter(['{"type":"result","result":"ok"}\n'])
+
+            def wait(self):
+                return 0
+
+        captured = {}
+
+        def popen(command, **kwargs):
+            captured["command"] = command
+            captured["env"] = kwargs.get("env") or {}
+            captured["process"] = FakeProcess()
+            return captured["process"]
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "CLAUDE_SESSION_UUID": "11111111-2222-3333-4444-555555555555",
+                "SESSION_ID": "sess",
+                "HARNESS_AGENT_HOME": "/agent-homes/sess",
+                "HARNESS_AGENT_UID": "65534",
+                "HARNESS_AGENT_GID": "65534",
+                "ANTHROPIC_BASE_URL": "http://harness-model-proxy.internal:8082",
+            },
+            clear=True,
+        ):
+            with mock.patch.object(bridge.os, "geteuid", return_value=65534):
+                with mock.patch.object(bridge.os, "getegid", return_value=65534):
+                    with mock.patch.object(bridge.subprocess, "Popen", side_effect=popen):
+                        status, error_class, error = bridge.ClaudeTurnRunner().run_turn(
+                            "hello",
+                            lambda stream, line: None,
+                        )
+
+        self.assertEqual((status, error_class, error), ("completed", "", ""))
+        self.assertEqual(captured["command"][0], "/usr/local/bin/claude")
+        self.assertNotIn("setpriv", captured["command"])
+        self.assertEqual(captured["env"]["ANTHROPIC_API_KEY"], bridge.HOST_ONLY_DUMMY_API_KEY)
+
     def test_claude_runner_resumes_after_first_turn(self):
         class FakeStdin:
             def write(self, value):
@@ -737,7 +789,7 @@ class EntrypointStaticTest(unittest.TestCase):
         self.assertIn('HARNESS_BRIDGE_MODE:-}" = "probe"', text)
         self.assertIn("exec /usr/local/bin/harness-bridge-client probe", text)
         self.assertIn('HARNESS_BRIDGE_MODE:-}" = "claim-loop"', text)
-        self.assertIn("exec /usr/local/bin/harness-bridge-client claim-loop", text)
+        self.assertIn("exec_bridge_client claim-loop", text)
         self.assertIn('HARNESS_BRIDGE_MODE:-auto}" = "auto"', text)
         self.assertIn("/usr/local/bin/harness-bridge-client probe", text)
         self.assertIn("/usr/local/bin/harness-bridge-client heartbeat-loop &", text)
@@ -764,6 +816,8 @@ class EntrypointStaticTest(unittest.TestCase):
         self.assertIn("secret-backed claude agent", text)
         self.assertIn("--clear-groups", text)
         self.assertIn("HARNESS_PROXY_DUMMY_API_KEY:-harness-model-proxy-dummy-key", text)
+        self.assertIn("exec_bridge_client()", text)
+        self.assertIn('/usr/local/bin/harness-bridge-client "$@"', text)
 
     def test_claim_loop_starts_after_workspace_and_agent_home_setup(self):
         entrypoint = SCRIPT.with_name("harness-agent-entrypoint")
@@ -775,6 +829,7 @@ class EntrypointStaticTest(unittest.TestCase):
         self.assertLess(text.index("ln -sfn \"$SESSION_WORKSPACE\" /workspace"), claim_loop)
         self.assertLess(cd_workspace, claim_loop)
         self.assertLess(text.index("  ensure_agent_user", cd_workspace), claim_loop)
+        self.assertLess(text.index("exec_bridge_client()"), claim_loop)
 
 
 def argparse_namespace(**kwargs):
