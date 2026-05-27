@@ -145,7 +145,6 @@ export function reduceSessionEvent<TConversation extends SessionEventConversatio
           updated_at: updatedAt,
           active_generation_id: activeGenerationId ?? session.active_generation_id,
           last_activity_at: lastActivityAt,
-          checkpoint_path: null,
           restore_ms: null
         })),
         conversations: slice.conversations,

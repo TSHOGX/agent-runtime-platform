@@ -601,7 +601,6 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
               status: res.data.status,
               updated_at: now,
               ended_at: s.ended_at ?? now,
-              checkpoint_path: null,
               restore_ms: null
             }
           : s

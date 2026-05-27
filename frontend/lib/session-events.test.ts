@@ -13,14 +13,11 @@ function session(patch: Partial<ApiSession> = {}): ApiSession {
     user_id: "lab",
     status: "checkpointed",
     agent: "claude",
-    workspace: "/sessions/sess_1",
     active_generation_id: "gen_1",
-    restore_id: "phase3-sess_1",
     restore_ms: 42,
     created_at: "2026-05-26T00:00:00Z",
     updated_at: "2026-05-26T00:00:00Z",
     last_activity_at: "2026-05-26T00:00:00Z",
-    checkpoint_path: "/checkpoints/sess_1",
     ...patch
   };
 }
@@ -59,7 +56,7 @@ describe("reduceSessionEvent", () => {
     expect(next.notifications).toEqual([{ level: "error", message: "runtime failed" }]);
   });
 
-  it("clears checkpoint metadata for checkpoint retirement", () => {
+  it("clears restore metadata for checkpoint retirement", () => {
     const next = reduce(slice(), {
       type: "session.checkpoint_retired",
       session_id: "sess_1",
@@ -68,7 +65,6 @@ describe("reduceSessionEvent", () => {
         session_updated_at: "2026-05-26T01:02:00Z",
         session_last_activity_at: "2026-05-26T00:30:00Z",
         active_generation_id: "gen_1",
-        checkpoint_path: null,
         restore_ms: null
       }
     });
@@ -77,12 +73,11 @@ describe("reduceSessionEvent", () => {
       status: "running_idle",
       updated_at: "2026-05-26T01:02:00Z",
       last_activity_at: "2026-05-26T00:30:00Z",
-      checkpoint_path: null,
       restore_ms: null
     });
   });
 
-  it("clears checkpoint metadata for restore fallback retirement", () => {
+  it("clears restore metadata for restore fallback retirement", () => {
     const next = reduce(slice(), {
       type: "session.restore_fallback_retired",
       session_id: "sess_1",
@@ -90,13 +85,11 @@ describe("reduceSessionEvent", () => {
         session_status: "running_idle",
         session_updated_at: "2026-05-26T01:03:00Z",
         active_generation_id: "gen_1",
-        checkpoint_path: null,
         restore_ms: null
       }
     });
 
     expect(next.sessions[0].status).toBe("running_idle");
-    expect(next.sessions[0].checkpoint_path).toBeNull();
     expect(next.sessions[0].restore_ms).toBeNull();
   });
 

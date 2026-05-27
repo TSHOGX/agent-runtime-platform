@@ -12,18 +12,13 @@ export type ApiSession = {
   user_id: string;
   status: SessionStatus;
   agent: string;
-  workspace: string;
-  agent_home_path?: string;
   active_generation_id?: string;
-  restore_id: string;
   restore_ms?: number | null;
-  claude_session_uuid?: string;
   created_at: string;
   updated_at: string;
   expires_at?: string | null;
   ended_at?: string | null;
   last_activity_at?: string | null;
-  checkpoint_path?: string | null;
   auto_checkpoint_enabled?: boolean;
   failure_reason?: string;
   error_class?: string;
