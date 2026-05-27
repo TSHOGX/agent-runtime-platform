@@ -1438,7 +1438,7 @@ func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid artifact path")
 		return
 	}
-	file, info, status, message := s.openArtifactFile(parts[0], parts[1])
+	file, info, status, message := s.openArtifactFile(r.Context(), parts[0], parts[1])
 	if file == nil {
 		writeError(w, status, message)
 		return
@@ -1449,7 +1449,7 @@ func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, info.Name(), info.ModTime(), file)
 }
 
-func (s *Server) openArtifactFile(sessionID, artifactPath string) (*os.File, os.FileInfo, int, string) {
+func (s *Server) openArtifactFile(ctx context.Context, sessionID, artifactPath string) (*os.File, os.FileInfo, int, string) {
 	if !safePathSegment(sessionID) || artifactPath == "" || strings.Contains(artifactPath, `\`) {
 		return nil, nil, http.StatusBadRequest, "invalid artifact path"
 	}
@@ -1464,7 +1464,22 @@ func (s *Server) openArtifactFile(sessionID, artifactPath string) (*os.File, os.
 		return nil, nil, http.StatusBadRequest, "invalid artifact path"
 	}
 
-	sessionRoot := filepath.Join(s.cfg.SessionsRoot, sessionID)
+	volumeConfig, err := s.dataVolumeProvisionerConfig()
+	if err != nil {
+		return nil, nil, http.StatusInternalServerError, err.Error()
+	}
+	workspace, err := s.store.VerifySessionWorkspaceVolume(ctx, store.VerifySessionWorkspaceVolumeParams{
+		SessionID: sessionID,
+		Config:    volumeConfig,
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, http.StatusNotFound, "artifact not found"
+	}
+	if err != nil {
+		return nil, nil, http.StatusForbidden, "workspace evidence invalid"
+	}
+
+	sessionRoot := workspace.HostPath
 	fullPath := filepath.Join(sessionRoot, filepath.FromSlash(cleanPath))
 	if !isPathInside(sessionRoot, fullPath) {
 		return nil, nil, http.StatusBadRequest, "invalid artifact path"
@@ -1508,6 +1523,25 @@ func (s *Server) openArtifactFile(sessionID, artifactPath string) (*os.File, os.
 		return nil, nil, http.StatusForbidden, "artifact is not a regular file"
 	}
 	return file, info, 0, ""
+}
+
+func (s *Server) dataVolumeProvisionerConfig() (store.DataVolumeProvisionerConfig, error) {
+	roots, err := config.ValidatePhase8IsolationRoots(s.cfg.Phase8IsolationRoots())
+	if err != nil {
+		return store.DataVolumeProvisionerConfig{}, err
+	}
+	identity := s.cfg.Phase7.SandboxIdentity
+	return store.DataVolumeProvisionerConfig{
+		SessionsRoot:   roots.SessionsRoot,
+		AgentHomesRoot: roots.AgentHomesRoot,
+		EvidenceRoot:   roots.DataVolumeEvidenceRoot,
+		LayoutVersion:  store.DataVolumeLayoutVersion,
+		RuntimeIdentity: store.RuntimeIdentity{
+			UID:              identity.UID,
+			GID:              identity.GID,
+			SupplementalGIDs: identity.SupplementalGIDs,
+		},
+	}, nil
 }
 
 func safePathSegment(segment string) bool {

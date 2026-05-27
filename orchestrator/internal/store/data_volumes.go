@@ -44,6 +44,11 @@ type ProvisionSessionDriverHomeParams struct {
 	Now       time.Time
 }
 
+type VerifySessionWorkspaceVolumeParams struct {
+	SessionID string
+	Config    DataVolumeProvisionerConfig
+}
+
 type SessionWorkspaceVolume struct {
 	SessionID                string
 	HostPath                 string
@@ -247,6 +252,32 @@ func (s *Store) GetSessionWorkspaceVolume(ctx context.Context, sessionID string)
 		return SessionWorkspaceVolume{}, err
 	}
 	if err := verifyDataVolumeMarker(volume.ProvisioningMarkerPath, volume.ProvisioningMarkerDigest); err != nil {
+		return SessionWorkspaceVolume{}, err
+	}
+	return volume, nil
+}
+
+func (s *Store) VerifySessionWorkspaceVolume(ctx context.Context, p VerifySessionWorkspaceVolumeParams) (SessionWorkspaceVolume, error) {
+	cfg, err := normalizeDataVolumeConfig(p.Config)
+	if err != nil {
+		return SessionWorkspaceVolume{}, err
+	}
+	sessionID, err := dataVolumeSafePathComponent("session id", p.SessionID)
+	if err != nil {
+		return SessionWorkspaceVolume{}, err
+	}
+	static := dataVolumeStatic{
+		kind:       dataVolumeWorkspace,
+		sessionID:  sessionID,
+		hostPath:   filepath.Join(cfg.SessionsRoot, sessionID),
+		markerPath: filepath.Join(cfg.EvidenceRoot, "workspaces", sessionID+".json"),
+		cfg:        cfg,
+	}
+	volume, err := s.getSessionWorkspace(ctx, sessionID)
+	if err != nil {
+		return SessionWorkspaceVolume{}, err
+	}
+	if err := validateExistingWorkspaceVolume(volume, static); err != nil {
 		return SessionWorkspaceVolume{}, err
 	}
 	return volume, nil
@@ -469,20 +500,40 @@ func writeDataVolumeMarker(path string, payload []byte, digest string) error {
 	return nil
 }
 
-func verifyDataVolumeMarker(path, digest string) error {
+func readVerifiedDataVolumeMarker(path, digest string) ([]byte, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("read data volume marker %q: %w", path, err)
+		return nil, fmt.Errorf("read data volume marker %q: %w", path, err)
 	}
 	if got := SandboxContractDigest(data); got != digest {
-		return fmt.Errorf("data volume marker digest mismatch for %q: got %s want %s", path, got, digest)
+		return nil, fmt.Errorf("data volume marker digest mismatch for %q: got %s want %s", path, got, digest)
 	}
 	canonical, err := canonicalDataVolumeJSONBytes(data)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !bytes.Equal(data, canonical) {
-		return fmt.Errorf("data volume marker %q is not canonical", path)
+		return nil, fmt.Errorf("data volume marker %q is not canonical", path)
+	}
+	return data, nil
+}
+
+func verifyDataVolumeMarker(path, digest string) error {
+	_, err := readVerifiedDataVolumeMarker(path, digest)
+	return err
+}
+
+func verifyDataVolumeMarkerMatches(path, digest string, expected dataVolumeMarker) error {
+	data, err := readVerifiedDataVolumeMarker(path, digest)
+	if err != nil {
+		return err
+	}
+	expectedData, err := canonicalDataVolumeJSON(expected)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(data, expectedData) {
+		return fmt.Errorf("data volume marker %q does not match expected provisioning evidence", path)
 	}
 	return nil
 }
@@ -497,7 +548,27 @@ func validateExistingWorkspaceVolume(row SessionWorkspaceVolume, static dataVolu
 		row.ProvisioningMarkerPath != static.markerPath {
 		return fmt.Errorf("session workspace volume row does not match expected provisioning config")
 	}
-	return verifyDataVolumeMarker(row.ProvisioningMarkerPath, row.ProvisioningMarkerDigest)
+	identityDigest, err := RuntimeIdentityDigest(static.cfg.RuntimeIdentity)
+	if err != nil {
+		return err
+	}
+	if row.RuntimeIdentityDigest != identityDigest {
+		return fmt.Errorf("session workspace volume row does not match expected runtime identity digest")
+	}
+	return verifyDataVolumeMarkerMatches(row.ProvisioningMarkerPath, row.ProvisioningMarkerDigest, dataVolumeMarker{
+		MarkerVersion: 1,
+		VolumeType:    string(dataVolumeWorkspace),
+		SessionID:     static.sessionID,
+		HostPath:      static.hostPath,
+		LayoutVersion: static.cfg.LayoutVersion,
+		RuntimeIdentity: dataVolumeIdentityJSON{
+			SandboxUID:              static.cfg.RuntimeIdentity.UID,
+			SandboxGID:              static.cfg.RuntimeIdentity.GID,
+			SandboxSupplementalGIDs: static.cfg.RuntimeIdentity.SupplementalGIDs,
+		},
+		RuntimeIdentityDigest: identityDigest,
+		ProvisionedAt:         formatTime(row.ProvisionedAt),
+	})
 }
 
 func validateExistingDriverHomeVolume(row SessionDriverHomeVolume, static dataVolumeStatic) error {
@@ -511,7 +582,28 @@ func validateExistingDriverHomeVolume(row SessionDriverHomeVolume, static dataVo
 		row.ProvisioningMarkerPath != static.markerPath {
 		return fmt.Errorf("session driver home volume row does not match expected provisioning config")
 	}
-	return verifyDataVolumeMarker(row.ProvisioningMarkerPath, row.ProvisioningMarkerDigest)
+	identityDigest, err := RuntimeIdentityDigest(static.cfg.RuntimeIdentity)
+	if err != nil {
+		return err
+	}
+	if row.RuntimeIdentityDigest != identityDigest {
+		return fmt.Errorf("session driver home volume row does not match expected runtime identity digest")
+	}
+	return verifyDataVolumeMarkerMatches(row.ProvisioningMarkerPath, row.ProvisioningMarkerDigest, dataVolumeMarker{
+		MarkerVersion: 1,
+		VolumeType:    string(dataVolumeDriverHome),
+		SessionID:     static.sessionID,
+		Driver:        static.driver,
+		HostPath:      static.hostPath,
+		LayoutVersion: static.cfg.LayoutVersion,
+		RuntimeIdentity: dataVolumeIdentityJSON{
+			SandboxUID:              static.cfg.RuntimeIdentity.UID,
+			SandboxGID:              static.cfg.RuntimeIdentity.GID,
+			SandboxSupplementalGIDs: static.cfg.RuntimeIdentity.SupplementalGIDs,
+		},
+		RuntimeIdentityDigest: identityDigest,
+		ProvisionedAt:         formatTime(row.ProvisionedAt),
+	})
 }
 
 func (s *Store) insertSessionWorkspace(ctx context.Context, row SessionWorkspaceVolume) error {

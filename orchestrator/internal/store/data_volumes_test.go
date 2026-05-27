@@ -162,6 +162,82 @@ func TestProvisionSessionWorkspaceRejectsMarkerTampering(t *testing.T) {
 	}
 }
 
+func TestVerifySessionWorkspaceVolumeRejectsConfigMismatch(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openOwnedStore(t, ctx)
+	createStoreSession(t, ctx, st, "sess_config_mismatch")
+	cfg := testDataVolumeConfig(t)
+	if _, err := st.ProvisionSessionWorkspace(ctx, ProvisionSessionWorkspaceParams{
+		SessionID: "sess_config_mismatch",
+		Config:    cfg,
+		Now:       time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("provision workspace: %v", err)
+	}
+
+	other := cfg
+	other.SessionsRoot = filepath.Join(t.TempDir(), "sessions")
+	_, err := st.VerifySessionWorkspaceVolume(ctx, VerifySessionWorkspaceVolumeParams{
+		SessionID: "sess_config_mismatch",
+		Config:    other,
+	})
+	if err == nil || !strings.Contains(err.Error(), "expected provisioning config") {
+		t.Fatalf("expected config mismatch, got %v", err)
+	}
+}
+
+func TestVerifySessionWorkspaceVolumeRejectsMarkerPayloadMismatch(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openOwnedStore(t, ctx)
+	createStoreSession(t, ctx, st, "sess_marker_mismatch")
+	cfg := testDataVolumeConfig(t)
+	volume, err := st.ProvisionSessionWorkspace(ctx, ProvisionSessionWorkspaceParams{
+		SessionID: "sess_marker_mismatch",
+		Config:    cfg,
+		Now:       time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("provision workspace: %v", err)
+	}
+
+	marker := dataVolumeMarker{
+		MarkerVersion: 1,
+		VolumeType:    string(dataVolumeWorkspace),
+		SessionID:     "sess_marker_mismatch",
+		HostPath:      filepath.Join(cfg.SessionsRoot, "other_session"),
+		LayoutVersion: DataVolumeLayoutVersion,
+		RuntimeIdentity: dataVolumeIdentityJSON{
+			SandboxUID:              volume.SandboxUID,
+			SandboxGID:              volume.SandboxGID,
+			SandboxSupplementalGIDs: volume.SandboxSupplementalGIDs,
+		},
+		RuntimeIdentityDigest: volume.RuntimeIdentityDigest,
+		ProvisionedAt:         formatTime(volume.ProvisionedAt),
+	}
+	payload, err := canonicalDataVolumeJSON(marker)
+	if err != nil {
+		t.Fatalf("canonical marker: %v", err)
+	}
+	digest := SandboxContractDigest(payload)
+	if err := os.WriteFile(volume.ProvisioningMarkerPath, payload, 0o644); err != nil {
+		t.Fatalf("write mismatched marker: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE session_workspaces
+SET provisioning_marker_digest = ?
+WHERE session_id = ?`, digest, volume.SessionID); err != nil {
+		t.Fatalf("update marker digest: %v", err)
+	}
+
+	_, err = st.VerifySessionWorkspaceVolume(ctx, VerifySessionWorkspaceVolumeParams{
+		SessionID: volume.SessionID,
+		Config:    cfg,
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not match expected provisioning evidence") {
+		t.Fatalf("expected marker payload mismatch, got %v", err)
+	}
+}
+
 func testDataVolumeConfig(t *testing.T) DataVolumeProvisionerConfig {
 	t.Helper()
 	dir := t.TempDir()
