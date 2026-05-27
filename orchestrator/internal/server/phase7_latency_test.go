@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"harness-platform/orchestrator/internal/artifacts"
 	"harness-platform/orchestrator/internal/bridge"
 	"harness-platform/orchestrator/internal/events"
 	"harness-platform/orchestrator/internal/sessionstate"
@@ -41,7 +40,7 @@ func TestPhase7TurnStartLatencyGate(t *testing.T) {
 		cfg:       cfg,
 		store:     st,
 		runtime:   instantRuntime{},
-		watcher:   artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		watcher:   newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
 		hub:       events.NewHub(),
 		log:       slog.Default(),
 		ownerUUID: owner.UUID,

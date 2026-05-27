@@ -283,6 +283,47 @@ func (s *Store) VerifySessionWorkspaceVolume(ctx context.Context, p VerifySessio
 	return volume, nil
 }
 
+func (s *Store) ListVerifiedSessionWorkspaceVolumes(ctx context.Context, cfg DataVolumeProvisionerConfig) ([]SessionWorkspaceVolume, error) {
+	normalized, err := normalizeDataVolumeConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT session_id, host_path, layout_version, sandbox_uid, sandbox_gid,
+       sandbox_supplemental_gids, runtime_identity_digest, provisioned_at,
+       provisioning_marker_path, provisioning_marker_digest
+FROM session_workspaces
+ORDER BY session_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	volumes := []SessionWorkspaceVolume{}
+	for rows.Next() {
+		volume, err := scanSessionWorkspaceVolume(rows)
+		if err != nil {
+			return nil, err
+		}
+		sessionID, err := dataVolumeSafePathComponent("session id", volume.SessionID)
+		if err != nil {
+			return nil, err
+		}
+		static := dataVolumeStatic{
+			kind:       dataVolumeWorkspace,
+			sessionID:  sessionID,
+			hostPath:   filepath.Join(normalized.SessionsRoot, sessionID),
+			markerPath: filepath.Join(normalized.EvidenceRoot, "workspaces", sessionID+".json"),
+			cfg:        normalized,
+		}
+		if err := validateExistingWorkspaceVolume(volume, static); err != nil {
+			return nil, err
+		}
+		volumes = append(volumes, volume)
+	}
+	return volumes, rows.Err()
+}
+
 func (s *Store) GetSessionDriverHomeVolume(ctx context.Context, sessionID, driver string) (SessionDriverHomeVolume, error) {
 	sessionID, err := dataVolumeSafePathComponent("session id", sessionID)
 	if err != nil {
@@ -649,6 +690,12 @@ SELECT session_id, host_path, layout_version, sandbox_uid, sandbox_gid,
        provisioning_marker_path, provisioning_marker_digest
 FROM session_workspaces
 WHERE session_id = ?`, sessionID)
+	return scanSessionWorkspaceVolume(row)
+}
+
+func scanSessionWorkspaceVolume(row interface {
+	Scan(dest ...any) error
+}) (SessionWorkspaceVolume, error) {
 	var volume SessionWorkspaceVolume
 	var gids, provisionedAt string
 	if err := row.Scan(

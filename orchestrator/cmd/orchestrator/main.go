@@ -94,7 +94,11 @@ func main() {
 				},
 			})
 			hub := events.NewHub()
-			watcher = artifacts.New(cfg.SessionsRoot, db, hub, log)
+			volumeConfig, err := dataVolumeProvisionerConfig(cfg)
+			if err != nil {
+				return err
+			}
+			watcher = artifacts.New(volumeConfig, db, hub, log)
 			app = server.New(cfg, db, rt, watcher, hub, log)
 			app.SetOwnerUUID(owner.UUID)
 			return nil
@@ -169,4 +173,23 @@ func main() {
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		log.Warn("http shutdown failed", "error", err)
 	}
+}
+
+func dataVolumeProvisionerConfig(cfg config.Config) (store.DataVolumeProvisionerConfig, error) {
+	roots, err := config.ValidatePhase8IsolationRoots(cfg.Phase8IsolationRoots())
+	if err != nil {
+		return store.DataVolumeProvisionerConfig{}, err
+	}
+	identity := cfg.Phase7.SandboxIdentity
+	return store.DataVolumeProvisionerConfig{
+		SessionsRoot:   roots.SessionsRoot,
+		AgentHomesRoot: roots.AgentHomesRoot,
+		EvidenceRoot:   roots.DataVolumeEvidenceRoot,
+		LayoutVersion:  store.DataVolumeLayoutVersion,
+		RuntimeIdentity: store.RuntimeIdentity{
+			UID:              identity.UID,
+			GID:              identity.GID,
+			SupplementalGIDs: identity.SupplementalGIDs,
+		},
+	}, nil
 }

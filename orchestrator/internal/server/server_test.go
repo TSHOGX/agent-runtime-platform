@@ -46,7 +46,7 @@ func TestCreateSessionRejectsUnsupportedAgent(t *testing.T) {
 		},
 		store:   st,
 		runtime: runtime.New(runtime.Config{}),
-		watcher: artifacts.New(dir, st, events.NewHub(), slog.Default()),
+		watcher: newServerTestWatcher(t, dir, st, events.NewHub()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
@@ -83,7 +83,7 @@ func TestCreateSessionSoftLimitUsesPoolExhaustedEnvelope(t *testing.T) {
 		},
 		store:   st,
 		runtime: runtime.New(runtime.Config{}),
-		watcher: artifacts.New(dir, st, events.NewHub(), slog.Default()),
+		watcher: newServerTestWatcher(t, dir, st, events.NewHub()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
@@ -155,7 +155,7 @@ func TestCloseSessionReleasesSoftLimitWithoutDeletingHistory(t *testing.T) {
 		cfg:     cfg,
 		store:   st,
 		runtime: runtime.New(runtime.Config{}),
-		watcher: artifacts.New(cfg.SessionsRoot, st, events.NewHub(), slog.Default()),
+		watcher: newServerTestWatcher(t, cfg.SessionsRoot, st, events.NewHub()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
@@ -230,7 +230,7 @@ func TestCreateSessionUsesNullExpiryWhenSessionRetentionDisabled(t *testing.T) {
 		},
 		store:   st,
 		runtime: runtime.New(runtime.Config{}),
-		watcher: artifacts.New(dir, st, events.NewHub(), slog.Default()),
+		watcher: newServerTestWatcher(t, dir, st, events.NewHub()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
@@ -293,7 +293,7 @@ func TestCreateSessionUsesPublicSessionDTO(t *testing.T) {
 		},
 		store:   st,
 		runtime: runtime.New(runtime.Config{}),
-		watcher: artifacts.New(dir, st, events.NewHub(), slog.Default()),
+		watcher: newServerTestWatcher(t, dir, st, events.NewHub()),
 		hub:     hub,
 		log:     slog.Default(),
 	}
@@ -598,7 +598,7 @@ func TestSendMessageAllocatesGenerationAndQueuesBridgeTurn(t *testing.T) {
 		cfg:     testServerConfig(dir),
 		store:   st,
 		runtime: instantRuntime{},
-		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
@@ -647,7 +647,7 @@ func TestSendMessageReusesActiveGenerationArtifacts(t *testing.T) {
 		cfg:     testServerConfig(dir),
 		store:   st,
 		runtime: instantRuntime{},
-		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
@@ -770,7 +770,7 @@ func TestSendMessageColdFallbackAllocatesReplacementGeneration(t *testing.T) {
 		cfg:     cfg,
 		store:   st,
 		runtime: rt,
-		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
@@ -873,7 +873,7 @@ func TestSendMessageRestoresCheckpointedGeneration(t *testing.T) {
 		cfg:     cfg,
 		store:   st,
 		runtime: rt,
-		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
@@ -972,7 +972,7 @@ WHERE id = ?`, filepath.Join(dir, "checkpoints", session.ID), session.ID); err !
 		cfg:     cfg,
 		store:   st,
 		runtime: rt,
-		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
@@ -1096,7 +1096,7 @@ WHERE id = ?`, filepath.Join(dir, "checkpoints", session.ID), session.ID); err !
 		cfg:     cfg,
 		store:   st,
 		runtime: rt,
-		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
@@ -1193,7 +1193,7 @@ WHERE generation_id = ?`, old.GenerationID); err != nil {
 		cfg:     cfg,
 		store:   st,
 		runtime: rt,
-		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
@@ -1274,7 +1274,7 @@ WHERE generation_id = ?`, old.GenerationID); err != nil {
 		cfg:     cfg,
 		store:   st,
 		runtime: rt,
-		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
@@ -1382,7 +1382,7 @@ WHERE generation_id = ?`, checkpointPath, old.GenerationID); err != nil {
 		cfg:     cfg,
 		store:   st,
 		runtime: rt,
-		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
@@ -1669,7 +1669,7 @@ WHERE generation_id = ?`, checkpointPath, allocation.GenerationID); err != nil {
 		cfg:     cfg,
 		store:   st,
 		runtime: rt,
-		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, hub, slog.Default()),
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, hub),
 		hub:     hub,
 		log:     slog.Default(),
 	}
@@ -1804,7 +1804,7 @@ func TestGetQuotaReportsSessionAndPoolCeilings(t *testing.T) {
 		cfg:     cfg,
 		store:   st,
 		runtime: instantRuntime{},
-		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
@@ -1853,7 +1853,7 @@ func TestSendMessagePoolExhaustionDoesNotQueueTurn(t *testing.T) {
 		cfg:     cfg,
 		store:   st,
 		runtime: instantRuntime{},
-		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
@@ -1897,7 +1897,7 @@ func TestSendMessageRuntimeStartFailureMarksGenerationFailedAndReclaimable(t *te
 		runtime: failingRuntime{
 			err: errors.New("pre-start sandbox network probe failed"),
 		},
-		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
@@ -2011,7 +2011,7 @@ func TestStartEnsuredGenerationRenewsLeaseDuringSlowPrepare(t *testing.T) {
 		cfg:     cfg,
 		store:   st,
 		runtime: rt,
-		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
@@ -2073,7 +2073,7 @@ WHERE generation_id = ?`, time.Now().UTC().Add(time.Minute).Format(time.RFC3339N
 		cfg:     cfg,
 		store:   st,
 		runtime: rt,
-		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
@@ -2167,7 +2167,7 @@ func TestSendMessagePrepareFailureMarksGenerationFailedAndReclaimable(t *testing
 		runtime: failingRuntime{
 			prepareErr: errors.New("pre-start sandbox network probe failed"),
 		},
-		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
@@ -2271,7 +2271,7 @@ func TestDestroySessionCancelsPendingTurnAndReclaimsGeneration(t *testing.T) {
 		cfg:     cfg,
 		store:   st,
 		runtime: rt,
-		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
@@ -2391,7 +2391,7 @@ func TestRunPhase7MaintenancePollsBridgeOutbox(t *testing.T) {
 		cfg:     cfg,
 		store:   st,
 		runtime: instantRuntime{},
-		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
@@ -2459,7 +2459,7 @@ WHERE generation_id = ?`,
 		cfg:     cfg,
 		store:   st,
 		runtime: rt,
-		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
@@ -2527,7 +2527,7 @@ WHERE generation_id = ?`, store.GenerationLeaseOwner("previous-owner"), now.Add(
 		cfg:     cfg,
 		store:   st,
 		runtime: rt,
-		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
@@ -2609,7 +2609,7 @@ func TestDestroyReclaimableGenerationResourcesMarksDestroyedOnlyAfterRuntimeClea
 				cfg:     cfg,
 				store:   st,
 				runtime: rt,
-				watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+				watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
 				hub:     events.NewHub(),
 				log:     slog.Default(),
 			}
@@ -2681,7 +2681,7 @@ func TestDestroyReclaimableGenerationResourcesRemovesFilesystemWithRealRuntime(t
 		cfg:     cfg,
 		store:   st,
 		runtime: realRuntime,
-		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
@@ -2792,7 +2792,7 @@ func TestRunPhase7MaintenancePublishesBridgeOutputAndCompletion(t *testing.T) {
 		cfg:     cfg,
 		store:   st,
 		runtime: instantRuntime{},
-		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, hub, slog.Default()),
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, hub),
 		hub:     hub,
 		log:     slog.Default(),
 	}
@@ -2898,7 +2898,7 @@ func TestBridgeFailedCompletionDoesNotFailSession(t *testing.T) {
 		cfg:     cfg,
 		store:   st,
 		runtime: instantRuntime{},
-		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, hub, slog.Default()),
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, hub),
 		hub:     hub,
 		log:     slog.Default(),
 	}
@@ -2984,7 +2984,7 @@ func TestRunPhase7MaintenancePrunesRetainedEvents(t *testing.T) {
 		cfg:     cfg,
 		store:   st,
 		runtime: instantRuntime{},
-		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
@@ -3014,7 +3014,7 @@ func TestSendMessageRejectsExpiredSessionBeforeAllocation(t *testing.T) {
 		cfg:     testServerConfig(dir),
 		store:   st,
 		runtime: instantRuntime{},
-		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, events.NewHub(), slog.Default()),
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
@@ -3051,7 +3051,7 @@ func TestInternalProxyRequestEndpointsPublishDurableEvents(t *testing.T) {
 		cfg:     cfg,
 		store:   st,
 		runtime: instantRuntime{},
-		watcher: artifacts.New(filepath.Join(dir, "sessions"), st, hub, slog.Default()),
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, hub),
 		hub:     hub,
 		log:     slog.Default(),
 	}
@@ -3901,6 +3901,19 @@ WHERE generation_id = ?`, generationID); err != nil {
 	if err := st.UpdateSessionStatus(ctx, sessionID, string(sessionstate.Checkpointed), nil); err != nil {
 		t.Fatalf("set checkpointed session: %v", err)
 	}
+}
+
+func newServerTestWatcher(t *testing.T, sessionsRoot string, st *store.Store, hub *events.Hub) *artifacts.Watcher {
+	t.Helper()
+	return artifacts.New(store.DataVolumeProvisionerConfig{
+		SessionsRoot:   sessionsRoot,
+		AgentHomesRoot: filepath.Join(t.TempDir(), "agent-homes"),
+		EvidenceRoot:   filepath.Join(t.TempDir(), "volume-evidence"),
+		RuntimeIdentity: store.RuntimeIdentity{
+			UID: serverTestSandboxUID(),
+			GID: serverTestSandboxGID(),
+		},
+	}, st, hub, slog.Default())
 }
 
 func testServerConfig(dir string) config.Config {

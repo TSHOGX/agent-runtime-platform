@@ -16,34 +16,38 @@ import (
 )
 
 type Watcher struct {
-	root  string
-	store *store.Store
-	hub   *events.Hub
-	log   *slog.Logger
+	volumeConfig store.DataVolumeProvisionerConfig
+	store        *store.Store
+	hub          *events.Hub
+	log          *slog.Logger
 }
 
-func New(root string, store *store.Store, hub *events.Hub, log *slog.Logger) *Watcher {
-	return &Watcher{root: root, store: store, hub: hub, log: log}
+func New(volumeConfig store.DataVolumeProvisionerConfig, store *store.Store, hub *events.Hub, log *slog.Logger) *Watcher {
+	return &Watcher{volumeConfig: volumeConfig, store: store, hub: hub, log: log}
 }
 
 func (w *Watcher) Run(ctx context.Context) error {
-	if err := os.MkdirAll(w.root, 0o755); err != nil {
-		return err
-	}
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return err
 	}
 	defer watcher.Close()
 
-	if err := w.addRecursive(watcher, w.root); err != nil {
+	watchedRoots := map[string]struct{}{}
+	if err := w.refreshWorkspaceWatches(ctx, watcher, watchedRoots); err != nil {
 		return err
 	}
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-ticker.C:
+			if err := w.refreshWorkspaceWatches(ctx, watcher, watchedRoots); err != nil {
+				w.log.Warn("failed to refresh artifact workspace watches", "error", err)
+			}
 		case err := <-watcher.Errors:
 			if err != nil {
 				w.log.Warn("artifact watcher error", "error", err)
@@ -51,7 +55,9 @@ func (w *Watcher) Run(ctx context.Context) error {
 		case event := <-watcher.Events:
 			if event.Has(fsnotify.Create) {
 				if info, err := os.Lstat(event.Name); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
-					_ = w.addRecursive(watcher, event.Name)
+					if _, _, _, ok := w.resolveArtifactPath(ctx, event.Name); ok {
+						_ = w.addRecursive(watcher, event.Name)
+					}
 					continue
 				}
 			}
@@ -66,18 +72,59 @@ func (w *Watcher) Run(ctx context.Context) error {
 }
 
 func (w *Watcher) ScanSession(ctx context.Context, sessionID string) error {
-	return filepath.WalkDir(filepath.Join(w.root, sessionID), func(path string, entry fs.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || entry.Type()&fs.ModeSymlink != 0 {
+	workspace, err := w.store.VerifySessionWorkspaceVolume(ctx, store.VerifySessionWorkspaceVolumeParams{
+		SessionID: sessionID,
+		Config:    w.volumeConfig,
+	})
+	if err != nil {
+		return err
+	}
+	return filepath.WalkDir(workspace.HostPath, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || entry.Type()&fs.ModeSymlink != 0 {
 			return nil
 		}
-		w.recordPath(ctx, path)
+		artifactPath, ok := workspaceRelativePath(workspace.HostPath, path)
+		if !ok {
+			return nil
+		}
+		w.recordWorkspacePath(ctx, workspace.SessionID, workspace.HostPath, artifactPath, path)
 		return nil
 	})
 }
 
+func (w *Watcher) refreshWorkspaceWatches(ctx context.Context, watcher *fsnotify.Watcher, watchedRoots map[string]struct{}) error {
+	workspaces, err := w.store.ListVerifiedSessionWorkspaceVolumes(ctx, w.volumeConfig)
+	if err != nil {
+		return err
+	}
+	for _, workspace := range workspaces {
+		if _, ok := watchedRoots[workspace.HostPath]; ok {
+			continue
+		}
+		info, err := os.Lstat(workspace.HostPath)
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return os.ErrInvalid
+		}
+		if err := w.addRecursive(watcher, workspace.HostPath); err != nil {
+			return err
+		}
+		watchedRoots[workspace.HostPath] = struct{}{}
+	}
+	return nil
+}
+
 func (w *Watcher) addRecursive(watcher *fsnotify.Watcher, root string) error {
 	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil || !entry.IsDir() {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() || entry.Type()&fs.ModeSymlink != 0 {
 			return nil
 		}
 		if err := watcher.Add(path); err != nil {
@@ -88,21 +135,32 @@ func (w *Watcher) addRecursive(watcher *fsnotify.Watcher, root string) error {
 }
 
 func (w *Watcher) recordPath(ctx context.Context, path string) {
+	sessionID, artifactPath, workspaceRoot, ok := w.resolveArtifactPath(ctx, path)
+	if !ok {
+		return
+	}
+	w.recordWorkspacePath(ctx, sessionID, workspaceRoot, artifactPath, path)
+}
+
+func (w *Watcher) recordWorkspacePath(ctx context.Context, sessionID, workspaceRoot, artifactPath, path string) {
 	info, err := os.Lstat(path)
 	if err != nil || info.IsDir() || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return
 	}
-	rel, err := filepath.Rel(w.root, path)
-	if err != nil || strings.HasPrefix(rel, "..") {
+	if hasSymlinkComponent(workspaceRoot, artifactPath) {
 		return
 	}
-	parts := strings.SplitN(rel, string(filepath.Separator), 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+	realWorkspaceRoot, err := filepath.EvalSymlinks(workspaceRoot)
+	if err != nil {
+		return
+	}
+	realPath, err := filepath.EvalSymlinks(path)
+	if err != nil || !pathInside(realWorkspaceRoot, realPath) {
 		return
 	}
 	artifact := store.Artifact{
-		SessionID: parts[0],
-		Path:      filepath.ToSlash(parts[1]),
+		SessionID: sessionID,
+		Path:      artifactPath,
 		Size:      info.Size(),
 		ModTime:   info.ModTime().UTC(),
 		UpdatedAt: time.Now().UTC(),
@@ -115,25 +173,63 @@ func (w *Watcher) recordPath(ctx context.Context, path string) {
 }
 
 func (w *Watcher) deletePath(ctx context.Context, path string) {
-	rel, err := filepath.Rel(w.root, path)
-	if err != nil || strings.HasPrefix(rel, "..") {
+	sessionID, artifactPath, _, ok := w.resolveArtifactPath(ctx, path)
+	if !ok {
 		return
 	}
-	parts := strings.SplitN(rel, string(filepath.Separator), 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return
-	}
-	artifactPath := filepath.ToSlash(parts[1])
-	if err := w.store.DeleteArtifactPath(ctx, parts[0], artifactPath); err != nil {
+	if err := w.store.DeleteArtifactPath(ctx, sessionID, artifactPath); err != nil {
 		w.log.Warn("failed to delete artifact metadata", "path", path, "error", err)
 		return
 	}
 	w.hub.Publish(events.Event{
 		Type:      "artifact.deleted",
-		SessionID: parts[0],
+		SessionID: sessionID,
 		Payload: map[string]string{
-			"session_id": parts[0],
+			"session_id": sessionID,
 			"path":       artifactPath,
 		},
 	})
+}
+
+func (w *Watcher) resolveArtifactPath(ctx context.Context, path string) (string, string, string, bool) {
+	workspaces, err := w.store.ListVerifiedSessionWorkspaceVolumes(ctx, w.volumeConfig)
+	if err != nil {
+		w.log.Warn("failed to resolve artifact workspace", "path", path, "error", err)
+		return "", "", "", false
+	}
+	for _, workspace := range workspaces {
+		artifactPath, ok := workspaceRelativePath(workspace.HostPath, path)
+		if ok {
+			return workspace.SessionID, artifactPath, workspace.HostPath, true
+		}
+	}
+	return "", "", "", false
+}
+
+func workspaceRelativePath(root, path string) (string, bool) {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return filepath.ToSlash(rel), true
+}
+
+func hasSymlinkComponent(root, slashPath string) bool {
+	current := root
+	for _, segment := range strings.Split(slashPath, "/") {
+		current = filepath.Join(current, segment)
+		info, err := os.Lstat(current)
+		if err != nil {
+			return true
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func pathInside(root, candidate string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(candidate))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
