@@ -147,12 +147,17 @@ class BridgeClientTest(unittest.TestCase):
             client.clear_checkpoint_ready()
             self.assertFalse(ready.exists())
 
-    def test_sandbox_source_ip_prefers_manifest_env(self):
-        with mock.patch.dict(os.environ, {"HARNESS_SANDBOX_SOURCE_IP": "10.240.0.2"}, clear=False):
+    def test_sandbox_source_ip_ignores_manifest_env(self):
+        env_name = "HARNESS_" + "SANDBOX_SOURCE_IP"
+        with mock.patch.dict(os.environ, {env_name: "10.240.0.2"}, clear=False):
             with mock.patch.object(bridge.subprocess, "check_output") as check_output:
-                self.assertEqual(bridge.sandbox_source_ip(), "10.240.0.2")
+                check_output.return_value = json.dumps([
+                    {"ifname": "lo", "addr_info": [{"family": "inet", "local": "127.0.0.1"}]},
+                    {"ifname": "eth0", "addr_info": [{"family": "inet", "local": "10.241.0.2"}]},
+                ])
+                self.assertEqual(bridge.sandbox_source_ip(), "10.241.0.2")
 
-        check_output.assert_not_called()
+        check_output.assert_called_once_with(["ip", "-j", "addr", "show"], text=True)
 
     def test_heartbeat_loop_uses_configured_interval(self):
         with tempfile.TemporaryDirectory() as root:
