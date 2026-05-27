@@ -121,6 +121,7 @@ type CheckpointRequest struct {
 	SessionID      string
 	GenerationID   string
 	CheckpointPath string
+	Generation     store.RuntimeGenerationDetails
 }
 
 type checkpointImageManifest struct {
@@ -2358,6 +2359,15 @@ func (r *Runtime) Checkpoint(ctx context.Context, req CheckpointRequest) error {
 	if container.GenerationID != req.GenerationID {
 		return fmt.Errorf("container generation mismatch: got %s want %s", container.GenerationID, req.GenerationID)
 	}
+	if strings.TrimSpace(req.Generation.SessionID) != "" && req.Generation.SessionID != req.SessionID {
+		return fmt.Errorf("checkpoint generation session mismatch")
+	}
+	if strings.TrimSpace(req.Generation.GenerationID) != "" && req.Generation.GenerationID != req.GenerationID {
+		return fmt.Errorf("checkpoint generation id mismatch")
+	}
+	if strings.TrimSpace(req.Generation.RunscContainerID) != "" && req.Generation.RunscContainerID != container.RunscContainerID {
+		return fmt.Errorf("checkpoint runsc container mismatch")
+	}
 
 	checkpointPath := strings.TrimSpace(req.CheckpointPath)
 	if checkpointPath == "" {
@@ -2376,7 +2386,7 @@ func (r *Runtime) Checkpoint(ctx context.Context, req CheckpointRequest) error {
 	// Create checkpoint
 	cmd := exec.CommandContext(ctx, "runsc",
 		"-root", r.cfg.RunscRoot,
-		"-overlay2", r.cfg.RunscOverlay2,
+		"-overlay2", r.runscOverlay2(req.Generation),
 		"checkpoint",
 		"-image-path", checkpointPath,
 		container.RunscContainerID,

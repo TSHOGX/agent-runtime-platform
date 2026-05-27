@@ -418,6 +418,22 @@ func TestCheckpointRequiresGenerationIdentity(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "container generation mismatch") {
 		t.Fatalf("expected generation mismatch error, got %v", err)
 	}
+	err = rt.Checkpoint(context.Background(), CheckpointRequest{
+		SessionID:    "sess_1",
+		GenerationID: "gen_a",
+		Generation:   store.RuntimeGenerationDetails{SessionID: "sess_other", GenerationID: "gen_a"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "checkpoint generation session mismatch") {
+		t.Fatalf("expected generation session mismatch error, got %v", err)
+	}
+	err = rt.Checkpoint(context.Background(), CheckpointRequest{
+		SessionID:    "sess_1",
+		GenerationID: "gen_a",
+		Generation:   store.RuntimeGenerationDetails{SessionID: "sess_1", GenerationID: "gen_a", RunscContainerID: "harness-gen-other"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "checkpoint runsc container mismatch") {
+		t.Fatalf("expected runsc container mismatch error, got %v", err)
+	}
 }
 
 func TestSendMessageDoesNotReconfigureLiveSandboxNetwork(t *testing.T) {

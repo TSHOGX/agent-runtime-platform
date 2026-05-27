@@ -1922,6 +1922,7 @@ func (s *Server) checkpointGeneration(ctx context.Context, candidate store.Check
 		SessionID:      candidate.SessionID,
 		GenerationID:   candidate.GenerationID,
 		CheckpointPath: details.CheckpointPath,
+		Generation:     details,
 	})
 	if err != nil {
 		abortNow := time.Now().UTC()

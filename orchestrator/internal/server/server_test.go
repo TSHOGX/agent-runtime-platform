@@ -504,7 +504,10 @@ func TestMonitorIdleSessionsCheckpointsEligibleGeneration(t *testing.T) {
 	}
 	if checkpoints[0].SessionID != session.ID ||
 		checkpoints[0].GenerationID != allocation.GenerationID ||
-		checkpoints[0].CheckpointPath != details.CheckpointPath {
+		checkpoints[0].CheckpointPath != details.CheckpointPath ||
+		checkpoints[0].Generation.GenerationID != allocation.GenerationID ||
+		checkpoints[0].Generation.RunscContainerID != details.RunscContainerID ||
+		checkpoints[0].Generation.RunscOverlay2 != details.RunscOverlay2 {
 		t.Fatalf("unexpected checkpoint request: %+v details=%+v", checkpoints[0], details)
 	}
 	var generationStatus, networkState, resourceState, checkpointPath, checkpointBundle, checkpointRuntimeConfig, checkpointManifest string
