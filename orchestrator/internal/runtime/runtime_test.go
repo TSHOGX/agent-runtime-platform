@@ -445,16 +445,12 @@ func TestEnsureSandboxNetworkUsesGenerationAllocationAndProbes(t *testing.T) {
 			"ip netns exec harness-gen-a nft list table inet harness_egress":                                                []byte("table exists"),
 			"nft list table inet harness_gen_gen_a":                                                                         []byte("table exists"),
 			"ip netns exec harness-gen-a curl -sS --max-time 2 -o /dev/null -w %{http_code} http://10.250.0.1:8082/healthz": []byte("200"),
-			"ip netns exec harness-gen-a curl -sS --max-time 2 -o /dev/null -w %{http_code} -X POST -H content-type: application/json -H x-api-key: 123 --data {} http://10.250.0.1:8082/v1/messages": []byte("400"),
 		},
 	}
 	rt := New(Config{
 		RunscNetwork:  "sandbox",
 		RunscOverlay2: "none",
 		CommandRunner: runner,
-		Claude: ClaudeConfig{
-			APIKey: "123",
-		},
 	})
 	details := testGenerationDetails(t.TempDir(), "gen_a")
 	details.RunscNetwork = "sandbox"
@@ -505,24 +501,24 @@ func TestEnsureSandboxNetworkUsesGenerationAllocationAndProbes(t *testing.T) {
 		"nft add rule inet harness_gen_gen_a forward iifname hgenah drop",
 		"nft add rule inet harness_gen_gen_a postrouting ip saddr 10.250.0.0/30 masquerade",
 		"ip netns exec harness-gen-a curl -sS --max-time 2 -o /dev/null -w %{http_code} http://10.250.0.1:8082/healthz",
-		"ip netns exec harness-gen-a curl -sS --max-time 2 -o /dev/null -w %{http_code} -X POST -H content-type: application/json -H x-api-key: 123 --data {} http://10.250.0.1:8082/v1/messages",
 	}
 	if got := runner.Commands(); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("unexpected commands:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
+	for _, command := range runner.Commands() {
+		if strings.Contains(command, "/v1/messages") || strings.Contains(command, "x-api-key") {
+			t.Fatalf("pre-start sandbox network probe must not call model endpoints or pass API keys: %s", command)
+		}
+	}
 }
 
-func TestProbeSandboxNetworkRetriesAndUsesConfiguredStatuses(t *testing.T) {
+func TestProbeSandboxNetworkRetriesAndUsesConfiguredHealthzStatuses(t *testing.T) {
 	healthz := "ip netns exec harness-gen-a curl -sS --max-time 2 -o /dev/null -w %{http_code} http://10.250.0.1:8082/healthz"
-	postMessages := "ip netns exec harness-gen-a curl -sS --max-time 2 -o /dev/null -w %{http_code} -X POST -H content-type: application/json -H x-api-key: 123 --data {} http://10.250.0.1:8082/v1/messages"
 	runner := &recordingCommandRunner{
 		sequence: map[string][]commandResult{
 			healthz: {
 				{out: []byte("503")},
 				{out: []byte("204")},
-			},
-			postMessages: {
-				{out: []byte("422")},
 			},
 		},
 	}
@@ -531,10 +527,6 @@ func TestProbeSandboxNetworkRetriesAndUsesConfiguredStatuses(t *testing.T) {
 		PreStartProbeAttempts: 2,
 		PreStartProbeInterval: time.Nanosecond,
 		ProbeHealthzStatuses:  []int{204},
-		ProbeMessageStatuses:  []int{422},
-		Claude: ClaudeConfig{
-			APIKey: "123",
-		},
 	})
 	details := testGenerationDetails(t.TempDir(), "gen_a")
 	details.NetnsName = "harness-gen-a"
@@ -543,7 +535,7 @@ func TestProbeSandboxNetworkRetriesAndUsesConfiguredStatuses(t *testing.T) {
 	if err := rt.probeSandboxNetwork(context.Background(), details); err != nil {
 		t.Fatalf("probe sandbox network: %v", err)
 	}
-	want := []string{healthz, healthz, postMessages}
+	want := []string{healthz, healthz}
 	if got := runner.Commands(); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("unexpected commands:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}

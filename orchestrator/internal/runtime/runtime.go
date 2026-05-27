@@ -2012,10 +2012,6 @@ func (r *Runtime) runSandboxNetworkProbeOnce(ctx context.Context, details store.
 			args:           []string{"netns", "exec", details.NetnsName, "curl", "-sS", "--max-time", "2", "-o", "/dev/null", "-w", "%{http_code}", baseURL + "/healthz"},
 			acceptStatuses: defaultIntSlice(r.cfg.ProbeHealthzStatuses, []int{200}),
 		},
-		{
-			args:           []string{"netns", "exec", details.NetnsName, "curl", "-sS", "--max-time", "2", "-o", "/dev/null", "-w", "%{http_code}", "-X", "POST", "-H", "content-type: application/json", "-H", "x-api-key: " + r.cfg.Claude.APIKey, "--data", "{}", baseURL + "/v1/messages"},
-			acceptStatuses: defaultIntSlice(r.cfg.ProbeMessageStatuses, []int{400}),
-		},
 	}
 	for _, probe := range probes {
 		output, err := r.runner.CombinedOutput(ctx, "ip", probe.args...)
