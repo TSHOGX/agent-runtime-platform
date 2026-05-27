@@ -1398,7 +1398,11 @@ func (r *Runtime) renderSandboxIsolatedRuntimeSpec(req StartRequest) (runtimeSpe
 	spec.Process.NoNewPrivileges = true
 	spec.Root = specRoot{Path: r.rootFSPath(), Readonly: true}
 	spec.Hostname = "harness-gen-" + shortID(details.GenerationID)
-	spec.Mounts = append(RuntimeAdapterPseudoMounts(), plan.SpecMounts()...)
+	pseudoMounts := RuntimeAdapterPseudoMounts()
+	if err := ValidateRuntimeAdapterPseudoMounts(pseudoMounts); err != nil {
+		return runtimeSpec{}, "", err
+	}
+	spec.Mounts = append(pseudoMounts, plan.SpecMounts()...)
 	linux := map[string]any{
 		"resources": map[string]any{
 			"memory": map[string]any{"limit": 1073741824},

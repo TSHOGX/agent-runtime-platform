@@ -174,15 +174,62 @@ func (p MountPlan) SpecMounts() []specMount {
 	return mounts
 }
 
+var runtimeAdapterPseudoMountAllowList = []specMount{
+	{Destination: "/proc", Type: "proc", Source: "proc"},
+	{Destination: "/dev", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
+	{Destination: "/dev/pts", Type: "devpts", Source: "devpts", Options: []string{"nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620", "gid=5"}},
+	{Destination: "/dev/shm", Type: "tmpfs", Source: "shm", Options: []string{"nosuid", "noexec", "nodev", "mode=1777", "size=65536k"}},
+	{Destination: "/dev/mqueue", Type: "mqueue", Source: "mqueue", Options: []string{"nosuid", "noexec", "nodev"}},
+	{Destination: "/sys", Type: "sysfs", Source: "sysfs", Options: []string{"nosuid", "noexec", "nodev", "ro"}},
+}
+
 func RuntimeAdapterPseudoMounts() []specMount {
-	return []specMount{
-		{Destination: "/proc", Type: "proc", Source: "proc"},
-		{Destination: "/dev", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
-		{Destination: "/dev/pts", Type: "devpts", Source: "devpts", Options: []string{"nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620", "gid=5"}},
-		{Destination: "/dev/shm", Type: "tmpfs", Source: "shm", Options: []string{"nosuid", "noexec", "nodev", "mode=1777", "size=65536k"}},
-		{Destination: "/dev/mqueue", Type: "mqueue", Source: "mqueue", Options: []string{"nosuid", "noexec", "nodev"}},
-		{Destination: "/sys", Type: "sysfs", Source: "sysfs", Options: []string{"nosuid", "noexec", "nodev", "ro"}},
+	mounts := make([]specMount, 0, len(runtimeAdapterPseudoMountAllowList))
+	for _, mount := range runtimeAdapterPseudoMountAllowList {
+		mounts = append(mounts, specMount{
+			Destination: mount.Destination,
+			Type:        mount.Type,
+			Source:      mount.Source,
+			Options:     append([]string(nil), mount.Options...),
+			Annotations: copyStringMap(mount.Annotations),
+		})
 	}
+	return mounts
+}
+
+func ValidateRuntimeAdapterPseudoMounts(mounts []specMount) error {
+	expected := map[string]specMount{}
+	for _, mount := range runtimeAdapterPseudoMountAllowList {
+		expected[mount.Destination] = mount
+	}
+	seen := map[string]struct{}{}
+	for _, mount := range mounts {
+		want, ok := expected[mount.Destination]
+		if !ok {
+			return fmt.Errorf("runtime adapter pseudo mount %q is not in sandbox-isolation-v1 allow-list", mount.Destination)
+		}
+		if _, ok := seen[mount.Destination]; ok {
+			return fmt.Errorf("runtime adapter pseudo mount %q is duplicated", mount.Destination)
+		}
+		seen[mount.Destination] = struct{}{}
+		if mount.Type != want.Type || mount.Source != want.Source {
+			return fmt.Errorf("runtime adapter pseudo mount %q type/source drift: got %s/%s want %s/%s", mount.Destination, mount.Type, mount.Source, want.Type, want.Source)
+		}
+		if !slices.Equal(mount.Options, want.Options) {
+			return fmt.Errorf("runtime adapter pseudo mount %q options drift: got %v want %v", mount.Destination, mount.Options, want.Options)
+		}
+		if len(mount.Annotations) != 0 {
+			return fmt.Errorf("runtime adapter pseudo mount %q must not carry annotations", mount.Destination)
+		}
+	}
+	if len(seen) != len(expected) {
+		for destination := range expected {
+			if _, ok := seen[destination]; !ok {
+				return fmt.Errorf("runtime adapter pseudo mount %q is missing", destination)
+			}
+		}
+	}
+	return nil
 }
 
 func exactBindMount(name, source, destination, mode string, options []string, annotations map[string]string) MountPlanMount {

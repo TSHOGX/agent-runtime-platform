@@ -152,6 +152,9 @@ func TestMountPlanRejectsForbiddenAndRecursiveBinds(t *testing.T) {
 
 func TestRuntimeAdapterPseudoMountsAreSeparateAllowList(t *testing.T) {
 	mounts := RuntimeAdapterPseudoMounts()
+	if err := ValidateRuntimeAdapterPseudoMounts(mounts); err != nil {
+		t.Fatalf("validate runtime adapter pseudo mounts: %v", err)
+	}
 	want := []string{"/proc", "/dev", "/dev/pts", "/dev/shm", "/dev/mqueue", "/sys"}
 	if len(mounts) != len(want) {
 		t.Fatalf("pseudo mounts len=%d want %d: %+v", len(mounts), len(want), mounts)
@@ -171,6 +174,55 @@ func TestRuntimeAdapterPseudoMountsAreSeparateAllowList(t *testing.T) {
 			mount.Destination == bridge.BridgeMountDestination {
 			t.Fatalf("pseudo mount leaked product destination: %+v", mount)
 		}
+	}
+}
+
+func TestRuntimeAdapterPseudoMountValidationRejectsDrift(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func([]specMount) []specMount
+		want   string
+	}{
+		{
+			name: "tun device",
+			mutate: func(mounts []specMount) []specMount {
+				return append(mounts, specMount{
+					Destination: "/dev/net/tun",
+					Type:        "bind",
+					Source:      "/dev/net/tun",
+					Options:     []string{"bind", "rw"},
+				})
+			},
+			want: "allow-list",
+		},
+		{
+			name: "option drift",
+			mutate: func(mounts []specMount) []specMount {
+				for i := range mounts {
+					if mounts[i].Destination == "/sys" {
+						mounts[i].Options = []string{"nosuid", "noexec", "nodev"}
+					}
+				}
+				return mounts
+			},
+			want: "options drift",
+		},
+		{
+			name: "missing",
+			mutate: func(mounts []specMount) []specMount {
+				return mounts[:len(mounts)-1]
+			},
+			want: "missing",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mounts := tt.mutate(RuntimeAdapterPseudoMounts())
+			err := ValidateRuntimeAdapterPseudoMounts(mounts)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %q error, got %v", tt.want, err)
+			}
+		})
 	}
 }
 
