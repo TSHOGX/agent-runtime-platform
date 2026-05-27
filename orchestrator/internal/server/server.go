@@ -774,6 +774,9 @@ func (s *Server) resourceAllocatorConfig(agent string) store.ResourceAllocatorCo
 		AgentModel:                  s.cfg.Claude.Model,
 		AgentOutputFormat:           outputFormat,
 		DisableNonessentialTraffic:  s.cfg.Claude.DisableNonessentialTraffic,
+		SandboxUID:                  s.cfg.Phase7.SandboxIdentity.UID,
+		SandboxGID:                  s.cfg.Phase7.SandboxIdentity.GID,
+		SandboxSupplementalGIDs:     s.cfg.Phase7.SandboxIdentity.SupplementalGIDs,
 		ProviderCredentialsHostOnly: agent == string(agents.Claude),
 		SandboxModelProxyBaseURL:    s.cfg.Claude.SandboxBaseURL,
 	}

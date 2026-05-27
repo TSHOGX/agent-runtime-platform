@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"net/url"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -35,6 +36,9 @@ type ResourceAllocatorConfig struct {
 	AgentModel                  string
 	AgentOutputFormat           string
 	DisableNonessentialTraffic  bool
+	SandboxUID                  int
+	SandboxGID                  int
+	SandboxSupplementalGIDs     []int
 	ModelAccessAllowed          *bool
 	ProviderCredentialsHostOnly bool
 	SandboxModelProxyBaseURL    string
@@ -122,6 +126,9 @@ type RuntimeGenerationDetails struct {
 	Model                           string
 	OutputFormat                    string
 	DisableNonessentialTraffic      bool
+	SandboxUID                      int
+	SandboxGID                      int
+	SandboxSupplementalGIDs         []int
 	ModelAccessAllowed              bool
 	RequiresSecretDrop              bool
 	ManifestAnthropicBaseURL        string
@@ -323,22 +330,29 @@ func (s *Store) AllocateGeneration(ctx context.Context, p AllocateGenerationPara
 	if err != nil {
 		return GenerationAllocation{}, err
 	}
+	supplementalGIDsJSON, err := json.Marshal(p.Config.sandboxSupplementalGIDs())
+	if err != nil {
+		return GenerationAllocation{}, err
+	}
 	now := formatTime(p.Now)
 	leaseExpires := p.Now.Add(p.LeaseTTL)
 
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO agent_runtime_profiles (
   agent_runtime_profile_id, agent, model, output_format,
-  disable_nonessential_traffic, requires_secret_drop,
+  disable_nonessential_traffic, sandbox_uid, sandbox_gid, sandbox_supplemental_gids,
+  requires_secret_drop,
   model_access_allowed, manifest_anthropic_base_url, anthropic_api_key_secret_id,
   anthropic_auth_token_secret_id, secret_version, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(agent, model, output_format, disable_nonessential_traffic,
+  sandbox_uid, sandbox_gid, sandbox_supplemental_gids,
   requires_secret_drop, model_access_allowed, manifest_anthropic_base_url,
   anthropic_api_key_secret_id, anthropic_auth_token_secret_id, secret_version
 ) DO NOTHING`,
 		agentRuntimeProfileID, p.Config.agent(), nullableString(p.Config.AgentModel), p.Config.outputFormat(),
-		boolInt(p.Config.DisableNonessentialTraffic), boolInt(p.Config.requiresSecretDrop()),
+		boolInt(p.Config.DisableNonessentialTraffic), p.Config.sandboxUID(), p.Config.sandboxGID(), string(supplementalGIDsJSON),
+		boolInt(p.Config.requiresSecretDrop()),
 		boolInt(p.Config.modelAccessAllowed()),
 		nullableString(p.Config.manifestAnthropicBaseURL(network.SandboxBaseURL)),
 		nullableString(p.Config.apiKeySecretID()), nullableString(p.Config.authTokenSecretID()),
@@ -352,6 +366,9 @@ WHERE agent = ?
   AND COALESCE(model, '') = COALESCE(?, '')
   AND output_format = ?
   AND disable_nonessential_traffic = ?
+  AND sandbox_uid = ?
+  AND sandbox_gid = ?
+  AND sandbox_supplemental_gids = ?
   AND requires_secret_drop = ?
   AND model_access_allowed = ?
   AND COALESCE(manifest_anthropic_base_url, '') = COALESCE(?, '')
@@ -359,7 +376,8 @@ WHERE agent = ?
   AND COALESCE(anthropic_auth_token_secret_id, '') = COALESCE(?, '')
   AND COALESCE(secret_version, '') = COALESCE(?, '')`,
 		p.Config.agent(), nullableString(p.Config.AgentModel), p.Config.outputFormat(),
-		boolInt(p.Config.DisableNonessentialTraffic), boolInt(p.Config.requiresSecretDrop()),
+		boolInt(p.Config.DisableNonessentialTraffic), p.Config.sandboxUID(), p.Config.sandboxGID(), string(supplementalGIDsJSON),
+		boolInt(p.Config.requiresSecretDrop()),
 		boolInt(p.Config.modelAccessAllowed()),
 		nullableString(p.Config.manifestAnthropicBaseURL(network.SandboxBaseURL)),
 		nullableString(p.Config.apiKeySecretID()), nullableString(p.Config.authTokenSecretID()),
@@ -2119,6 +2137,9 @@ SELECT
   COALESCE(a.model, ''),
   a.output_format,
   a.disable_nonessential_traffic,
+  a.sandbox_uid,
+  a.sandbox_gid,
+  a.sandbox_supplemental_gids,
   a.model_access_allowed,
   a.requires_secret_drop,
   COALESCE(a.manifest_anthropic_base_url, ''),
@@ -2134,6 +2155,7 @@ WHERE g.session_id = ?
   AND g.generation_id = ?`, sessionID, generationID)
 	var details RuntimeGenerationDetails
 	var disableNonessentialTraffic, modelAccessAllowed, requiresSecretDrop, autoCheckpointEnabled int
+	var sandboxSupplementalGIDs string
 	if err := row.Scan(
 		&details.SessionID,
 		&details.GenerationID,
@@ -2188,6 +2210,9 @@ WHERE g.session_id = ?
 		&details.Model,
 		&details.OutputFormat,
 		&disableNonessentialTraffic,
+		&details.SandboxUID,
+		&details.SandboxGID,
+		&sandboxSupplementalGIDs,
 		&modelAccessAllowed,
 		&requiresSecretDrop,
 		&details.ManifestAnthropicBaseURL,
@@ -2198,6 +2223,11 @@ WHERE g.session_id = ?
 		return RuntimeGenerationDetails{}, err
 	}
 	details.DisableNonessentialTraffic = disableNonessentialTraffic != 0
+	if strings.TrimSpace(sandboxSupplementalGIDs) != "" {
+		if err := json.Unmarshal([]byte(sandboxSupplementalGIDs), &details.SandboxSupplementalGIDs); err != nil {
+			return RuntimeGenerationDetails{}, fmt.Errorf("parse sandbox supplemental gids: %w", err)
+		}
+	}
 	details.ModelAccessAllowed = modelAccessAllowed != 0
 	details.RequiresSecretDrop = requiresSecretDrop != 0
 	details.AutoCheckpointEnabled = autoCheckpointEnabled != 0
@@ -2563,6 +2593,38 @@ func (c ResourceAllocatorConfig) outputFormat() string {
 		return "stream-json"
 	}
 	return strings.TrimSpace(c.AgentOutputFormat)
+}
+
+func (c ResourceAllocatorConfig) sandboxUID() int {
+	if c.SandboxUID <= 0 {
+		return 65534
+	}
+	return c.SandboxUID
+}
+
+func (c ResourceAllocatorConfig) sandboxGID() int {
+	if c.SandboxGID <= 0 {
+		return 65534
+	}
+	return c.SandboxGID
+}
+
+func (c ResourceAllocatorConfig) sandboxSupplementalGIDs() []int {
+	if len(c.SandboxSupplementalGIDs) == 0 {
+		return []int{}
+	}
+	out := append([]int(nil), c.SandboxSupplementalGIDs...)
+	sort.Ints(out)
+	deduped := out[:0]
+	for _, gid := range out {
+		if gid <= 0 {
+			continue
+		}
+		if len(deduped) == 0 || deduped[len(deduped)-1] != gid {
+			deduped = append(deduped, gid)
+		}
+	}
+	return deduped
 }
 
 func (c ResourceAllocatorConfig) requiresSecretDrop() bool {

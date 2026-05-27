@@ -114,6 +114,7 @@ func defaultMigrations(options Options) []migration {
 		{version: 11, name: "phase8_data_volumes", fn: migrateV11Phase8DataVolumes},
 		{version: 12, name: "phase8_runtime_resource_instances", fn: migrateV12Phase8RuntimeResourceInstances},
 		{version: 13, name: "phase8_model_entitlements", fn: migrateV13Phase8ModelEntitlements},
+		{version: 14, name: "phase8_runtime_profile_identity", fn: migrateV14Phase8RuntimeProfileIdentity},
 	}
 }
 
@@ -871,6 +872,43 @@ DROP INDEX IF EXISTS agent_runtime_profiles_tuple_uq;
 CREATE UNIQUE INDEX IF NOT EXISTS agent_runtime_profiles_tuple_uq
   ON agent_runtime_profiles (
     agent, model, output_format, disable_nonessential_traffic,
+    requires_secret_drop, model_access_allowed, manifest_anthropic_base_url,
+    anthropic_api_key_secret_id, anthropic_auth_token_secret_id, secret_version
+  );
+`); err != nil {
+		return err
+	}
+	return nil
+}
+
+func migrateV14Phase8RuntimeProfileIdentity(ctx context.Context, tx dbRunner) error {
+	columns := []struct {
+		name string
+		ddl  string
+	}{
+		{name: "sandbox_uid", ddl: "ALTER TABLE agent_runtime_profiles ADD COLUMN sandbox_uid INTEGER NOT NULL DEFAULT 65534 CHECK(sandbox_uid > 0)"},
+		{name: "sandbox_gid", ddl: "ALTER TABLE agent_runtime_profiles ADD COLUMN sandbox_gid INTEGER NOT NULL DEFAULT 65534 CHECK(sandbox_gid > 0)"},
+		{name: "sandbox_supplemental_gids", ddl: "ALTER TABLE agent_runtime_profiles ADD COLUMN sandbox_supplemental_gids TEXT NOT NULL DEFAULT '[]'"},
+	}
+	for _, column := range columns {
+		exists, err := columnExists(ctx, tx, "agent_runtime_profiles", column.name)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, column.ddl); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+DROP INDEX IF EXISTS agent_runtime_profiles_tuple_uq;
+
+CREATE UNIQUE INDEX IF NOT EXISTS agent_runtime_profiles_tuple_uq
+  ON agent_runtime_profiles (
+    agent, model, output_format, disable_nonessential_traffic,
+    sandbox_uid, sandbox_gid, sandbox_supplemental_gids,
     requires_secret_drop, model_access_allowed, manifest_anthropic_base_url,
     anthropic_api_key_secret_id, anthropic_auth_token_secret_id, secret_version
   );

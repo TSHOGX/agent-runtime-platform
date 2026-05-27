@@ -3782,6 +3782,10 @@ func TestResourceAllocatorConfigUsesHostOnlyClaudeCredentials(t *testing.T) {
 	if claudeConfig.SandboxModelProxyBaseURL != "http://harness-model-proxy.internal:8082" {
 		t.Fatalf("claude sandbox model proxy base url = %q", claudeConfig.SandboxModelProxyBaseURL)
 	}
+	if claudeConfig.SandboxUID != cfg.Phase7.SandboxIdentity.UID ||
+		claudeConfig.SandboxGID != cfg.Phase7.SandboxIdentity.GID {
+		t.Fatalf("claude allocator sandbox identity = %+v", claudeConfig)
+	}
 
 	shellConfig := srv.resourceAllocatorConfig("sh")
 	if shellConfig.ProviderCredentialsHostOnly || shellConfig.SandboxModelProxyBaseURL != "http://harness-model-proxy.internal:8082" {
@@ -3807,6 +3811,9 @@ func serverTestAllocatorConfig(cfg config.Config, agent string) store.ResourceAl
 		AgentModel:                  cfg.Claude.Model,
 		AgentOutputFormat:           outputFormat,
 		DisableNonessentialTraffic:  cfg.Claude.DisableNonessentialTraffic,
+		SandboxUID:                  cfg.Phase7.SandboxIdentity.UID,
+		SandboxGID:                  cfg.Phase7.SandboxIdentity.GID,
+		SandboxSupplementalGIDs:     cfg.Phase7.SandboxIdentity.SupplementalGIDs,
 		ProviderCredentialsHostOnly: agent == "claude",
 		SandboxModelProxyBaseURL:    cfg.Claude.SandboxBaseURL,
 	}

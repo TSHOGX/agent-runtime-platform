@@ -63,6 +63,11 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ne
 		details.SecretsDirPath == "" {
 		t.Fatalf("unexpected claude generation details: %+v", details)
 	}
+	if details.SandboxUID != 7000 ||
+		details.SandboxGID != 7001 ||
+		!slices.Equal(details.SandboxSupplementalGIDs, []int{43, 44}) {
+		t.Fatalf("unexpected sandbox runtime identity: %+v", details)
+	}
 	if details.RunscNetwork != "sandbox" ||
 		details.RunscOverlay2 != "none" ||
 		details.HostProxyBindURL != cfg.HostProxyBindURL ||
@@ -756,6 +761,51 @@ func TestAllocateClaudeHostOnlyGenerationHasNoSecretReferences(t *testing.T) {
 	}
 	if details.ManifestAnthropicBaseURL != "http://harness-model-proxy.internal:8082" {
 		t.Fatalf("manifest base url = %q", details.ManifestAnthropicBaseURL)
+	}
+}
+
+func TestAllocateGenerationRuntimeProfileIncludesSandboxIdentity(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	createStoreSession(t, ctx, st, "sess_identity_a")
+	createStoreSession(t, ctx, st, "sess_identity_b")
+	cfg := testAllocatorConfig(t)
+
+	first, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_identity_a",
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    cfg,
+	})
+	if err != nil {
+		t.Fatalf("allocate first identity generation: %v", err)
+	}
+	cfg.SandboxGID = 8001
+	second, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_identity_b",
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    cfg,
+	})
+	if err != nil {
+		t.Fatalf("allocate second identity generation: %v", err)
+	}
+
+	firstDetails, err := st.GetRuntimeGenerationDetails(ctx, "sess_identity_a", first.GenerationID)
+	if err != nil {
+		t.Fatalf("get first identity generation: %v", err)
+	}
+	secondDetails, err := st.GetRuntimeGenerationDetails(ctx, "sess_identity_b", second.GenerationID)
+	if err != nil {
+		t.Fatalf("get second identity generation: %v", err)
+	}
+	if firstDetails.AgentRuntimeProfileID == secondDetails.AgentRuntimeProfileID {
+		t.Fatalf("runtime profile should differ when sandbox identity changes: first=%+v second=%+v", firstDetails, secondDetails)
+	}
+	if secondDetails.SandboxGID != 8001 {
+		t.Fatalf("second sandbox gid = %d", secondDetails.SandboxGID)
 	}
 }
 
@@ -2487,6 +2537,9 @@ func testAllocatorConfig(t *testing.T) ResourceAllocatorConfig {
 		AgentModel:                 "sonnet",
 		AgentOutputFormat:          "stream-json",
 		DisableNonessentialTraffic: true,
+		SandboxUID:                 7000,
+		SandboxGID:                 7001,
+		SandboxSupplementalGIDs:    []int{44, 43},
 	}
 }
 
