@@ -243,6 +243,20 @@ WHERE generation_id = ?`, strings.TrimSpace(generationID))
 	return instance, nil
 }
 
+func (s *Store) GetRuntimeResourceCleanupIdentity(ctx context.Context, generationID string) (RuntimeResourceInstance, error) {
+	row := s.db.QueryRowContext(ctx, runtimeResourceInstanceSelectSQL()+`
+WHERE generation_id = ?`, strings.TrimSpace(generationID))
+	instance, err := scanRuntimeResourceInstance(row)
+	if err != nil {
+		return RuntimeResourceInstance{}, err
+	}
+	payload, err := verifyRuntimeResourceIdentityPayload(instance)
+	if err != nil {
+		return RuntimeResourceInstance{}, err
+	}
+	return runtimeResourceInstanceFromIdentityPayload(instance, payload), nil
+}
+
 func (s *Store) ClaimRuntimeResourceMaterialization(ctx context.Context, p RuntimeResourceMaterializationClaimParams) error {
 	return s.claimRuntimeResourceMaterialization(ctx, p, RuntimeResourceAllocated)
 }
@@ -319,7 +333,7 @@ func (s *Store) MarkRuntimeResourceAbsentVerified(ctx context.Context, p Runtime
 	if p.Now.IsZero() {
 		p.Now = time.Now().UTC()
 	}
-	instance, err := s.GetRuntimeResourceInstance(ctx, p.GenerationID)
+	instance, err := s.GetRuntimeResourceCleanupIdentity(ctx, p.GenerationID)
 	if err != nil {
 		return err
 	}
@@ -515,19 +529,27 @@ func runtimeResourceIdentity(p RuntimeResourceInstanceParams) ([]byte, string, e
 	return data, SandboxContractDigest(data), nil
 }
 
-func verifyRuntimeResourceIdentity(instance RuntimeResourceInstance) error {
+func verifyRuntimeResourceIdentityPayload(instance RuntimeResourceInstance) (runtimeResourceIdentityPayload, error) {
 	canonical, err := canonicalDataVolumeJSONBytes(instance.ResourceIdentityPayload)
 	if err != nil {
-		return err
+		return runtimeResourceIdentityPayload{}, err
 	}
 	if !bytes.Equal(canonical, instance.ResourceIdentityPayload) {
-		return fmt.Errorf("runtime resource identity payload is not canonical")
+		return runtimeResourceIdentityPayload{}, fmt.Errorf("runtime resource identity payload is not canonical")
 	}
 	if got := SandboxContractDigest(instance.ResourceIdentityPayload); got != instance.ResourceIdentityDigest {
-		return fmt.Errorf("runtime resource identity digest mismatch: got %s want %s", got, instance.ResourceIdentityDigest)
+		return runtimeResourceIdentityPayload{}, fmt.Errorf("runtime resource identity digest mismatch: got %s want %s", got, instance.ResourceIdentityDigest)
 	}
 	var payload runtimeResourceIdentityPayload
 	if err := json.Unmarshal(instance.ResourceIdentityPayload, &payload); err != nil {
+		return runtimeResourceIdentityPayload{}, err
+	}
+	return payload, nil
+}
+
+func verifyRuntimeResourceIdentity(instance RuntimeResourceInstance) error {
+	payload, err := verifyRuntimeResourceIdentityPayload(instance)
+	if err != nil {
 		return err
 	}
 	if payload.HostID != instance.HostID ||
@@ -561,6 +583,38 @@ func verifyRuntimeResourceIdentity(instance RuntimeResourceInstance) error {
 		return fmt.Errorf("runtime resource identity payload does not match row mirrors")
 	}
 	return nil
+}
+
+func runtimeResourceInstanceFromIdentityPayload(instance RuntimeResourceInstance, payload runtimeResourceIdentityPayload) RuntimeResourceInstance {
+	instance.HostID = payload.HostID
+	instance.SessionID = payload.SessionID
+	instance.GenerationID = payload.GenerationID
+	instance.ContractID = payload.ContractID
+	instance.SandboxContractVersion = payload.SandboxContractVersion
+	instance.RunscContainerID = payload.RunscContainerID
+	instance.RunscPlatform = payload.RunscPlatform
+	instance.RunscVersion = payload.RunscVersion
+	instance.RunscBinaryPath = payload.RunscBinaryPath
+	instance.RunscBinaryDigest = payload.RunscBinaryDigest
+	instance.NetworkProfileID = payload.NetworkProfileID
+	instance.NetnsName = payload.NetnsName
+	instance.NetnsPath = payload.NetnsPath
+	instance.HostVeth = payload.HostVeth
+	instance.SandboxVeth = payload.SandboxVeth
+	instance.HostGatewayIP = payload.HostGatewayIP
+	instance.SandboxIP = payload.SandboxIP
+	instance.SandboxIPCIDR = payload.SandboxIPCIDR
+	instance.HostSideCIDR = payload.HostSideCIDR
+	instance.NftTableName = payload.NftTableName
+	instance.ControlDirPath = payload.ControlDirPath
+	instance.ControlManifestPath = payload.ControlManifestPath
+	instance.BundleDirPath = payload.BundleDirPath
+	instance.SpecPath = payload.SpecPath
+	instance.CheckpointPath = payload.CheckpointPath
+	instance.BridgeDirPath = payload.BridgeDirPath
+	instance.NetworkHostsPath = payload.NetworkHostsPath
+	instance.LogDirPath = payload.LogDirPath
+	return instance
 }
 
 func runtimeResourceEvidenceDigest(evidence ResourceReconciliationEvidence) ([]byte, string, error) {

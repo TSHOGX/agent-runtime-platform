@@ -245,6 +245,74 @@ WHERE generation_id = ?`, instance.GenerationID); err != nil {
 	}
 }
 
+func TestRuntimeResourceCleanupIdentityUsesVerifiedPayload(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	now := time.Now().UTC()
+	instance := createRuntimeResourceInstanceForTest(t, ctx, st, owner.UUID, "sess_resource_cleanup_identity", "host-1", now)
+	originalBridgeDir := instance.BridgeDirPath
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_resource_instances
+SET bridge_dir_path = ?
+WHERE generation_id = ?`, filepath.Join(t.TempDir(), "corrupt-bridge"), instance.GenerationID); err != nil {
+		t.Fatalf("corrupt row mirror: %v", err)
+	}
+	if _, err := st.GetRuntimeResourceInstance(ctx, instance.GenerationID); err == nil || !strings.Contains(err.Error(), "payload does not match row mirrors") {
+		t.Fatalf("expected strict getter to reject row mirror corruption, got %v", err)
+	}
+	cleanupIdentity, err := st.GetRuntimeResourceCleanupIdentity(ctx, instance.GenerationID)
+	if err != nil {
+		t.Fatalf("get cleanup identity: %v", err)
+	}
+	if cleanupIdentity.BridgeDirPath != originalBridgeDir {
+		t.Fatalf("cleanup identity used row mirror bridge path %q, want payload path %q", cleanupIdentity.BridgeDirPath, originalBridgeDir)
+	}
+	if err := st.ClaimRuntimeResourceRetiring(ctx, RuntimeResourceRetireParams{
+		GenerationID: instance.GenerationID,
+		WorkerID:     "worker-cleanup",
+		HostID:       cleanupIdentity.HostID,
+		Now:          now.Add(time.Second),
+	}); err != nil {
+		t.Fatalf("retire resource: %v", err)
+	}
+	evidence := runtimeResourceEvidenceForTest(cleanupIdentity.HostID)
+	if err := st.MarkRuntimeResourceReconciling(ctx, RuntimeResourceEvidenceParams{
+		GenerationID: instance.GenerationID,
+		WorkerID:     "worker-cleanup",
+		HostID:       cleanupIdentity.HostID,
+		Evidence:     evidence,
+		Now:          now.Add(2 * time.Second),
+	}); err != nil {
+		t.Fatalf("mark reconciling: %v", err)
+	}
+	if err := st.MarkRuntimeResourceAbsentVerified(ctx, RuntimeResourceEvidenceParams{
+		GenerationID: instance.GenerationID,
+		WorkerID:     "worker-cleanup",
+		HostID:       cleanupIdentity.HostID,
+		Evidence:     evidence,
+		Now:          now.Add(3 * time.Second),
+	}); err != nil {
+		t.Fatalf("absent verify with row mirror corruption: %v", err)
+	}
+}
+
+func TestRuntimeResourceCleanupIdentityRejectsCorruptPayload(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	now := time.Now().UTC()
+	instance := createRuntimeResourceInstanceForTest(t, ctx, st, owner.UUID, "sess_resource_cleanup_corrupt_payload", "host-1", now)
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_resource_instances
+SET resource_identity_payload = '{}'
+WHERE generation_id = ?`, instance.GenerationID); err != nil {
+		t.Fatalf("corrupt identity payload: %v", err)
+	}
+	_, err := st.GetRuntimeResourceCleanupIdentity(ctx, instance.GenerationID)
+	if err == nil || !strings.Contains(err.Error(), "identity digest mismatch") {
+		t.Fatalf("expected identity digest mismatch, got %v", err)
+	}
+}
+
 func TestRuntimeResourceAbsentVerifiedRequiresHostEvidence(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)

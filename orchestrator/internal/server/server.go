@@ -1306,6 +1306,17 @@ func (s *Server) runtimeResourceInstanceIfExists(ctx context.Context, generation
 	return instance, true, nil
 }
 
+func (s *Server) runtimeResourceCleanupIdentityIfExists(ctx context.Context, generationID string) (store.RuntimeResourceInstance, bool, error) {
+	instance, err := s.store.GetRuntimeResourceCleanupIdentity(ctx, generationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return store.RuntimeResourceInstance{}, false, nil
+	}
+	if err != nil {
+		return store.RuntimeResourceInstance{}, false, err
+	}
+	return instance, true, nil
+}
+
 func (s *Server) claimRuntimeResourceCleanup(ctx context.Context, instance store.RuntimeResourceInstance, now time.Time) error {
 	switch instance.State {
 	case store.RuntimeResourceRetiring, store.RuntimeResourceReconciling, store.RuntimeResourceAbsentVerified, store.RuntimeResourceDestroyed:
@@ -1324,7 +1335,7 @@ func (s *Server) claimRuntimeResourceCleanup(ctx context.Context, instance store
 
 func (s *Server) completeRuntimeResourceCleanup(ctx context.Context, instance store.RuntimeResourceInstance, cleanup runtime.GenerationResourceCleanup, now time.Time) error {
 	evidence := runtimeResourceCleanupEvidence(instance, cleanup)
-	current, err := s.store.GetRuntimeResourceInstance(ctx, instance.GenerationID)
+	current, err := s.store.GetRuntimeResourceCleanupIdentity(ctx, instance.GenerationID)
 	if err != nil {
 		return err
 	}
@@ -1344,7 +1355,7 @@ func (s *Server) completeRuntimeResourceCleanup(ctx context.Context, instance st
 			return err
 		}
 	}
-	current, err = s.store.GetRuntimeResourceInstance(ctx, instance.GenerationID)
+	current, err = s.store.GetRuntimeResourceCleanupIdentity(ctx, instance.GenerationID)
 	if err != nil {
 		return err
 	}
@@ -1817,7 +1828,7 @@ func (s *Server) cleanupGenerationResources(ctx context.Context, sessionID, gene
 	if err != nil {
 		return fmt.Errorf("lookup generation resources: %w", err)
 	}
-	resourceInstance, resourceTracked, err := s.runtimeResourceInstanceIfExists(ctx, generationID)
+	resourceInstance, resourceTracked, err := s.runtimeResourceCleanupIdentityIfExists(ctx, generationID)
 	if err != nil {
 		return fmt.Errorf("lookup runtime resource instance: %w", err)
 	}
