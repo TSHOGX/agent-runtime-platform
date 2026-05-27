@@ -116,6 +116,9 @@ WHERE c.sandbox_source_ip = ?
 		}
 		return StartProxyRequestResult{}, err
 	}
+	if _, err := getSandboxContractForGenerationWithMirrors(ctx, tx, result.SessionID, result.GenerationID); err != nil {
+		return StartProxyRequestResult{}, err
+	}
 	result.RequestSequence = nextRequestSequence
 
 	res, err := tx.ExecContext(ctx, `

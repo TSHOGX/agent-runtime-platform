@@ -122,6 +122,78 @@ WHERE generation_id = ?`, allocation.GenerationID); err != nil {
 	}
 }
 
+func TestCorruptSandboxContractBlocksLiveRuntimeUse(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	now := time.Now().UTC()
+	sessionID := "sess_contract_live_corrupt"
+	createStoreSession(t, ctx, st, sessionID)
+	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: sessionID,
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       now,
+		Config:    testAllocatorConfig(t),
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, sessionID, allocation.GenerationID, allocation.Owner, now.Add(time.Second)); err != nil {
+		t.Fatalf("mark generation live: %v", err)
+	}
+	instance := createLiveRuntimeResourceInstanceForAllocation(t, ctx, st, sessionID, allocation, owner.UUID, "host-contract-corrupt", now.Add(2*time.Second))
+	turnID, err := st.EnqueueTurn(ctx, sessionID, "before corruption", now.Add(3*time.Second))
+	if err != nil {
+		t.Fatalf("enqueue turn: %v", err)
+	}
+	if grant, ok, err := st.ClaimNextTurn(ctx, ClaimNextTurnParams{
+		SessionID:    sessionID,
+		GenerationID: allocation.GenerationID,
+		Owner:        allocation.Owner,
+		RequestID:    "claim_before_corruption",
+		LeaseTTL:     time.Minute,
+		Now:          now.Add(4 * time.Second),
+	}); err != nil || !ok || grant.TurnID != turnID {
+		t.Fatalf("claim setup: ok=%v grant=%+v err=%v", ok, grant, err)
+	}
+	if _, err := st.AckTurnStarted(ctx, AckStartedParams{
+		SessionID:    sessionID,
+		GenerationID: allocation.GenerationID,
+		TurnID:       turnID,
+		Owner:        allocation.Owner,
+		LeaseTTL:     time.Minute,
+		Now:          now.Add(5 * time.Second),
+	}); err != nil {
+		t.Fatalf("ack setup: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE sandbox_contracts
+SET canonical_payload = '{}'
+WHERE generation_id = ?`, allocation.GenerationID); err != nil {
+		t.Fatalf("corrupt sandbox contract: %v", err)
+	}
+	if _, _, err := st.ClaimNextTurn(ctx, ClaimNextTurnParams{
+		SessionID:    sessionID,
+		GenerationID: allocation.GenerationID,
+		Owner:        allocation.Owner,
+		RequestID:    "claim_before_corruption",
+		LeaseTTL:     time.Minute,
+		Now:          now.Add(6 * time.Second),
+	}); err == nil || !strings.Contains(err.Error(), "sandbox contract digest mismatch") {
+		t.Fatalf("expected claim contract corruption error, got %v", err)
+	}
+	if _, err := st.ListBridgePollGenerations(ctx, allocation.Owner, now.Add(6*time.Second), 0); err == nil || !strings.Contains(err.Error(), "sandbox contract digest mismatch") {
+		t.Fatalf("expected bridge poll contract corruption error, got %v", err)
+	}
+	if _, err := st.StartProxyRequest(ctx, StartProxyRequestParams{
+		SandboxSourceIP: instance.SandboxIP,
+		ProxyRequestID:  "proxy_after_corruption",
+		Now:             now.Add(6 * time.Second),
+	}); err == nil || !strings.Contains(err.Error(), "sandbox contract digest mismatch") {
+		t.Fatalf("expected proxy contract corruption error, got %v", err)
+	}
+}
+
 func TestStoreSandboxContractRejectsDigestInPayload(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)

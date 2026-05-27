@@ -401,6 +401,9 @@ WHERE id = ?
 	if affected != 1 {
 		return TurnGrant{}, false, tx.Commit()
 	}
+	if _, err := getSandboxContractForGenerationWithMirrors(ctx, tx, p.SessionID, p.GenerationID); err != nil {
+		return TurnGrant{}, false, err
+	}
 
 	res, err = tx.ExecContext(ctx, `
 UPDATE runtime_generations
@@ -605,6 +608,9 @@ func (s *Store) AckTurnStarted(ctx context.Context, p AckStartedParams) (int64, 
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if _, err := getSandboxContractForGenerationWithMirrors(ctx, tx, p.SessionID, p.GenerationID); err != nil {
+		return 0, err
+	}
 	expiresAt := p.Now.Add(p.LeaseTTL)
 	var alreadyRunning int
 	if err := tx.QueryRowContext(ctx, `
@@ -1159,6 +1165,9 @@ WHERE session_id = ?
 		return TurnGrant{}, false, nil
 	}
 	if err != nil {
+		return TurnGrant{}, false, err
+	}
+	if _, err := getSandboxContractForGenerationWithMirrors(ctx, tx, p.SessionID, p.GenerationID); err != nil {
 		return TurnGrant{}, false, err
 	}
 	grant, err := turnGrantByID(ctx, tx, p.SessionID, p.GenerationID, turnID, p.Owner, p.Now)

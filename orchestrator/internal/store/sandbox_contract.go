@@ -149,7 +149,11 @@ ON CONFLICT(generation_id) DO NOTHING`,
 }
 
 func (s *Store) GetSandboxContractForGeneration(ctx context.Context, sessionID, generationID string) (SandboxContractRecord, error) {
-	row := s.db.QueryRowContext(ctx, `
+	return getSandboxContractForGenerationWithMirrors(ctx, s.db, sessionID, generationID)
+}
+
+func getSandboxContractForGenerationWithMirrors(ctx context.Context, db dbRunner, sessionID, generationID string) (SandboxContractRecord, error) {
+	row := db.QueryRowContext(ctx, `
 SELECT
   sc.contract_id,
   sc.session_id,

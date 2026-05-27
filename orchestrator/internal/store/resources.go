@@ -1744,7 +1744,15 @@ ORDER BY g.session_id, g.generation_id`, args...)
 		}
 		generations = append(generations, generation)
 	}
-	return generations, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, generation := range generations {
+		if _, err := s.GetSandboxContractForGeneration(ctx, generation.SessionID, generation.GenerationID); err != nil {
+			return nil, err
+		}
+	}
+	return generations, nil
 }
 
 func (s *Store) GetRuntimeGenerationStatus(ctx context.Context, sessionID, generationID string) (string, error) {
@@ -1871,7 +1879,15 @@ ORDER BY s.last_activity_at ASC`, formatTime(cutoff), owner, formatTime(now))
 		}
 		candidates = append(candidates, candidate)
 	}
-	return candidates, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, candidate := range candidates {
+		if _, err := s.GetSandboxContractForGeneration(ctx, candidate.SessionID, candidate.GenerationID); err != nil {
+			return nil, err
+		}
+	}
+	return candidates, nil
 }
 
 func (s *Store) BeginGenerationCheckpoint(ctx context.Context, sessionID, generationID, owner string, now time.Time) error {
@@ -1883,6 +1899,9 @@ func (s *Store) BeginGenerationCheckpoint(ctx context.Context, sessionID, genera
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if _, err := getSandboxContractForGenerationWithMirrors(ctx, tx, sessionID, generationID); err != nil {
+		return err
+	}
 	res, err := tx.ExecContext(ctx, `
 UPDATE runtime_generations
 SET status = 'checkpointing',
