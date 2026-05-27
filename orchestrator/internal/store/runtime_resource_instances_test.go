@@ -52,6 +52,13 @@ func TestRuntimeResourceInstanceStateMachine(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("mark live: %v", err)
 	}
+	live, err := st.GetRuntimeResourceInstance(ctx, instance.GenerationID)
+	if err != nil {
+		t.Fatalf("get live runtime resource: %v", err)
+	}
+	if live.LeaseExpiresAt != nil || live.IdempotencyToken != "" {
+		t.Fatalf("live runtime resource should clear materialization lease, got expires=%v token=%q", live.LeaseExpiresAt, live.IdempotencyToken)
+	}
 	if err := st.ReserveRuntimeResourceCheckpoint(ctx, RuntimeResourceWorkerTransitionParams{
 		GenerationID: instance.GenerationID,
 		WorkerID:     workerID,

@@ -403,16 +403,20 @@ func (s *Store) workerStateTransition(ctx context.Context, p RuntimeResourceWork
 	if strings.TrimSpace(p.GenerationID) == "" || strings.TrimSpace(p.WorkerID) == "" || strings.TrimSpace(p.HostID) == "" {
 		return fmt.Errorf("generation id, worker id, and host id are required")
 	}
+	clearMaterializationLease := to == RuntimeResourceLive || to == RuntimeResourceCheckpointReserved
 	res, err := s.db.ExecContext(ctx, `
 UPDATE runtime_resource_instances
 SET state = ?,
+    lease_expires_at = CASE WHEN ? = 1 THEN NULL ELSE lease_expires_at END,
+    idempotency_token = CASE WHEN ? = 1 THEN NULL ELSE idempotency_token END,
     updated_at = ?
 WHERE generation_id = ?
   AND worker_id = ?
   AND host_id = ?
   AND state = ?
   AND (lease_expires_at IS NULL OR lease_expires_at > ?)`,
-		string(to), formatTime(p.Now), strings.TrimSpace(p.GenerationID), strings.TrimSpace(p.WorkerID),
+		string(to), boolInt(clearMaterializationLease), boolInt(clearMaterializationLease),
+		formatTime(p.Now), strings.TrimSpace(p.GenerationID), strings.TrimSpace(p.WorkerID),
 		strings.TrimSpace(p.HostID), string(from), formatTime(p.Now))
 	if err != nil {
 		return err

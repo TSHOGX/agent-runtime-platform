@@ -2093,6 +2093,76 @@ WHERE contract_id = ?`, contract.ContractID).Scan(&manifestDigest, &specDigest, 
 	}
 }
 
+func TestRuntimeResourceInstanceCheckpointRestoreTransitions(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_resource_checkpoint_restore", string(sessionstate.Created), time.Now().UTC(), nil)
+	enableSessionAutoCheckpoint(t, ctx, st, session.ID)
+	cfg := testServerConfig(dir)
+	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     store.GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    serverTestAllocatorConfig(cfg, session.Agent),
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	rt := &recordingRuntime{}
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: rt,
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+
+	if err := srv.startEnsuredGeneration(ctx, session, ensuredGeneration{Allocation: allocation, IsNew: true}, startFailureInputAcceptable); err != nil {
+		t.Fatalf("start ensured generation: %v", err)
+	}
+	if err := st.UpdateSessionStatusAndActivity(ctx, session.ID, string(sessionstate.RunningIdle), nil, time.Now().UTC()); err != nil {
+		t.Fatalf("mark session idle: %v", err)
+	}
+	if err := srv.checkpointGeneration(ctx, store.CheckpointCandidate{
+		SessionID:    session.ID,
+		GenerationID: allocation.GenerationID,
+	}, allocation.Owner, time.Now().UTC()); err != nil {
+		t.Fatalf("checkpoint generation: %v", err)
+	}
+	instance, err := st.GetRuntimeResourceInstance(ctx, allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get checkpointed runtime resource: %v", err)
+	}
+	if instance.State != store.RuntimeResourceCheckpointReserved {
+		t.Fatalf("runtime resource after checkpoint=%s want %s", instance.State, store.RuntimeResourceCheckpointReserved)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(`{"content":"after checkpoint"}`))
+	rec := httptest.NewRecorder()
+	srv.sendMessage(rec, req, session.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected restore status 202, got %d body %s", rec.Code, rec.Body.String())
+	}
+	instance, err = st.GetRuntimeResourceInstance(ctx, allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get restored runtime resource: %v", err)
+	}
+	if instance.State != store.RuntimeResourceLive ||
+		instance.WorkerID != owner.UUID ||
+		instance.IdempotencyToken != "" ||
+		instance.LeaseExpiresAt != nil {
+		t.Fatalf("unexpected runtime resource after restore: %+v", instance)
+	}
+	_, starts := rt.requests()
+	if len(starts) != 2 || !starts[1].RestoreFromCheckpoint {
+		t.Fatalf("expected second start to restore checkpoint, got %+v", starts)
+	}
+}
+
 func TestStartEnsuredGenerationDestroysRuntimeAfterOwnerLoss(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

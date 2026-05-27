@@ -540,6 +540,16 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			return err
 		}
 	}
+	if ensured.RestoreFromCheckpoint {
+		resourceTracked, err := s.prepareRuntimeResourceRestore(ctx, allocation.GenerationID, resourceWorkerID, resourceHostID, s.cfg.Phase7.Bridge.LeaseTTL.Duration)
+		if err != nil {
+			if retireErr := s.retireGenerationForRestoreFallback(session.ID, allocation.GenerationID, allocation.Owner, err); retireErr != nil {
+				return retireErr
+			}
+			return err
+		}
+		runtimeResourceCreated = resourceTracked
+	}
 	startReq := s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, preparedArtifacts)
 	startReq.RestoreFromCheckpoint = ensured.RestoreFromCheckpoint
 	result := s.runtime.Start(startCtx, startReq, nil)
@@ -551,6 +561,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			return leaseErr
 		}
 		if ensured.RestoreFromCheckpoint {
+			retireRuntimeResource()
 			if err := s.retireGenerationForRestoreFallback(session.ID, allocation.GenerationID, allocation.Owner, result.Err); err != nil {
 				return err
 			}
@@ -610,11 +621,33 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		}
 	}
 	if ensured.RestoreFromCheckpoint {
+		if runtimeResourceCreated {
+			if err := s.store.MarkRuntimeResourceLive(ctx, store.RuntimeResourceWorkerTransitionParams{
+				GenerationID: allocation.GenerationID,
+				WorkerID:     resourceWorkerID,
+				HostID:       resourceHostID,
+				Now:          time.Now().UTC(),
+			}); err != nil {
+				if destroyErr := s.destroyGenerationRuntime(ctx, generationDetails); destroyErr != nil && !errors.Is(destroyErr, context.Canceled) {
+					s.log.Warn("failed to destroy runtime after restore resource live CAS failure", "session_id", session.ID, "generation_id", allocation.GenerationID, "error", destroyErr)
+					return destroyErr
+				}
+				retireRuntimeResource()
+				if leaseErr := leaseKeeper.ensureOwned(); leaseErr != nil {
+					return leaseErr
+				}
+				if retireErr := s.retireGenerationForRestoreFallback(session.ID, allocation.GenerationID, allocation.Owner, err); retireErr != nil {
+					return retireErr
+				}
+				return err
+			}
+		}
 		if err := s.store.MarkGenerationResourcesLive(ctx, session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
 			if destroyErr := s.destroyGenerationRuntime(ctx, generationDetails); destroyErr != nil && !errors.Is(destroyErr, context.Canceled) {
 				s.log.Warn("failed to destroy runtime after restore live CAS failure", "session_id", session.ID, "generation_id", allocation.GenerationID, "error", destroyErr)
 				return destroyErr
 			}
+			retireRuntimeResource()
 			if leaseErr := leaseKeeper.ensureOwned(); leaseErr != nil {
 				return leaseErr
 			}
@@ -1104,6 +1137,65 @@ func (s *Server) createRuntimeResourceInstance(ctx context.Context, details stor
 		RootPrefixes:           s.runtimeResourceRootPrefixes(),
 		Now:                    time.Now().UTC(),
 	})
+}
+
+func (s *Server) prepareRuntimeResourceRestore(ctx context.Context, generationID, workerID, hostID string, leaseTTL time.Duration) (bool, error) {
+	_, ok, err := s.runtimeResourceInstanceIfExists(ctx, generationID)
+	if err != nil || !ok {
+		return false, err
+	}
+	now := time.Now().UTC()
+	if err := s.store.ClaimRuntimeResourceCheckpointRestore(ctx, store.RuntimeResourceMaterializationClaimParams{
+		GenerationID:     generationID,
+		WorkerID:         workerID,
+		HostID:           hostID,
+		LeaseExpiresAt:   now.Add(leaseTTL),
+		IdempotencyToken: "restore:" + generationID,
+		Now:              now,
+	}); err != nil {
+		return true, err
+	}
+	if err := s.store.MarkRuntimeResourceReady(ctx, store.RuntimeResourceWorkerTransitionParams{
+		GenerationID: generationID,
+		WorkerID:     workerID,
+		HostID:       hostID,
+		Now:          time.Now().UTC(),
+	}); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = s.store.ClaimRuntimeResourceRetiring(cleanupCtx, store.RuntimeResourceRetireParams{
+			GenerationID: generationID,
+			WorkerID:     workerID,
+			HostID:       hostID,
+			Now:          time.Now().UTC(),
+		})
+		return true, err
+	}
+	return true, nil
+}
+
+func (s *Server) reserveRuntimeResourceCheckpoint(ctx context.Context, generationID string) error {
+	instance, ok, err := s.runtimeResourceInstanceIfExists(ctx, generationID)
+	if err != nil || !ok {
+		return err
+	}
+	return s.store.ReserveRuntimeResourceCheckpoint(ctx, store.RuntimeResourceWorkerTransitionParams{
+		GenerationID: generationID,
+		WorkerID:     instance.WorkerID,
+		HostID:       instance.HostID,
+		Now:          time.Now().UTC(),
+	})
+}
+
+func (s *Server) runtimeResourceInstanceIfExists(ctx context.Context, generationID string) (store.RuntimeResourceInstance, bool, error) {
+	instance, err := s.store.GetRuntimeResourceInstance(ctx, generationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return store.RuntimeResourceInstance{}, false, nil
+	}
+	if err != nil {
+		return store.RuntimeResourceInstance{}, false, err
+	}
+	return instance, true, nil
 }
 
 func runtimeResourceWorkerID(ownerUUID, leaseOwner string) string {
@@ -2300,6 +2392,9 @@ func (s *Server) checkpointGeneration(ctx context.Context, candidate store.Check
 		CheckpointControlManifestDigest: details.ProjectedControlManifestDigest,
 		Now:                             completeNow,
 	}); err != nil {
+		return err
+	}
+	if err := s.reserveRuntimeResourceCheckpoint(ctx, candidate.GenerationID); err != nil {
 		return err
 	}
 	s.hub.Publish(events.Event{Type: "session." + string(sessionstate.Checkpointed), SessionID: candidate.SessionID, GenerationID: candidate.GenerationID})
