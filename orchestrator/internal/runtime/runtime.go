@@ -1905,7 +1905,35 @@ func prepareBridgeMountPlaceholder(controlDir string) error {
 	if len(entries) > 0 {
 		return fmt.Errorf("bridge mount placeholder %q must be empty", placeholder)
 	}
+	mountpoint, err := pathIsMountPoint(placeholder)
+	if err != nil {
+		return fmt.Errorf("inspect bridge mount placeholder mountpoint: %w", err)
+	}
+	if mountpoint {
+		return fmt.Errorf("bridge mount placeholder %q must not be a mountpoint", placeholder)
+	}
 	return nil
+}
+
+func pathIsMountPoint(path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return false, err
+	}
+	parent := filepath.Dir(path)
+	parentInfo, err := os.Lstat(parent)
+	if err != nil {
+		return false, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return false, fmt.Errorf("stat metadata unavailable for %s", path)
+	}
+	parentStat, ok := parentInfo.Sys().(*syscall.Stat_t)
+	if !ok {
+		return false, fmt.Errorf("stat metadata unavailable for %s", parent)
+	}
+	return stat.Dev != parentStat.Dev || stat.Ino == parentStat.Ino, nil
 }
 
 func ensureSandboxOwnedDir(path string, uid, gid int, mode os.FileMode) error {

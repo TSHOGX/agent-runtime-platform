@@ -32,6 +32,23 @@ func TestRuntimeStartRejectsUnsupportedAgent(t *testing.T) {
 	}
 }
 
+func TestPathIsMountPointDetectsRootAndTempDir(t *testing.T) {
+	rootIsMount, err := pathIsMountPoint(string(filepath.Separator))
+	if err != nil {
+		t.Fatalf("inspect filesystem root mountpoint: %v", err)
+	}
+	if !rootIsMount {
+		t.Fatal("filesystem root should be detected as a mountpoint")
+	}
+	tempIsMount, err := pathIsMountPoint(t.TempDir())
+	if err != nil {
+		t.Fatalf("inspect temp dir mountpoint: %v", err)
+	}
+	if tempIsMount {
+		t.Fatal("plain temp dir should not be detected as a mountpoint")
+	}
+}
+
 func TestRuntimeStartRequiresGenerationDetailsForColdPath(t *testing.T) {
 	rt := New(Config{
 		DefaultAgent:    "claude",
