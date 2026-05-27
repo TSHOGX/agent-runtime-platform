@@ -57,6 +57,7 @@ type Config struct {
 const controlFileName = "session.json"
 const checkpointImageManifestFileName = "harness-checkpoint-manifest.json"
 const checkpointImageManifestVersion = 1
+const defaultRunscPlatform = "systrap"
 
 var requiredCheckpointImageFiles = []string{"checkpoint.img", "pages.img", "pages_meta.img"}
 
@@ -222,6 +223,13 @@ type GenerationArtifacts struct {
 	RunscBinaryPath         string
 	RunscBinaryDigest       string
 	NetworkPrepared         bool
+}
+
+type runscPin struct {
+	Platform     string
+	Version      string
+	BinaryPath   string
+	BinaryDigest string
 }
 
 type Runtime struct {
@@ -739,8 +747,7 @@ func (r *Runtime) renderGenerationArtifacts(ctx context.Context, req StartReques
 	if err := writeJSONFileAtomic(details.SpecPath, spec, 0o644); err != nil {
 		return GenerationArtifacts{}, fmt.Errorf("write runtime spec: %w", err)
 	}
-	runscVersion := r.runscVersion(ctx)
-	runscBinaryPath, runscBinaryDigest := runscBinaryMetadata()
+	currentRunsc := r.currentRunscPin(ctx)
 	bundleDigest := digestHex(mustCanonicalJSON(map[string]any{
 		"bundle_dir":  filepath.Clean(details.BundleDirPath),
 		"rootfs":      spec.Root.Path,
@@ -749,12 +756,12 @@ func (r *Runtime) renderGenerationArtifacts(ctx context.Context, req StartReques
 	runtimeConfigDigest := digestHex(mustCanonicalJSON(map[string]any{
 		"runsc_network":       r.runscNetwork(details),
 		"runsc_overlay2":      r.runscOverlay2(details),
-		"runsc_platform":      details.RunscPlatform,
-		"runsc_binary_path":   runscBinaryPath,
-		"runsc_binary_digest": runscBinaryDigest,
+		"runsc_platform":      currentRunsc.Platform,
+		"runsc_binary_path":   currentRunsc.BinaryPath,
+		"runsc_binary_digest": currentRunsc.BinaryDigest,
 		"rootfs":              spec.Root.Path,
 	}))
-	manifest, err := r.buildGenerationManifest(req, runscVersion, bundleDigest, runtimeConfigDigest, specDigest)
+	manifest, err := r.buildGenerationManifest(req, currentRunsc.Version, bundleDigest, runtimeConfigDigest, specDigest)
 	if err != nil {
 		return GenerationArtifacts{}, err
 	}
@@ -778,9 +785,9 @@ func (r *Runtime) renderGenerationArtifacts(ctx context.Context, req StartReques
 		BundleDigest:            bundleDigest,
 		RuntimeConfigDigest:     runtimeConfigDigest,
 		SpecDigest:              specDigest,
-		RunscVersion:            runscVersion,
-		RunscBinaryPath:         runscBinaryPath,
-		RunscBinaryDigest:       runscBinaryDigest,
+		RunscVersion:            currentRunsc.Version,
+		RunscBinaryPath:         currentRunsc.BinaryPath,
+		RunscBinaryDigest:       currentRunsc.BinaryDigest,
 	}, nil
 }
 
@@ -873,7 +880,7 @@ func (r *Runtime) buildGenerationManifest(req StartRequest, runscVersion, bundle
 		Agent:                                sandboxAgent(req),
 		ClaudeSessionUUID:                    req.ClaudeSessionUUID,
 		ResumeClaude:                         req.ResumeClaude,
-		RunscPlatform:                        defaultString(details.RunscPlatform, "systrap"),
+		RunscPlatform:                        effectiveRunscPlatform(details),
 		RunscVersion:                         runscVersion,
 		SandboxModelProxyBaseURL:             details.ManifestAnthropicBaseURL,
 		Model:                                details.Model,
@@ -909,6 +916,9 @@ func validateGenerationDetails(req StartRequest) error {
 	}
 	if !isSandboxIsolatedRequest(req) {
 		return fmt.Errorf("unsupported agent %q", agent)
+	}
+	if platform := effectiveRunscPlatform(details); platform != defaultRunscPlatform {
+		return fmt.Errorf("unsupported runsc platform %q", platform)
 	}
 	if details.RequiresSecretDrop ||
 		strings.TrimSpace(details.SecretsDirPath) != "" ||
@@ -1221,6 +1231,101 @@ func (r *Runtime) runscVersion(ctx context.Context) string {
 		return "unknown"
 	}
 	return strings.TrimSpace(strings.Join(strings.Fields(string(out)), " "))
+}
+
+func (r *Runtime) currentRunscPin(ctx context.Context) runscPin {
+	path, digest := runscBinaryMetadata()
+	return runscPin{
+		Platform:     defaultRunscPlatform,
+		Version:      r.runscVersion(ctx),
+		BinaryPath:   path,
+		BinaryDigest: digest,
+	}
+}
+
+func effectiveRunscPlatform(details store.RuntimeGenerationDetails) string {
+	return defaultString(details.RunscPlatform, defaultRunscPlatform)
+}
+
+func runscPinFromArtifacts(details store.RuntimeGenerationDetails, artifacts GenerationArtifacts) runscPin {
+	return runscPin{
+		Platform:     effectiveRunscPlatform(details),
+		Version:      artifacts.RunscVersion,
+		BinaryPath:   artifacts.RunscBinaryPath,
+		BinaryDigest: artifacts.RunscBinaryDigest,
+	}
+}
+
+func runscPinFromDetails(details store.RuntimeGenerationDetails) runscPin {
+	return runscPin{
+		Platform:     effectiveRunscPlatform(details),
+		Version:      details.RunscVersion,
+		BinaryPath:   details.RunscBinaryPath,
+		BinaryDigest: details.RunscBinaryDigest,
+	}
+}
+
+func (r *Runtime) verifyLaunchRunscPin(ctx context.Context, operation string, details store.RuntimeGenerationDetails, artifacts GenerationArtifacts) (runscPin, error) {
+	current := r.currentRunscPin(ctx)
+	if err := verifyRequiredRunscPin(operation, "prepared artifacts", current, runscPinFromArtifacts(details, artifacts)); err != nil {
+		return current, err
+	}
+	if err := verifyOptionalRunscPin(operation, "resource instance", current, runscPinFromDetails(details)); err != nil {
+		return current, err
+	}
+	return current, nil
+}
+
+func (r *Runtime) verifyGenerationRunscPin(ctx context.Context, operation string, details store.RuntimeGenerationDetails) (runscPin, error) {
+	current := r.currentRunscPin(ctx)
+	if err := verifyRequiredRunscPin(operation, "resource instance", current, runscPinFromDetails(details)); err != nil {
+		return current, err
+	}
+	return current, nil
+}
+
+func verifyRequiredRunscPin(operation, source string, current, pinned runscPin) error {
+	checks := []struct {
+		field   string
+		current string
+		pinned  string
+	}{
+		{"runsc_platform", current.Platform, pinned.Platform},
+		{"runsc_version", current.Version, pinned.Version},
+		{"runsc_binary_path", current.BinaryPath, pinned.BinaryPath},
+		{"runsc_binary_digest", current.BinaryDigest, pinned.BinaryDigest},
+	}
+	for _, check := range checks {
+		if strings.TrimSpace(check.pinned) == "" {
+			return fmt.Errorf("runsc pin missing before %s: %s %s", operation, source, check.field)
+		}
+		if check.current != check.pinned {
+			return fmt.Errorf("runsc pin mismatch before %s: %s %s current %q pinned %q", operation, source, check.field, check.current, check.pinned)
+		}
+	}
+	return nil
+}
+
+func verifyOptionalRunscPin(operation, source string, current, pinned runscPin) error {
+	checks := []struct {
+		field   string
+		current string
+		pinned  string
+	}{
+		{"runsc_platform", current.Platform, pinned.Platform},
+		{"runsc_version", current.Version, pinned.Version},
+		{"runsc_binary_path", current.BinaryPath, pinned.BinaryPath},
+		{"runsc_binary_digest", current.BinaryDigest, pinned.BinaryDigest},
+	}
+	for _, check := range checks {
+		if strings.TrimSpace(check.pinned) == "" {
+			continue
+		}
+		if check.current != check.pinned {
+			return fmt.Errorf("runsc pin mismatch before %s: %s %s current %q pinned %q", operation, source, check.field, check.current, check.pinned)
+		}
+	}
+	return nil
 }
 
 func runscBinaryMetadata() (string, string) {
@@ -1975,6 +2080,10 @@ func (r *Runtime) startFresh(ctx context.Context, req StartRequest, output func(
 		return Result{Err: err}
 	}
 	req.PreparedArtifacts = artifacts
+	currentRunsc, err := r.verifyLaunchRunscPin(ctx, "fresh launch", req.Generation, artifacts)
+	if err != nil {
+		return Result{Err: err}
+	}
 	if err := r.prepareRuntimeDataDirs(req); err != nil {
 		return Result{Err: err}
 	}
@@ -1994,9 +2103,9 @@ func (r *Runtime) startFresh(ctx context.Context, req StartRequest, output func(
 	r.cleanupRunscContainer(ctx, containerID)
 
 	cmdCtx, cancelCmd := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(cmdCtx, "runsc",
+	cmd := exec.CommandContext(cmdCtx, currentRunsc.BinaryPath,
 		"-root", r.cfg.RunscRoot,
-		"-platform", "systrap",
+		"-platform", currentRunsc.Platform,
 		"-overlay2", r.runscOverlay2(req.Generation),
 		"-network", r.runscNetwork(req.Generation),
 		"run",
@@ -2102,6 +2211,10 @@ func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, ou
 		return Result{Err: err}
 	}
 	req.PreparedArtifacts = artifacts
+	currentRunsc, err := r.verifyLaunchRunscPin(ctx, "restore", req.Generation, artifacts)
+	if err != nil {
+		return Result{Err: err}
+	}
 	if err := validateCheckpointRestore(req.Generation, artifacts, checkpointPath); err != nil {
 		return Result{Err: err}
 	}
@@ -2119,9 +2232,9 @@ func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, ou
 	r.cleanupRunscContainer(ctx, containerID)
 
 	cmdCtx, cancelCmd := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(cmdCtx, "runsc",
+	cmd := exec.CommandContext(cmdCtx, currentRunsc.BinaryPath,
 		"-root", r.cfg.RunscRoot,
-		"-platform", "systrap",
+		"-platform", currentRunsc.Platform,
 		"-overlay2", r.runscOverlay2(req.Generation),
 		"-network", r.runscNetwork(req.Generation),
 		"restore",
@@ -2238,7 +2351,7 @@ func validateCheckpointRestore(details store.RuntimeGenerationDetails, artifacts
 	}{
 		{"checkpoint_network_profile_id", details.NetworkProfileID, details.CheckpointNetworkProfileID},
 		{"checkpoint_agent_runtime_profile_id", details.AgentRuntimeProfileID, details.CheckpointAgentRuntimeProfileID},
-		{"checkpoint_runsc_platform", defaultString(details.RunscPlatform, "systrap"), details.CheckpointRunscPlatform},
+		{"checkpoint_runsc_platform", effectiveRunscPlatform(details), details.CheckpointRunscPlatform},
 		{"checkpoint_runsc_version", artifacts.RunscVersion, details.CheckpointRunscVersion},
 		{"checkpoint_runsc_binary_path", artifacts.RunscBinaryPath, details.CheckpointRunscBinaryPath},
 		{"checkpoint_runsc_binary_digest", artifacts.RunscBinaryDigest, details.CheckpointRunscBinaryDigest},
@@ -2396,6 +2509,10 @@ func (r *Runtime) Checkpoint(ctx context.Context, req CheckpointRequest) error {
 	if strings.TrimSpace(req.Generation.RunscContainerID) != "" && req.Generation.RunscContainerID != container.RunscContainerID {
 		return fmt.Errorf("checkpoint runsc container mismatch")
 	}
+	currentRunsc, err := r.verifyGenerationRunscPin(ctx, "checkpoint", req.Generation)
+	if err != nil {
+		return err
+	}
 
 	checkpointPath := strings.TrimSpace(req.CheckpointPath)
 	if checkpointPath == "" {
@@ -2412,7 +2529,7 @@ func (r *Runtime) Checkpoint(ctx context.Context, req CheckpointRequest) error {
 	}
 
 	// Create checkpoint
-	cmd := exec.CommandContext(ctx, "runsc",
+	cmd := exec.CommandContext(ctx, currentRunsc.BinaryPath,
 		"-root", r.cfg.RunscRoot,
 		"-overlay2", r.runscOverlay2(req.Generation),
 		"checkpoint",
