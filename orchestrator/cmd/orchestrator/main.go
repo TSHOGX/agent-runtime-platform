@@ -35,6 +35,10 @@ func main() {
 		log.Error("failed to load config", "error", err)
 		os.Exit(1)
 	}
+	if _, err := config.ValidatePhase8IsolationRoots(cfg.Phase8IsolationRoots()); err != nil {
+		log.Error("invalid phase8 isolation roots", "error", err)
+		os.Exit(1)
+	}
 	for _, warning := range cfg.Warnings {
 		log.Warn("config warning", "warning", warning)
 	}

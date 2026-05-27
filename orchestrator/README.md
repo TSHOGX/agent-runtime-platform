@@ -46,7 +46,7 @@ Useful environment variables:
 - `HARNESS_AGENT_HOMES_ROOT` defaults to `/var/lib/harness/agent-homes`.
 - `HARNESS_CHECKPOINTS_ROOT` defaults to `/var/lib/harness/checkpoints`.
 - `HARNESS_BUNDLE_ROOT` defaults to `<repo>/bundle/out`.
-- `HARNESS_DB_PATH` defaults to `<sessions_root>/orchestrator.db`.
+- `HARNESS_DB_PATH` defaults to `/var/lib/harness/state/orchestrator.db`.
 - `HARNESS_DEFAULT_AGENT` defaults to `claude`.
 - `HARNESS_MAX_SESSIONS` defaults to `30` and caps non-terminal sessions, not live `/30` slots.
 - `RUNSC_ROOT` defaults to `/var/lib/harness/runsc`.

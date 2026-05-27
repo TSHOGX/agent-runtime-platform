@@ -264,7 +264,7 @@ func Load() (Config, error) {
 		CheckpointsRoot:  getenv("HARNESS_CHECKPOINTS_ROOT", "/var/lib/harness/checkpoints"),
 		BundleRoot:       getenv("HARNESS_BUNDLE_ROOT", filepath.Join(repoRoot, "bundle", "out")),
 		RootFSPath:       getenv("HARNESS_ROOTFS_PATH", filepath.Join(repoRoot, "sandbox-image", "rootfs")),
-		DBPath:           getenv("HARNESS_DB_PATH", filepath.Join(sessionsRoot, "orchestrator.db")),
+		DBPath:           getenv("HARNESS_DB_PATH", "/var/lib/harness/state/orchestrator.db"),
 		DefaultAgent:     getenv("HARNESS_DEFAULT_AGENT", "claude"),
 		MaxSessions:      maxSessions,
 		RunscNetwork:     defaultString(projectConfig.Runtime.RunscNetwork, "sandbox"),

@@ -674,6 +674,24 @@ func TestLoadRejectsInvalidSessionRetentionEnv(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultDBPathIsOutsideSessionsRoot(t *testing.T) {
+	repo := writeMinimalLoadConfig(t)
+	chdirForLoadTest(t, repo)
+	t.Setenv("HARNESS_SESSIONS_ROOT", filepath.Join(t.TempDir(), "sessions"))
+	t.Setenv("HARNESS_DB_PATH", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if phase8PathWithin(cfg.DBPath, cfg.SessionsRoot) {
+		t.Fatalf("default DB path %q must not be under sessions root %q", cfg.DBPath, cfg.SessionsRoot)
+	}
+	if _, err := ValidatePhase8IsolationRoots(cfg.Phase8IsolationRoots()); err != nil {
+		t.Fatalf("default roots should satisfy phase8 validation: %v", err)
+	}
+}
+
 func TestLoadProjectConfigMissingFileUsesDefaults(t *testing.T) {
 	cfg, err := loadProjectConfig(filepath.Join(t.TempDir(), "missing.yaml"))
 	if err != nil {
