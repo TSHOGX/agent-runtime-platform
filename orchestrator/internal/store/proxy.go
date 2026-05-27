@@ -91,8 +91,11 @@ JOIN turns t ON t.id = c.turn_id
   AND t.generation_id = c.generation_id
 JOIN runtime_generations g ON g.generation_id = c.generation_id
   AND g.session_id = c.session_id
+JOIN agent_runtime_profiles a ON a.agent_runtime_profile_id = g.agent_runtime_profile_id
 JOIN sessions s ON s.id = c.session_id
 WHERE c.sandbox_source_ip = ?
+  AND c.model_access_allowed = 1
+  AND a.model_access_allowed = 1
   AND c.expires_at > ?
   AND t.status = 'running'
   AND t.lease_owner = c.lease_owner
@@ -133,10 +136,11 @@ WHERE sandbox_source_ip = ?
 	}
 
 	payload := map[string]any{
-		"proxy_request_id":  p.ProxyRequestID,
-		"sandbox_source_ip": p.SandboxSourceIP,
-		"request_sequence":  result.RequestSequence,
-		"correlation_mode":  "source_ip",
+		"proxy_request_id":     p.ProxyRequestID,
+		"sandbox_source_ip":    p.SandboxSourceIP,
+		"request_sequence":     result.RequestSequence,
+		"correlation_mode":     "source_ip",
+		"model_access_allowed": true,
 	}
 	if p.UpstreamModel != "" {
 		payload["upstream_model"] = p.UpstreamModel

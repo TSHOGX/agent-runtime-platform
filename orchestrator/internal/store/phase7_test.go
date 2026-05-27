@@ -32,7 +32,7 @@ func TestPhase7MigrationsCreateSchemaAndBackfillLegacySessions(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	assertMigrationVersions(t, st.db, 12)
+	assertMigrationVersions(t, st.db, 13)
 	for _, table := range []string{
 		"runtime_generations", "runtime_generation_resources", "turns", "events",
 		"active_model_request_contexts", "network_profiles", "agent_runtime_profiles",
@@ -47,6 +47,10 @@ func TestPhase7MigrationsCreateSchemaAndBackfillLegacySessions(t *testing.T) {
 	}
 	for _, column := range []string{"auto_checkpoint_enabled"} {
 		assertColumnExists(t, st.db, "runtime_generations", column)
+	}
+	for _, column := range []string{"model_access_allowed"} {
+		assertColumnExists(t, st.db, "agent_runtime_profiles", column)
+		assertColumnExists(t, st.db, "active_model_request_contexts", column)
 	}
 	for _, column := range []string{"sandbox_contract_id", "sandbox_contract_version", "checkpoint_runsc_binary_path", "checkpoint_runsc_binary_digest"} {
 		assertColumnExists(t, st.db, "runtime_generations", column)
@@ -122,7 +126,7 @@ func TestPhase7MigrationsAreIdempotent(t *testing.T) {
 	if err := st.migrate(ctx); err != nil {
 		t.Fatalf("rerun migrate: %v", err)
 	}
-	assertMigrationVersions(t, st.db, 12)
+	assertMigrationVersions(t, st.db, 13)
 	_ = st.Close()
 
 	st, err = Open(ctx, path)
@@ -130,7 +134,7 @@ func TestPhase7MigrationsAreIdempotent(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	assertMigrationVersions(t, st.db, 12)
+	assertMigrationVersions(t, st.db, 13)
 }
 
 func TestPhase7EventTimeMigrationNormalizesLegacyTimestamps(t *testing.T) {

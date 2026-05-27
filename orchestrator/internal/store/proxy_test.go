@@ -120,6 +120,65 @@ func TestProxyRequestStartRejectsExpiredContext(t *testing.T) {
 	}
 }
 
+func TestProxyRequestStartRequiresModelEntitlement(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		tamper func(context.Context, *testing.T, *Store, GenerationAllocation, string)
+	}{
+		{
+			name: "active context disabled",
+			tamper: func(ctx context.Context, t *testing.T, st *Store, _ GenerationAllocation, sandboxSourceIP string) {
+				t.Helper()
+				if _, err := st.db.ExecContext(ctx, `
+UPDATE active_model_request_contexts
+SET model_access_allowed = 0
+WHERE sandbox_source_ip = ?`, sandboxSourceIP); err != nil {
+					t.Fatalf("disable active model context: %v", err)
+				}
+			},
+		},
+		{
+			name: "runtime profile disabled",
+			tamper: func(ctx context.Context, t *testing.T, st *Store, allocation GenerationAllocation, _ string) {
+				t.Helper()
+				if _, err := st.db.ExecContext(ctx, `
+UPDATE agent_runtime_profiles
+SET model_access_allowed = 0
+WHERE agent_runtime_profile_id = ?`, allocation.AgentRuntimeProfileID); err != nil {
+					t.Fatalf("disable runtime profile model access: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			st, owner := openOwnedStore(t, ctx)
+			now := time.Now().UTC()
+			allocation, _, sandboxSourceIP := createRunningProxyTurn(t, ctx, st, owner.UUID, "sess_proxy_entitlement", now)
+			tc.tamper(ctx, t, st, allocation, sandboxSourceIP)
+
+			_, err := st.StartProxyRequest(ctx, StartProxyRequestParams{
+				SandboxSourceIP: sandboxSourceIP,
+				ProxyRequestID:  "proxy_entitlement_denied",
+				Now:             now.Add(5 * time.Second),
+			})
+			if !errors.Is(err, ErrProxyContextUnavailable) {
+				t.Fatalf("model entitlement err=%v want ErrProxyContextUnavailable", err)
+			}
+			var events int
+			if err := st.db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM events
+WHERE proxy_request_id = 'proxy_entitlement_denied'`).Scan(&events); err != nil {
+				t.Fatalf("count proxy events: %v", err)
+			}
+			if events != 0 {
+				t.Fatalf("denied proxy request wrote %d events", events)
+			}
+		})
+	}
+}
+
 func TestProxyRequestStartRejectsCrossSessionTampering(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

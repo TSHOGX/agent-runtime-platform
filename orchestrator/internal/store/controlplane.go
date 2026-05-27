@@ -661,21 +661,31 @@ WHERE generation_id = ?
 	if err := assertSandboxSourceIPTx(ctx, tx, p.SessionID, p.GenerationID, p.SandboxSourceIP); err != nil {
 		return 0, err
 	}
+	var modelAccessAllowed int
+	if err := tx.QueryRowContext(ctx, `
+SELECT a.model_access_allowed
+FROM runtime_generations g
+JOIN agent_runtime_profiles a ON a.agent_runtime_profile_id = g.agent_runtime_profile_id
+WHERE g.session_id = ?
+  AND g.generation_id = ?`, p.SessionID, p.GenerationID).Scan(&modelAccessAllowed); err != nil {
+		return 0, err
+	}
 	if startedNow {
 		_, err = tx.ExecContext(ctx, `
 INSERT INTO active_model_request_contexts (
   sandbox_source_ip, session_id, generation_id, turn_id,
-  lease_owner, expires_at, next_request_sequence, registered_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?) ON CONFLICT(sandbox_source_ip) DO UPDATE SET
+  lease_owner, expires_at, model_access_allowed, next_request_sequence, registered_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?) ON CONFLICT(sandbox_source_ip) DO UPDATE SET
   session_id = excluded.session_id,
   generation_id = excluded.generation_id,
   turn_id = excluded.turn_id,
   lease_owner = excluded.lease_owner,
   expires_at = excluded.expires_at,
+  model_access_allowed = excluded.model_access_allowed,
   next_request_sequence = excluded.next_request_sequence,
   registered_at = excluded.registered_at,
   updated_at = excluded.updated_at`,
-			p.SandboxSourceIP, p.SessionID, p.GenerationID, p.TurnID, p.Owner, formatTime(expiresAt), formatTime(p.Now), formatTime(p.Now))
+			p.SandboxSourceIP, p.SessionID, p.GenerationID, p.TurnID, p.Owner, formatTime(expiresAt), modelAccessAllowed, formatTime(p.Now), formatTime(p.Now))
 		if err != nil {
 			return 0, err
 		}

@@ -113,6 +113,7 @@ func defaultMigrations(options Options) []migration {
 		{version: 10, name: "phase8_sandbox_contracts", fn: migrateV10Phase8SandboxContracts},
 		{version: 11, name: "phase8_data_volumes", fn: migrateV11Phase8DataVolumes},
 		{version: 12, name: "phase8_runtime_resource_instances", fn: migrateV12Phase8RuntimeResourceInstances},
+		{version: 13, name: "phase8_model_entitlements", fn: migrateV13Phase8ModelEntitlements},
 	}
 }
 
@@ -827,6 +828,54 @@ CREATE UNIQUE INDEX IF NOT EXISTS runtime_resource_instances_%s_active_uq
 `, field, field, field)); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func migrateV13Phase8ModelEntitlements(ctx context.Context, tx dbRunner) error {
+	columns := []struct {
+		table string
+		name  string
+		ddl   string
+	}{
+		{table: "agent_runtime_profiles", name: "model_access_allowed", ddl: "ALTER TABLE agent_runtime_profiles ADD COLUMN model_access_allowed INTEGER NOT NULL DEFAULT 1 CHECK(model_access_allowed IN (0,1))"},
+		{table: "active_model_request_contexts", name: "model_access_allowed", ddl: "ALTER TABLE active_model_request_contexts ADD COLUMN model_access_allowed INTEGER NOT NULL DEFAULT 0 CHECK(model_access_allowed IN (0,1))"},
+	}
+	for _, column := range columns {
+		exists, err := columnExists(ctx, tx, column.table, column.name)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, column.ddl); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE agent_runtime_profiles
+SET model_access_allowed = CASE WHEN agent = 'claude' THEN 1 ELSE 0 END;
+
+UPDATE active_model_request_contexts
+SET model_access_allowed = COALESCE((
+  SELECT a.model_access_allowed
+  FROM runtime_generations g
+  JOIN agent_runtime_profiles a ON a.agent_runtime_profile_id = g.agent_runtime_profile_id
+  WHERE g.generation_id = active_model_request_contexts.generation_id
+    AND g.session_id = active_model_request_contexts.session_id
+), 0);
+
+DROP INDEX IF EXISTS agent_runtime_profiles_tuple_uq;
+
+CREATE UNIQUE INDEX IF NOT EXISTS agent_runtime_profiles_tuple_uq
+  ON agent_runtime_profiles (
+    agent, model, output_format, disable_nonessential_traffic,
+    requires_secret_drop, model_access_allowed, manifest_anthropic_base_url,
+    anthropic_api_key_secret_id, anthropic_auth_token_secret_id, secret_version
+  );
+`); err != nil {
+		return err
 	}
 	return nil
 }

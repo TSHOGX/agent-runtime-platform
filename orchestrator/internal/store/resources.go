@@ -34,6 +34,7 @@ type ResourceAllocatorConfig struct {
 	AgentModel                 string
 	AgentOutputFormat          string
 	DisableNonessentialTraffic bool
+	ModelAccessAllowed         *bool
 	AnthropicAPIKeySecretID    string
 	AnthropicAuthTokenSecretID string
 	SecretVersion              string
@@ -117,6 +118,7 @@ type RuntimeGenerationDetails struct {
 	Model                           string
 	OutputFormat                    string
 	DisableNonessentialTraffic      bool
+	ModelAccessAllowed              bool
 	RequiresSecretDrop              bool
 	ManifestAnthropicBaseURL        string
 	AnthropicAPIKeySecretID         string
@@ -321,15 +323,16 @@ func (s *Store) AllocateGeneration(ctx context.Context, p AllocateGenerationPara
 INSERT INTO agent_runtime_profiles (
   agent_runtime_profile_id, agent, model, output_format,
   disable_nonessential_traffic, requires_secret_drop,
-  manifest_anthropic_base_url, anthropic_api_key_secret_id,
+  model_access_allowed, manifest_anthropic_base_url, anthropic_api_key_secret_id,
   anthropic_auth_token_secret_id, secret_version, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(agent, model, output_format, disable_nonessential_traffic,
-  requires_secret_drop, manifest_anthropic_base_url,
+  requires_secret_drop, model_access_allowed, manifest_anthropic_base_url,
   anthropic_api_key_secret_id, anthropic_auth_token_secret_id, secret_version
 ) DO NOTHING`,
 		agentRuntimeProfileID, p.Config.agent(), nullableString(p.Config.AgentModel), p.Config.outputFormat(),
 		boolInt(p.Config.DisableNonessentialTraffic), boolInt(p.Config.requiresSecretDrop()),
+		boolInt(p.Config.modelAccessAllowed()),
 		nullableString(p.Config.manifestAnthropicBaseURL(network.SandboxBaseURL)),
 		nullableString(p.Config.apiKeySecretID()), nullableString(p.Config.authTokenSecretID()),
 		nullableString(p.Config.secretVersion()), now); err != nil {
@@ -343,12 +346,14 @@ WHERE agent = ?
   AND output_format = ?
   AND disable_nonessential_traffic = ?
   AND requires_secret_drop = ?
+  AND model_access_allowed = ?
   AND COALESCE(manifest_anthropic_base_url, '') = COALESCE(?, '')
   AND COALESCE(anthropic_api_key_secret_id, '') = COALESCE(?, '')
   AND COALESCE(anthropic_auth_token_secret_id, '') = COALESCE(?, '')
   AND COALESCE(secret_version, '') = COALESCE(?, '')`,
 		p.Config.agent(), nullableString(p.Config.AgentModel), p.Config.outputFormat(),
 		boolInt(p.Config.DisableNonessentialTraffic), boolInt(p.Config.requiresSecretDrop()),
+		boolInt(p.Config.modelAccessAllowed()),
 		nullableString(p.Config.manifestAnthropicBaseURL(network.SandboxBaseURL)),
 		nullableString(p.Config.apiKeySecretID()), nullableString(p.Config.authTokenSecretID()),
 		nullableString(p.Config.secretVersion())).Scan(&agentRuntimeProfileID); err != nil {
@@ -2105,6 +2110,7 @@ SELECT
   COALESCE(a.model, ''),
   a.output_format,
   a.disable_nonessential_traffic,
+  a.model_access_allowed,
   a.requires_secret_drop,
   COALESCE(a.manifest_anthropic_base_url, ''),
   COALESCE(a.anthropic_api_key_secret_id, ''),
@@ -2118,7 +2124,7 @@ JOIN agent_runtime_profiles a ON a.agent_runtime_profile_id = g.agent_runtime_pr
 WHERE g.session_id = ?
   AND g.generation_id = ?`, sessionID, generationID)
 	var details RuntimeGenerationDetails
-	var disableNonessentialTraffic, requiresSecretDrop, autoCheckpointEnabled int
+	var disableNonessentialTraffic, modelAccessAllowed, requiresSecretDrop, autoCheckpointEnabled int
 	if err := row.Scan(
 		&details.SessionID,
 		&details.GenerationID,
@@ -2172,6 +2178,7 @@ WHERE g.session_id = ?
 		&details.Model,
 		&details.OutputFormat,
 		&disableNonessentialTraffic,
+		&modelAccessAllowed,
 		&requiresSecretDrop,
 		&details.ManifestAnthropicBaseURL,
 		&details.AnthropicAPIKeySecretID,
@@ -2181,6 +2188,7 @@ WHERE g.session_id = ?
 		return RuntimeGenerationDetails{}, err
 	}
 	details.DisableNonessentialTraffic = disableNonessentialTraffic != 0
+	details.ModelAccessAllowed = modelAccessAllowed != 0
 	details.RequiresSecretDrop = requiresSecretDrop != 0
 	details.AutoCheckpointEnabled = autoCheckpointEnabled != 0
 	return details, nil
@@ -2546,6 +2554,13 @@ func (c ResourceAllocatorConfig) outputFormat() string {
 }
 
 func (c ResourceAllocatorConfig) requiresSecretDrop() bool {
+	return c.agent() == "claude"
+}
+
+func (c ResourceAllocatorConfig) modelAccessAllowed() bool {
+	if c.ModelAccessAllowed != nil {
+		return *c.ModelAccessAllowed
+	}
 	return c.agent() == "claude"
 }
 
