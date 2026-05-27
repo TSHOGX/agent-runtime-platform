@@ -92,10 +92,14 @@ type RuntimeGenerationDetails struct {
 	SpecDigest                      string
 	RunscContainerID                string
 	RunscVersion                    string
+	RunscBinaryPath                 string
+	RunscBinaryDigest               string
 	CheckpointNetworkProfileID      string
 	CheckpointAgentRuntimeProfileID string
 	CheckpointRunscVersion          string
 	CheckpointRunscPlatform         string
+	CheckpointRunscBinaryPath       string
+	CheckpointRunscBinaryDigest     string
 	CheckpointBundleDigest          string
 	CheckpointRuntimeConfigDigest   string
 	CheckpointControlManifestDigest string
@@ -155,6 +159,8 @@ type CompleteCheckpointParams struct {
 	CheckpointPath                  string
 	RunscPlatform                   string
 	RunscVersion                    string
+	RunscBinaryPath                 string
+	RunscBinaryDigest               string
 	CheckpointBundleDigest          string
 	CheckpointRuntimeConfigDigest   string
 	CheckpointControlManifestDigest string
@@ -254,6 +260,8 @@ type GenerationRuntimeArtifactDigests struct {
 	RuntimeConfigDigest            string
 	SpecDigest                     string
 	RunscVersion                   string
+	RunscBinaryPath                string
+	RunscBinaryDigest              string
 }
 
 type ResourceQuota struct {
@@ -1990,6 +1998,12 @@ func (s *Store) CompleteGenerationCheckpoint(ctx context.Context, p CompleteChec
 	if strings.TrimSpace(p.CheckpointControlManifestDigest) == "" {
 		return fmt.Errorf("checkpoint control manifest digest is required")
 	}
+	if strings.TrimSpace(p.RunscBinaryPath) == "" {
+		return fmt.Errorf("checkpoint runsc binary path is required")
+	}
+	if strings.TrimSpace(p.RunscBinaryDigest) == "" {
+		return fmt.Errorf("checkpoint runsc binary digest is required")
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -2003,6 +2017,8 @@ SET status = 'checkpointed',
     checkpoint_agent_runtime_profile_id = agent_runtime_profile_id,
     checkpoint_runsc_version = COALESCE(?, runsc_version),
     checkpoint_runsc_platform = COALESCE(?, runsc_platform),
+    checkpoint_runsc_binary_path = ?,
+    checkpoint_runsc_binary_digest = ?,
     checkpoint_bundle_digest = ?,
     checkpoint_runtime_config_digest = ?,
     checkpoint_control_manifest_digest = ?,
@@ -2019,7 +2035,7 @@ WHERE generation_id = ?
     WHERE id = ?
       AND active_generation_id = ?
       AND status = 'checkpointing'
-  )`, formatTime(p.Now), nullableString(p.RunscVersion), nullableString(p.RunscPlatform),
+  )`, formatTime(p.Now), nullableString(p.RunscVersion), nullableString(p.RunscPlatform), p.RunscBinaryPath, p.RunscBinaryDigest,
 		p.CheckpointBundleDigest, p.CheckpointRuntimeConfigDigest, p.CheckpointControlManifestDigest,
 		formatTime(p.Now), p.GenerationID, p.SessionID, p.Owner, formatTime(p.Now), p.SessionID, p.GenerationID)
 	if err != nil {
@@ -2102,10 +2118,14 @@ SELECT
   COALESCE(r.spec_digest, ''),
   COALESCE(r.runsc_container_id, ''),
   COALESCE(r.runsc_version, ''),
+  COALESCE(r.runsc_binary_path, ''),
+  COALESCE(r.runsc_binary_digest, ''),
   COALESCE(g.checkpoint_network_profile_id, ''),
   COALESCE(g.checkpoint_agent_runtime_profile_id, ''),
   COALESCE(g.checkpoint_runsc_version, ''),
   COALESCE(g.checkpoint_runsc_platform, ''),
+  COALESCE(g.checkpoint_runsc_binary_path, ''),
+  COALESCE(g.checkpoint_runsc_binary_digest, ''),
   COALESCE(g.checkpoint_bundle_digest, ''),
   COALESCE(g.checkpoint_runtime_config_digest, ''),
   COALESCE(g.checkpoint_control_manifest_digest, ''),
@@ -2177,10 +2197,14 @@ WHERE g.session_id = ?
 		&details.SpecDigest,
 		&details.RunscContainerID,
 		&details.RunscVersion,
+		&details.RunscBinaryPath,
+		&details.RunscBinaryDigest,
 		&details.CheckpointNetworkProfileID,
 		&details.CheckpointAgentRuntimeProfileID,
 		&details.CheckpointRunscVersion,
 		&details.CheckpointRunscPlatform,
+		&details.CheckpointRunscBinaryPath,
+		&details.CheckpointRunscBinaryDigest,
 		&details.CheckpointBundleDigest,
 		&details.CheckpointRuntimeConfigDigest,
 		&details.CheckpointControlManifestDigest,
@@ -2254,7 +2278,9 @@ SET control_manifest_digest = ?,
     bundle_digest = COALESCE(?, bundle_digest),
     runtime_config_digest = COALESCE(?, runtime_config_digest),
     spec_digest = COALESCE(?, spec_digest),
-    runsc_version = COALESCE(?, runsc_version)
+    runsc_version = COALESCE(?, runsc_version),
+    runsc_binary_path = COALESCE(?, runsc_binary_path),
+    runsc_binary_digest = COALESCE(?, runsc_binary_digest)
 WHERE generation_id = ?`,
 		digests.ControlManifestDigest,
 		nullableString(digests.ProjectedControlManifestDigest),
@@ -2262,6 +2288,8 @@ WHERE generation_id = ?`,
 		nullableString(digests.RuntimeConfigDigest),
 		nullableString(digests.SpecDigest),
 		nullableString(digests.RunscVersion),
+		nullableString(digests.RunscBinaryPath),
+		nullableString(digests.RunscBinaryDigest),
 		generationID); err != nil {
 		return err
 	}

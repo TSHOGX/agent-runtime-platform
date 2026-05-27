@@ -909,12 +909,14 @@ func sandboxContractPayload(session store.Session, details store.RuntimeGenerati
 			"egress_policy_id": details.EgressPolicyID,
 		},
 		"runtime_adapter": map[string]any{
-			"kind":               "runsc",
-			"runsc_platform":     runscPlatform,
-			"runsc_version":      artifacts.RunscVersion,
-			"runsc_container_id": details.RunscContainerID,
-			"runsc_network":      details.RunscNetwork,
-			"runsc_overlay2":     details.RunscOverlay2,
+			"kind":                "runsc",
+			"runsc_platform":      runscPlatform,
+			"runsc_version":       artifacts.RunscVersion,
+			"runsc_binary_path":   artifacts.RunscBinaryPath,
+			"runsc_binary_digest": artifacts.RunscBinaryDigest,
+			"runsc_container_id":  details.RunscContainerID,
+			"runsc_network":       details.RunscNetwork,
+			"runsc_overlay2":      details.RunscOverlay2,
 		},
 		"credential_policy": map[string]any{
 			"provider_credentials": "host-only",
@@ -947,6 +949,8 @@ func runtimeArtifactsFromDetails(details store.RuntimeGenerationDetails) runtime
 		RuntimeConfigDigest:     details.RuntimeConfigDigest,
 		SpecDigest:              details.SpecDigest,
 		RunscVersion:            details.RunscVersion,
+		RunscBinaryPath:         details.RunscBinaryPath,
+		RunscBinaryDigest:       details.RunscBinaryDigest,
 	}
 }
 
@@ -958,6 +962,8 @@ func runtimeArtifactDigests(artifacts runtime.GenerationArtifacts) store.Generat
 		RuntimeConfigDigest:            artifacts.RuntimeConfigDigest,
 		SpecDigest:                     artifacts.SpecDigest,
 		RunscVersion:                   artifacts.RunscVersion,
+		RunscBinaryPath:                artifacts.RunscBinaryPath,
+		RunscBinaryDigest:              artifacts.RunscBinaryDigest,
 	}
 }
 
@@ -2051,6 +2057,8 @@ func (s *Server) checkpointGeneration(ctx context.Context, candidate store.Check
 		CheckpointPath:                  details.CheckpointPath,
 		RunscPlatform:                   details.RunscPlatform,
 		RunscVersion:                    details.RunscVersion,
+		RunscBinaryPath:                 details.RunscBinaryPath,
+		RunscBinaryDigest:               details.RunscBinaryDigest,
 		CheckpointBundleDigest:          details.BundleDigest,
 		CheckpointRuntimeConfigDigest:   details.RuntimeConfigDigest,
 		CheckpointControlManifestDigest: details.ProjectedControlManifestDigest,

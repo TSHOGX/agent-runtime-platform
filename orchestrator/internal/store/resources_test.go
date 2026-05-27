@@ -423,7 +423,16 @@ func TestClaimCheckpointedGenerationForRestoreMovesReservedResources(t *testing.
 	if err := st.MarkGenerationResourcesLive(ctx, "sess_restore_claim", allocation.GenerationID, allocation.Owner, now.Add(time.Second)); err != nil {
 		t.Fatalf("mark generation live: %v", err)
 	}
-	if err := st.RecordGenerationRuntimeArtifacts(ctx, allocation.GenerationID, "manifest_digest", "runsc test"); err != nil {
+	if err := st.RecordGenerationRuntimeArtifactDigests(ctx, allocation.GenerationID, GenerationRuntimeArtifactDigests{
+		ControlManifestDigest:          "manifest_digest",
+		ProjectedControlManifestDigest: "manifest_digest",
+		BundleDigest:                   "bundle_digest",
+		RuntimeConfigDigest:            "runtime_config_digest",
+		SpecDigest:                     "spec_digest",
+		RunscVersion:                   "runsc test",
+		RunscBinaryPath:                "/usr/local/bin/runsc-test",
+		RunscBinaryDigest:              "sha256:runsc-test",
+	}); err != nil {
 		t.Fatalf("record artifacts: %v", err)
 	}
 	checkpointedGeneration(t, ctx, st, "sess_restore_claim", allocation.GenerationID, now.Add(2*time.Second))
@@ -471,13 +480,17 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ge
 	}
 	if details.NetworkAllocationState != "recreating" ||
 		details.ControlManifestDigest != "manifest_digest" ||
-		details.RunscVersion != "runsc test" {
+		details.RunscVersion != "runsc test" ||
+		details.RunscBinaryPath != "/usr/local/bin/runsc-test" ||
+		details.RunscBinaryDigest != "sha256:runsc-test" {
 		t.Fatalf("restore details not preserved: %+v", details)
 	}
 	if details.CheckpointNetworkProfileID != allocation.NetworkProfileID ||
 		details.CheckpointAgentRuntimeProfileID != allocation.AgentRuntimeProfileID ||
 		details.CheckpointRunscVersion != "runsc test" ||
 		details.CheckpointRunscPlatform != "systrap" ||
+		details.CheckpointRunscBinaryPath != "/usr/local/bin/runsc-test" ||
+		details.CheckpointRunscBinaryDigest != "sha256:runsc-test" ||
 		details.CheckpointBundleDigest != "bundle_digest" ||
 		details.CheckpointRuntimeConfigDigest != "runtime_config_digest" ||
 		details.CheckpointControlManifestDigest != "manifest_digest" {
@@ -1556,6 +1569,8 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &se
 		CheckpointPath:                  filepath.Join(cfg.RunDir, "checkpoint"),
 		RunscPlatform:                   "systrap",
 		RunscVersion:                    "runsc auto",
+		RunscBinaryPath:                 "/usr/local/bin/runsc-auto",
+		RunscBinaryDigest:               "sha256:runsc-auto",
 		CheckpointBundleDigest:          "bundle_digest",
 		CheckpointRuntimeConfigDigest:   "runtime_config_digest",
 		CheckpointControlManifestDigest: "projected_manifest_digest",
@@ -2357,6 +2372,16 @@ SET status = 'checkpointed',
     checkpoint_agent_runtime_profile_id = agent_runtime_profile_id,
     checkpoint_runsc_version = COALESCE(runsc_version, 'runsc test'),
     checkpoint_runsc_platform = COALESCE(runsc_platform, 'systrap'),
+    checkpoint_runsc_binary_path = COALESCE((
+      SELECT NULLIF(runsc_binary_path, '')
+      FROM runtime_generation_resources
+      WHERE runtime_generation_resources.generation_id = runtime_generations.generation_id
+    ), '/usr/local/bin/runsc-test'),
+    checkpoint_runsc_binary_digest = COALESCE((
+      SELECT NULLIF(runsc_binary_digest, '')
+      FROM runtime_generation_resources
+      WHERE runtime_generation_resources.generation_id = runtime_generations.generation_id
+    ), 'sha256:runsc-test'),
     checkpoint_bundle_digest = 'bundle_digest',
     checkpoint_runtime_config_digest = 'runtime_config_digest',
     checkpoint_control_manifest_digest = COALESCE((
@@ -2458,6 +2483,8 @@ func createAutoCheckpointGeneration(t *testing.T, ctx context.Context, st *Store
 		RuntimeConfigDigest:            "runtime_config_digest",
 		SpecDigest:                     "spec_digest",
 		RunscVersion:                   "runsc auto",
+		RunscBinaryPath:                "/usr/local/bin/runsc-auto",
+		RunscBinaryDigest:              "sha256:runsc-auto",
 	}); err != nil {
 		t.Fatalf("record artifacts for %s: %v", sessionID, err)
 	}

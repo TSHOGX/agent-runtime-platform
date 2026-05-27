@@ -186,11 +186,15 @@ func TestValidateCheckpointRestoreRejectsMetadataMismatch(t *testing.T) {
 	details.CheckpointAgentRuntimeProfileID = details.AgentRuntimeProfileID
 	details.CheckpointRunscPlatform = details.RunscPlatform
 	details.CheckpointRunscVersion = "runsc test"
+	details.CheckpointRunscBinaryPath = "/usr/local/bin/runsc-test"
+	details.CheckpointRunscBinaryDigest = "sha256:runsc-test"
 	details.CheckpointBundleDigest = "bundle_digest"
 	details.CheckpointRuntimeConfigDigest = "runtime_config_digest"
 	details.CheckpointControlManifestDigest = "control_manifest_digest"
 	artifacts := GenerationArtifacts{
 		RunscVersion:            "runsc test",
+		RunscBinaryPath:         "/usr/local/bin/runsc-test",
+		RunscBinaryDigest:       "sha256:runsc-test",
 		BundleDigest:            "bundle_digest",
 		RuntimeConfigDigest:     "runtime_config_digest",
 		ProjectedManifestDigest: "other_control_manifest_digest",

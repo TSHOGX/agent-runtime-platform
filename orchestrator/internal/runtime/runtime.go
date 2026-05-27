@@ -219,6 +219,8 @@ type GenerationArtifacts struct {
 	RuntimeConfigDigest     string
 	SpecDigest              string
 	RunscVersion            string
+	RunscBinaryPath         string
+	RunscBinaryDigest       string
 	NetworkPrepared         bool
 }
 
@@ -738,16 +740,19 @@ func (r *Runtime) renderGenerationArtifacts(ctx context.Context, req StartReques
 		return GenerationArtifacts{}, fmt.Errorf("write runtime spec: %w", err)
 	}
 	runscVersion := r.runscVersion(ctx)
+	runscBinaryPath, runscBinaryDigest := runscBinaryMetadata()
 	bundleDigest := digestHex(mustCanonicalJSON(map[string]any{
 		"bundle_dir":  filepath.Clean(details.BundleDirPath),
 		"rootfs":      spec.Root.Path,
 		"spec_digest": specDigest,
 	}))
 	runtimeConfigDigest := digestHex(mustCanonicalJSON(map[string]any{
-		"runsc_network":  r.runscNetwork(details),
-		"runsc_overlay2": r.runscOverlay2(details),
-		"runsc_platform": details.RunscPlatform,
-		"rootfs":         spec.Root.Path,
+		"runsc_network":       r.runscNetwork(details),
+		"runsc_overlay2":      r.runscOverlay2(details),
+		"runsc_platform":      details.RunscPlatform,
+		"runsc_binary_path":   runscBinaryPath,
+		"runsc_binary_digest": runscBinaryDigest,
+		"rootfs":              spec.Root.Path,
 	}))
 	manifest, err := r.buildGenerationManifest(req, runscVersion, bundleDigest, runtimeConfigDigest, specDigest)
 	if err != nil {
@@ -774,6 +779,8 @@ func (r *Runtime) renderGenerationArtifacts(ctx context.Context, req StartReques
 		RuntimeConfigDigest:     runtimeConfigDigest,
 		SpecDigest:              specDigest,
 		RunscVersion:            runscVersion,
+		RunscBinaryPath:         runscBinaryPath,
+		RunscBinaryDigest:       runscBinaryDigest,
 	}, nil
 }
 
@@ -1214,6 +1221,22 @@ func (r *Runtime) runscVersion(ctx context.Context) string {
 		return "unknown"
 	}
 	return strings.TrimSpace(strings.Join(strings.Fields(string(out)), " "))
+}
+
+func runscBinaryMetadata() (string, string) {
+	path, err := exec.LookPath("runsc")
+	if err != nil {
+		return "runsc", "unavailable:" + err.Error()
+	}
+	canonical, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		canonical = filepath.Clean(path)
+	}
+	digest, err := fileSHA256(canonical)
+	if err != nil {
+		return canonical, "unavailable:" + err.Error()
+	}
+	return canonical, "sha256:" + digest
 }
 
 func normalizeClaudeConfig(cfg ClaudeConfig) ClaudeConfig {
@@ -2217,6 +2240,8 @@ func validateCheckpointRestore(details store.RuntimeGenerationDetails, artifacts
 		{"checkpoint_agent_runtime_profile_id", details.AgentRuntimeProfileID, details.CheckpointAgentRuntimeProfileID},
 		{"checkpoint_runsc_platform", defaultString(details.RunscPlatform, "systrap"), details.CheckpointRunscPlatform},
 		{"checkpoint_runsc_version", artifacts.RunscVersion, details.CheckpointRunscVersion},
+		{"checkpoint_runsc_binary_path", artifacts.RunscBinaryPath, details.CheckpointRunscBinaryPath},
+		{"checkpoint_runsc_binary_digest", artifacts.RunscBinaryDigest, details.CheckpointRunscBinaryDigest},
 		{"checkpoint_bundle_digest", artifacts.BundleDigest, details.CheckpointBundleDigest},
 		{"checkpoint_runtime_config_digest", artifacts.RuntimeConfigDigest, details.CheckpointRuntimeConfigDigest},
 		{"checkpoint_control_manifest_digest", artifacts.ProjectedManifestDigest, details.CheckpointControlManifestDigest},

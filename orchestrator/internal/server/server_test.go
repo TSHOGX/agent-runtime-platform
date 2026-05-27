@@ -866,9 +866,7 @@ func TestSendMessageRestoresCheckpointedGeneration(t *testing.T) {
 	if err := st.MarkGenerationResourcesLive(ctx, session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
 		t.Fatalf("mark checkpointed generation live: %v", err)
 	}
-	if err := st.RecordGenerationRuntimeArtifacts(ctx, allocation.GenerationID, "restore_manifest_digest", "runsc restore-test"); err != nil {
-		t.Fatalf("record checkpointed artifacts: %v", err)
-	}
+	recordServerRuntimeArtifacts(t, ctx, st, allocation.GenerationID, "restore_manifest_digest", "runsc restore-test")
 	markServerGenerationCheckpointed(t, ctx, st, session.ID, allocation.GenerationID, time.Now().UTC())
 
 	rt := &recordingRuntime{}
@@ -932,6 +930,8 @@ WHERE session_id = ?
 		start.WaitForTurn ||
 		start.PreparedArtifacts.ManifestDigest != "restore_manifest_digest" ||
 		start.PreparedArtifacts.RunscVersion != "runsc restore-test" ||
+		start.PreparedArtifacts.RunscBinaryPath != "/usr/local/bin/runsc-test" ||
+		start.PreparedArtifacts.RunscBinaryDigest != "sha256:runsc-test" ||
 		start.Generation.NetworkAllocationState != "recreating" {
 		t.Fatalf("unexpected restore start request: %+v", start)
 	}
@@ -958,9 +958,7 @@ func TestSendMessageFallsBackWhenCheckpointRestoreFails(t *testing.T) {
 	if err := st.MarkGenerationResourcesLive(ctx, session.ID, old.GenerationID, old.Owner, time.Now().UTC()); err != nil {
 		t.Fatalf("mark checkpointed generation live: %v", err)
 	}
-	if err := st.RecordGenerationRuntimeArtifacts(ctx, old.GenerationID, "restore_manifest_digest", "runsc restore-test"); err != nil {
-		t.Fatalf("record checkpointed artifacts: %v", err)
-	}
+	recordServerRuntimeArtifacts(t, ctx, st, old.GenerationID, "restore_manifest_digest", "runsc restore-test")
 	markServerGenerationCheckpointed(t, ctx, st, session.ID, old.GenerationID, time.Now().UTC())
 	if _, err := st.DBForTest().ExecContext(ctx, `
 UPDATE sessions
@@ -1079,9 +1077,7 @@ func TestSendMessageRestoreFallbackColdStartFailureLeavesSessionRetryable(t *tes
 	if err := st.MarkGenerationResourcesLive(ctx, session.ID, old.GenerationID, old.Owner, time.Now().UTC()); err != nil {
 		t.Fatalf("mark checkpointed generation live: %v", err)
 	}
-	if err := st.RecordGenerationRuntimeArtifacts(ctx, old.GenerationID, "restore_manifest_digest", "runsc restore-test"); err != nil {
-		t.Fatalf("record checkpointed artifacts: %v", err)
-	}
+	recordServerRuntimeArtifacts(t, ctx, st, old.GenerationID, "restore_manifest_digest", "runsc restore-test")
 	markServerGenerationCheckpointed(t, ctx, st, session.ID, old.GenerationID, time.Now().UTC())
 	if _, err := st.DBForTest().ExecContext(ctx, `
 UPDATE sessions
@@ -1177,9 +1173,7 @@ func TestSendMessageRestoreLiveCASFailureDestroysRunscContainerIDBeforeFallback(
 	if err := st.MarkGenerationResourcesLive(ctx, session.ID, old.GenerationID, old.Owner, time.Now().UTC()); err != nil {
 		t.Fatalf("mark checkpointed generation live: %v", err)
 	}
-	if err := st.RecordGenerationRuntimeArtifacts(ctx, old.GenerationID, "restore_manifest_digest", "runsc restore-test"); err != nil {
-		t.Fatalf("record checkpointed artifacts: %v", err)
-	}
+	recordServerRuntimeArtifacts(t, ctx, st, old.GenerationID, "restore_manifest_digest", "runsc restore-test")
 	markServerGenerationCheckpointed(t, ctx, st, session.ID, old.GenerationID, time.Now().UTC())
 
 	rt := &restoreStartHookRuntime{
@@ -1258,9 +1252,7 @@ func TestSendMessageRestoreLiveCASFailureDoesNotRetireWhenDestroyFails(t *testin
 	if err := st.MarkGenerationResourcesLive(ctx, session.ID, old.GenerationID, old.Owner, time.Now().UTC()); err != nil {
 		t.Fatalf("mark checkpointed generation live: %v", err)
 	}
-	if err := st.RecordGenerationRuntimeArtifacts(ctx, old.GenerationID, "restore_manifest_digest", "runsc restore-test"); err != nil {
-		t.Fatalf("record checkpointed artifacts: %v", err)
-	}
+	recordServerRuntimeArtifacts(t, ctx, st, old.GenerationID, "restore_manifest_digest", "runsc restore-test")
 	markServerGenerationCheckpointed(t, ctx, st, session.ID, old.GenerationID, time.Now().UTC())
 
 	rt := &restoreStartHookRuntime{
@@ -2060,6 +2052,10 @@ func TestStartEnsuredGenerationRenewsLeaseDuringSlowPrepare(t *testing.T) {
 	adapter, ok := payload["runtime_adapter"].(map[string]any)
 	if !ok || adapter["runsc_container_id"] != serverRunscContainerID(t, ctx, st, session.ID, allocation.GenerationID) {
 		t.Fatalf("sandbox contract missing runsc identity: %s", contract.CanonicalPayload)
+	}
+	if adapter["runsc_binary_path"] != "/usr/local/bin/runsc-test" ||
+		adapter["runsc_binary_digest"] != "sha256:runsc-test" {
+		t.Fatalf("sandbox contract missing runsc binary metadata: %s", contract.CanonicalPayload)
 	}
 	var manifestDigest, specDigest, bundleDigest string
 	if err := st.DBForTest().QueryRowContext(ctx, `
@@ -3763,6 +3759,28 @@ func testGenerationArtifacts() runtime.GenerationArtifacts {
 		RuntimeConfigDigest:     "runtime_config_digest",
 		SpecDigest:              "spec_digest",
 		RunscVersion:            "runsc test",
+		RunscBinaryPath:         "/usr/local/bin/runsc-test",
+		RunscBinaryDigest:       "sha256:runsc-test",
+	}
+}
+
+func recordServerRuntimeArtifacts(t *testing.T, ctx context.Context, st *store.Store, generationID, manifestDigest, runscVersion string) {
+	t.Helper()
+	artifacts := testGenerationArtifacts()
+	artifacts.ManifestDigest = manifestDigest
+	artifacts.ProjectedManifestDigest = manifestDigest
+	artifacts.RunscVersion = runscVersion
+	if err := st.RecordGenerationRuntimeArtifactDigests(ctx, generationID, store.GenerationRuntimeArtifactDigests{
+		ControlManifestDigest:          artifacts.ManifestDigest,
+		ProjectedControlManifestDigest: artifacts.ProjectedManifestDigest,
+		BundleDigest:                   artifacts.BundleDigest,
+		RuntimeConfigDigest:            artifacts.RuntimeConfigDigest,
+		SpecDigest:                     artifacts.SpecDigest,
+		RunscVersion:                   artifacts.RunscVersion,
+		RunscBinaryPath:                artifacts.RunscBinaryPath,
+		RunscBinaryDigest:              artifacts.RunscBinaryDigest,
+	}); err != nil {
+		t.Fatalf("record runtime artifacts: %v", err)
 	}
 }
 
@@ -3896,6 +3914,8 @@ func prepareServerIdleGeneration(t *testing.T, ctx context.Context, st *store.St
 		RuntimeConfigDigest:            artifacts.RuntimeConfigDigest,
 		SpecDigest:                     artifacts.SpecDigest,
 		RunscVersion:                   artifacts.RunscVersion,
+		RunscBinaryPath:                artifacts.RunscBinaryPath,
+		RunscBinaryDigest:              artifacts.RunscBinaryDigest,
 	}); err != nil {
 		t.Fatalf("record runtime artifacts: %v", err)
 	}
@@ -3919,6 +3939,16 @@ SET status = 'checkpointed',
     checkpoint_agent_runtime_profile_id = agent_runtime_profile_id,
     checkpoint_runsc_version = COALESCE(runsc_version, 'runsc test'),
     checkpoint_runsc_platform = COALESCE(runsc_platform, 'systrap'),
+    checkpoint_runsc_binary_path = COALESCE((
+      SELECT NULLIF(runsc_binary_path, '')
+      FROM runtime_generation_resources
+      WHERE runtime_generation_resources.generation_id = runtime_generations.generation_id
+    ), '/usr/local/bin/runsc-test'),
+    checkpoint_runsc_binary_digest = COALESCE((
+      SELECT NULLIF(runsc_binary_digest, '')
+      FROM runtime_generation_resources
+      WHERE runtime_generation_resources.generation_id = runtime_generations.generation_id
+    ), 'sha256:runsc-test'),
     checkpoint_bundle_digest = 'bundle_digest',
     checkpoint_runtime_config_digest = 'runtime_config_digest',
     checkpoint_control_manifest_digest = COALESCE((
