@@ -727,12 +727,19 @@ func TestProbeSandboxNetworkRetriesAndUsesConfiguredHealthzStatuses(t *testing.T
 }
 
 func TestDestroyGenerationResourcesDeletesPerGenerationNetwork(t *testing.T) {
-	runner := &recordingCommandRunner{}
 	dir := t.TempDir()
+	runscRoot := filepath.Join(dir, "runsc-root")
+	runner := &recordingCommandRunner{
+		fail: map[string]error{
+			"runsc -root " + runscRoot + " state harness-gen-gen_a": errors.New("not found"),
+			"ip link show hgenah":                   errors.New("does not exist"),
+			"nft list table inet harness_gen_gen_a": errors.New("No such table"),
+		},
+	}
 	rt := New(Config{
 		RunscNetwork:    "sandbox",
 		RunscOverlay2:   "none",
-		RunscRoot:       filepath.Join(dir, "runsc-root"),
+		RunscRoot:       runscRoot,
 		RunDir:          filepath.Join(dir, "run"),
 		CheckpointsRoot: filepath.Join(dir, "checkpoints"),
 		CommandRunner:   runner,
@@ -749,6 +756,9 @@ func TestDestroyGenerationResourcesDeletesPerGenerationNetwork(t *testing.T) {
 	if !cleanup.RunscDeleted || !cleanup.NftTableDeleted || !cleanup.HostVethDeleted || !cleanup.NetnsDeleted {
 		t.Fatalf("unexpected cleanup result: %+v", cleanup)
 	}
+	if cleanup.RunscState == "" || cleanup.IPNetns == "" || cleanup.IPLink == "" || cleanup.NFT == "" || len(cleanup.FilesystemLstat) == 0 {
+		t.Fatalf("cleanup did not record absence evidence: %+v", cleanup)
+	}
 
 	want := []string{
 		"runsc -root " + filepath.Join(dir, "runsc-root") + " kill harness-gen-gen_a KILL",
@@ -756,6 +766,10 @@ func TestDestroyGenerationResourcesDeletesPerGenerationNetwork(t *testing.T) {
 		"nft delete table inet harness_gen_gen_a",
 		"ip link delete hgenah",
 		"ip netns delete harness-gen-a",
+		"runsc -root " + filepath.Join(dir, "runsc-root") + " state harness-gen-gen_a",
+		"ip netns list",
+		"ip link show hgenah",
+		"nft list table inet harness_gen_gen_a",
 	}
 	if got := runner.Commands(); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("unexpected commands:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
@@ -764,11 +778,15 @@ func TestDestroyGenerationResourcesDeletesPerGenerationNetwork(t *testing.T) {
 
 func TestDestroyGenerationResourcesDeletesFilesystemInNonSandboxMode(t *testing.T) {
 	dir := t.TempDir()
+	runscRoot := filepath.Join(dir, "runsc-root")
 	rt := New(Config{
 		RunscNetwork:    "host",
+		RunscRoot:       runscRoot,
 		RunDir:          filepath.Join(dir, "run"),
 		CheckpointsRoot: filepath.Join(dir, "checkpoints"),
-		CommandRunner:   &recordingCommandRunner{},
+		CommandRunner: &recordingCommandRunner{fail: map[string]error{
+			"runsc -root " + runscRoot + " state harness-gen-gen_cleanup": errors.New("not found"),
+		}},
 	})
 	details := testGenerationDetails(dir, "gen_cleanup")
 	details.RunscNetwork = "host"
@@ -796,11 +814,15 @@ func TestDestroyGenerationResourcesDeletesFilesystemInNonSandboxMode(t *testing.
 func TestDestroyGenerationResourcesDeletesLegacyCheckpointPath(t *testing.T) {
 	dir := t.TempDir()
 	checkpointsRoot := filepath.Join(dir, "checkpoints")
+	runscRoot := filepath.Join(dir, "runsc-root")
 	rt := New(Config{
 		RunscNetwork:    "host",
+		RunscRoot:       runscRoot,
 		RunDir:          filepath.Join(dir, "run"),
 		CheckpointsRoot: checkpointsRoot,
-		CommandRunner:   &recordingCommandRunner{},
+		CommandRunner: &recordingCommandRunner{fail: map[string]error{
+			"runsc -root " + runscRoot + " state harness-gen-gen_legacy": errors.New("not found"),
+		}},
 	})
 	details := testGenerationDetails(dir, "gen_legacy")
 	details.RunscNetwork = "host"
@@ -978,11 +1000,17 @@ func TestDestroyGenerationResourcesRejectsUnsafeLegacyCheckpointPaths(t *testing
 }
 
 func TestDestroyGenerationResourcesCleansFilesystemWithIncompleteSandboxMetadata(t *testing.T) {
-	runner := &recordingCommandRunner{}
 	dir := t.TempDir()
+	runscRoot := filepath.Join(dir, "runsc-root")
+	runner := &recordingCommandRunner{
+		fail: map[string]error{
+			"runsc -root " + runscRoot + " state harness-gen-gen_missing_net": errors.New("not found"),
+			"nft list table inet harness_gen_gen_missing_net":                 errors.New("No such table"),
+		},
+	}
 	rt := New(Config{
 		RunscNetwork:    "sandbox",
-		RunscRoot:       filepath.Join(dir, "runsc-root"),
+		RunscRoot:       runscRoot,
 		RunDir:          filepath.Join(dir, "run"),
 		CheckpointsRoot: filepath.Join(dir, "checkpoints"),
 		CommandRunner:   runner,
@@ -1009,6 +1037,8 @@ func TestDestroyGenerationResourcesCleansFilesystemWithIncompleteSandboxMetadata
 		"runsc -root " + filepath.Join(dir, "runsc-root") + " kill harness-gen-gen_missing_net KILL",
 		"runsc -root " + filepath.Join(dir, "runsc-root") + " delete harness-gen-gen_missing_net",
 		"nft delete table inet harness_gen_gen_missing_net",
+		"runsc -root " + filepath.Join(dir, "runsc-root") + " state harness-gen-gen_missing_net",
+		"nft list table inet harness_gen_gen_missing_net",
 	}
 	if got := runner.Commands(); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("unexpected commands:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
@@ -1801,6 +1831,7 @@ func testGenerationDetails(dir, generationID string) store.RuntimeGenerationDeta
 		SandboxIPCIDR:              "10.200.1.2/30",
 		SandboxBaseURL:             "http://10.200.1.1:8082",
 		NetnsName:                  "harness-gen-" + generationID,
+		NftTableName:               hostEgressTableName(generationID),
 		EgressPolicyDigest:         "egress_digest",
 		Agent:                      "claude",
 		Model:                      "sonnet",

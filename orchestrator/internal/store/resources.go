@@ -116,6 +116,7 @@ type RuntimeGenerationDetails struct {
 	SandboxVeth                     string
 	SandboxIPCIDR                   string
 	HostSideCIDR                    string
+	NftTableName                    string
 	EgressPolicyID                  string
 	EgressPolicyDigest              string
 	AllowedEgressRules              string

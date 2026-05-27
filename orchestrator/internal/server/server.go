@@ -1384,6 +1384,7 @@ func runtimeDetailsWithResourceInstance(details store.RuntimeGenerationDetails, 
 	details.HostGatewayIP = instance.HostGatewayIP
 	details.SandboxIPCIDR = instance.SandboxIPCIDR
 	details.HostSideCIDR = instance.HostSideCIDR
+	details.NftTableName = instance.NftTableName
 	details.ControlDirPath = instance.ControlDirPath
 	details.ControlManifestPath = instance.ControlManifestPath
 	details.BundleDirPath = instance.BundleDirPath
@@ -1396,39 +1397,18 @@ func runtimeDetailsWithResourceInstance(details store.RuntimeGenerationDetails, 
 }
 
 func runtimeResourceCleanupEvidence(instance store.RuntimeResourceInstance, cleanup runtime.GenerationResourceCleanup) store.ResourceReconciliationEvidence {
-	filesystem := map[string]string{}
-	addFilesystemEvidence := func(label, path string, deleted bool) {
-		if strings.TrimSpace(path) == "" {
-			return
-		}
-		state := "absent"
-		if !deleted {
-			state = "absent_or_previously_removed"
-		}
-		filesystem[label+":"+path] = state
+	filesystem := make(map[string]string, len(cleanup.FilesystemLstat))
+	for path, value := range cleanup.FilesystemLstat {
+		filesystem[path] = value
 	}
-	addFilesystemEvidence("checkpoint", instance.CheckpointPath, cleanup.CheckpointDeleted)
-	addFilesystemEvidence("control", instance.ControlDirPath, cleanup.ControlDirDeleted)
-	addFilesystemEvidence("bundle", instance.BundleDirPath, cleanup.BundleDirDeleted)
-	addFilesystemEvidence("spec", instance.SpecPath, cleanup.BundleDirDeleted)
-	addFilesystemEvidence("bridge", instance.BridgeDirPath, cleanup.BridgeDirDeleted)
-	addFilesystemEvidence("network_hosts", instance.NetworkHostsPath, cleanup.NetworkDirDeleted)
-	addFilesystemEvidence("logs", instance.LogDirPath, cleanup.LogDirDeleted)
 	return store.ResourceReconciliationEvidence{
 		HostID:          instance.HostID,
-		RunscState:      cleanupEvidenceState("runsc_container", cleanup.RunscDeleted),
-		IPNetns:         cleanupEvidenceState("netns", cleanup.NetnsDeleted),
-		IPLink:          cleanupEvidenceState("host_veth", cleanup.HostVethDeleted),
-		NFT:             cleanupEvidenceState("nft_table", cleanup.NftTableDeleted),
+		RunscState:      cleanup.RunscState,
+		IPNetns:         cleanup.IPNetns,
+		IPLink:          cleanup.IPLink,
+		NFT:             cleanup.NFT,
 		FilesystemLstat: filesystem,
 	}
-}
-
-func cleanupEvidenceState(label string, deleted bool) string {
-	if deleted {
-		return label + ":absent"
-	}
-	return label + ":absent_or_previously_removed"
 }
 
 func runtimeResourceWorkerID(ownerUUID, leaseOwner string) string {

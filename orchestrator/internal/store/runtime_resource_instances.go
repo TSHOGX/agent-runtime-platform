@@ -585,6 +585,9 @@ func validateAbsenceEvidence(evidence ResourceReconciliationEvidence, hostID str
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("reconciliation evidence %s is required before absent_verified", label)
 		}
+		if err := validateAbsenceEvidenceValue(label, value); err != nil {
+			return err
+		}
 	}
 	if len(evidence.FilesystemLstat) == 0 {
 		return fmt.Errorf("reconciliation evidence filesystem lstat is required before absent_verified")
@@ -593,8 +596,22 @@ func validateAbsenceEvidence(evidence ResourceReconciliationEvidence, hostID str
 		if strings.TrimSpace(path) == "" || strings.TrimSpace(value) == "" {
 			return fmt.Errorf("reconciliation evidence filesystem lstat entries must be non-empty")
 		}
+		if err := validateAbsenceEvidenceValue("filesystem lstat "+path, value); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func validateAbsenceEvidenceValue(label, value string) error {
+	value = strings.TrimSpace(value)
+	if strings.Contains(value, "absent_or_previously_removed") {
+		return fmt.Errorf("reconciliation evidence %s must be independently verified before absent_verified", label)
+	}
+	if value == "absent" || strings.Contains(value, ":absent") {
+		return nil
+	}
+	return fmt.Errorf("reconciliation evidence %s must prove absence before absent_verified", label)
 }
 
 func runtimeResourceInstanceSelectSQL() string {

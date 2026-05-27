@@ -281,6 +281,42 @@ func TestRuntimeResourceAbsentVerifiedRequiresHostEvidence(t *testing.T) {
 	}
 }
 
+func TestRuntimeResourceAbsentVerifiedRejectsSyntheticAbsenceEvidence(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	now := time.Now().UTC()
+	instance := createRuntimeResourceInstanceForTest(t, ctx, st, owner.UUID, "sess_resource_synthetic_evidence", "host-1", now)
+	if err := st.ClaimRuntimeResourceRetiring(ctx, RuntimeResourceRetireParams{
+		GenerationID: instance.GenerationID,
+		WorkerID:     "worker-cleanup",
+		HostID:       instance.HostID,
+		Now:          now.Add(time.Second),
+	}); err != nil {
+		t.Fatalf("retire resource: %v", err)
+	}
+	evidence := runtimeResourceEvidenceForTest(instance.HostID)
+	if err := st.MarkRuntimeResourceReconciling(ctx, RuntimeResourceEvidenceParams{
+		GenerationID: instance.GenerationID,
+		WorkerID:     "worker-cleanup",
+		HostID:       instance.HostID,
+		Evidence:     evidence,
+		Now:          now.Add(2 * time.Second),
+	}); err != nil {
+		t.Fatalf("mark reconciling: %v", err)
+	}
+	evidence.RunscState = "runsc_container:absent_or_previously_removed"
+	err := st.MarkRuntimeResourceAbsentVerified(ctx, RuntimeResourceEvidenceParams{
+		GenerationID: instance.GenerationID,
+		WorkerID:     "worker-cleanup",
+		HostID:       instance.HostID,
+		Evidence:     evidence,
+		Now:          now.Add(3 * time.Second),
+	})
+	if err == nil || !strings.Contains(err.Error(), "independently verified") {
+		t.Fatalf("expected synthetic evidence rejection, got %v", err)
+	}
+}
+
 func createRuntimeResourceInstanceForTest(t *testing.T, ctx context.Context, st *Store, ownerUUID, sessionID, hostID string, now time.Time) RuntimeResourceInstance {
 	t.Helper()
 	params := runtimeResourceInstanceParamsForTest(t, ctx, st, ownerUUID, sessionID, hostID, now)

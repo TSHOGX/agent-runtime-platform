@@ -72,6 +72,11 @@ type GenerationResourceCleanup struct {
 	NetnsDeleted      bool
 	HostVethDeleted   bool
 	NftTableDeleted   bool
+	RunscState        string
+	IPNetns           string
+	IPLink            string
+	NFT               string
+	FilesystemLstat   map[string]string
 }
 
 type CommandRunner interface {
@@ -418,7 +423,7 @@ func (r *Runtime) DestroyGenerationResources(ctx context.Context, details store.
 	}
 
 	if strings.EqualFold(strings.TrimSpace(r.runscNetwork(details)), "sandbox") {
-		tableName := hostEgressTableName(details.GenerationID)
+		tableName := generationNftTableName(details)
 		if err := r.deleteNetworkResource(ctx, "nft", []string{"delete", "table", "inet", tableName}, true); err != nil {
 			errs = append(errs, err)
 		} else {
@@ -442,18 +447,24 @@ func (r *Runtime) DestroyGenerationResources(ctx context.Context, details store.
 	if len(errs) > 0 {
 		return cleanup, errors.Join(errs...)
 	}
+	if err := r.recordGenerationResourceAbsenceEvidence(ctx, details, containerID, targets, &cleanup); err != nil {
+		return cleanup, err
+	}
 	return cleanup, nil
 }
 
 type cleanupTargetKind string
 
 const (
-	cleanupTargetCheckpoint cleanupTargetKind = "checkpoint"
-	cleanupTargetControl    cleanupTargetKind = "control"
-	cleanupTargetBundle     cleanupTargetKind = "bundle"
-	cleanupTargetBridge     cleanupTargetKind = "bridge"
-	cleanupTargetNetwork    cleanupTargetKind = "network"
-	cleanupTargetLog        cleanupTargetKind = "log"
+	cleanupTargetCheckpoint      cleanupTargetKind = "checkpoint"
+	cleanupTargetControl         cleanupTargetKind = "control"
+	cleanupTargetControlManifest cleanupTargetKind = "control_manifest"
+	cleanupTargetBundle          cleanupTargetKind = "bundle"
+	cleanupTargetSpec            cleanupTargetKind = "spec"
+	cleanupTargetBridge          cleanupTargetKind = "bridge"
+	cleanupTargetNetwork         cleanupTargetKind = "network"
+	cleanupTargetNetworkHosts    cleanupTargetKind = "network_hosts"
+	cleanupTargetLog             cleanupTargetKind = "log"
 )
 
 type filesystemCleanupTarget struct {
@@ -492,6 +503,17 @@ func (r *Runtime) generationFilesystemCleanupTargets(details store.RuntimeGenera
 			return nil, err
 		}
 	}
+	if err := validateFilesystemCleanupTarget(cleanupTargetControlManifest, details.ControlManifestPath, filepath.Join(runRoot, "control", generationDir, controlFileName), runRoot); err != nil {
+		return nil, err
+	}
+	if err := validateFilesystemCleanupTarget(cleanupTargetSpec, details.SpecPath, filepath.Join(runRoot, "runtime", generationDir, "config.json"), runRoot); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(details.NetworkHostsPath) != "" {
+		if err := validateFilesystemCleanupTarget(cleanupTargetNetworkHosts, details.NetworkHostsPath, filepath.Join(runRoot, "network", generationDir, "hosts"), runRoot); err != nil {
+			return nil, err
+		}
+	}
 
 	checkpointPath, err := validateCheckpointCleanupTarget(details, runRoot, generationDir, r.cfg.CheckpointsRoot)
 	if err != nil {
@@ -499,6 +521,137 @@ func (r *Runtime) generationFilesystemCleanupTargets(details store.RuntimeGenera
 	}
 	targets = append([]filesystemCleanupTarget{{kind: cleanupTargetCheckpoint, path: checkpointPath.path, root: checkpointPath.root}}, targets...)
 	return targets, nil
+}
+
+func (r *Runtime) recordGenerationResourceAbsenceEvidence(ctx context.Context, details store.RuntimeGenerationDetails, containerID string, targets []filesystemCleanupTarget, cleanup *GenerationResourceCleanup) error {
+	runscState, err := r.runscContainerAbsenceEvidence(ctx, containerID)
+	if err != nil {
+		return err
+	}
+	cleanup.RunscState = runscState
+	if strings.EqualFold(strings.TrimSpace(r.runscNetwork(details)), "sandbox") {
+		ipNetns, err := r.netnsAbsenceEvidence(ctx, details.NetnsName)
+		if err != nil {
+			return err
+		}
+		ipLink, err := r.ipLinkAbsenceEvidence(ctx, details.HostVeth)
+		if err != nil {
+			return err
+		}
+		nft, err := r.nftTableAbsenceEvidence(ctx, generationNftTableName(details))
+		if err != nil {
+			return err
+		}
+		cleanup.IPNetns = ipNetns
+		cleanup.IPLink = ipLink
+		cleanup.NFT = nft
+	} else {
+		cleanup.IPNetns = "netns:absent; check=runsc_network_not_sandbox"
+		cleanup.IPLink = "host_veth:absent; check=runsc_network_not_sandbox"
+		cleanup.NFT = "nft_table:absent; check=runsc_network_not_sandbox"
+	}
+	filesystem, err := filesystemAbsenceEvidence(generationFilesystemEvidenceTargets(details, targets))
+	if err != nil {
+		return err
+	}
+	cleanup.FilesystemLstat = filesystem
+	return nil
+}
+
+func (r *Runtime) runscContainerAbsenceEvidence(ctx context.Context, containerID string) (string, error) {
+	output, err := r.runner.CombinedOutput(ctx, "runsc", "-root", r.cfg.RunscRoot, "state", containerID)
+	if err != nil {
+		if commandFailureContains(output, err, "does not exist", "not found", "no such container", "no such file") {
+			return "runsc_container:absent; check=runsc state " + containerID, nil
+		}
+		return "", fmt.Errorf("verify runsc container %s absence: %w: %s", containerID, err, strings.TrimSpace(string(output)))
+	}
+	return "", fmt.Errorf("verify runsc container %s absence: container still present", containerID)
+}
+
+func (r *Runtime) netnsAbsenceEvidence(ctx context.Context, netnsName string) (string, error) {
+	netnsName = strings.TrimSpace(netnsName)
+	if netnsName == "" {
+		return "netns:absent; check=not_configured", nil
+	}
+	output, err := r.runner.CombinedOutput(ctx, "ip", "netns", "list")
+	if err != nil {
+		return "", fmt.Errorf("verify network namespace %s absence: %w: %s", netnsName, err, strings.TrimSpace(string(output)))
+	}
+	if netnsListContains(string(output), netnsName) {
+		return "", fmt.Errorf("verify network namespace %s absence: namespace still present", netnsName)
+	}
+	return "netns:absent; check=ip netns list " + netnsName, nil
+}
+
+func (r *Runtime) ipLinkAbsenceEvidence(ctx context.Context, linkName string) (string, error) {
+	linkName = strings.TrimSpace(linkName)
+	if linkName == "" {
+		return "host_veth:absent; check=not_configured", nil
+	}
+	output, err := r.runner.CombinedOutput(ctx, "ip", "link", "show", linkName)
+	if err != nil {
+		if commandFailureContains(output, err, "cannot find device", "does not exist", "not found", "no such device") {
+			return "host_veth:absent; check=ip link show " + linkName, nil
+		}
+		return "", fmt.Errorf("verify host veth %s absence: %w: %s", linkName, err, strings.TrimSpace(string(output)))
+	}
+	return "", fmt.Errorf("verify host veth %s absence: link still present", linkName)
+}
+
+func (r *Runtime) nftTableAbsenceEvidence(ctx context.Context, tableName string) (string, error) {
+	tableName = strings.TrimSpace(tableName)
+	if tableName == "" {
+		return "nft_table:absent; check=not_configured", nil
+	}
+	output, err := r.runner.CombinedOutput(ctx, "nft", "list", "table", "inet", tableName)
+	if err != nil {
+		if commandFailureContains(output, err, "does not exist", "not found", "no such file", "no such table") {
+			return "nft_table:absent; check=nft list table inet " + tableName, nil
+		}
+		return "", fmt.Errorf("verify nft table %s absence: %w: %s", tableName, err, strings.TrimSpace(string(output)))
+	}
+	return "", fmt.Errorf("verify nft table %s absence: table still present", tableName)
+}
+
+func netnsListContains(output, netnsName string) bool {
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && fields[0] == netnsName {
+			return true
+		}
+	}
+	return false
+}
+
+func generationFilesystemEvidenceTargets(details store.RuntimeGenerationDetails, cleanupTargets []filesystemCleanupTarget) []filesystemCleanupTarget {
+	targets := append([]filesystemCleanupTarget(nil), cleanupTargets...)
+	for _, target := range cleanupTargets {
+		switch target.kind {
+		case cleanupTargetControl:
+			targets = append(targets, filesystemCleanupTarget{kind: cleanupTargetControlManifest, path: cleanAbsolutePath(details.ControlManifestPath), root: target.root})
+		case cleanupTargetBundle:
+			targets = append(targets, filesystemCleanupTarget{kind: cleanupTargetSpec, path: cleanAbsolutePath(details.SpecPath), root: target.root})
+		case cleanupTargetNetwork:
+			if strings.TrimSpace(details.NetworkHostsPath) != "" {
+				targets = append(targets, filesystemCleanupTarget{kind: cleanupTargetNetworkHosts, path: cleanAbsolutePath(details.NetworkHostsPath), root: target.root})
+			}
+		}
+	}
+	return targets
+}
+
+func filesystemAbsenceEvidence(targets []filesystemCleanupTarget) (map[string]string, error) {
+	evidence := make(map[string]string, len(targets))
+	for _, target := range targets {
+		if _, err := os.Lstat(target.path); err == nil {
+			return nil, fmt.Errorf("verify %s cleanup path %q absence: path still exists", target.kind, target.path)
+		} else if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("verify %s cleanup path %q absence: %w", target.kind, target.path, err)
+		}
+		evidence[string(target.kind)+":"+target.path] = "lstat:absent"
+	}
+	return evidence, nil
 }
 
 func validateCheckpointCleanupTarget(details store.RuntimeGenerationDetails, runRoot, generationDir, checkpointsRoot string) (filesystemCleanupTarget, error) {
@@ -657,7 +810,7 @@ func (r *Runtime) deleteNetworkResource(ctx context.Context, name string, args [
 	if err == nil {
 		return nil
 	}
-	if missingOK && commandOutputContains(string(output), "cannot find device", "does not exist", "not found", "no such file", "no such process", "no such table") {
+	if missingOK && commandFailureContains(output, err, "cannot find device", "does not exist", "not found", "no such file", "no such process", "no such table") {
 		return nil
 	}
 	return fmt.Errorf("destroy sandbox network resource %q: %w: %s", strings.Join(append([]string{name}, args...), " "), err, strings.TrimSpace(string(output)))
@@ -667,7 +820,7 @@ func (r *Runtime) deleteRunscContainer(ctx context.Context, containerID string) 
 	_, _ = r.runner.CombinedOutput(ctx, "runsc", "-root", r.cfg.RunscRoot, "kill", containerID, "KILL")
 	output, err := r.runner.CombinedOutput(ctx, "runsc", "-root", r.cfg.RunscRoot, "delete", containerID)
 	if err != nil {
-		if commandOutputContains(string(output), "does not exist", "not found", "no such container", "no such file") {
+		if commandFailureContains(output, err, "does not exist", "not found", "no such container", "no such file") {
 			return nil
 		}
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
@@ -1718,6 +1871,21 @@ func commandOutputContains(output string, needles ...string) bool {
 		}
 	}
 	return false
+}
+
+func commandFailureContains(output []byte, err error, needles ...string) bool {
+	text := string(output)
+	if err != nil {
+		text += " " + err.Error()
+	}
+	return commandOutputContains(text, needles...)
+}
+
+func generationNftTableName(details store.RuntimeGenerationDetails) string {
+	if tableName := strings.TrimSpace(details.NftTableName); tableName != "" {
+		return tableName
+	}
+	return hostEgressTableName(details.GenerationID)
 }
 
 func (r *Runtime) applySandboxEgressPolicy(ctx context.Context, details store.RuntimeGenerationDetails) error {

@@ -2917,9 +2917,14 @@ func TestDestroyReclaimableGenerationResourcesRemovesFilesystemWithRealRuntime(t
 	realRuntime := runtime.New(runtime.Config{
 		RunscNetwork:    "sandbox",
 		RunscOverlay2:   "none",
+		RunscRoot:       filepath.Join(dir, "runsc-root"),
 		RunDir:          cfg.Phase7.RunDir,
 		CheckpointsRoot: filepath.Join(dir, "checkpoints"),
-		CommandRunner:   serverCommandRunner{},
+		CommandRunner: serverCommandRunner{fail: map[string]error{
+			"runsc -root " + filepath.Join(dir, "runsc-root") + " state " + details.RunscContainerID: errors.New("not found"),
+			"ip link show " + details.HostVeth:                                         errors.New("does not exist"),
+			"nft list table inet " + runtimeResourceNftTableName(details.GenerationID): errors.New("No such table"),
+		}},
 	})
 	srv := &Server{
 		cfg:     cfg,
@@ -3703,8 +3708,8 @@ func (instantRuntime) Destroy(context.Context, string) error {
 	return nil
 }
 
-func (instantRuntime) DestroyGenerationResources(context.Context, store.RuntimeGenerationDetails) (runtime.GenerationResourceCleanup, error) {
-	return runtime.GenerationResourceCleanup{}, nil
+func (instantRuntime) DestroyGenerationResources(_ context.Context, details store.RuntimeGenerationDetails) (runtime.GenerationResourceCleanup, error) {
+	return runtimeCleanupEvidenceForDetails(details), nil
 }
 
 func (instantRuntime) Interrupt(string) error {
@@ -3796,12 +3801,44 @@ func (r *recordingRuntime) DestroyGenerationResources(_ context.Context, details
 	if err != nil {
 		return runtime.GenerationResourceCleanup{}, err
 	}
+	return runtimeCleanupEvidenceForDetails(details), nil
+}
+
+func runtimeCleanupEvidenceForDetails(details store.RuntimeGenerationDetails) runtime.GenerationResourceCleanup {
+	filesystem := map[string]string{}
+	addFilesystem := func(label, path string) {
+		if strings.TrimSpace(path) != "" {
+			filesystem[label+":"+path] = "lstat:absent"
+		}
+	}
+	addFilesystem("checkpoint", details.CheckpointPath)
+	addFilesystem("control", details.ControlDirPath)
+	addFilesystem("control_manifest", details.ControlManifestPath)
+	addFilesystem("bundle", details.BundleDirPath)
+	addFilesystem("spec", details.SpecPath)
+	addFilesystem("bridge", details.BridgeDirPath)
+	addFilesystem("network_hosts", details.NetworkHostsPath)
+	addFilesystem("logs", details.LogDirPath)
+	if len(filesystem) == 0 {
+		filesystem["test:runtime_resource"] = "lstat:absent"
+	}
 	return runtime.GenerationResourceCleanup{
-		RunscDeleted:    true,
-		NetnsDeleted:    true,
-		HostVethDeleted: true,
-		NftTableDeleted: true,
-	}, nil
+		RunscDeleted:      true,
+		CheckpointDeleted: true,
+		ControlDirDeleted: true,
+		BundleDirDeleted:  true,
+		BridgeDirDeleted:  true,
+		NetworkDirDeleted: true,
+		LogDirDeleted:     true,
+		NetnsDeleted:      true,
+		HostVethDeleted:   true,
+		NftTableDeleted:   true,
+		RunscState:        "runsc_container:absent; check=test",
+		IPNetns:           "netns:absent; check=test",
+		IPLink:            "host_veth:absent; check=test",
+		NFT:               "nft_table:absent; check=test",
+		FilesystemLstat:   filesystem,
+	}
 }
 
 func (r *recordingRuntime) Destroy(_ context.Context, runtimeID string) error {
@@ -3919,10 +3956,14 @@ func (r *restoreValidationRuntime) Checkpoint(context.Context, runtime.Checkpoin
 
 type serverCommandRunner struct {
 	outputs map[string][]byte
+	fail    map[string]error
 }
 
 func (r serverCommandRunner) CombinedOutput(_ context.Context, name string, args ...string) ([]byte, error) {
 	key := strings.Join(append([]string{name}, args...), " ")
+	if err := r.fail[key]; err != nil {
+		return nil, err
+	}
 	if out, ok := r.outputs[key]; ok {
 		return out, nil
 	}
@@ -3950,8 +3991,8 @@ func (f failingRuntime) Destroy(context.Context, string) error {
 	return nil
 }
 
-func (f failingRuntime) DestroyGenerationResources(context.Context, store.RuntimeGenerationDetails) (runtime.GenerationResourceCleanup, error) {
-	return runtime.GenerationResourceCleanup{}, nil
+func (f failingRuntime) DestroyGenerationResources(_ context.Context, details store.RuntimeGenerationDetails) (runtime.GenerationResourceCleanup, error) {
+	return runtimeCleanupEvidenceForDetails(details), nil
 }
 
 func (f failingRuntime) Interrupt(string) error {
