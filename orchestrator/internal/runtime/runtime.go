@@ -44,8 +44,6 @@ type Config struct {
 	Claude                  ClaudeConfig
 	RestoreFromCheckpoint   bool
 	Phase7RunDir            string
-	SecretsRoot             string
-	SecretReadersGID        int
 	PreStartProbeAttempts   int
 	PreStartProbeInterval   time.Duration
 	ProbeHealthzStatuses    []int
@@ -59,7 +57,6 @@ type Config struct {
 const controlFileName = "session.json"
 const checkpointImageManifestFileName = "harness-checkpoint-manifest.json"
 const checkpointImageManifestVersion = 1
-const secretPublishValidationWait = 500 * time.Millisecond
 
 var requiredCheckpointImageFiles = []string{"checkpoint.img", "pages.img", "pages_meta.img"}
 
@@ -151,10 +148,6 @@ type controlManifest struct {
 	RunscPlatform                        string `json:"runsc_platform"`
 	RunscVersion                         string `json:"runsc_version"`
 	AnthropicBaseURL                     string `json:"anthropic_base_url,omitempty"`
-	AnthropicAPIKeySecretID              string `json:"anthropic_api_key_secret_id,omitempty"`
-	AnthropicAuthTokenSecretID           string `json:"anthropic_auth_token_secret_id,omitempty"`
-	SecretVersion                        string `json:"secret_version,omitempty"`
-	SecretMountPath                      string `json:"secret_mount_path,omitempty"`
 	Model                                string `json:"model,omitempty"`
 	OutputFormat                         string `json:"output_format"`
 	WorkspacePath                        string `json:"workspace_path"`
@@ -736,9 +729,6 @@ func (r *Runtime) renderGenerationArtifacts(ctx context.Context, req StartReques
 	if err := r.writeNetworkHostsProjection(details); err != nil {
 		return GenerationArtifacts{}, err
 	}
-	if err := r.materializeSecrets(details); err != nil {
-		return GenerationArtifacts{}, err
-	}
 	spec, specDigest, err := r.renderRuntimeSpec(req)
 	if err != nil {
 		return GenerationArtifacts{}, err
@@ -806,11 +796,6 @@ func (r *Runtime) prepareGenerationDirs(req StartRequest) error {
 			return fmt.Errorf("create generation bridge dir: %w", err)
 		}
 	}
-	if strings.TrimSpace(details.SecretsDirPath) != "" {
-		if err := ensureSecretDir(details.SecretsDirPath, r.cfg.SecretReadersGID); err != nil {
-			return fmt.Errorf("create generation secrets dir: %w", err)
-		}
-	}
 	return r.prepareRuntimeDataDirs(req)
 }
 
@@ -860,222 +845,6 @@ func modelProxyBaseURLHost(raw string) (string, error) {
 	return host, nil
 }
 
-func (r *Runtime) materializeSecrets(details store.RuntimeGenerationDetails) error {
-	if !details.RequiresSecretDrop {
-		if strings.TrimSpace(details.SecretsDirPath) != "" {
-			return fmt.Errorf("generation must not carry a secrets dir")
-		}
-		return nil
-	}
-	if strings.TrimSpace(details.SecretsDirPath) == "" {
-		return fmt.Errorf("secret-backed generation requires secrets dir")
-	}
-	if strings.TrimSpace(r.cfg.SecretsRoot) == "" {
-		return fmt.Errorf("secret-backed generation requires secrets root")
-	}
-	if r.cfg.SecretReadersGID <= 0 {
-		return fmt.Errorf("secret-backed generation requires secret readers gid")
-	}
-	if err := ensureSecretDir(details.SecretsDirPath, r.cfg.SecretReadersGID); err != nil {
-		return fmt.Errorf("create materialized secrets root: %w", err)
-	}
-	secrets := map[string]string{
-		details.AnthropicAPIKeySecretID:    r.cfg.Claude.APIKey,
-		details.AnthropicAuthTokenSecretID: r.cfg.Claude.AuthToken,
-	}
-	for secretID, fallbackValue := range secrets {
-		if strings.TrimSpace(secretID) == "" || strings.TrimSpace(details.SecretVersion) == "" {
-			return fmt.Errorf("secret-backed generation requires secret id and version")
-		}
-		src := filepath.Join(r.cfg.SecretsRoot, secretID, details.SecretVersion)
-		if err := publishLocalSecretVersion(src, fallbackValue, r.cfg.SecretReadersGID); err != nil {
-			return err
-		}
-		dst := filepath.Join(details.SecretsDirPath, secretID, details.SecretVersion)
-		if err := materializeSecretVersion(src, dst, r.cfg.SecretReadersGID); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func publishLocalSecretVersion(path, value string, readersGID int) error {
-	if strings.TrimSpace(value) == "" {
-		return fmt.Errorf("secret %s is missing and no publish value was configured", path)
-	}
-	if readersGID <= 0 {
-		return fmt.Errorf("secret readers gid must be > 0")
-	}
-	if err := ensureSecretDir(filepath.Dir(path), readersGID); err != nil {
-		return fmt.Errorf("create secret dir: %w", err)
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o440)
-	if err != nil {
-		if os.IsExist(err) {
-			return waitForSecretVersion(path, readersGID, secretPublishValidationWait)
-		}
-		return fmt.Errorf("publish secret version: %w", err)
-	}
-	if _, err := file.WriteString(value); err != nil {
-		_ = file.Close()
-		return fmt.Errorf("write secret version: %w", err)
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return fmt.Errorf("sync secret version: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("close secret version: %w", err)
-	}
-	if err := chownPathIfNeeded(path, readersGID); err != nil {
-		return fmt.Errorf("chown secret version: %w", err)
-	}
-	if err := os.Chmod(path, 0o440); err != nil {
-		return fmt.Errorf("chmod secret version: %w", err)
-	}
-	return validateSecretVersion(path, readersGID)
-}
-
-func materializeSecretVersion(src, dst string, readersGID int) error {
-	info, err := os.Stat(src)
-	if err != nil {
-		return fmt.Errorf("stat secret version %s: %w", src, err)
-	}
-	if info.IsDir() {
-		return fmt.Errorf("secret version %s is a directory", src)
-	}
-	if err := validateSecretVersion(src, readersGID); err != nil {
-		return err
-	}
-	if err := ensureSecretDir(filepath.Dir(dst), readersGID); err != nil {
-		return fmt.Errorf("create materialized secret dir: %w", err)
-	}
-	if err := os.Link(src, dst); err == nil {
-		return validateSecretVersion(dst, readersGID)
-	} else if os.IsExist(err) {
-		return waitForSecretVersion(dst, readersGID, secretPublishValidationWait)
-	}
-	in, err := os.Open(src)
-	if err != nil {
-		return fmt.Errorf("open secret version: %w", err)
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o440)
-	if err != nil {
-		if os.IsExist(err) {
-			return waitForSecretVersion(dst, readersGID, secretPublishValidationWait)
-		}
-		return fmt.Errorf("create materialized secret: %w", err)
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		return fmt.Errorf("copy materialized secret: %w", err)
-	}
-	if err := out.Sync(); err != nil {
-		_ = out.Close()
-		return fmt.Errorf("sync materialized secret: %w", err)
-	}
-	if err := out.Close(); err != nil {
-		return fmt.Errorf("close materialized secret: %w", err)
-	}
-	if err := chownPathIfNeeded(dst, readersGID); err != nil {
-		return fmt.Errorf("chown materialized secret: %w", err)
-	}
-	if err := os.Chmod(dst, 0o440); err != nil {
-		return fmt.Errorf("chmod materialized secret: %w", err)
-	}
-	return validateSecretVersion(dst, readersGID)
-}
-
-func waitForSecretVersion(path string, readersGID int, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	var lastErr error
-	for {
-		if err := validateSecretVersion(path, readersGID); err == nil {
-			return nil
-		} else {
-			lastErr = err
-		}
-		if time.Now().After(deadline) {
-			return lastErr
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
-func ensureSecretDir(path string, readersGID int) error {
-	if strings.TrimSpace(path) == "" {
-		return fmt.Errorf("secret dir path is required")
-	}
-	if err := os.MkdirAll(path, 0o750); err != nil {
-		return err
-	}
-	current := filepath.Clean(path)
-	var dirs []string
-	for {
-		dirs = append(dirs, current)
-		parent := filepath.Dir(current)
-		if parent == current {
-			break
-		}
-		info, err := os.Stat(parent)
-		if err != nil || !info.IsDir() || info.Mode().Perm() != 0o750 {
-			break
-		}
-		current = parent
-	}
-	for i := len(dirs) - 1; i >= 0; i-- {
-		if err := chownPathIfNeeded(dirs[i], readersGID); err != nil {
-			return err
-		}
-		if err := os.Chmod(dirs[i], 0o750); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func chownPathIfNeeded(path string, readersGID int) error {
-	if readersGID <= 0 {
-		return nil
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return fmt.Errorf("stat ownership unavailable for %s", path)
-	}
-	if int(stat.Gid) == readersGID {
-		return nil
-	}
-	return os.Chown(path, int(stat.Uid), readersGID)
-}
-
-func validateSecretVersion(path string, readersGID int) error {
-	info, err := os.Stat(path)
-	if err != nil {
-		return fmt.Errorf("stat secret version %s: %w", path, err)
-	}
-	if info.IsDir() {
-		return fmt.Errorf("secret version %s is a directory", path)
-	}
-	if mode := info.Mode().Perm(); mode != 0o440 {
-		return fmt.Errorf("secret version %s must have mode 0440, got %04o", path, mode)
-	}
-	if readersGID > 0 {
-		stat, ok := info.Sys().(*syscall.Stat_t)
-		if !ok {
-			return fmt.Errorf("stat ownership unavailable for %s", path)
-		}
-		if int(stat.Gid) != readersGID {
-			return fmt.Errorf("secret version %s must have group %d, got %d", path, readersGID, stat.Gid)
-		}
-	}
-	return nil
-}
-
 func (r *Runtime) buildGenerationManifest(req StartRequest, runscVersion, bundleDigest, runtimeConfigDigest, specDigest string) (controlManifest, error) {
 	details := req.Generation
 	if !isSandboxIsolatedRequest(req) {
@@ -1098,9 +867,6 @@ func (r *Runtime) buildGenerationManifest(req StartRequest, runscVersion, bundle
 		RunscPlatform:                        defaultString(details.RunscPlatform, "systrap"),
 		RunscVersion:                         runscVersion,
 		AnthropicBaseURL:                     details.ManifestAnthropicBaseURL,
-		AnthropicAPIKeySecretID:              details.AnthropicAPIKeySecretID,
-		AnthropicAuthTokenSecretID:           details.AnthropicAuthTokenSecretID,
-		SecretVersion:                        details.SecretVersion,
 		Model:                                details.Model,
 		OutputFormat:                         details.OutputFormat,
 		WorkspacePath:                        "/workspace",
@@ -1164,29 +930,25 @@ func projectedControlManifestDigest(manifest controlManifest) (string, error) {
 		return "", err
 	}
 	strictFields := map[string]struct{}{
-		"session_id":                     {},
-		"generation_id":                  {},
-		"network_profile_id":             {},
-		"agent_runtime_profile_id":       {},
-		"agent":                          {},
-		"claude_session_uuid":            {},
-		"resume_claude":                  {},
-		"runsc_platform":                 {},
-		"runsc_version":                  {},
-		"anthropic_base_url":             {},
-		"anthropic_api_key_secret_id":    {},
-		"anthropic_auth_token_secret_id": {},
-		"secret_version":                 {},
-		"secret_mount_path":              {},
-		"model":                          {},
-		"output_format":                  {},
-		"workspace_path":                 {},
-		"agent_home_path":                {},
-		"bundle_digest":                  {},
-		"runtime_config_digest":          {},
-		"spec_digest":                    {},
-		"egress_policy_digest":           {},
-		"manifest_version":               {},
+		"session_id":               {},
+		"generation_id":            {},
+		"network_profile_id":       {},
+		"agent_runtime_profile_id": {},
+		"agent":                    {},
+		"claude_session_uuid":      {},
+		"resume_claude":            {},
+		"runsc_platform":           {},
+		"runsc_version":            {},
+		"anthropic_base_url":       {},
+		"model":                    {},
+		"output_format":            {},
+		"workspace_path":           {},
+		"agent_home_path":          {},
+		"bundle_digest":            {},
+		"runtime_config_digest":    {},
+		"spec_digest":              {},
+		"egress_policy_digest":     {},
+		"manifest_version":         {},
 		"claude_code_disable_nonessential_traffic": {},
 	}
 	regenerableFields := map[string]struct{}{

@@ -12,7 +12,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -35,13 +34,12 @@ func TestRuntimeStartRejectsUnsupportedAgent(t *testing.T) {
 
 func TestRuntimeStartRequiresGenerationDetailsForColdPath(t *testing.T) {
 	rt := New(Config{
-		DefaultAgent:     "claude",
-		SessionsRoot:     filepath.Join(t.TempDir(), "sessions"),
-		AgentHomesRoot:   filepath.Join(t.TempDir(), "agent-homes"),
-		CheckpointsRoot:  filepath.Join(t.TempDir(), "checkpoints"),
-		BundleRoot:       filepath.Join(t.TempDir(), "bundle", "out"),
-		RunscNetwork:     "host",
-		SecretReadersGID: testSecretReadersGID(),
+		DefaultAgent:    "claude",
+		SessionsRoot:    filepath.Join(t.TempDir(), "sessions"),
+		AgentHomesRoot:  filepath.Join(t.TempDir(), "agent-homes"),
+		CheckpointsRoot: filepath.Join(t.TempDir(), "checkpoints"),
+		BundleRoot:      filepath.Join(t.TempDir(), "bundle", "out"),
+		RunscNetwork:    "host",
 	})
 	res := rt.Start(context.Background(), StartRequest{
 		SessionID: "sess_1",
@@ -124,7 +122,7 @@ func TestProjectedControlManifestDigestIgnoresRegenerableFields(t *testing.T) {
 		t.Fatalf("regenerable fields changed projected digest: %s != %s", first, second)
 	}
 	strictChanged := base
-	strictChanged.SecretVersion = "rotated"
+	strictChanged.EgressPolicyDigest = "rotated_egress_digest"
 	third, err := projectedControlManifestDigest(strictChanged)
 	if err != nil {
 		t.Fatalf("project strict changed manifest: %v", err)
@@ -1132,12 +1130,6 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndIsolatedRuntime(t *t
 	if manifest.AnthropicBaseURL != "http://harness-model-proxy.internal:8082" {
 		t.Fatalf("unexpected sandbox base URL: %+v", manifest)
 	}
-	if manifest.SecretMountPath != "" ||
-		manifest.AnthropicAPIKeySecretID != "" ||
-		manifest.AnthropicAuthTokenSecretID != "" ||
-		manifest.SecretVersion != "" {
-		t.Fatalf("host-only manifest must not reference secrets: %+v", manifest)
-	}
 	if strings.Contains(string(data), `"anthropic_api_key":`) || strings.Contains(string(data), `"anthropic_auth_token":`) {
 		t.Fatalf("manifest must not contain plaintext credential fields: %s", data)
 	}
@@ -1281,12 +1273,6 @@ func TestPrepareClaudeHostOnlyGenerationHasNoSecretMount(t *testing.T) {
 	if manifest.AnthropicBaseURL != "http://harness-model-proxy.internal:8082" {
 		t.Fatalf("unexpected host-only base url: %+v", manifest)
 	}
-	if manifest.SecretMountPath != "" ||
-		manifest.AnthropicAPIKeySecretID != "" ||
-		manifest.AnthropicAuthTokenSecretID != "" ||
-		manifest.SecretVersion != "" {
-		t.Fatalf("host-only manifest must not reference secrets: %+v", manifest)
-	}
 	assertControlManifestOmitsHostOnlyFields(t, manifestData)
 	if strings.Contains(string(manifestData), "/harness-secrets") ||
 		strings.Contains(string(manifestData), "anthropic_api_key") ||
@@ -1319,12 +1305,10 @@ func TestPrepareClaudeHostOnlyGenerationHasNoSecretMount(t *testing.T) {
 func TestPrepareGenerationConcurrentSessionsUseDistinctControlManifests(t *testing.T) {
 	dir := t.TempDir()
 	rt := New(Config{
-		SessionsRoot:     filepath.Join(dir, "sessions"),
-		AgentHomesRoot:   filepath.Join(dir, "agent-homes"),
-		BundleRoot:       filepath.Join(dir, "bundle", "out"),
-		RootFSPath:       filepath.Join(dir, "rootfs"),
-		SecretsRoot:      filepath.Join(dir, "secrets"),
-		SecretReadersGID: testSecretReadersGID(),
+		SessionsRoot:   filepath.Join(dir, "sessions"),
+		AgentHomesRoot: filepath.Join(dir, "agent-homes"),
+		BundleRoot:     filepath.Join(dir, "bundle", "out"),
+		RootFSPath:     filepath.Join(dir, "rootfs"),
 		Claude: ClaudeConfig{
 			APIKey:    "123",
 			AuthToken: "123",
@@ -1387,26 +1371,6 @@ func TestPrepareGenerationConcurrentSessionsUseDistinctControlManifests(t *testi
 				tc.details.AgentRuntimeProfileID)
 		}
 	}
-}
-
-func TestPublishLocalSecretVersionDoesNotOverwriteExistingVersion(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "secrets", "anthropic_api_key", "local")
-	readersGID := testSecretReadersGID()
-	if err := publishLocalSecretVersion(path, "first-value", readersGID); err != nil {
-		t.Fatalf("publish first secret version: %v", err)
-	}
-	if err := publishLocalSecretVersion(path, "second-value", readersGID); err != nil {
-		t.Fatalf("republish existing secret version: %v", err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read secret version: %v", err)
-	}
-	if string(data) != "first-value" {
-		t.Fatalf("existing secret version was overwritten: %q", data)
-	}
-	assertSecretFile(t, path)
 }
 
 func TestPrepareShellGenerationHasNoSecretMount(t *testing.T) {
@@ -1497,9 +1461,6 @@ func TestPrepareShellGenerationHasNoSecretMount(t *testing.T) {
 	if manifestFile.Payload.WorkspacePath != "/workspace" || manifestFile.Payload.AgentHomePath != "/agent-home" {
 		t.Fatalf("shell manifest must use isolated sandbox paths: %+v", manifestFile.Payload)
 	}
-	if manifestFile.Payload.SecretMountPath != "" || manifestFile.Payload.AnthropicAPIKeySecretID != "" {
-		t.Fatalf("shell manifest must not reference secrets: %+v", manifestFile.Payload)
-	}
 	if manifestFile.Payload.AnthropicBaseURL != "" {
 		t.Fatalf("shell manifest must not require Claude base URL: %+v", manifestFile.Payload)
 	}
@@ -1556,12 +1517,10 @@ func TestPrepareGenerationRejectsMismatchedIdentity(t *testing.T) {
 	dir := t.TempDir()
 	details := testGenerationDetails(dir, "gen_mismatch")
 	rt := New(Config{
-		SessionsRoot:     filepath.Join(dir, "sessions"),
-		AgentHomesRoot:   filepath.Join(dir, "agent-homes"),
-		BundleRoot:       filepath.Join(dir, "bundle", "out"),
-		RootFSPath:       filepath.Join(dir, "rootfs"),
-		SecretsRoot:      filepath.Join(dir, "secrets"),
-		SecretReadersGID: testSecretReadersGID(),
+		SessionsRoot:   filepath.Join(dir, "sessions"),
+		AgentHomesRoot: filepath.Join(dir, "agent-homes"),
+		BundleRoot:     filepath.Join(dir, "bundle", "out"),
+		RootFSPath:     filepath.Join(dir, "rootfs"),
 		Claude: ClaudeConfig{
 			APIKey:    "123",
 			AuthToken: "123",
@@ -1671,15 +1630,11 @@ func testControlManifest() controlManifest {
 		ResumeClaude:                         true,
 		RunscPlatform:                        "systrap",
 		RunscVersion:                         "runsc test",
-		AnthropicBaseURL:                     "http://10.200.1.1:8082",
-		AnthropicAPIKeySecretID:              "anthropic_api_key",
-		AnthropicAuthTokenSecretID:           "anthropic_auth_token",
-		SecretVersion:                        "local",
-		SecretMountPath:                      "/harness-secrets",
+		AnthropicBaseURL:                     "http://harness-model-proxy.internal:8082",
 		Model:                                "sonnet",
 		OutputFormat:                         "stream-json",
-		WorkspacePath:                        "/sessions/sess_1",
-		AgentHomePath:                        "/agent-homes/sess_1",
+		WorkspacePath:                        "/workspace",
+		AgentHomePath:                        "/agent-home",
 		BundleDigest:                         "bundle_digest",
 		RuntimeConfigDigest:                  "runtime_config_digest",
 		SpecDigest:                           "spec_digest",
@@ -1755,36 +1710,6 @@ func mustJSONForTest(t *testing.T, value any) string {
 	return string(data)
 }
 
-func assertSecretPath(t *testing.T, path string) {
-	t.Helper()
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat secret dir %s: %v", path, err)
-	}
-	if !info.IsDir() {
-		t.Fatalf("secret path %s is not a directory", path)
-	}
-	if mode := info.Mode().Perm(); mode != 0o750 {
-		t.Fatalf("secret dir %s mode=%04o want 0750", path, mode)
-	}
-	assertPathGID(t, info, path, testSecretReadersGID())
-}
-
-func assertSecretFile(t *testing.T, path string) {
-	t.Helper()
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat secret file %s: %v", path, err)
-	}
-	if info.IsDir() {
-		t.Fatalf("secret file %s is a directory", path)
-	}
-	if mode := info.Mode().Perm(); mode != 0o440 {
-		t.Fatalf("secret file %s mode=%04o want 0440", path, mode)
-	}
-	assertPathGID(t, info, path, testSecretReadersGID())
-}
-
 func assertControlManifestOmitsHostOnlyFields(t *testing.T, data []byte) {
 	t.Helper()
 	var file controlManifestFile
@@ -1809,47 +1734,6 @@ func assertControlManifestOmitsHostOnlyFields(t *testing.T, data []byte) {
 	}
 }
 
-func assertPathGID(t *testing.T, info os.FileInfo, path string, want int) {
-	t.Helper()
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		t.Fatalf("stat ownership unavailable for %s", path)
-	}
-	if int(stat.Gid) != want {
-		t.Fatalf("%s gid=%d want %d", path, stat.Gid, want)
-	}
-}
-
-func TestEnsureSecretDirPreservesExistingOwner(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("requires root to set up non-current owner")
-	}
-	dir := t.TempDir()
-	secretsRoot := filepath.Join(dir, "secrets")
-	if err := os.Mkdir(secretsRoot, 0o750); err != nil {
-		t.Fatalf("mkdir secrets root: %v", err)
-	}
-	const ownerUID = 12345
-	readersGID := testSecretReadersGID()
-	if err := os.Chown(secretsRoot, ownerUID, readersGID); err != nil {
-		t.Fatalf("chown secrets root: %v", err)
-	}
-	if err := ensureSecretDir(filepath.Join(secretsRoot, "secret_id"), readersGID); err != nil {
-		t.Fatalf("ensure secret dir: %v", err)
-	}
-	info, err := os.Stat(secretsRoot)
-	if err != nil {
-		t.Fatalf("stat secrets root: %v", err)
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		t.Fatalf("stat ownership unavailable for %s", secretsRoot)
-	}
-	if int(stat.Uid) != ownerUID {
-		t.Fatalf("secrets root uid=%d want preserved uid %d", stat.Uid, ownerUID)
-	}
-}
-
 func closedDone() <-chan struct{} {
 	done := make(chan struct{})
 	close(done)
@@ -1870,12 +1754,4 @@ func testSandboxGID() int {
 		return gid
 	}
 	return 65534
-}
-
-func testSecretReadersGID() int {
-	gid := os.Getgid()
-	if gid > 0 {
-		return gid
-	}
-	return 1
 }
