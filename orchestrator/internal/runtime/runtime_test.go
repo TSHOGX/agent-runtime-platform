@@ -1538,6 +1538,7 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndIsolatedRuntime(t *t
 	if spec.Process.User.UID != testSandboxUID() || spec.Process.User.GID != testSandboxGID() {
 		t.Fatalf("isolated user=%+v want %d:%d", spec.Process.User, testSandboxUID(), testSandboxGID())
 	}
+	assertRuntimeSpecCapabilityPolicy(t, spec)
 	if strings.Contains(mustJSONForTest(t, spec.Process.Capabilities), "CAP_") {
 		t.Fatalf("isolated capabilities must be empty: %+v", spec.Process.Capabilities)
 	}
@@ -1793,6 +1794,7 @@ func TestPrepareShellGenerationHasNoSecretMount(t *testing.T) {
 	if spec.Process.User.UID != testSandboxUID() || spec.Process.User.GID != testSandboxGID() {
 		t.Fatalf("shell isolated user=%+v want %d:%d", spec.Process.User, testSandboxUID(), testSandboxGID())
 	}
+	assertRuntimeSpecCapabilityPolicy(t, spec)
 	if strings.Contains(mustJSONForTest(t, spec.Process.Capabilities), "CAP_") {
 		t.Fatalf("shell isolated capabilities must be empty: %+v", spec.Process.Capabilities)
 	}
@@ -2145,6 +2147,26 @@ func mustJSONForTest(t *testing.T, value any) string {
 		t.Fatalf("marshal json: %v", err)
 	}
 	return string(data)
+}
+
+func assertRuntimeSpecCapabilityPolicy(t *testing.T, spec runtimeSpec) {
+	t.Helper()
+	if !spec.Process.NoNewPrivileges {
+		t.Fatalf("runtime spec must set noNewPrivileges: %+v", spec.Process)
+	}
+	capabilities, ok := spec.Process.Capabilities.(map[string]any)
+	if !ok {
+		t.Fatalf("runtime spec capabilities must be an object: %+v", spec.Process.Capabilities)
+	}
+	for _, name := range []string{"bounding", "effective", "inheritable", "permitted", "ambient"} {
+		values, ok := capabilities[name].([]any)
+		if !ok {
+			t.Fatalf("runtime spec capability set %s must be an array: %+v", name, capabilities)
+		}
+		if len(values) != 0 {
+			t.Fatalf("runtime spec capability set %s must be empty: %+v", name, capabilities)
+		}
+	}
 }
 
 func assertControlManifestOmitsHostOnlyFields(t *testing.T, data []byte, forbiddenValues ...string) {
