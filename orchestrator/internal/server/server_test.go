@@ -2138,6 +2138,30 @@ func TestStartEnsuredGenerationRenewsLeaseDuringSlowPrepare(t *testing.T) {
 		adapter["runsc_binary_digest"] != "sha256:runsc-test" {
 		t.Fatalf("sandbox contract missing runsc binary metadata: %s", contract.CanonicalPayload)
 	}
+	ambientCaps, ok := adapter["ambient_capabilities"].([]any)
+	if adapter["no_new_privileges"] != true || !ok || len(ambientCaps) != 0 {
+		t.Fatalf("sandbox contract missing runtime capability policy: %s", contract.CanonicalPayload)
+	}
+	forbiddenCaps, ok := adapter["forbidden_capabilities"].([]any)
+	if !ok || !jsonArrayContainsAll(forbiddenCaps, "CAP_NET_ADMIN", "CAP_NET_RAW", "CAP_SYS_ADMIN") {
+		t.Fatalf("sandbox contract missing forbidden capability policy: %s", contract.CanonicalPayload)
+	}
+	requiredAnnotations, ok := adapter["required_annotations"].(map[string]any)
+	if !ok {
+		t.Fatalf("sandbox contract missing required annotations: %s", contract.CanonicalPayload)
+	}
+	bridgeAnnotations, ok := requiredAnnotations[bridge.BridgeMountDestination].(map[string]any)
+	if !ok ||
+		bridgeAnnotations["dev.gvisor.spec.mount./harness-control/bridge.type"] != "bind" ||
+		bridgeAnnotations["dev.gvisor.spec.mount./harness-control/bridge.share"] != "exclusive" {
+		t.Fatalf("sandbox contract missing bridge required annotation policy: %s", contract.CanonicalPayload)
+	}
+	networkIdentity, ok := payload["network_identity"].(map[string]any)
+	if !ok ||
+		networkIdentity["sandbox_ip"] != instance.SandboxIP ||
+		networkIdentity["nft_table_name"] != instance.NftTableName {
+		t.Fatalf("sandbox contract missing runtime network identity: %s instance=%+v", contract.CanonicalPayload, instance)
+	}
 	resourceIdentity, ok := payload["resource_identity"].(map[string]any)
 	if !ok || resourceIdentity["resource_identity_digest"] != instance.ResourceIdentityDigest {
 		t.Fatalf("sandbox contract missing resource identity digest: %s instance=%+v", contract.CanonicalPayload, instance)
@@ -4768,6 +4792,21 @@ func assertContains(t *testing.T, value, want string) {
 	if !strings.Contains(value, want) {
 		t.Fatalf("expected %q to contain %q", value, want)
 	}
+}
+
+func jsonArrayContainsAll(values []any, want ...string) bool {
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		if text, ok := value.(string); ok {
+			seen[text] = struct{}{}
+		}
+	}
+	for _, value := range want {
+		if _, ok := seen[value]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func drainHasEvent(ch <-chan events.Event, eventType string) bool {

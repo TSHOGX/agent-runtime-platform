@@ -484,12 +484,20 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 			return err
 		}
+		contractPayload, err := sandboxContractPayload(generationDetails, preparedArtifacts, resourceIdentityDigest, dataVolumes)
+		if err != nil {
+			if leaseErr := leaseKeeper.err(); leaseErr != nil {
+				return leaseErr
+			}
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+			return err
+		}
 		if _, err := s.store.StoreSandboxContract(ctx, store.StoreSandboxContractParams{
 			ContractID:             sandboxContractID(allocation.GenerationID),
 			SessionID:              session.ID,
 			GenerationID:           allocation.GenerationID,
 			SandboxContractVersion: store.SandboxContractVersion,
-			Payload:                sandboxContractPayload(generationDetails, preparedArtifacts, resourceIdentityDigest, dataVolumes),
+			Payload:                contractPayload,
 			Now:                    time.Now().UTC(),
 		}); err != nil {
 			if leaseErr := leaseKeeper.err(); leaseErr != nil {
@@ -1064,10 +1072,14 @@ func sandboxContractID(generationID string) string {
 	return "contract_" + strings.TrimSpace(generationID)
 }
 
-func sandboxContractPayload(details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, resourceIdentityDigest string, volumes sessionRuntimeDataVolumes) map[string]any {
+func sandboxContractPayload(details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, resourceIdentityDigest string, volumes sessionRuntimeDataVolumes) (map[string]any, error) {
 	runscPlatform := strings.TrimSpace(details.RunscPlatform)
 	if runscPlatform == "" {
 		runscPlatform = "systrap"
+	}
+	sandboxIP, err := runtimeResourceSandboxIP(details.SandboxIPCIDR)
+	if err != nil {
+		return nil, err
 	}
 	var sandboxModelProxyBaseURL any
 	if value := strings.TrimSpace(details.ManifestAnthropicBaseURL); value != "" {
@@ -1100,6 +1112,7 @@ func sandboxContractPayload(details store.RuntimeGenerationDetails, artifacts ru
 		"mount_plan": mountPlan,
 		"network_identity": map[string]any{
 			"runsc_network":    details.RunscNetwork,
+			"sandbox_ip":       sandboxIP,
 			"sandbox_ip_cidr":  details.SandboxIPCIDR,
 			"host_gateway_ip":  details.HostGatewayIP,
 			"netns_name":       details.NetnsName,
@@ -1107,17 +1120,31 @@ func sandboxContractPayload(details store.RuntimeGenerationDetails, artifacts ru
 			"host_veth":        details.HostVeth,
 			"sandbox_veth":     details.SandboxVeth,
 			"host_side_cidr":   details.HostSideCIDR,
+			"nft_table_name":   runtimeResourceNftTableName(details.GenerationID),
 			"egress_policy_id": details.EgressPolicyID,
 		},
 		"runtime_adapter": map[string]any{
-			"kind":                "runsc",
-			"runsc_platform":      runscPlatform,
-			"runsc_version":       artifacts.RunscVersion,
-			"runsc_binary_path":   artifacts.RunscBinaryPath,
-			"runsc_binary_digest": artifacts.RunscBinaryDigest,
-			"runsc_container_id":  details.RunscContainerID,
-			"runsc_network":       details.RunscNetwork,
-			"runsc_overlay2":      details.RunscOverlay2,
+			"kind":                 "runsc",
+			"runsc_platform":       runscPlatform,
+			"runsc_version":        artifacts.RunscVersion,
+			"runsc_binary_path":    artifacts.RunscBinaryPath,
+			"runsc_binary_digest":  artifacts.RunscBinaryDigest,
+			"runsc_container_id":   details.RunscContainerID,
+			"runsc_network":        details.RunscNetwork,
+			"runsc_overlay2":       details.RunscOverlay2,
+			"no_new_privileges":    true,
+			"ambient_capabilities": []string{},
+			"forbidden_capabilities": []string{
+				"CAP_NET_ADMIN",
+				"CAP_NET_RAW",
+				"CAP_SYS_ADMIN",
+			},
+			"required_annotations": map[string]any{
+				bridge.BridgeMountDestination: map[string]string{
+					"dev.gvisor.spec.mount./harness-control/bridge.type":  "bind",
+					"dev.gvisor.spec.mount./harness-control/bridge.share": "exclusive",
+				},
+			},
 		},
 		"resource_identity": map[string]any{
 			"resource_identity_digest": resourceIdentityDigest,
@@ -1164,7 +1191,7 @@ func sandboxContractPayload(details store.RuntimeGenerationDetails, artifacts ru
 			"control_manifest_digest": artifacts.ProjectedManifestDigest,
 		},
 	}
-	return payload
+	return payload, nil
 }
 
 func runtimeArtifactsFromDetails(details store.RuntimeGenerationDetails) runtime.GenerationArtifacts {
