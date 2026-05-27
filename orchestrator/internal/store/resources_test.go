@@ -747,6 +747,10 @@ func TestAllocateClaudeHostOnlyGenerationHasNoSecretReferences(t *testing.T) {
 		details.SecretVersion != "" {
 		t.Fatalf("host-only claude generation should not carry secrets: %+v", details)
 	}
+	wantHostsSuffix := filepath.Join("network", "gen-"+allocation.GenerationID, "hosts")
+	if details.NetworkHostsPath == "" || !strings.HasSuffix(details.NetworkHostsPath, wantHostsSuffix) {
+		t.Fatalf("host-only claude generation should carry network hosts projection path ending %q: %+v", wantHostsSuffix, details)
+	}
 	if !details.ModelAccessAllowed {
 		t.Fatalf("host-only claude generation should allow model access: %+v", details)
 	}

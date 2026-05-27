@@ -3714,6 +3714,7 @@ func testServerConfig(dir string) config.Config {
 		DefaultAgent:     "claude",
 		Claude: config.ClaudeConfig{
 			ProxyBindURL:               "http://0.0.0.0:8082",
+			SandboxBaseURL:             "http://harness-model-proxy.internal:8082",
 			Model:                      "sonnet",
 			OutputFormat:               "stream-json",
 			DisableNonessentialTraffic: true,

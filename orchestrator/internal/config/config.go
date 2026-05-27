@@ -51,6 +51,8 @@ type ClaudeConfig struct {
 	DisableNonessentialTraffic bool   `yaml:"disable_nonessential_traffic"`
 }
 
+const defaultSandboxModelProxyBaseURL = "http://harness-model-proxy.internal:8082"
+
 type Phase7Config struct {
 	RunDir           string           `yaml:"run_dir"`
 	SessionRetention Duration         `yaml:"session_retention"`
@@ -306,7 +308,7 @@ func loadProjectConfig(path string) (projectConfig, error) {
 		},
 		Claude: ClaudeConfig{
 			ProxyBindURL:               "http://0.0.0.0:8082",
-			SandboxBaseURL:             "http://10.200.1.1:8082",
+			SandboxBaseURL:             defaultSandboxModelProxyBaseURL,
 			APIKey:                     "123",
 			AuthToken:                  "123",
 			Model:                      "sonnet",
@@ -879,7 +881,7 @@ func validateHosts(field string, values []string) error {
 
 func normalizeClaudeConfig(cfg ClaudeConfig) ClaudeConfig {
 	cfg.ProxyBindURL = defaultString(cfg.ProxyBindURL, "http://0.0.0.0:8082")
-	cfg.SandboxBaseURL = defaultString(cfg.SandboxBaseURL, "http://10.200.1.1:8082")
+	cfg.SandboxBaseURL = defaultString(cfg.SandboxBaseURL, defaultSandboxModelProxyBaseURL)
 	cfg.APIKey = defaultString(cfg.APIKey, "123")
 	cfg.AuthToken = defaultString(cfg.AuthToken, cfg.APIKey)
 	cfg.Model = defaultString(cfg.Model, "sonnet")

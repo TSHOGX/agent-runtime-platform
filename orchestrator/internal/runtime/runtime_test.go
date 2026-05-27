@@ -584,13 +584,14 @@ func TestDestroyGenerationResourcesDeletesFilesystemInNonSandboxMode(t *testing.
 	})
 	details := testGenerationDetails(dir, "gen_cleanup")
 	details.RunscNetwork = "host"
+	details.NetworkHostsPath = filepath.Join(dir, "run", "network", "gen-"+details.GenerationID, "hosts")
 	createGenerationFilesystem(t, details)
 
 	cleanup, err := rt.DestroyGenerationResources(context.Background(), details)
 	if err != nil {
 		t.Fatalf("destroy generation resources: %v", err)
 	}
-	if !cleanup.CheckpointDeleted || !cleanup.ControlDirDeleted || !cleanup.BundleDirDeleted || !cleanup.BridgeDirDeleted || !cleanup.LogDirDeleted {
+	if !cleanup.CheckpointDeleted || !cleanup.ControlDirDeleted || !cleanup.BundleDirDeleted || !cleanup.BridgeDirDeleted || !cleanup.NetworkDirDeleted || !cleanup.LogDirDeleted {
 		t.Fatalf("unexpected filesystem cleanup result: %+v", cleanup)
 	}
 	assertGenerationFilesystemMissing(t, generationFilesystemPaths(details))
@@ -599,7 +600,7 @@ func TestDestroyGenerationResourcesDeletesFilesystemInNonSandboxMode(t *testing.
 	if err != nil {
 		t.Fatalf("destroy generation resources second pass: %v", err)
 	}
-	if cleanup.CheckpointDeleted || cleanup.ControlDirDeleted || cleanup.BundleDirDeleted || cleanup.BridgeDirDeleted || cleanup.LogDirDeleted {
+	if cleanup.CheckpointDeleted || cleanup.ControlDirDeleted || cleanup.BundleDirDeleted || cleanup.BridgeDirDeleted || cleanup.NetworkDirDeleted || cleanup.LogDirDeleted {
 		t.Fatalf("missing paths should be idempotent, got cleanup result: %+v", cleanup)
 	}
 }
@@ -1217,6 +1218,7 @@ func TestPrepareClaudeHostOnlyGenerationHasNoSecretMount(t *testing.T) {
 	details.AnthropicAuthTokenSecretID = ""
 	details.SecretVersion = ""
 	details.SecretsDirPath = ""
+	details.NetworkHostsPath = filepath.Join(dir, "run", "network", "gen-"+details.GenerationID, "hosts")
 
 	if _, err := rt.PrepareGeneration(context.Background(), StartRequest{
 		SessionID:         "sess_1",
@@ -1261,6 +1263,13 @@ func TestPrepareClaudeHostOnlyGenerationHasNoSecretMount(t *testing.T) {
 	}
 	if mountByDestination(spec.Mounts, "/harness-secrets") != nil {
 		t.Fatalf("host-only spec must not mount secrets: %+v", spec.Mounts)
+	}
+	if mountSource(spec.Mounts, "/etc/hosts") != details.NetworkHostsPath {
+		t.Fatalf("host-only spec must mount network hosts projection: %+v", spec.Mounts)
+	}
+	hostsData := mustReadFile(t, details.NetworkHostsPath)
+	if string(hostsData) != "127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n10.200.1.1 harness-model-proxy.internal\n" {
+		t.Fatalf("unexpected network hosts projection: %s", hostsData)
 	}
 }
 
@@ -1526,6 +1535,7 @@ func testGenerationDetails(dir, generationID string) store.RuntimeGenerationDeta
 		CheckpointPath:             filepath.Join(dir, "run", "gen-"+generationID, "checkpoint"),
 		SecretsDirPath:             filepath.Join(dir, "run", "control", "gen-"+generationID, "secrets"),
 		BridgeDirPath:              filepath.Join(dir, "run", "bridge", "gen-"+generationID),
+		NetworkHostsPath:           "",
 		LogDirPath:                 filepath.Join(dir, "run", "logs", "gen-"+generationID),
 		HostGatewayIP:              "10.200.1.1",
 		SandboxIPCIDR:              "10.200.1.2/30",
@@ -1545,13 +1555,17 @@ func testGenerationDetails(dir, generationID string) store.RuntimeGenerationDeta
 }
 
 func generationFilesystemPaths(details store.RuntimeGenerationDetails) []string {
-	return []string{
+	paths := []string{
 		details.CheckpointPath,
 		details.ControlDirPath,
 		details.BundleDirPath,
 		details.BridgeDirPath,
 		details.LogDirPath,
 	}
+	if strings.TrimSpace(details.NetworkHostsPath) != "" {
+		paths = append(paths, filepath.Dir(details.NetworkHostsPath))
+	}
+	return paths
 }
 
 func createGenerationFilesystem(t *testing.T, details store.RuntimeGenerationDetails) {

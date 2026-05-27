@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -80,6 +81,7 @@ type RuntimeGenerationDetails struct {
 	CheckpointPath                  string
 	SecretsDirPath                  string
 	BridgeDirPath                   string
+	NetworkHostsPath                string
 	LogDirPath                      string
 	ControlManifestDigest           string
 	ProjectedControlManifestDigest  string
@@ -300,6 +302,9 @@ func (s *Store) AllocateGeneration(ctx context.Context, p AllocateGenerationPara
 	if !p.Config.requiresSecretDrop() {
 		resources.SecretsDirPath = ""
 	}
+	if !p.Config.requiresNetworkHostsProjection() {
+		resources.NetworkHostsPath = ""
+	}
 	egressPolicyID := egressPolicyID(p.Config)
 	allowedRules := allowedEgressRules(network.HostGatewayIP, p.Config)
 	allowedRulesJSON, err := json.Marshal(allowedRules)
@@ -403,12 +408,13 @@ INSERT INTO network_profiles (
 INSERT INTO runtime_generation_resources (
   generation_id, network_profile_id, agent_runtime_profile_id,
   control_dir_path, control_manifest_path, bundle_dir_path, spec_path,
-  checkpoint_path, secrets_dir_path, bridge_dir_path, log_dir_path,
+  checkpoint_path, secrets_dir_path, bridge_dir_path, network_hosts_path, log_dir_path,
   resource_state, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'allocating', ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'allocating', ?)`,
 		generationID, networkProfileID, agentRuntimeProfileID,
 		resources.ControlDirPath, resources.ControlManifestPath, resources.BundleDirPath, resources.SpecPath,
-		nullableString(resources.CheckpointPath), nullableString(resources.SecretsDirPath), resources.BridgeDirPath, resources.LogDirPath, now); err != nil {
+		nullableString(resources.CheckpointPath), nullableString(resources.SecretsDirPath), resources.BridgeDirPath,
+		nullableString(resources.NetworkHostsPath), resources.LogDirPath, now); err != nil {
 		return GenerationAllocation{}, err
 	}
 	if err := updateSessionActiveGenerationTx(ctx, tx, SessionActiveGenerationCASParams{
@@ -2072,6 +2078,7 @@ SELECT
   COALESCE(r.checkpoint_path, ''),
   COALESCE(r.secrets_dir_path, ''),
   r.bridge_dir_path,
+  COALESCE(r.network_hosts_path, ''),
   r.log_dir_path,
   COALESCE(r.control_manifest_digest, ''),
   COALESCE(r.projected_control_manifest_digest, ''),
@@ -2140,6 +2147,7 @@ WHERE g.session_id = ?
 		&details.CheckpointPath,
 		&details.SecretsDirPath,
 		&details.BridgeDirPath,
+		&details.NetworkHostsPath,
 		&details.LogDirPath,
 		&details.ControlManifestDigest,
 		&details.ProjectedControlManifestDigest,
@@ -2256,6 +2264,7 @@ type resourcePaths struct {
 	CheckpointPath      string
 	SecretsDirPath      string
 	BridgeDirPath       string
+	NetworkHostsPath    string
 	LogDirPath          string
 }
 
@@ -2476,6 +2485,7 @@ func buildResourcePaths(runDir, generationID string) resourcePaths {
 		CheckpointPath:      filepath.Join(base, "checkpoint"),
 		SecretsDirPath:      filepath.Join(controlDir, "secrets"),
 		BridgeDirPath:       bridgeDir,
+		NetworkHostsPath:    filepath.Join(runDir, "network", "gen-"+generationID, "hosts"),
 		LogDirPath:          filepath.Join(runDir, "logs", "gen-"+generationID),
 	}
 }
@@ -2570,6 +2580,20 @@ func (c ResourceAllocatorConfig) providerCredentialsHostOnly() bool {
 	return c.agent() == "claude" && c.ProviderCredentialsHostOnly
 }
 
+func (c ResourceAllocatorConfig) requiresNetworkHostsProjection() bool {
+	if !c.providerCredentialsHostOnly() || !c.modelAccessAllowed() {
+		return false
+	}
+	host := modelProxyBaseURLHost(c.SandboxModelProxyBaseURL)
+	if host == "" {
+		return false
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return false
+	}
+	return true
+}
+
 func (c ResourceAllocatorConfig) manifestAnthropicBaseURL(baseURL string) string {
 	if c.agent() == "sh" {
 		return ""
@@ -2608,6 +2632,14 @@ func (c ResourceAllocatorConfig) secretVersion() string {
 		return "local"
 	}
 	return strings.TrimSpace(c.SecretVersion)
+}
+
+func modelProxyBaseURLHost(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(parsed.Hostname()))
 }
 
 func (c ResourceAllocatorConfig) hostProxyBindURL() string {

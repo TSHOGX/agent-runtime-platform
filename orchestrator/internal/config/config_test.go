@@ -745,6 +745,9 @@ func TestLoadProjectConfigMissingFileUsesDefaults(t *testing.T) {
 	if !cfg.Claude.DisableNonessentialTraffic {
 		t.Fatalf("expected default nonessential traffic setting to be true")
 	}
+	if cfg.Claude.SandboxBaseURL != "http://harness-model-proxy.internal:8082" {
+		t.Fatalf("default sandbox base URL = %q", cfg.Claude.SandboxBaseURL)
+	}
 	if cfg.Phase7.ControlRoot() != "/var/lib/harness/run/control" ||
 		cfg.Phase7.BundleRoot() != "/var/lib/harness/run/runtime" ||
 		cfg.Phase7.BridgeRoot() != "/var/lib/harness/run/bridge" {

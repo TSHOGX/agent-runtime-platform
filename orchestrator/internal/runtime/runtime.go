@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -67,6 +68,7 @@ type GenerationResourceCleanup struct {
 	ControlDirDeleted bool
 	BundleDirDeleted  bool
 	BridgeDirDeleted  bool
+	NetworkDirDeleted bool
 	LogDirDeleted     bool
 	NetnsDeleted      bool
 	HostVethDeleted   bool
@@ -388,6 +390,8 @@ func (r *Runtime) DestroyGenerationResources(ctx context.Context, details store.
 			cleanup.BundleDirDeleted = deleted
 		case cleanupTargetBridge:
 			cleanup.BridgeDirDeleted = deleted
+		case cleanupTargetNetwork:
+			cleanup.NetworkDirDeleted = deleted
 		case cleanupTargetLog:
 			cleanup.LogDirDeleted = deleted
 		}
@@ -431,6 +435,7 @@ const (
 	cleanupTargetControl    cleanupTargetKind = "control"
 	cleanupTargetBundle     cleanupTargetKind = "bundle"
 	cleanupTargetBridge     cleanupTargetKind = "bridge"
+	cleanupTargetNetwork    cleanupTargetKind = "network"
 	cleanupTargetLog        cleanupTargetKind = "log"
 )
 
@@ -455,10 +460,14 @@ func (r *Runtime) generationFilesystemCleanupTargets(details store.RuntimeGenera
 		{kind: cleanupTargetBridge, path: details.BridgeDirPath, root: runRoot},
 		{kind: cleanupTargetLog, path: details.LogDirPath, root: runRoot},
 	}
+	if strings.TrimSpace(details.NetworkHostsPath) != "" {
+		targets = append(targets, filesystemCleanupTarget{kind: cleanupTargetNetwork, path: filepath.Dir(details.NetworkHostsPath), root: runRoot})
+	}
 	expected := map[cleanupTargetKind]string{
 		cleanupTargetControl: filepath.Join(runRoot, "control", generationDir),
 		cleanupTargetBundle:  filepath.Join(runRoot, "runtime", generationDir),
 		cleanupTargetBridge:  filepath.Join(runRoot, "bridge", generationDir),
+		cleanupTargetNetwork: filepath.Join(runRoot, "network", generationDir),
 		cleanupTargetLog:     filepath.Join(runRoot, "logs", generationDir),
 	}
 	for _, target := range targets {
@@ -724,6 +733,9 @@ func (r *Runtime) renderGenerationArtifacts(ctx context.Context, req StartReques
 	if err := r.prepareGenerationDirs(req); err != nil {
 		return GenerationArtifacts{}, err
 	}
+	if err := r.writeNetworkHostsProjection(details); err != nil {
+		return GenerationArtifacts{}, err
+	}
 	if err := r.materializeSecrets(details); err != nil {
 		return GenerationArtifacts{}, err
 	}
@@ -800,6 +812,52 @@ func (r *Runtime) prepareGenerationDirs(req StartRequest) error {
 		}
 	}
 	return r.prepareRuntimeDataDirs(req)
+}
+
+func (r *Runtime) writeNetworkHostsProjection(details store.RuntimeGenerationDetails) error {
+	if strings.TrimSpace(details.NetworkHostsPath) == "" {
+		return nil
+	}
+	payload, err := renderNetworkHostsProjection(details)
+	if err != nil {
+		return err
+	}
+	if err := writeFileAtomic(details.NetworkHostsPath, payload, 0o644); err != nil {
+		return fmt.Errorf("write network hosts projection: %w", err)
+	}
+	return nil
+}
+
+func renderNetworkHostsProjection(details store.RuntimeGenerationDetails) ([]byte, error) {
+	host, err := modelProxyBaseURLHost(details.ManifestAnthropicBaseURL)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return nil, fmt.Errorf("network hosts projection requires a hostname alias, got %q", host)
+	}
+	gateway, err := netip.ParseAddr(strings.TrimSpace(details.HostGatewayIP))
+	if err != nil {
+		return nil, fmt.Errorf("network hosts projection requires host gateway ip: %w", err)
+	}
+	lines := []string{
+		"127.0.0.1 localhost",
+		"::1 localhost ip6-localhost ip6-loopback",
+		fmt.Sprintf("%s %s", gateway.String(), host),
+	}
+	return []byte(strings.Join(lines, "\n") + "\n"), nil
+}
+
+func modelProxyBaseURLHost(raw string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", fmt.Errorf("invalid model proxy base url: %w", err)
+	}
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	if host == "" || strings.ContainsAny(host, " \t\r\n/") {
+		return "", fmt.Errorf("model proxy base url must include a hostname")
+	}
+	return host, nil
 }
 
 func (r *Runtime) materializeSecrets(details store.RuntimeGenerationDetails) error {
@@ -1261,6 +1319,14 @@ func (r *Runtime) renderLegacyRuntimeSpec(req StartRequest) (runtimeSpec, string
 	if schemaPack := r.schemaPackPath(); schemaPack != "" {
 		spec.Mounts = append(spec.Mounts, specMount{Destination: "/schema-pack", Type: "bind", Source: schemaPack, Options: []string{"rbind", "ro"}})
 	}
+	if strings.TrimSpace(details.NetworkHostsPath) != "" {
+		spec.Mounts = append(spec.Mounts, specMount{
+			Destination: "/etc/hosts",
+			Type:        "bind",
+			Source:      details.NetworkHostsPath,
+			Options:     []string{"bind", "ro", "nosuid", "nodev", "noexec"},
+		})
+	}
 	if details.RequiresSecretDrop {
 		spec.Mounts = append(spec.Mounts, specMount{
 			Destination: "/harness-secrets",
@@ -1315,6 +1381,7 @@ func (r *Runtime) renderPhase8ShellRuntimeSpec(req StartRequest) (runtimeSpec, s
 		Generation:        details,
 		WorkspaceHostPath: workspaceHostPath,
 		AgentHomeHostPath: agentHomeHostPath,
+		NetworkHostsPath:  details.NetworkHostsPath,
 		SchemaPackPath:    r.schemaPackPath(),
 	})
 	if err != nil {
@@ -1415,6 +1482,16 @@ func (r *Runtime) repoRoot() string {
 }
 
 func writeJSONFileAtomic(path string, value any, mode os.FileMode) error {
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(value); err != nil {
+		return err
+	}
+	return writeFileAtomic(path, buf.Bytes(), mode)
+}
+
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -1423,9 +1500,7 @@ func writeJSONFileAtomic(path string, value any, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(value); err != nil {
+	if _, err := file.Write(data); err != nil {
 		_ = file.Close()
 		return err
 	}
