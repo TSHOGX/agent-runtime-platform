@@ -111,6 +111,7 @@ func defaultMigrations(options Options) []migration {
 		{version: 8, name: "phase7_event_retention_index", fn: migrateV8Phase7EventRetentionIndex},
 		{version: 9, name: "phase7_checkpoint_policy", fn: migrateV9Phase7CheckpointPolicy},
 		{version: 10, name: "phase8_sandbox_contracts", fn: migrateV10Phase8SandboxContracts},
+		{version: 11, name: "phase8_data_volumes", fn: migrateV11Phase8DataVolumes},
 	}
 }
 
@@ -705,6 +706,44 @@ CREATE UNIQUE INDEX IF NOT EXISTS runtime_generation_resources_runsc_container_i
   ON runtime_generation_resources (runsc_container_id)
   WHERE runsc_container_id IS NOT NULL
     AND resource_state != 'destroyed';
+`)
+	return err
+}
+
+func migrateV11Phase8DataVolumes(ctx context.Context, tx dbRunner) error {
+	_, err := tx.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS session_workspaces (
+  session_id TEXT PRIMARY KEY,
+  host_path TEXT NOT NULL UNIQUE,
+  layout_version INTEGER NOT NULL,
+  sandbox_uid INTEGER NOT NULL,
+  sandbox_gid INTEGER NOT NULL,
+  sandbox_supplemental_gids TEXT NOT NULL,
+  runtime_identity_digest TEXT NOT NULL,
+  provisioned_at TEXT NOT NULL,
+  provisioning_marker_path TEXT NOT NULL UNIQUE,
+  provisioning_marker_digest TEXT NOT NULL,
+  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS session_driver_homes (
+  session_id TEXT NOT NULL,
+  driver TEXT NOT NULL,
+  host_path TEXT NOT NULL UNIQUE,
+  layout_version INTEGER NOT NULL,
+  sandbox_uid INTEGER NOT NULL,
+  sandbox_gid INTEGER NOT NULL,
+  sandbox_supplemental_gids TEXT NOT NULL,
+  runtime_identity_digest TEXT NOT NULL,
+  provisioned_at TEXT NOT NULL,
+  provisioning_marker_path TEXT NOT NULL UNIQUE,
+  provisioning_marker_digest TEXT NOT NULL,
+  PRIMARY KEY(session_id, driver),
+  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS session_driver_homes_session_idx
+  ON session_driver_homes (session_id);
 `)
 	return err
 }
