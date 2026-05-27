@@ -1,10 +1,18 @@
 # Phase 9a: Configurable Harness System Prompt
 
-> Status: planned. Part of [Phase 9](./README.md).
+> Status: planned after [Phase 8 runtime isolation hardening](../phase8/README.md).
+> Part of [Phase 9](./README.md).
 
 ## Merge Gate
 
-The P0 session-lifetime baseline has landed. Phase 9a may rely on retryable generation start failures, restore-fallback retirement for claimed checkpoint restores, durable non-terminal runtime events, and failed/canceled bridge turn completions that do not fail the session.
+Phase 9a has two prerequisites:
+
+- Phase 8 runtime isolation, because 9a adds control-manifest fields and a
+  Claude-visible sidecar that must use the sandbox-visible projection and exact
+  mount contract.
+- The completed P0 session-lifetime baseline: retryable generation start
+  failures, restore-fallback retirement, durable non-terminal runtime events,
+  and failed/canceled bridge turn completions that do not fail the session.
 
 The remaining Phase 9a-specific merge gate is prepared-artifact compatibility. Phase 9a introduces stricter manifest/sidecar validation for already prepared generations, so the implementation must add:
 
@@ -126,6 +134,11 @@ type Session struct {
 Operator prompts are policy, not secrets. The `json:"-"` tags and API tests prevent accidental HTTP/SSE exposure, but they are not a sandbox secrecy boundary. Phase 9a stores the prompt text in the session row and writes it into the per-generation control manifest (`/harness-control/session.json`) and sidecar (`/harness-control/system_prompt.txt`) so Claude can receive it. Agent tools and shell commands running in the sandbox can read those mounted files.
 
 Operational rule: do not put credentials, secret tokens, private customer data, or hidden evaluation canaries in `harness.system_prompt.text`. If a future operator needs prompt content that is hidden from sandbox tools while still influencing the model, the delivery design must change; Phase 9a intentionally does not provide that boundary.
+
+Because Phase 8 release gates scan host-rendered control artifacts under
+`/harness-control`, prompts must also use sandbox-visible paths such as
+`/workspace` and must not include host roots, proxy-internal paths, provider
+paths, or other host-only runtime identities.
 
 ## Host-Side Artifact Rendering
 

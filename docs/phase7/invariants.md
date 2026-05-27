@@ -75,6 +75,11 @@ Every turn claim and completion update is guarded by the active lease
   applicability" below.)
 ```
 
+The credential invariant above is about persisted control-plane artifacts and
+credential source selection. It does not mean Claude cannot see the credential
+after the current entrypoint exports it for Claude Code. Phase 8 owns the
+stronger runtime secrecy boundary.
+
 ### Phase 7a vs 7b applicability
 
 The invariants above split cleanly along the 7a/7b boundary:

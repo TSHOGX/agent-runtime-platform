@@ -1,6 +1,7 @@
 # Phase 9b: Proactive Context Compaction
 
-> Status: planned. Part of [Phase 9](./README.md).
+> Status: planned after [Phase 8 runtime isolation hardening](../phase8/README.md).
+> Part of [Phase 9](./README.md).
 
 ## Goal
 
@@ -9,6 +10,10 @@ Trigger Claude Code's context compaction earlier than its built-in threshold, ba
 Today: Claude Code self-triggers compaction based on its own assumptions about the model's context size. When the harness runs against `claude-code-proxy` translating to an OpenAI-compatible upstream with a smaller effective context, sessions silently approach the real limit before Claude Code thinks compaction is necessary. The session then fails mid-conversation with no warning.
 
 The fix is in two parts: (1) get accurate per-turn token usage into the orchestrator, (2) have the orchestrator instruct compaction before the running total crosses a configurable budget.
+
+Phase 8 is a hard prerequisite. Phase 9b depends on proxy request correlation
+from the verified contract/resource sandbox identity, not the broader
+pre-Phase-8 source-IP assumptions.
 
 ## Background: Where Token Usage Lives Today
 
@@ -21,7 +26,11 @@ The data flow today (from the proxy/orchestrator exploration):
 
 Conclusion: usage is already correctly accumulated inside the proxy. The cheapest integration is to extend the existing `finish` observation rather than parsing it out of the in-sandbox Claude Code stdout.
 
-Session/turn correlation already works: the proxy reports `sandbox_source_ip` on `start`, the orchestrator's `StartProxyRequest` at `orchestrator/internal/store/proxy.go:86` resolves it to `session_id` / `turn_id` / `generation_id` via the active model-request context, and the resulting `proxy_request_id` ties the `finish` event back to the right turn. No new headers, no plumbing through Claude Code env vars.
+After Phase 8, session/turn correlation uses the observed proxy peer IP matched
+to the verified contract/resource sandbox identity and active model-request
+context. The resulting `proxy_request_id` ties the `finish` event back to the
+right turn. No new headers or Claude Code env vars are part of the trusted
+path.
 
 ## Part 1: Token Reporting Plumbing
 

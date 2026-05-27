@@ -11,8 +11,8 @@ Harness Platform now has a working end-to-end lab stack:
 - Go orchestrator API on port `8090`.
 - gVisor `runsc` runtime using per-generation OCI specs, control manifests, bridge dirs, and network profiles.
 - SQLite persistence for sessions, messages, runtime generations, turns, durable events, proxy request context, resources, and artifact metadata.
-- Per-session workspace under `/var/lib/harness/sessions/<session_id>`.
-- Per-session Claude HOME under `/var/lib/harness/agent-homes/<session_id>`, mounted in gVisor as `/agent-homes/<session_id>` and kept outside `/workspace`.
+- Per-session workspace under `/var/lib/harness/sessions/<session_id>`, currently reached from the sandbox through a parent `/sessions` mount.
+- Per-session Claude HOME under `/var/lib/harness/agent-homes/<session_id>`, currently reached from the sandbox through a parent `/agent-homes` mount and kept outside `/workspace`.
 - Claude Code stream-json parsing into durable `emit_output` events, persisted assistant messages, and live UI deltas.
 - Shell sessions through the bridge-aware shell shim, with shell output persisted as assistant messages and interrupt support for running turns.
 - Phase 7 typed `config/harness.yaml` is loaded with strict YAML validation and drives per-generation network, probe, bridge, reaper, checkpoint, and secret settings.
@@ -27,7 +27,9 @@ Harness Platform now has a working end-to-end lab stack:
 
 ### P0 Lifetime Separation - `20a8c07`
 
-The P0 lifetime baseline is complete at `20a8c07`. The roadmap now treats Phase 9 as active work on top of long-lived sessions. Key commits in this slice:
+The P0 lifetime baseline is complete at `20a8c07`. The roadmap now treats
+Phase 8 runtime isolation hardening as active work on top of long-lived
+sessions. Key commits in this slice:
 
 - `5cf0ddb fix(config): rename session ttl to retention` - renames the user-facing retention knob and makes `0s` the no-expiry default.
 - `c46c3db feat(config): add checkpoint image retention` and `fd01372 feat(store): retire expired checkpoint metadata` - add explicit checkpoint-image retirement.
@@ -150,17 +152,34 @@ HTTP routes, SSE/WebSocket endpoints, and the canonical event-name set are docum
 
 - Claude Code is the primary supported analysis path.
 - `Shell` is the supported interactive command path and has its own `turn_done`/`interrupt` contract; future adapters still need their own completion protocol before they are first-class multi-turn citizens.
-- The active Go runtime launches `runsc` directly. `bundle/restore-sandbox.sh` remains a useful Phase 2 smoke tool, not the main orchestrator runtime path.
+- The active Go runtime launches `runsc` directly. `bundle/restore-sandbox.sh` is a legacy Phase 2 smoke tool, not the main orchestrator runtime path; Phase 8 must migrate it to the `sandbox-isolation-v1` runtime contract or quarantine it as pre-Phase-8-only tooling.
 - The current Go runtime uses `runsc -network sandbox -overlay2 none` with per-generation network profiles. The runtime creates the allocated netns/veth pair, configures host and sandbox addresses from the persisted `/30`, applies the static lab egress allow-list, probes the local proxy, and writes the generation-specific sandbox-visible Anthropic base URL into the control manifest. The local proxy key remains `123` for the lab path.
+- The current runtime still mounts the parent session root at `/sessions` and the parent agent-home root at `/agent-homes`, then points the active session at `/workspace`. This gives the sandbox a broader filesystem view than the intended per-session boundary and is the blocking Phase 8 fix.
+- Claude generations currently receive model/proxy credentials through sandbox-readable secret files and export them before execing Claude. The manifest/spec avoid plaintext credentials, but the Claude process can still observe the runtime values. Phase 8 moves upstream credentials host-side and authorizes model requests through source-IP/generation/turn context plus driver entitlement; it does not add a sandbox-visible proxy-token path.
+- Shell generations do not mount `/harness-secrets`, but the shell shim still starts from the root entrypoint path. Phase 8 makes shell driver execution non-root and gives it only its own workspace/home mounts.
+- The current OCI rootfs is writable. Phase 8 makes rootfs read-only and turns tmp/cache/workspace/agent-home/bridge into explicit writable surfaces.
 - Automatic idle checkpointing is disabled by the checked-in policy. It can be enabled only after operators accept the measured restore/resource-retention behavior for the lab.
 - Reclaimable runtime resources are retained for `harness.reaper.failed_retention` before physical cleanup, so recently failed/destroyed generations can remain visible briefly by design.
+- Phase 8 is planned as a destructive clean cutover for this lab, not an
+  in-place compatibility migration. Old sessions, workspaces, agent homes,
+  runtime rows, checkpoints, and prepared bundles are wiped or quarantined from
+  active roots before `sandbox-isolation-v1` is enabled. Phase 8 also replaces
+  split network/resource cleanup state with one `runtime_resource_instances`
+  lifecycle; Phase 7 session/turn/generation execution semantics remain
+  authoritative.
 - Retained non-terminal sessions count toward `harness.max_sessions` even when they have no live runtime resources. Use the workbench close action or `DELETE /api/sessions/<id>` to free session quota while keeping history and workspace files.
 - Artifact metadata is recorded by host-side scanning/watching and rendered as a read-only live file tree. Direct file mutation operations remain outside the UI; use the sandbox agent or shell path to create, rename, or delete files.
 - Auth is lab shared-password cookie auth when `HARNESS_LAB_PASSWORD` is set.
 
 ## Next Architecture Target
 
-Active architecture work is Phase 9: configurable harness system prompt, proactive context compaction, system-skills mount, and harness-managed Claude Code settings. Production auth/authorization, real secret storage and rotation, tenant-level egress policy, resource limits, observability, and multi-orchestrator HA are Phase 10.
+Active architecture work is Phase 8: runtime isolation hardening. It narrows
+each sandbox to exact per-session/per-driver mounts, runs shell non-root, makes
+the rootfs read-only, moves upstream model credentials host-side, and unifies
+generation-owned host resource reconciliation before allocator reuse. Phase 9
+agent capability work follows Phase 8; production auth/authorization, real
+secret storage and rotation, tenant-level egress policy, resource limits,
+observability, and multi-orchestrator HA are Phase 10.
 
 ## Checks
 

@@ -45,9 +45,16 @@ Go orchestrator
           |-- harness-agent-entrypoint
           |-- harness-bridge-client
           |-- Claude Code / PTY-backed shell agent
-          |-- /workspace -> /var/lib/harness/sessions/<session_id>
-          `-- /agent-homes/<session_id> -> /var/lib/harness/agent-homes/<session_id>
+          |-- /workspace -> /sessions/<session_id>
+          `-- /agent-homes/<session_id>
 ```
+
+Current implementation note: `/sessions` is a bind mount of the whole host
+workspace root and `/agent-homes` is a bind mount of the whole host agent-home
+root. That gives the sandbox a broader filesystem view than the target
+architecture. Phase 8 replaces these parent-root mounts with exact binds of the
+current session workspace at `/workspace` and persistent session+driver home at
+`/agent-home`.
 
 The frontend talks to its own origin. Route handlers forward API calls to the orchestrator, including the SSE stream:
 
@@ -303,7 +310,7 @@ Claude control manifest:
 | --- | --- |
 | `proxy_bind_url` | Explicit host bind URL for the local proxy, `http://0.0.0.0:8082` |
 | `anthropic_base_url` | Sandbox-visible proxy URL, derived from the generation's allocated `host_gateway_ip` |
-| `anthropic_api_key` / `anthropic_auth_token` | Local proxy credential, fixed to `123` for the lab stack |
+| `anthropic_api_key_secret_id` / `anthropic_auth_token_secret_id` | References to sandbox-readable local proxy credentials, fixed to `123` in the lab stack after secret materialization; Phase 8 sunsets this provider-secret path, moves upstream credentials host-side, and authorizes model requests through source-IP/generation/turn context plus driver entitlement |
 | `claude_model` | Claude model alias, default `sonnet` |
 | `claude_code_disable_nonessential_traffic` | Keep Claude Code from making nonessential traffic during sandbox turns |
 | `session_workspace` | In-container sessions mount, default `/sessions/<session_id>` |
@@ -350,6 +357,18 @@ Checkpoint/restore remains policy-gated. Operators should enable automatic check
 
 ## Current Limitations
 
+- Runtime filesystem isolation is not yet at the intended boundary: the sandbox
+  can see parent `/sessions` and `/agent-homes` mounts, not only the current
+  session's workspace and persistent session+driver home. This is Phase 8's
+  highest-priority fix.
+- Claude-visible model credentials are still read from sandbox-mounted secret
+  files and exported before execing Claude. They are not stored in the
+  manifest/spec/rootfs, but they are visible to the Claude process and its tool
+  subprocesses. Phase 8 moves upstream credentials host-side.
+- Shell sessions currently start from the root entrypoint path and need the
+  Phase 8 non-root driver contract before being treated as least-privilege.
+- The OCI rootfs is currently writable. Phase 8 changes it to read-only with
+  explicit writable mounts for tmp/cache/workspace/home/bridge.
 - Additional agent adapters beyond Claude Code and the shell shim need their own completion contract before they are first-class multi-turn citizens.
 - Artifact browsing is read-only. File creation, renaming, and deletion should still happen through the sandbox agent or shell session, with the UI reflecting those changes through metadata events.
 - Tenant-level resource limits and production egress policy management are Phase 10 work.

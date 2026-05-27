@@ -1,6 +1,7 @@
 # Phase 9c: System-Skills Mount
 
-> Status: planned. Part of [Phase 9](./README.md).
+> Status: planned after [Phase 8 runtime isolation hardening](../phase8/README.md).
+> Part of [Phase 9](./README.md).
 > Foundation for [Phase 11 trajectory→skill evolution](../phase11-trajectory-pipeline.md).
 
 ## Goal
@@ -17,16 +18,22 @@ This is a runtime packaging and delivery problem:
 
 Phase 9c does **not** introduce a separate skills release system. Versioning is the `harness-platform` git history: operators update skills by changing this repo and deploying a new commit. Phase 11 may add a reviewed `releases/` flow when the trajectory pipeline starts generating skill candidates.
 
-## Current Runtime Facts
+## Runtime Prerequisite
 
-The current container layout already has the right separation:
+Phase 9c starts after Phase 8 narrows the runtime mount contract. The older
+runtime facts below describe the pre-Phase-8 layout and are not sufficient for
+new sandbox-visible content:
 
 - `/workspace` is a symlink to `/sessions/<session_id>`.
 - The agent HOME is `/agent-homes/<session_id>`, outside `/workspace`.
 - The artifact watcher only scans the sessions root and ignores symlinks.
 - Runtime spec generation already centralizes mounts for `/sessions`, `/agent-homes`, `/harness-control`, `/schema-pack`, and `/harness-secrets`.
 
-The skills mount must not live under `/sessions` or `/workspace`. It is a separate read-only mount, then optionally linked into the agent's private HOME for a conventional discovery path.
+Phase 8 replaces `/sessions` and `/agent-homes` parent binds with exact
+`/workspace` and `/agent-home` mounts. The skills mount must be a separate
+read-only exact subtree, never below `/sessions`, `/agent-homes`, or
+`/workspace`, then optionally linked into the selected driver's private HOME for
+a conventional discovery path.
 
 ## Directory Layout
 
@@ -53,7 +60,7 @@ Container-side layout:
 /harness-skills              # read-only bind mount
 /harness-skills/skills/...
 
-/agent-homes/<session_id>/   # existing private agent HOME
+/agent-home/                 # selected driver's private agent HOME
 ```
 
 Optional per-agent links created by the entrypoint:
@@ -114,16 +121,21 @@ During generation artifact rendering:
 1. Resolve `harness.skills.source_path`.
 2. Validate it exists and is a directory.
 3. Compute `skills_digest`.
-4. Add a read-only bind mount:
+4. Add a read-only exact bind mount through the Phase 8 MountPlan builder:
 
 ```json
 {
   "destination": "/harness-skills",
   "type": "bind",
   "source": "/opt/harness-platform/sandbox-image/system-skills",
-  "options": ["rbind", "ro", "nosuid", "nodev", "noexec"]
+  "options": ["bind", "ro", "nosuid", "nodev", "noexec"]
 }
 ```
+
+This mount inherits the Phase 8 exact-bind contract. If a worker can only use a
+recursive fallback, it must reject nested source submounts, use private/slave
+propagation, and prove with the Phase 8 post-launch submount gate that new host
+submounts do not appear in the sandbox.
 
 Recommended behavior:
 
@@ -191,7 +203,7 @@ This is a visibility boundary, not a secrecy boundary. If the agent can read a s
 1. Add `harness.skills` config with validation and defaults.
 2. Add runtime config fields for skills source path and mount path.
 3. Add canonical directory digest calculation.
-4. Add read-only skills bind mount in runtime spec generation.
+4. Add the read-only skills exact bind through the Phase 8 MountPlan.
 5. Add skills fields to the control manifest and projected digest logic.
 6. Update the entrypoint to link skills into the selected agent's private HOME.
 7. Tests:

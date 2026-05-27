@@ -98,15 +98,56 @@ setpriv --reuid "$AGENT_UID" --regid "$HARNESS_SECRET_READERS_GID" \
 
 `--clear-groups` without an accompanying `--groups <secret-readers-gid>` is an explicit defect for any sandbox that mounts a secret. Tests assert that the Claude runner invokes `setpriv --groups "$HARNESS_SECRET_READERS_GID"` and reads `${SECRET_DIR}/<secret_id>/<secret_version>` after dropping privileges.
 
-A root-entrypoint-then-drop alternative (entrypoint reads the secret as root and injects via env before dropping to UID 65534) is **not** part of this contract: it would put plaintext in the agent process environment, which is observable via `/proc/self/environ` and survives across `execve`, and it would break the bind-mount-only model that lets Phase 10 swap directory storage for KMS without touching the entrypoint.
+Phase 7's credential contract is an at-rest and source-of-truth contract for the
+legacy, pre-Phase-8 provider-secret mount path: the manifest/spec/rootfs do not
+carry plaintext credentials, and the entrypoint must not fall back to ambient
+host Claude configuration. It is **not** a secrecy boundary against Claude
+itself. The current Claude runner reads the mounted secret after dropping
+privileges and exports it for Claude Code, so the Claude process and
+prompt-injected tool children can observe the runtime value through
+environment/proc inspection. Phase 8 retires this mounted provider-credential
+path and replaces it with a host-side upstream credential boundary plus
+source-IP/generation/turn proxy authorization and driver entitlement.
 
-**Shell agent (`HARNESS_AGENT=sh`) does not mount secrets.** The shell shim does not need upstream model credentials, and Phase 7 forbids shell secret mounts by construction: the shell generation's `agent_runtime_profile` is `agent = sh`, `requires_secret_drop = false`, carries no `anthropic_api_key_secret_id` / `anthropic_auth_token_secret_id`, the per-generation control dir for a shell generation has no `secrets/` subdirectory materialized, and `secret_mount_path` is unset so no bind-mount is added to the runtime spec. The orchestrator validates this at generation-start time: a shell generation whose manifest carries any secret reference is rejected with `error_class = shell_secret_disallowed`. If a future shell or BYO-agent variant ever needs upstream credentials, it must first land its own `setpriv --groups "$HARNESS_SECRET_READERS_GID"` drop in the entrypoint and explicitly opt in via `agent_runtime_profile.requires_secret_drop = true` — the doc-level rule is "no secret mount unless the entrypoint demonstrably runs the agent under a non-root UID with the readers group." Until then, the only way to give a shell session model access is via a separate Claude generation in the same session.
+After Phase 8, upstream model provider credentials and remote MCP bearer tokens
+must not be mounted into `/harness-secrets`, exported through the driver
+environment, or made readable by the sandbox entrypoint. Any future
+`/harness-secrets` use is limited to scoped non-provider driver secrets after
+that driver proves non-root execution and least-privilege access.
 
-The per-generation secrets directory under the control dir is created mode `0750` owned by `orchestrator:harness-secret-readers`; each `<secret_id>` subdirectory uses the same mode and ownership, and the `<secret_version>` file is hard-linked or copied into it preserving owner/group/mode. The bind-mount into the sandbox at `secret_mount_path` is read-only (`ro,nosuid,nodev,noexec`); read-only bind enforces that the agent cannot mutate the file, while `0440 group=harness-secret-readers` is what makes the in-sandbox read succeed. This mount option set is part of the contract, not a test-only detail.
+**Shell agent (`HARNESS_AGENT=sh`) does not mount secrets.** The shell shim does not need upstream model credentials, and Phase 7 forbids shell secret mounts by construction: the shell generation's `agent_runtime_profile` is `agent = sh`, `requires_secret_drop = false`, carries no `anthropic_api_key_secret_id` / `anthropic_auth_token_secret_id`, the per-generation control dir for a shell generation has no `secrets/` subdirectory materialized, and `secret_mount_path` is unset so no bind-mount is added to the runtime spec. The orchestrator validates this at generation-start time: a shell generation whose manifest carries any secret reference is rejected with `error_class = shell_secret_disallowed`. After Phase 8, shell or BYO-agent model access must use the host-side proxy credential boundary, not a provider-secret mount. If a future shell or BYO-agent variant ever needs scoped non-provider secrets, it must first land its own `setpriv --groups "$HARNESS_SECRET_READERS_GID"` drop in the entrypoint and explicitly opt in via `agent_runtime_profile.requires_secret_drop = true` — the doc-level rule is "no secret mount unless the entrypoint demonstrably runs the agent under a non-root UID with the readers group."
 
-Phase 10 replaces the directory backend with KMS without changing this contract — the entrypoint still reads `${SECRET_DIR}/<secret_id>/<secret_version>` as UID `65534`, and the KMS-backed materializer is responsible for writing files with the same owner/group/mode and for choosing whether to materialize via tmpfs to keep plaintext off persistent storage. If a future Phase 10 design uses gVisor `--file-access=shared` with idmap mounts, the contract becomes "the materialized file must be readable by the sandbox-mapped UID" and the host group convention is replaced by idmap remapping; the entrypoint contract is unchanged.
+For the legacy provider-secret mount path, and for any future explicitly
+approved scoped non-provider secret mount, the per-generation secrets directory
+under the control dir is created mode `0750` owned by
+`orchestrator:harness-secret-readers`; each `<secret_id>` subdirectory uses the
+same mode and ownership, and the `<secret_version>` file is hard-linked or
+copied into it preserving owner/group/mode. The bind-mount into the sandbox at
+`secret_mount_path` is read-only (`ro,nosuid,nodev,noexec`); read-only bind
+enforces that the agent cannot mutate the file, while `0440
+group=harness-secret-readers` is what makes the in-sandbox read succeed. This
+mount option set is part of the contract, not a test-only detail.
 
-At generation start the host materializes the per-generation secrets dir under the control dir and bind-mounts it read-only into the sandbox at `secret_mount_path`; the entrypoint reads `${SECRET_DIR}/<secret_id>/<secret_version>` rather than the manifest. The manifest carries only the secret-reference fields (`anthropic_api_key_secret_id` / `anthropic_auth_token_secret_id`) plus `secret_version`, never plaintext, and the entrypoint must not fall back to host-level Claude configuration.
+Phase 10 KMS must not preserve or reintroduce sandbox entrypoint reads for
+upstream model provider credentials; those remain host-side after Phase 8. If a
+future Phase 10 design supports scoped non-provider driver secrets through
+`/harness-secrets`, it may reuse this materialization shape with a KMS-backed
+materializer writing files with the same owner/group/mode, optionally via tmpfs
+to keep plaintext off persistent storage. If that design uses gVisor
+`--file-access=shared` with idmap mounts, the contract becomes "the
+materialized file must be readable by the sandbox-mapped UID" and the host group
+convention is replaced by idmap remapping.
+
+On the legacy provider-secret path, generation start materializes the
+per-generation secrets dir under the control dir and bind-mounts it read-only
+into the sandbox at `secret_mount_path`; the entrypoint reads
+`${SECRET_DIR}/<secret_id>/<secret_version>` rather than the manifest. The
+manifest carries only the secret-reference fields
+(`anthropic_api_key_secret_id` / `anthropic_auth_token_secret_id`) plus
+`secret_version`, never plaintext, and the entrypoint must not fall back to
+host-level Claude configuration. Phase 8 migration must reject or recreate
+generations whose manifest/spec still depends on this provider-secret mount
+contract.
 
 ## Resource Allocator And Reaper
 
