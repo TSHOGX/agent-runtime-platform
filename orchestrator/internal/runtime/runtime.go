@@ -1959,8 +1959,10 @@ func (r *Runtime) startFresh(ctx context.Context, req StartRequest, output func(
 		req.PreparedArtifacts.NetworkPrepared = true
 	}
 
-	// Build runsc run command
-	containerID := fmt.Sprintf("phase3-%s", req.SessionID)
+	containerID, err := runscContainerID(req.Generation)
+	if err != nil {
+		return Result{Err: err}
+	}
 	bundlePath := artifacts.BundleDir
 	hub.Publish(OutputEvent{Stream: "runtime", Line: "using per-generation runtime bundle"})
 	r.cleanupRunscContainer(ctx, containerID)
@@ -2083,7 +2085,10 @@ func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, ou
 		}
 		req.PreparedArtifacts.NetworkPrepared = true
 	}
-	containerID := fmt.Sprintf("phase3-%s", req.SessionID)
+	containerID, err := runscContainerID(req.Generation)
+	if err != nil {
+		return Result{Err: err}
+	}
 	bundlePath := artifacts.BundleDir
 	r.cleanupRunscContainer(ctx, containerID)
 
@@ -2222,6 +2227,14 @@ func validateCheckpointRestore(details store.RuntimeGenerationDetails, artifacts
 		}
 	}
 	return nil
+}
+
+func runscContainerID(details store.RuntimeGenerationDetails) (string, error) {
+	containerID := strings.TrimSpace(details.RunscContainerID)
+	if containerID == "" {
+		return "", fmt.Errorf("runsc container id is required")
+	}
+	return containerID, nil
 }
 
 func writeCheckpointImageManifest(checkpointPath string) error {

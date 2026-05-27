@@ -92,6 +92,7 @@ type RuntimeGenerationDetails struct {
 	BundleDigest                    string
 	RuntimeConfigDigest             string
 	SpecDigest                      string
+	RunscContainerID                string
 	RunscVersion                    string
 	CheckpointNetworkProfileID      string
 	CheckpointAgentRuntimeProfileID string
@@ -306,6 +307,7 @@ func (s *Store) AllocateGeneration(ctx context.Context, p AllocateGenerationPara
 	networkProfileID := "net_" + generationID
 	agentRuntimeProfileID := agentRuntimeProfileID(generationID)
 	resources := buildResourcePaths(p.Config.RunDir, generationID)
+	runscContainerID := generationRunscContainerID(generationID)
 	if !p.Config.requiresSecretDrop() {
 		resources.SecretsDirPath = ""
 	}
@@ -427,12 +429,12 @@ INSERT INTO runtime_generation_resources (
   generation_id, network_profile_id, agent_runtime_profile_id,
   control_dir_path, control_manifest_path, bundle_dir_path, spec_path,
   checkpoint_path, secrets_dir_path, bridge_dir_path, network_hosts_path, log_dir_path,
-  resource_state, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'allocating', ?)`,
+  runsc_container_id, resource_state, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'allocating', ?)`,
 		generationID, networkProfileID, agentRuntimeProfileID,
 		resources.ControlDirPath, resources.ControlManifestPath, resources.BundleDirPath, resources.SpecPath,
 		nullableString(resources.CheckpointPath), nullableString(resources.SecretsDirPath), resources.BridgeDirPath,
-		nullableString(resources.NetworkHostsPath), resources.LogDirPath, now); err != nil {
+		nullableString(resources.NetworkHostsPath), resources.LogDirPath, runscContainerID, now); err != nil {
 		return GenerationAllocation{}, err
 	}
 	if err := updateSessionActiveGenerationTx(ctx, tx, SessionActiveGenerationCASParams{
@@ -2100,6 +2102,7 @@ SELECT
   COALESCE(r.bundle_digest, ''),
   COALESCE(r.runtime_config_digest, ''),
   COALESCE(r.spec_digest, ''),
+  COALESCE(r.runsc_container_id, ''),
   COALESCE(r.runsc_version, ''),
   COALESCE(g.checkpoint_network_profile_id, ''),
   COALESCE(g.checkpoint_agent_runtime_profile_id, ''),
@@ -2173,6 +2176,7 @@ WHERE g.session_id = ?
 		&details.BundleDigest,
 		&details.RuntimeConfigDigest,
 		&details.SpecDigest,
+		&details.RunscContainerID,
 		&details.RunscVersion,
 		&details.CheckpointNetworkProfileID,
 		&details.CheckpointAgentRuntimeProfileID,
@@ -2515,6 +2519,10 @@ func buildResourcePaths(runDir, generationID string) resourcePaths {
 		NetworkHostsPath:    filepath.Join(runDir, "network", "gen-"+generationID, "hosts"),
 		LogDirPath:          filepath.Join(runDir, "logs", "gen-"+generationID),
 	}
+}
+
+func generationRunscContainerID(generationID string) string {
+	return "harness-gen-" + strings.TrimSpace(generationID)
 }
 
 func allowedEgressRules(hostGatewayIP string, cfg ResourceAllocatorConfig) []string {

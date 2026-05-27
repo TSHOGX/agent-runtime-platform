@@ -1553,6 +1553,7 @@ func testGenerationDetails(dir, generationID string) store.RuntimeGenerationDeta
 		BundleDirPath:              filepath.Join(dir, "run", "runtime", "gen-"+generationID),
 		SpecPath:                   filepath.Join(dir, "run", "runtime", "gen-"+generationID, "config.json"),
 		CheckpointPath:             filepath.Join(dir, "run", "gen-"+generationID, "checkpoint"),
+		RunscContainerID:           "harness-gen-" + generationID,
 		SecretsDirPath:             "",
 		BridgeDirPath:              filepath.Join(dir, "run", "bridge", "gen-"+generationID),
 		NetworkHostsPath:           "",
