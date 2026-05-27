@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -461,6 +462,94 @@ WHERE g.generation_id = ?`, "gen_turn").Scan(&generationStatus, &sessionStatus, 
 	}
 	if contexts != 0 {
 		t.Fatalf("expected context cleanup, got %d", contexts)
+	}
+}
+
+func TestClaimNextTurnRequiresLiveRuntimeResourceInstance(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	createStoreSession(t, ctx, st, "sess_turn_resource")
+	createActiveGeneration(t, ctx, st, "sess_turn_resource", "gen_turn_resource", "owner")
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_resource_instances
+SET state = 'ready'
+WHERE generation_id = 'gen_turn_resource'`); err != nil {
+		t.Fatalf("downgrade runtime resource state: %v", err)
+	}
+	if _, err := st.EnqueueTurn(ctx, "sess_turn_resource", "blocked", time.Now().UTC()); err != nil {
+		t.Fatalf("enqueue turn: %v", err)
+	}
+	grant, ok, err := st.ClaimNextTurn(ctx, ClaimNextTurnParams{
+		SessionID:    "sess_turn_resource",
+		GenerationID: "gen_turn_resource",
+		Owner:        "owner",
+		RequestID:    "req-resource-not-live",
+		LeaseTTL:     time.Minute,
+		Now:          time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("claim without live resource should return no work, got err=%v", err)
+	}
+	if ok {
+		t.Fatalf("claim should require live runtime resource, got grant=%+v", grant)
+	}
+}
+
+func TestAckTurnStartedRequiresLiveRuntimeResourceInstance(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	createStoreSession(t, ctx, st, "sess_ack_resource")
+	createActiveGeneration(t, ctx, st, "sess_ack_resource", "gen_ack_resource", "owner")
+	turnID, err := st.EnqueueTurn(ctx, "sess_ack_resource", "blocked ack", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("enqueue turn: %v", err)
+	}
+	now := time.Now().UTC()
+	grant, ok, err := st.ClaimNextTurn(ctx, ClaimNextTurnParams{
+		SessionID:    "sess_ack_resource",
+		GenerationID: "gen_ack_resource",
+		Owner:        "owner",
+		RequestID:    "req-ack-resource",
+		LeaseTTL:     time.Minute,
+		Now:          now,
+	})
+	if err != nil || !ok || grant.TurnID != turnID {
+		t.Fatalf("claim setup: ok=%v grant=%+v err=%v", ok, grant, err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_resource_instances
+SET state = 'ready'
+WHERE generation_id = 'gen_ack_resource'`); err != nil {
+		t.Fatalf("downgrade runtime resource state: %v", err)
+	}
+	if _, err := st.AckTurnStarted(ctx, AckStartedParams{
+		SessionID:    "sess_ack_resource",
+		GenerationID: "gen_ack_resource",
+		TurnID:       turnID,
+		Owner:        "owner",
+		LeaseTTL:     time.Minute,
+		Now:          now.Add(time.Second),
+	}); err == nil || !strings.Contains(err.Error(), "generation ack_started CAS failed") {
+		t.Fatalf("expected ack failure without live resource, got %v", err)
+	}
+	var turnStatus string
+	var contexts int
+	if err := st.db.QueryRowContext(ctx, `SELECT status FROM turns WHERE id = ?`, turnID).Scan(&turnStatus); err != nil {
+		t.Fatalf("query turn: %v", err)
+	}
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM active_model_request_contexts`).Scan(&contexts); err != nil {
+		t.Fatalf("query active contexts: %v", err)
+	}
+	if turnStatus != "leased" || contexts != 0 {
+		t.Fatalf("ack should not commit turn/context without live resource: turn=%s contexts=%d", turnStatus, contexts)
 	}
 }
 
@@ -1006,21 +1095,27 @@ func TestGenerationHeartbeatAndFailureCAS(t *testing.T) {
 	if got := parseTime(leaseExpires); !got.Equal(wantExpires) {
 		t.Fatalf("generation lease_expires_at=%s want %s", got, wantExpires)
 	}
-	var turnExpires, contextExpires, contextOwner string
+	var turnExpires, contextSourceIP, contextExpires, contextOwner, resourceSourceIP string
 	if err := st.db.QueryRowContext(ctx, `SELECT lease_expires_at FROM turns WHERE id = ?`, turnID).Scan(&turnExpires); err != nil {
 		t.Fatalf("query turn lease expiry: %v", err)
 	}
 	if err := st.db.QueryRowContext(ctx, `
-SELECT expires_at, lease_owner
+SELECT sandbox_source_ip, expires_at, lease_owner
 FROM active_model_request_contexts
-WHERE sandbox_source_ip = '10.240.0.2'`).Scan(&contextExpires, &contextOwner); err != nil {
+WHERE generation_id = 'gen_hb'`).Scan(&contextSourceIP, &contextExpires, &contextOwner); err != nil {
 		t.Fatalf("query active proxy context expiry: %v", err)
+	}
+	if err := st.db.QueryRowContext(ctx, `
+SELECT sandbox_ip
+FROM runtime_resource_instances
+WHERE generation_id = 'gen_hb'`).Scan(&resourceSourceIP); err != nil {
+		t.Fatalf("query runtime resource source ip: %v", err)
 	}
 	if got := parseTime(turnExpires); !got.Equal(wantExpires) {
 		t.Fatalf("turn lease_expires_at=%s want %s", got, wantExpires)
 	}
-	if got := parseTime(contextExpires); !got.Equal(wantExpires) || contextOwner != "owner" {
-		t.Fatalf("context expires_at=%s owner=%s want %s/owner", got, contextOwner, wantExpires)
+	if got := parseTime(contextExpires); !got.Equal(wantExpires) || contextOwner != "owner" || contextSourceIP != resourceSourceIP {
+		t.Fatalf("context source=%s expires_at=%s owner=%s want %s %s/owner", contextSourceIP, got, contextOwner, resourceSourceIP, wantExpires)
 	}
 
 	if err := st.FailGeneration(ctx, FailGenerationParams{
@@ -1535,6 +1630,11 @@ func createActiveGeneration(t *testing.T, ctx context.Context, st *Store, sessio
 	networkProfileID := "net_" + generationID
 	agentRuntimeProfileID := "arp_" + generationID
 	egressPolicyID := "egress_" + generationID
+	ipOctet := testRuntimeResourceIPOctet(generationID)
+	hostGatewayIP := fmt.Sprintf("10.241.%d.1", ipOctet)
+	sandboxBaseURL := "http://" + hostGatewayIP + ":8082"
+	sandboxIPCIDR := fmt.Sprintf("10.241.%d.2/30", ipOctet)
+	hostSideCIDR := fmt.Sprintf("10.241.%d.0/30", ipOctet)
 	tx, err := st.db.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatalf("begin generation helper tx: %v", err)
@@ -1556,9 +1656,9 @@ INSERT INTO agent_runtime_profiles (
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO runtime_generations (
   generation_id, session_id, status, network_profile_id, agent_runtime_profile_id,
-  lease_owner, lease_expires_at, last_seen_at
-) VALUES (?, ?, 'idle', ?, ?, ?, ?, ?)`,
-		generationID, sessionID, networkProfileID, agentRuntimeProfileID, owner, formatTime(expires), formatTime(now)); err != nil {
+  sandbox_contract_version, lease_owner, lease_expires_at, last_seen_at
+) VALUES (?, ?, 'idle', ?, ?, ?, ?, ?, ?)`,
+		generationID, sessionID, networkProfileID, agentRuntimeProfileID, SandboxContractVersion, owner, formatTime(expires), formatTime(now)); err != nil {
 		t.Fatalf("insert generation: %v", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -1568,12 +1668,34 @@ INSERT INTO network_profiles (
   netns_name, netns_path, host_veth, sandbox_veth, sandbox_ip_cidr,
   egress_policy_id, allowed_egress_rules, doris_fe_hosts, doris_be_hosts,
   doris_ports, dns_policy, host_side_cidr, allocation_state, created_at
-) VALUES (?, ?, ?, '127.0.0.1:8082', 8082, '10.240.0.1', 'http://10.240.0.1:8082', 'http://10.240.0.1:8082',
-  ?, ?, ?, ?, '10.240.0.2/30', ?, '[]', '[]', '[]', '[]', 'off', '10.240.0.0/30', 'live', ?)`,
+) VALUES (?, ?, ?, '127.0.0.1:8082', 8082, ?, ?, ?,
+  ?, ?, ?, ?, ?, ?, '[]', '[]', '[]', '[]', 'off', ?, 'live', ?)`,
 		networkProfileID, sessionID, generationID,
+		hostGatewayIP, sandboxBaseURL, sandboxBaseURL,
 		"hns-"+generationID, "/run/netns/hns-"+generationID, "hv-"+generationID, "sv-"+generationID,
-		egressPolicyID, formatTime(now)); err != nil {
+		sandboxIPCIDR, egressPolicyID, hostSideCIDR, formatTime(now)); err != nil {
 		t.Fatalf("insert network profile: %v", err)
+	}
+	resourceBase := filepath.Join(t.TempDir(), generationID)
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO runtime_generation_resources (
+  generation_id, network_profile_id, agent_runtime_profile_id,
+  control_dir_path, control_manifest_path, bundle_dir_path, spec_path,
+  checkpoint_path, bridge_dir_path, log_dir_path,
+  sandbox_contract_version, runsc_container_id, resource_state, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live', ?)`,
+		generationID, networkProfileID, agentRuntimeProfileID,
+		filepath.Join(resourceBase, "control"),
+		filepath.Join(resourceBase, "control", "session.json"),
+		filepath.Join(resourceBase, "runtime"),
+		filepath.Join(resourceBase, "runtime", "config.json"),
+		filepath.Join(resourceBase, "checkpoint"),
+		filepath.Join(resourceBase, "bridge"),
+		filepath.Join(resourceBase, "logs"),
+		SandboxContractVersion,
+		"harness-gen-"+generationID,
+		formatTime(now)); err != nil {
+		t.Fatalf("insert generation resources: %v", err)
 	}
 	if err := updateSessionActiveGenerationTx(ctx, tx, SessionActiveGenerationCASParams{
 		SessionID:        sessionID,
@@ -1584,4 +1706,20 @@ INSERT INTO network_profiles (
 	if err := tx.Commit(); err != nil {
 		t.Fatalf("commit generation helper tx: %v", err)
 	}
+	allocation := GenerationAllocation{
+		GenerationID:          generationID,
+		NetworkProfileID:      networkProfileID,
+		AgentRuntimeProfileID: agentRuntimeProfileID,
+		Owner:                 owner,
+		LeaseExpiresAt:        now.Add(time.Minute),
+	}
+	createLiveRuntimeResourceInstanceForAllocation(t, ctx, st, sessionID, allocation, owner, "host-"+generationID, now)
+}
+
+func testRuntimeResourceIPOctet(value string) int {
+	acc := 0
+	for _, r := range value {
+		acc = (acc*31 + int(r)) % 200
+	}
+	return acc + 1
 }

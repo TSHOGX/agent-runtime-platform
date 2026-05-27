@@ -1032,6 +1032,7 @@ func TestExpiredRuntimeRecoveryRequeuesExpiredLeasedTurn(t *testing.T) {
 	if err := st.MarkGenerationResourcesLive(ctx, "sess_requeue", allocation.GenerationID, allocation.Owner, now.Add(-3*time.Minute+time.Second)); err != nil {
 		t.Fatalf("mark resources live: %v", err)
 	}
+	createLiveRuntimeResourceInstanceForAllocation(t, ctx, st, "sess_requeue", allocation, owner.UUID, "host-requeue", now.Add(-3*time.Minute+2*time.Second))
 	turnID, err := st.EnqueueTurn(ctx, "sess_requeue", "retry me", now.Add(-3*time.Minute+2*time.Second))
 	if err != nil {
 		t.Fatalf("enqueue turn: %v", err)
@@ -1136,6 +1137,7 @@ func TestClaimNextTurnPreservesSequenceOrderingAfterRecoveryRequeue(t *testing.T
 			if err := st.MarkGenerationResourcesLive(ctx, sessionID, oldAllocation.GenerationID, oldAllocation.Owner, now.Add(-3*time.Minute+time.Second)); err != nil {
 				t.Fatalf("mark old generation live: %v", err)
 			}
+			createLiveRuntimeResourceInstanceForAllocation(t, ctx, st, sessionID, oldAllocation, owner.UUID, "host-old-"+sessionID, now.Add(-3*time.Minute+2*time.Second))
 			requeuedTurnID, err := st.EnqueueTurn(ctx, sessionID, "retry me", now.Add(-3*time.Minute+2*time.Second))
 			if err != nil {
 				t.Fatalf("enqueue requeued turn: %v", err)
@@ -1193,6 +1195,7 @@ func TestClaimNextTurnPreservesSequenceOrderingAfterRecoveryRequeue(t *testing.T
 			if err := st.MarkGenerationResourcesLive(ctx, sessionID, newAllocation.GenerationID, newAllocation.Owner, now.Add(3*time.Second)); err != nil {
 				t.Fatalf("mark new generation live: %v", err)
 			}
+			createLiveRuntimeResourceInstanceForAllocation(t, ctx, st, sessionID, newAllocation, owner.UUID, "host-new-"+sessionID, now.Add(3*time.Second+time.Millisecond))
 
 			grant, ok, err := st.ClaimNextTurn(ctx, ClaimNextTurnParams{
 				SessionID:    sessionID,
@@ -1480,7 +1483,6 @@ func TestListBridgePollGenerationsIncludesAckStartedExpiredLeaseDuringGrace(t *t
 
 	createStoreSession(t, ctx, st, "sess_poll_recover")
 	recoverable, recoverableTurnID := createExpiredAckStartedTurn(t, ctx, st, owner.UUID, cfg, "sess_poll_recover", now, 30*time.Second)
-	createLiveRuntimeResourceInstanceForAllocation(t, ctx, st, "sess_poll_recover", recoverable, owner.UUID, "host-1", now.Add(-25*time.Second))
 	previousOwner := GenerationLeaseOwner("previous-owner")
 	if _, err := st.db.ExecContext(ctx, `
 UPDATE runtime_generations
@@ -1497,7 +1499,6 @@ WHERE id = ?`, previousOwner, recoverableTurnID); err != nil {
 
 	createStoreSession(t, ctx, st, "sess_poll_expired")
 	expired, _ := createExpiredAckStartedTurn(t, ctx, st, owner.UUID, cfg, "sess_poll_expired", now, 2*time.Minute)
-	createLiveRuntimeResourceInstanceForAllocation(t, ctx, st, "sess_poll_expired", expired, owner.UUID, "host-1", now.Add(-time.Minute))
 
 	generations, err := st.ListBridgePollGenerations(ctx, recoverable.Owner, now, time.Minute)
 	if err != nil {
@@ -2203,6 +2204,7 @@ func TestSweepExpiredSessionsCancelsUnstartedTurnsButPreservesAckStartedLease(t 
 	if err := st.MarkGenerationResourcesLive(ctx, "sess_expired_ack", allocation.GenerationID, allocation.Owner, now.Add(-29*time.Second)); err != nil {
 		t.Fatalf("mark ack resources live: %v", err)
 	}
+	createLiveRuntimeResourceInstanceForAllocation(t, ctx, st, "sess_expired_ack", allocation, owner.UUID, "host-expired-ack", now.Add(-28*time.Second))
 	ackTurnID, err := st.EnqueueTurn(ctx, "sess_expired_ack", "started", now.Add(-28*time.Second))
 	if err != nil {
 		t.Fatalf("enqueue ack turn: %v", err)
@@ -2547,6 +2549,7 @@ func createExpiredAckStartedTurn(t *testing.T, ctx context.Context, st *Store, o
 	if err := st.MarkGenerationResourcesLive(ctx, sessionID, allocation.GenerationID, allocation.Owner, now.Add(-expiredFor-time.Minute+time.Second)); err != nil {
 		t.Fatalf("mark resources live: %v", err)
 	}
+	createLiveRuntimeResourceInstanceForAllocation(t, ctx, st, sessionID, allocation, ownerUUID, "host-expired-"+sessionID, now.Add(-expiredFor-time.Minute+2*time.Second))
 	turnID, err := st.EnqueueTurn(ctx, sessionID, "maybe already ran", now.Add(-expiredFor-time.Minute+2*time.Second))
 	if err != nil {
 		t.Fatalf("enqueue turn: %v", err)

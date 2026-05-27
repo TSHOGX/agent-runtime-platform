@@ -377,12 +377,17 @@ WHERE id = ?
   AND EXISTS (
     SELECT 1 FROM runtime_generations g
     JOIN sessions s ON s.id = g.session_id
+    JOIN runtime_resource_instances ri ON ri.generation_id = g.generation_id
     WHERE g.generation_id = ?
       AND g.session_id = ?
+      AND g.sandbox_contract_version = 'sandbox-isolation-v1'
       AND g.status IN ('idle', 'active')
       AND g.lease_owner = ?
       AND g.lease_expires_at > ?
       AND s.active_generation_id = ?
+      AND ri.state = 'live'
+      AND ri.sandbox_contract_version = 'sandbox-isolation-v1'
+      AND ri.contract_id = g.sandbox_contract_id
 	)`,
 		p.GenerationID, p.Owner, formatTime(expiresAt), p.RequestID, formatTime(p.Now), grant.TurnID,
 		p.SessionID, p.GenerationID, p.GenerationID, p.SessionID, p.Owner, formatTime(p.Now), p.GenerationID)
@@ -641,6 +646,7 @@ UPDATE runtime_generations
 SET last_seen_at = ?
 WHERE generation_id = ?
   AND session_id = ?
+  AND sandbox_contract_version = 'sandbox-isolation-v1'
   AND status = 'active'
   AND lease_owner = ?
   AND lease_expires_at > ?
@@ -648,7 +654,14 @@ WHERE generation_id = ?
     SELECT 1 FROM sessions
     WHERE id = ?
       AND active_generation_id = ?
-  )`, formatTime(p.Now), p.GenerationID, p.SessionID, p.Owner, formatTime(p.Now), p.SessionID, p.GenerationID)
+  )
+  AND EXISTS (
+    SELECT 1 FROM runtime_resource_instances ri
+    WHERE ri.generation_id = ?
+      AND ri.state = 'live'
+      AND ri.sandbox_contract_version = 'sandbox-isolation-v1'
+      AND ri.contract_id = runtime_generations.sandbox_contract_id
+  )`, formatTime(p.Now), p.GenerationID, p.SessionID, p.Owner, formatTime(p.Now), p.SessionID, p.GenerationID, p.GenerationID)
 	if err != nil {
 		return 0, err
 	}
@@ -709,20 +722,24 @@ INSERT INTO active_model_request_contexts (
 }
 
 func sandboxSourceIPForGenerationTx(ctx context.Context, tx *sql.Tx, sessionID, generationID string) (string, error) {
-	var sandboxCIDR string
+	var sandboxIP string
 	if err := tx.QueryRowContext(ctx, `
-SELECT n.sandbox_ip_cidr
-FROM network_profiles n
-JOIN runtime_generations g ON g.network_profile_id = n.network_profile_id
+SELECT ri.sandbox_ip
+FROM runtime_resource_instances ri
+JOIN runtime_generations g ON g.generation_id = ri.generation_id
 WHERE g.session_id = ?
-  AND g.generation_id = ?`, sessionID, generationID).Scan(&sandboxCIDR); err != nil {
+  AND g.generation_id = ?
+  AND g.sandbox_contract_version = 'sandbox-isolation-v1'
+  AND ri.state = 'live'
+  AND ri.sandbox_contract_version = 'sandbox-isolation-v1'
+  AND ri.contract_id = g.sandbox_contract_id`, sessionID, generationID).Scan(&sandboxIP); err != nil {
 		return "", err
 	}
-	prefix, err := netip.ParsePrefix(sandboxCIDR)
+	addr, err := netip.ParseAddr(sandboxIP)
 	if err != nil {
-		return "", fmt.Errorf("invalid network profile sandbox_ip_cidr %q: %w", sandboxCIDR, err)
+		return "", fmt.Errorf("invalid runtime resource sandbox_ip %q: %w", sandboxIP, err)
 	}
-	return prefix.Addr().String(), nil
+	return addr.String(), nil
 }
 
 func (s *Store) CompleteTurn(ctx context.Context, p CompleteTurnParams) (int64, error) {
@@ -1125,8 +1142,17 @@ WHERE session_id = ?
   AND claim_request_id = ?
   AND status IN ('leased', 'running')
   AND lease_owner = ?
-  AND lease_expires_at > ?`,
-		p.SessionID, p.GenerationID, p.RequestID, p.Owner, formatTime(p.Now))
+  AND lease_expires_at > ?
+  AND EXISTS (
+    SELECT 1 FROM runtime_resource_instances ri
+    JOIN runtime_generations g ON g.generation_id = ri.generation_id
+    WHERE ri.generation_id = ?
+      AND ri.state = 'live'
+      AND ri.sandbox_contract_version = 'sandbox-isolation-v1'
+      AND g.sandbox_contract_version = 'sandbox-isolation-v1'
+      AND ri.contract_id = g.sandbox_contract_id
+  )`,
+		p.SessionID, p.GenerationID, p.RequestID, p.Owner, formatTime(p.Now), p.GenerationID)
 	var turnID int64
 	err := row.Scan(&turnID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1151,8 +1177,17 @@ WHERE id = ?
   AND generation_id = ?
   AND status IN ('leased', 'running')
   AND lease_owner = ?
-  AND lease_expires_at > ?`,
-		turnID, sessionID, generationID, owner, formatTime(now))
+  AND lease_expires_at > ?
+  AND EXISTS (
+    SELECT 1 FROM runtime_resource_instances ri
+    JOIN runtime_generations g ON g.generation_id = ri.generation_id
+    WHERE ri.generation_id = ?
+      AND ri.state = 'live'
+      AND ri.sandbox_contract_version = 'sandbox-isolation-v1'
+      AND g.sandbox_contract_version = 'sandbox-isolation-v1'
+      AND ri.contract_id = g.sandbox_contract_id
+  )`,
+		turnID, sessionID, generationID, owner, formatTime(now), generationID)
 	var grant TurnGrant
 	var leaseExpires string
 	err := row.Scan(&grant.TurnID, &grant.Sequence, &grant.Content, &grant.Attempt, &leaseExpires)

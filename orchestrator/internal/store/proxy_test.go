@@ -487,6 +487,7 @@ func TestAckTurnStartedDerivesActiveContextSandboxSourceIP(t *testing.T) {
 	if err := st.MarkGenerationResourcesLive(ctx, "sess_proxy_ip_mismatch", allocation.GenerationID, allocation.Owner, now.Add(time.Second)); err != nil {
 		t.Fatalf("mark resources live: %v", err)
 	}
+	createLiveRuntimeResourceInstanceForAllocation(t, ctx, st, "sess_proxy_ip_mismatch", allocation, owner.UUID, "host-proxy-ip-mismatch", now.Add(2*time.Second))
 	turnID, err := st.EnqueueTurn(ctx, "sess_proxy_ip_mismatch", "bad source ip", now.Add(2*time.Second))
 	if err != nil {
 		t.Fatalf("enqueue turn: %v", err)

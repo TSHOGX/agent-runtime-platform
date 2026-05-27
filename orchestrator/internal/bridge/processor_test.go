@@ -915,10 +915,100 @@ func allocateBridgeGeneration(t *testing.T, ctx context.Context, st *store.Store
 	if err != nil {
 		t.Fatalf("get generation details: %v", err)
 	}
+	createBridgeRuntimeResourceLive(t, ctx, st, sessionID, allocation, details, owner.UUID)
 	if err := EnsureLayout(details.BridgeDirPath); err != nil {
 		t.Fatalf("ensure bridge layout: %v", err)
 	}
 	return allocation, details
+}
+
+func createBridgeRuntimeResourceLive(t *testing.T, ctx context.Context, st *store.Store, sessionID string, allocation store.GenerationAllocation, details store.RuntimeGenerationDetails, ownerUUID string) {
+	t.Helper()
+	contractID := "contract_" + allocation.GenerationID
+	if _, err := st.StoreSandboxContract(ctx, store.StoreSandboxContractParams{
+		ContractID:   contractID,
+		SessionID:    sessionID,
+		GenerationID: allocation.GenerationID,
+		Payload: map[string]any{
+			"contract_id":              contractID,
+			"contract_schema_version":  1,
+			"generation_id":            allocation.GenerationID,
+			"session_id":               sessionID,
+			"sandbox_contract_version": store.SandboxContractVersion,
+		},
+		Now: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("store sandbox contract: %v", err)
+	}
+	prefix, err := netip.ParsePrefix(details.SandboxIPCIDR)
+	if err != nil {
+		t.Fatalf("parse sandbox cidr: %v", err)
+	}
+	runscPath := filepath.Join(t.TempDir(), "runsc")
+	instance, err := st.CreateRuntimeResourceInstance(ctx, store.RuntimeResourceInstanceParams{
+		GenerationID:           allocation.GenerationID,
+		SessionID:              sessionID,
+		ContractID:             contractID,
+		SandboxContractVersion: store.SandboxContractVersion,
+		HostID:                 "host-" + allocation.GenerationID,
+		RunscContainerID:       details.RunscContainerID,
+		RunscPlatform:          "systrap",
+		RunscVersion:           "runsc test",
+		RunscBinaryPath:        runscPath,
+		RunscBinaryDigest:      "sha256:runsc",
+		NetworkProfileID:       allocation.NetworkProfileID,
+		NetnsName:              details.NetnsName,
+		NetnsPath:              details.NetnsPath,
+		HostVeth:               details.HostVeth,
+		SandboxVeth:            details.SandboxVeth,
+		HostGatewayIP:          details.HostGatewayIP,
+		SandboxIP:              prefix.Addr().String(),
+		SandboxIPCIDR:          details.SandboxIPCIDR,
+		HostSideCIDR:           details.HostSideCIDR,
+		NftTableName:           "harness_gen_" + strings.TrimPrefix(allocation.GenerationID, "gen_"),
+		ControlDirPath:         details.ControlDirPath,
+		ControlManifestPath:    details.ControlManifestPath,
+		BundleDirPath:          details.BundleDirPath,
+		SpecPath:               details.SpecPath,
+		CheckpointPath:         details.CheckpointPath,
+		BridgeDirPath:          details.BridgeDirPath,
+		LogDirPath:             details.LogDirPath,
+		RootPrefixes: map[string]string{
+			"run_dir":      filepath.Dir(filepath.Dir(details.ControlDirPath)),
+			"control_root": filepath.Dir(details.ControlDirPath),
+			"bridge_root":  filepath.Dir(details.BridgeDirPath),
+		},
+		Now: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("create runtime resource instance: %v", err)
+	}
+	if err := st.ClaimRuntimeResourceMaterialization(ctx, store.RuntimeResourceMaterializationClaimParams{
+		GenerationID:     allocation.GenerationID,
+		WorkerID:         ownerUUID,
+		HostID:           instance.HostID,
+		LeaseExpiresAt:   time.Now().Add(time.Minute),
+		IdempotencyToken: "test:" + allocation.GenerationID,
+		Now:              time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("claim runtime resource materialization: %v", err)
+	}
+	if err := st.MarkRuntimeResourceReady(ctx, store.RuntimeResourceWorkerTransitionParams{
+		GenerationID: allocation.GenerationID,
+		WorkerID:     ownerUUID,
+		HostID:       instance.HostID,
+		Now:          time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("mark runtime resource ready: %v", err)
+	}
+	if err := st.MarkRuntimeResourceLive(ctx, store.RuntimeResourceWorkerTransitionParams{
+		GenerationID: allocation.GenerationID,
+		WorkerID:     ownerUUID,
+		HostID:       instance.HostID,
+		Now:          time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("mark runtime resource live: %v", err)
+	}
 }
 
 func markBridgeGenerationCheckpointed(t *testing.T, ctx context.Context, st *store.Store, sessionID, generationID string, now time.Time) {

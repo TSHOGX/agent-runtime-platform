@@ -3093,6 +3093,7 @@ func TestBridgeFailedCompletionDoesNotFailSession(t *testing.T) {
 	if err := st.MarkGenerationResourcesLive(ctx, session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
 		t.Fatalf("mark generation live: %v", err)
 	}
+	createServerRuntimeResourceLive(t, ctx, st, session.ID, allocation, owner.UUID, "host-bridge-failed", time.Now().UTC())
 	turnID, err := st.EnqueueTurn(ctx, session.ID, "run", time.Now().UTC())
 	if err != nil {
 		t.Fatalf("enqueue turn: %v", err)
