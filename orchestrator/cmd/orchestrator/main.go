@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -71,7 +70,7 @@ func main() {
 				AgentHomesRoot:        cfg.AgentHomesRoot,
 				CheckpointsRoot:       cfg.CheckpointsRoot,
 				BundleRoot:            cfg.BundleRoot,
-				RootFSPath:            filepath.Join(cfg.RepoRoot, "sandbox-image", "rootfs"),
+				RootFSPath:            cfg.RootFSPath,
 				DefaultAgent:          cfg.DefaultAgent,
 				Phase7RunDir:          cfg.Phase7.RunDir,
 				SecretsRoot:           cfg.Phase7.Secrets.Root,

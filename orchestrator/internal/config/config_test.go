@@ -18,6 +18,10 @@ func TestLoadProjectConfigUsesPhase7HarnessSchema(t *testing.T) {
   run_dir: /tmp/harness-run
   session_retention: 3h
   max_sessions: 10
+  sandbox_identity:
+    uid: 7000
+    gid: 7001
+    supplemental_gids: [44, 43]
   network:
     cidr_pool: 10.210.0.0/24
     egress:
@@ -71,6 +75,11 @@ func TestLoadProjectConfigUsesPhase7HarnessSchema(t *testing.T) {
 	}
 	if phase7.SessionRetention.Duration != 3*time.Hour || phase7.MaxSessions != 10 {
 		t.Fatalf("unexpected retention/max: %s %d", phase7.SessionRetention.Duration, phase7.MaxSessions)
+	}
+	if phase7.SandboxIdentity.UID != 7000 ||
+		phase7.SandboxIdentity.GID != 7001 ||
+		!sameInts(phase7.SandboxIdentity.SupplementalGIDs, []int{43, 44}) {
+		t.Fatalf("unexpected sandbox identity: %+v", phase7.SandboxIdentity)
 	}
 	if got := phase7.Network.CIDRPool.String(); got != "10.210.0.0/24" {
 		t.Fatalf("cidr_pool: %q", got)
@@ -509,6 +518,34 @@ func TestValidatePhase7Config(t *testing.T) {
 			},
 			want: "must have group 4321",
 		},
+		{
+			name: "sandbox uid",
+			mutate: func(cfg *Phase7Config) {
+				cfg.SandboxIdentity.UID = 0
+			},
+			want: "sandbox_identity.uid must be > 0",
+		},
+		{
+			name: "sandbox gid",
+			mutate: func(cfg *Phase7Config) {
+				cfg.SandboxIdentity.GID = 0
+			},
+			want: "sandbox_identity.gid must be > 0",
+		},
+		{
+			name: "sandbox supplemental root gid",
+			mutate: func(cfg *Phase7Config) {
+				cfg.SandboxIdentity.SupplementalGIDs = []int{0}
+			},
+			want: "supplemental_gids must contain only positive non-root gids",
+		},
+		{
+			name: "sandbox supplemental duplicate",
+			mutate: func(cfg *Phase7Config) {
+				cfg.SandboxIdentity.SupplementalGIDs = []int{1234, 1234}
+			},
+			want: "supplemental_gids contains duplicate gid 1234",
+		},
 	}
 
 	for _, tt := range tests {
@@ -533,6 +570,17 @@ func TestValidatePhase7Config(t *testing.T) {
 	}
 }
 
+func TestNormalizeSandboxIdentitySortsSupplementalGIDs(t *testing.T) {
+	got := NormalizeSandboxIdentity(SandboxIdentity{
+		UID:              7000,
+		GID:              7001,
+		SupplementalGIDs: []int{9, 7, 8},
+	})
+	if !sameInts(got.SupplementalGIDs, []int{7, 8, 9}) {
+		t.Fatalf("supplemental gids not sorted: %+v", got)
+	}
+}
+
 func TestValidatePhase7ConfigAllowsZeroSessionRetention(t *testing.T) {
 	dir := t.TempDir()
 	cfg := defaultPhase7Config()
@@ -542,6 +590,60 @@ func TestValidatePhase7ConfigAllowsZeroSessionRetention(t *testing.T) {
 
 	if err := validatePhase7Config(cfg); err != nil {
 		t.Fatalf("zero session retention should be valid: %v", err)
+	}
+}
+
+func TestValidatePhase8IsolationRootsAllowsReservedSubroots(t *testing.T) {
+	roots := phase8RootsForTest(t)
+
+	canonical, err := ValidatePhase8IsolationRoots(roots)
+	if err != nil {
+		t.Fatalf("validate phase8 roots: %v", err)
+	}
+	if canonical.DataVolumeEvidenceRoot != filepath.Clean(roots.DataVolumeEvidenceRoot) ||
+		canonical.ProxyInternalRoot != filepath.Clean(roots.ProxyInternalRoot) ||
+		canonical.DBStateRoot != filepath.Dir(filepath.Clean(roots.DBPath)) {
+		t.Fatalf("unexpected canonical roots: %+v", canonical)
+	}
+}
+
+func TestValidatePhase8IsolationRootsRejectsDBUnderSandboxRoot(t *testing.T) {
+	roots := phase8RootsForTest(t)
+	roots.DBPath = filepath.Join(roots.SessionsRoot, "orchestrator.db")
+
+	_, err := ValidatePhase8IsolationRoots(roots)
+	if err == nil || !strings.Contains(err.Error(), "overlaps") {
+		t.Fatalf("expected overlapping db root rejection, got %v", err)
+	}
+}
+
+func TestValidatePhase8IsolationRootsRejectsProxyInternalUnderControlRoot(t *testing.T) {
+	roots := phase8RootsForTest(t)
+	roots.ProxyInternalRoot = filepath.Join(roots.RunDir, "control", "proxy-internal")
+
+	_, err := ValidatePhase8IsolationRoots(roots)
+	if err == nil || !strings.Contains(err.Error(), "overlaps sandbox-bindable run control root") {
+		t.Fatalf("expected proxy internal overlap rejection, got %v", err)
+	}
+}
+
+func TestValidatePhase8IsolationRootsRejectsEvidenceUnderSandboxRoot(t *testing.T) {
+	roots := phase8RootsForTest(t)
+	roots.DataVolumeEvidenceRoot = filepath.Join(roots.AgentHomesRoot, "evidence")
+
+	_, err := ValidatePhase8IsolationRoots(roots)
+	if err == nil || !strings.Contains(err.Error(), "overlaps") {
+		t.Fatalf("expected evidence overlap rejection, got %v", err)
+	}
+}
+
+func TestValidatePhase8IsolationRootsRejectsRelativeRoot(t *testing.T) {
+	roots := phase8RootsForTest(t)
+	roots.RootFSPath = "relative/rootfs"
+
+	_, err := ValidatePhase8IsolationRoots(roots)
+	if err == nil || !strings.Contains(err.Error(), "must be absolute") {
+		t.Fatalf("expected absolute path rejection, got %v", err)
 	}
 }
 
@@ -699,6 +801,38 @@ func unsetEnvForTest(t *testing.T, key string) {
 			_ = os.Unsetenv(key)
 		}
 	})
+}
+
+func phase8RootsForTest(t *testing.T) Phase8IsolationRoots {
+	t.Helper()
+	base := t.TempDir()
+	roots := Phase8IsolationRoots{
+		SessionsRoot:           filepath.Join(base, "sessions"),
+		AgentHomesRoot:         filepath.Join(base, "agent-homes"),
+		RunDir:                 filepath.Join(base, "run"),
+		CheckpointsRoot:        filepath.Join(base, "checkpoints"),
+		PreparedBundleRoot:     filepath.Join(base, "prepared-bundles"),
+		RootFSPath:             filepath.Join(base, "rootfs"),
+		DBPath:                 filepath.Join(base, "state", "orchestrator.db"),
+		SchemaPackRoot:         filepath.Join(base, "schema-pack"),
+		DataVolumeEvidenceRoot: filepath.Join(base, "state", "volume-evidence"),
+		ProxyInternalRoot:      filepath.Join(base, "run", "proxy-internal"),
+	}
+	for _, path := range []string{
+		roots.SessionsRoot,
+		roots.AgentHomesRoot,
+		roots.RunDir,
+		roots.CheckpointsRoot,
+		roots.PreparedBundleRoot,
+		roots.RootFSPath,
+		filepath.Dir(roots.DBPath),
+		roots.SchemaPackRoot,
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("mkdir phase8 test root %s: %v", path, err)
+		}
+	}
+	return roots
 }
 
 func TestCheckedInHarnessConfigLoads(t *testing.T) {
