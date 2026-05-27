@@ -418,6 +418,24 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		return err
 	}
 	preparedArtifacts := runtimeArtifactsFromDetails(generationDetails)
+	resourceWorkerID := runtimeResourceWorkerID(s.ownerUUID, allocation.Owner)
+	resourceHostID := runtimeResourceHostID()
+	var runtimeResourceCreated bool
+	retireRuntimeResource := func() {
+		if !runtimeResourceCreated {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.store.ClaimRuntimeResourceRetiring(cleanupCtx, store.RuntimeResourceRetireParams{
+			GenerationID: allocation.GenerationID,
+			WorkerID:     resourceWorkerID,
+			HostID:       resourceHostID,
+			Now:          time.Now().UTC(),
+		}); err != nil && !errors.Is(err, context.Canceled) {
+			s.log.Warn("failed to retire runtime resource after start failure", "session_id", session.ID, "generation_id", allocation.GenerationID, "error", err)
+		}
+	}
 	if ensured.IsNew {
 		preparedArtifacts, err = s.runtime.PrepareGeneration(startCtx, s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, runtime.GenerationArtifacts{}))
 		if err != nil {
@@ -476,14 +494,49 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		if err := leaseKeeper.ensureOwned(); err != nil {
 			return err
 		}
-		if err := s.store.MarkGenerationResourcesLive(ctx, session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
+		if _, err := s.createRuntimeResourceInstance(ctx, generationDetails, preparedArtifacts, resourceHostID); err != nil {
 			if leaseErr := leaseKeeper.err(); leaseErr != nil {
 				return leaseErr
 			}
 			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 			return err
 		}
+		runtimeResourceCreated = true
+		materializeNow := time.Now().UTC()
+		if err := s.store.ClaimRuntimeResourceMaterialization(ctx, store.RuntimeResourceMaterializationClaimParams{
+			GenerationID:     allocation.GenerationID,
+			WorkerID:         resourceWorkerID,
+			HostID:           resourceHostID,
+			LeaseExpiresAt:   materializeNow.Add(s.cfg.Phase7.Bridge.LeaseTTL.Duration),
+			IdempotencyToken: "start:" + allocation.GenerationID,
+			Now:              materializeNow,
+		}); err != nil {
+			if leaseErr := leaseKeeper.err(); leaseErr != nil {
+				return leaseErr
+			}
+			retireRuntimeResource()
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+			return err
+		}
 		if err := leaseKeeper.ensureOwned(); err != nil {
+			retireRuntimeResource()
+			return err
+		}
+		if err := s.store.MarkRuntimeResourceReady(ctx, store.RuntimeResourceWorkerTransitionParams{
+			GenerationID: allocation.GenerationID,
+			WorkerID:     resourceWorkerID,
+			HostID:       resourceHostID,
+			Now:          time.Now().UTC(),
+		}); err != nil {
+			if leaseErr := leaseKeeper.err(); leaseErr != nil {
+				return leaseErr
+			}
+			retireRuntimeResource()
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+			return err
+		}
+		if err := leaseKeeper.ensureOwned(); err != nil {
+			retireRuntimeResource()
 			return err
 		}
 	}
@@ -503,6 +556,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			}
 			return result.Err
 		}
+		retireRuntimeResource()
 		s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, result.Err, failureMode)
 		return result.Err
 	}
@@ -511,7 +565,49 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			s.log.Warn("failed to destroy runtime after start lease loss", "session_id", session.ID, "generation_id", allocation.GenerationID, "error", destroyErr)
 			return destroyErr
 		}
+		retireRuntimeResource()
 		return err
+	}
+	if ensured.IsNew {
+		if err := s.store.MarkRuntimeResourceLive(ctx, store.RuntimeResourceWorkerTransitionParams{
+			GenerationID: allocation.GenerationID,
+			WorkerID:     resourceWorkerID,
+			HostID:       resourceHostID,
+			Now:          time.Now().UTC(),
+		}); err != nil {
+			if destroyErr := s.destroyGenerationRuntime(ctx, generationDetails); destroyErr != nil && !errors.Is(destroyErr, context.Canceled) {
+				s.log.Warn("failed to destroy runtime after resource live CAS failure", "session_id", session.ID, "generation_id", allocation.GenerationID, "error", destroyErr)
+				return destroyErr
+			}
+			retireRuntimeResource()
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+			return err
+		}
+		if err := leaseKeeper.ensureOwned(); err != nil {
+			if destroyErr := s.destroyGenerationRuntime(context.Background(), generationDetails); destroyErr != nil && !errors.Is(destroyErr, context.Canceled) {
+				s.log.Warn("failed to destroy runtime after resource live lease loss", "session_id", session.ID, "generation_id", allocation.GenerationID, "error", destroyErr)
+				return destroyErr
+			}
+			retireRuntimeResource()
+			return err
+		}
+		if err := s.store.MarkGenerationResourcesLive(ctx, session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
+			if destroyErr := s.destroyGenerationRuntime(ctx, generationDetails); destroyErr != nil && !errors.Is(destroyErr, context.Canceled) {
+				s.log.Warn("failed to destroy runtime after generation live CAS failure", "session_id", session.ID, "generation_id", allocation.GenerationID, "error", destroyErr)
+				return destroyErr
+			}
+			retireRuntimeResource()
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+			return err
+		}
+		if err := leaseKeeper.ensureOwned(); err != nil {
+			if destroyErr := s.destroyGenerationRuntime(context.Background(), generationDetails); destroyErr != nil && !errors.Is(destroyErr, context.Canceled) {
+				s.log.Warn("failed to destroy runtime after generation live lease loss", "session_id", session.ID, "generation_id", allocation.GenerationID, "error", destroyErr)
+				return destroyErr
+			}
+			retireRuntimeResource()
+			return err
+		}
 	}
 	if ensured.RestoreFromCheckpoint {
 		if err := s.store.MarkGenerationResourcesLive(ctx, session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
@@ -965,6 +1061,146 @@ func runtimeArtifactDigests(artifacts runtime.GenerationArtifacts) store.Generat
 		RunscBinaryPath:                artifacts.RunscBinaryPath,
 		RunscBinaryDigest:              artifacts.RunscBinaryDigest,
 	}
+}
+
+func (s *Server) createRuntimeResourceInstance(ctx context.Context, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, hostID string) (store.RuntimeResourceInstance, error) {
+	runscPlatform := strings.TrimSpace(details.RunscPlatform)
+	if runscPlatform == "" {
+		runscPlatform = "systrap"
+	}
+	sandboxIP, err := runtimeResourceSandboxIP(details.SandboxIPCIDR)
+	if err != nil {
+		return store.RuntimeResourceInstance{}, err
+	}
+	return s.store.CreateRuntimeResourceInstance(ctx, store.RuntimeResourceInstanceParams{
+		GenerationID:           details.GenerationID,
+		SessionID:              details.SessionID,
+		ContractID:             sandboxContractID(details.GenerationID),
+		SandboxContractVersion: store.SandboxContractVersion,
+		HostID:                 hostID,
+		RunscContainerID:       details.RunscContainerID,
+		RunscPlatform:          runscPlatform,
+		RunscVersion:           artifacts.RunscVersion,
+		RunscBinaryPath:        artifacts.RunscBinaryPath,
+		RunscBinaryDigest:      artifacts.RunscBinaryDigest,
+		NetworkProfileID:       details.NetworkProfileID,
+		NetnsName:              details.NetnsName,
+		NetnsPath:              details.NetnsPath,
+		HostVeth:               details.HostVeth,
+		SandboxVeth:            details.SandboxVeth,
+		HostGatewayIP:          details.HostGatewayIP,
+		SandboxIP:              sandboxIP,
+		SandboxIPCIDR:          details.SandboxIPCIDR,
+		HostSideCIDR:           details.HostSideCIDR,
+		NftTableName:           runtimeResourceNftTableName(details.GenerationID),
+		ControlDirPath:         details.ControlDirPath,
+		ControlManifestPath:    details.ControlManifestPath,
+		BundleDirPath:          details.BundleDirPath,
+		SpecPath:               details.SpecPath,
+		CheckpointPath:         details.CheckpointPath,
+		BridgeDirPath:          details.BridgeDirPath,
+		NetworkHostsPath:       details.NetworkHostsPath,
+		LogDirPath:             details.LogDirPath,
+		RootPrefixes:           s.runtimeResourceRootPrefixes(),
+		Now:                    time.Now().UTC(),
+	})
+}
+
+func runtimeResourceWorkerID(ownerUUID, leaseOwner string) string {
+	workerID := strings.TrimSpace(ownerUUID)
+	if workerID != "" {
+		return workerID
+	}
+	leaseOwner = strings.TrimSpace(leaseOwner)
+	suffix := ":" + store.RuntimeManagerRoleTag
+	if strings.HasSuffix(leaseOwner, suffix) {
+		workerID = strings.TrimSpace(strings.TrimSuffix(leaseOwner, suffix))
+	}
+	if workerID == "" {
+		workerID = leaseOwner
+	}
+	return workerID
+}
+
+func runtimeResourceHostID() string {
+	host, err := os.Hostname()
+	if err == nil && strings.TrimSpace(host) != "" {
+		return strings.TrimSpace(host)
+	}
+	return "unknown-host"
+}
+
+func runtimeResourceSandboxIP(cidr string) (string, error) {
+	cidr = strings.TrimSpace(cidr)
+	prefix, err := netip.ParsePrefix(cidr)
+	if err == nil {
+		return prefix.Addr().String(), nil
+	}
+	if before, _, ok := strings.Cut(cidr, "/"); ok && strings.TrimSpace(before) != "" {
+		return strings.TrimSpace(before), nil
+	}
+	return "", fmt.Errorf("runtime resource sandbox ip cidr %q is invalid: %w", cidr, err)
+}
+
+func runtimeResourceNftTableName(generationID string) string {
+	return "harness_gen_" + runtimeResourceIdentifier(generationID)
+}
+
+func runtimeResourceIdentifier(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	out := b.String()
+	if out == "" {
+		return "unknown"
+	}
+	return out
+}
+
+func (s *Server) runtimeResourceRootPrefixes() map[string]string {
+	roots := s.cfg.Phase8IsolationRoots()
+	if strings.TrimSpace(s.cfg.DBPath) == "" {
+		roots.DataVolumeEvidenceRoot = ""
+	}
+	if strings.TrimSpace(s.cfg.Phase7.RunDir) == "" {
+		roots.ProxyInternalRoot = ""
+	}
+	values := map[string]string{
+		"sessions_root":             roots.SessionsRoot,
+		"agent_homes_root":          roots.AgentHomesRoot,
+		"run_dir":                   roots.RunDir,
+		"checkpoints_root":          roots.CheckpointsRoot,
+		"prepared_bundle_root":      roots.PreparedBundleRoot,
+		"rootfs_path":               roots.RootFSPath,
+		"db_path":                   roots.DBPath,
+		"schema_pack_root":          roots.SchemaPackRoot,
+		"data_volume_evidence_root": roots.DataVolumeEvidenceRoot,
+		"proxy_internal_root":       roots.ProxyInternalRoot,
+		"provider_credential_root":  roots.ProviderCredentialRoot,
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		out[key] = cleanRuntimeResourceRoot(value)
+	}
+	return out
+}
+
+func cleanRuntimeResourceRoot(path string) string {
+	path = strings.TrimSpace(path)
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	return filepath.Clean(absolute)
 }
 
 func runtimeFailureClass(message string) string {

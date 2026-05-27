@@ -1946,6 +1946,18 @@ WHERE g.session_id = ?`, session.ID).Scan(
 	if !sessionstate.CanAcceptInput(sessionStatus) {
 		t.Fatalf("session should remain input-acceptable after start failure, got %s", sessionStatus)
 	}
+	var runtimeResourceState string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT state
+FROM runtime_resource_instances
+WHERE generation_id = (
+  SELECT generation_id FROM runtime_generations WHERE session_id = ?
+)`, session.ID).Scan(&runtimeResourceState); err != nil {
+		t.Fatalf("query runtime resource instance after start failure: %v", err)
+	}
+	if runtimeResourceState != string(store.RuntimeResourceRetiring) {
+		t.Fatalf("runtime resource state after start failure=%s want %s", runtimeResourceState, store.RuntimeResourceRetiring)
+	}
 	var runtimeEvents int
 	if err := st.DBForTest().QueryRowContext(ctx, `
 SELECT COUNT(*)
@@ -2037,6 +2049,18 @@ func TestStartEnsuredGenerationRenewsLeaseDuringSlowPrepare(t *testing.T) {
 		t.Fatalf("start ensured generation did not finish")
 	}
 	waitForGenerationStatus(t, ctx, st, allocation.GenerationID, "idle")
+	instance, err := st.GetRuntimeResourceInstance(ctx, allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get runtime resource instance: %v", err)
+	}
+	if instance.State != store.RuntimeResourceLive ||
+		instance.WorkerID != owner.UUID ||
+		instance.RunscContainerID != serverRunscContainerID(t, ctx, st, session.ID, allocation.GenerationID) ||
+		instance.RunscBinaryPath != "/usr/local/bin/runsc-test" ||
+		instance.RunscBinaryDigest != "sha256:runsc-test" ||
+		instance.NftTableName != runtimeResourceNftTableName(allocation.GenerationID) {
+		t.Fatalf("unexpected runtime resource instance: %+v", instance)
+	}
 	contract, err := st.GetSandboxContractForGeneration(ctx, session.ID, allocation.GenerationID)
 	if err != nil {
 		t.Fatalf("get sandbox contract: %v", err)
@@ -2125,12 +2149,19 @@ JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
 WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&status, &ownerValue, &errorClass, &networkState, &resourceState); err != nil {
 		t.Fatalf("query generation after owner loss: %v", err)
 	}
-	if status != "idle" ||
+	if status != "allocating" ||
 		ownerValue != "other_owner" ||
 		errorClass != "" ||
-		networkState != "live" ||
-		resourceState != "live" {
+		networkState != "allocating" ||
+		resourceState != "allocating" {
 		t.Fatalf("owner loss should not fail or reclaim the stolen generation: status=%s owner=%q class=%q network=%s resource=%s", status, ownerValue, errorClass, networkState, resourceState)
+	}
+	instance, err := st.GetRuntimeResourceInstance(ctx, allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get runtime resource instance after owner loss: %v", err)
+	}
+	if instance.State != store.RuntimeResourceRetiring {
+		t.Fatalf("runtime resource after owner loss=%s want %s", instance.State, store.RuntimeResourceRetiring)
 	}
 	var runtimeEvents int
 	if err := st.DBForTest().QueryRowContext(ctx, `
