@@ -60,10 +60,6 @@ emit("CLAUDE_MODEL", data.get("model", "sonnet"))
 emit("CLAUDE_OUTPUT_FORMAT", data.get("output_format", "stream-json"))
 emit("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", data.get("claude_code_disable_nonessential_traffic", True))
 emit("ANTHROPIC_BASE_URL", data.get("anthropic_base_url"))
-emit("ANTHROPIC_API_KEY_SECRET_ID", data.get("anthropic_api_key_secret_id"))
-emit("ANTHROPIC_AUTH_TOKEN_SECRET_ID", data.get("anthropic_auth_token_secret_id"))
-emit("SECRET_VERSION", data.get("secret_version"))
-emit("SECRET_MOUNT_PATH", data.get("secret_mount_path"))
 PY
   )" || exit 65
   eval "$CONTROL_EXPORTS"
@@ -94,26 +90,16 @@ check_expected "${GENERATION_ID:-}" "${HARNESS_EXPECTED_GENERATION_ID:-}" "gener
 check_expected "${NETWORK_PROFILE_ID:-}" "${HARNESS_EXPECTED_NETWORK_PROFILE_ID:-}" "network_profile_id"
 check_expected "${AGENT_RUNTIME_PROFILE_ID:-}" "${HARNESS_EXPECTED_AGENT_RUNTIME_PROFILE_ID:-}" "agent_runtime_profile_id"
 check_expected "${MANIFEST_VERSION:-}" "${HARNESS_EXPECTED_MANIFEST_VERSION:-}" "manifest_version"
-check_expected "${ANTHROPIC_API_KEY_SECRET_ID:-}" "${HARNESS_EXPECTED_API_KEY_SECRET_ID:-}" "anthropic_api_key_secret_id"
-check_expected "${ANTHROPIC_AUTH_TOKEN_SECRET_ID:-}" "${HARNESS_EXPECTED_AUTH_TOKEN_SECRET_ID:-}" "anthropic_auth_token_secret_id"
-check_expected "${SECRET_VERSION:-}" "${HARNESS_EXPECTED_SECRET_VERSION:-}" "secret_version"
+
+if [ -n "${SECRET_MOUNT_PATH:-}" ] || [ -n "${ANTHROPIC_API_KEY_SECRET_ID:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN_SECRET_ID:-}" ] || [ -n "${SECRET_VERSION:-}" ] || [ -n "${HARNESS_SECRET_READERS_GID:-}" ]; then
+  echo "[entrypoint] sandbox secret mounts are not supported" >&2
+  exit 65
+fi
+unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
 
 if [ "${HARNESS_AGENT:-claude}" = "claude" ]; then
   : "${ANTHROPIC_BASE_URL:?ANTHROPIC_BASE_URL is required for claude agent}"
-  SECRET_BACKED_CLAUDE=0
-  if [ -n "${SECRET_MOUNT_PATH:-}" ] || [ -n "${ANTHROPIC_API_KEY_SECRET_ID:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN_SECRET_ID:-}" ] || [ -n "${SECRET_VERSION:-}" ]; then
-    SECRET_BACKED_CLAUDE=1
-  fi
-  if [ "$SECRET_BACKED_CLAUDE" = "1" ]; then
-    : "${SECRET_MOUNT_PATH:?SECRET_MOUNT_PATH is required for secret-backed claude agent}"
-    : "${ANTHROPIC_API_KEY_SECRET_ID:?ANTHROPIC_API_KEY_SECRET_ID is required for secret-backed claude agent}"
-    : "${ANTHROPIC_AUTH_TOKEN_SECRET_ID:?ANTHROPIC_AUTH_TOKEN_SECRET_ID is required for secret-backed claude agent}"
-    : "${SECRET_VERSION:?SECRET_VERSION is required for secret-backed claude agent}"
-    : "${HARNESS_SECRET_READERS_GID:?HARNESS_SECRET_READERS_GID is required for secret-backed claude agent}"
-    export ANTHROPIC_BASE_URL SECRET_MOUNT_PATH ANTHROPIC_API_KEY_SECRET_ID ANTHROPIC_AUTH_TOKEN_SECRET_ID SECRET_VERSION
-  else
-    export ANTHROPIC_BASE_URL
-  fi
+  export ANTHROPIC_BASE_URL
 fi
 
 if [ "${HARNESS_BRIDGE_MODE:-}" = "probe" ]; then
@@ -123,27 +109,25 @@ fi
 
 # Keep the agent's writable HOME outside /workspace so Claude internals do not
 # appear in the user-visible file tree or artifact list.
-SESSION_WORKSPACE="${SESSION_WORKSPACE:-/sessions/$SESSION_ID}"
-AGENT_HOME="${HARNESS_AGENT_HOME:-/agent-homes/$SESSION_ID}"
+: "${SESSION_WORKSPACE:?SESSION_WORKSPACE is required in control file}"
+: "${HARNESS_AGENT_HOME:?HARNESS_AGENT_HOME is required in control file}"
+AGENT_HOME="$HARNESS_AGENT_HOME"
 
 ensure_agent_user() {
-  mkdir -p "$AGENT_HOME"
   chown -R "$AGENT_UID:$AGENT_GID" "$AGENT_HOME" "$SESSION_WORKSPACE" 2>/dev/null || true
 }
 
-if [ "$SESSION_WORKSPACE" = "/workspace" ]; then
-  [ -d /workspace ] || { echo "[entrypoint] /workspace mount is required" >&2; exit 65; }
-else
-  mkdir -p "$SESSION_WORKSPACE"
-  if [ -d /workspace ] && [ ! -L /workspace ]; then
-    rmdir /workspace 2>/dev/null || true
-  fi
-  ln -sfn "$SESSION_WORKSPACE" /workspace
+if [ "$SESSION_WORKSPACE" != "/workspace" ]; then
+  echo "[entrypoint] SESSION_WORKSPACE must be /workspace" >&2
+  exit 65
 fi
+[ -d /workspace ] || { echo "[entrypoint] /workspace mount is required" >&2; exit 65; }
 
-if [ "$AGENT_HOME" = "/agent-home" ]; then
-  [ -d /agent-home ] || { echo "[entrypoint] /agent-home mount is required" >&2; exit 65; }
+if [ "$AGENT_HOME" != "/agent-home" ]; then
+  echo "[entrypoint] HARNESS_AGENT_HOME must be /agent-home" >&2
+  exit 65
 fi
+[ -d /agent-home ] || { echo "[entrypoint] /agent-home mount is required" >&2; exit 65; }
 
 cd /workspace
 
@@ -153,7 +137,7 @@ if [ "${HARNESS_AGENT:-claude}" = "claude" ]; then
 fi
 
 exec_bridge_client() {
-  if [ "${HARNESS_AGENT:-claude}" = "claude" ] && [ "${SECRET_BACKED_CLAUDE:-0}" != "1" ]; then
+  if [ "${HARNESS_AGENT:-claude}" = "claude" ]; then
     exec setpriv --reuid "$AGENT_UID" --regid "$AGENT_GID" --clear-groups \
       env HOME="$AGENT_HOME" USER="$AGENT_USER" LOGNAME="$AGENT_USER" \
       HARNESS_AGENT_HOME="$AGENT_HOME" \
@@ -198,35 +182,18 @@ case "${HARNESS_AGENT:-claude}" in
         set -- "$@" --resume "$CLAUDE_SESSION_UUID"
       fi
       set +e
-      if [ "${SECRET_BACKED_CLAUDE:-0}" = "1" ]; then
-        printf '%s\n' "$turn" | setpriv --reuid "$AGENT_UID" --regid "$AGENT_GID" --groups "$HARNESS_SECRET_READERS_GID" \
-          env HOME="$AGENT_HOME" USER="$AGENT_USER" LOGNAME="$AGENT_USER" \
-          ANTHROPIC_BASE_URL="$ANTHROPIC_BASE_URL" \
-          SECRET_MOUNT_PATH="$SECRET_MOUNT_PATH" \
-          ANTHROPIC_API_KEY_SECRET_ID="$ANTHROPIC_API_KEY_SECRET_ID" \
-          ANTHROPIC_AUTH_TOKEN_SECRET_ID="$ANTHROPIC_AUTH_TOKEN_SECRET_ID" \
-          SECRET_VERSION="$SECRET_VERSION" \
-          sh -c '
-            ANTHROPIC_API_KEY="$(cat "$SECRET_MOUNT_PATH/$ANTHROPIC_API_KEY_SECRET_ID/$SECRET_VERSION")"
-            ANTHROPIC_AUTH_TOKEN="$(cat "$SECRET_MOUNT_PATH/$ANTHROPIC_AUTH_TOKEN_SECRET_ID/$SECRET_VERSION")"
-            export ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
-            exec "$@"
-          ' sh "$@"
-        status=$?
-      else
-        ANTHROPIC_API_KEY="${HARNESS_PROXY_DUMMY_API_KEY:-harness-model-proxy-dummy-key}"
-        export ANTHROPIC_API_KEY
-        printf '%s\n' "$turn" | setpriv --reuid "$AGENT_UID" --regid "$AGENT_GID" --clear-groups \
-          env HOME="$AGENT_HOME" USER="$AGENT_USER" LOGNAME="$AGENT_USER" \
-          ANTHROPIC_BASE_URL="$ANTHROPIC_BASE_URL" \
-          sh -c '
-            export ANTHROPIC_BASE_URL ANTHROPIC_API_KEY
-            unset ANTHROPIC_AUTH_TOKEN
-            exec "$@"
-          ' sh "$@"
-        status=$?
-        unset ANTHROPIC_API_KEY
-      fi
+      ANTHROPIC_API_KEY="${HARNESS_PROXY_DUMMY_API_KEY:-harness-model-proxy-dummy-key}"
+      export ANTHROPIC_API_KEY
+      printf '%s\n' "$turn" | setpriv --reuid "$AGENT_UID" --regid "$AGENT_GID" --clear-groups \
+        env HOME="$AGENT_HOME" USER="$AGENT_USER" LOGNAME="$AGENT_USER" \
+        ANTHROPIC_BASE_URL="$ANTHROPIC_BASE_URL" \
+        sh -c '
+          export ANTHROPIC_BASE_URL ANTHROPIC_API_KEY
+          unset ANTHROPIC_AUTH_TOKEN
+          exec "$@"
+        ' sh "$@"
+      status=$?
+      unset ANTHROPIC_API_KEY
       set -e
       if [ "$status" -ne 0 ]; then
         echo "[entrypoint] claude turn exited with status $status" >&2

@@ -477,26 +477,7 @@ class BridgeClientTest(unittest.TestCase):
             self.assertTrue((Path(root) / bridge.HEARTBEAT / bridge.BRIDGE_HEARTBEAT).exists())
             self.assertTrue((Path(root) / bridge.HEARTBEAT / bridge.CHECKPOINT_READY).exists())
 
-    def test_configured_secret_reads_materialized_secret(self):
-        with tempfile.TemporaryDirectory() as root:
-            secret_path = Path(root) / "api-key" / "v1"
-            secret_path.parent.mkdir(parents=True)
-            secret_path.write_text("test-key\n", encoding="utf-8")
-            with mock.patch.dict(
-                os.environ,
-                {
-                    "SECRET_MOUNT_PATH": root,
-                    "ANTHROPIC_API_KEY_SECRET_ID": "api-key",
-                    "SECRET_VERSION": "v1",
-                },
-                clear=False,
-            ):
-                self.assertEqual(
-                    bridge.configured_secret("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_SECRET_ID"),
-                    "test-key",
-                )
-
-    def test_claude_runner_drops_privileges_before_reading_secrets(self):
+    def test_claude_runner_ignores_legacy_secret_environment(self):
         class FakeStdin:
             def __init__(self):
                 self.writes = []
@@ -529,11 +510,12 @@ class BridgeClientTest(unittest.TestCase):
             {
                 "CLAUDE_SESSION_UUID": "11111111-2222-3333-4444-555555555555",
                 "SESSION_ID": "sess",
-                "HARNESS_AGENT_HOME": "/agent-homes/sess",
+                "HARNESS_AGENT_HOME": "/agent-home",
                 "HARNESS_AGENT_UID": "65534",
                 "HARNESS_AGENT_GID": "65534",
                 "HARNESS_SECRET_READERS_GID": "12345",
-                "ANTHROPIC_BASE_URL": "http://10.240.0.1:8082",
+                "ANTHROPIC_BASE_URL": "http://harness-model-proxy.internal:8082",
+                "ANTHROPIC_AUTH_TOKEN": "legacy-token",
                 "SECRET_MOUNT_PATH": "/harness-secrets",
                 "ANTHROPIC_API_KEY_SECRET_ID": "anthropic_api_key",
                 "ANTHROPIC_AUTH_TOKEN_SECRET_ID": "anthropic_auth_token",
@@ -547,12 +529,22 @@ class BridgeClientTest(unittest.TestCase):
 
         self.assertEqual((status, error_class, error), ("completed", "", ""))
         command = captured["command"]
-        self.assertEqual(command[:7], ["setpriv", "--reuid", "65534", "--regid", "65534", "--groups", "12345"])
-        self.assertIn("SECRET_MOUNT_PATH=/harness-secrets", command)
-        shell_script = command[command.index("-c") + 1]
-        self.assertIn('ANTHROPIC_API_KEY="$(cat "$SECRET_MOUNT_PATH/$ANTHROPIC_API_KEY_SECRET_ID/$SECRET_VERSION")"', shell_script)
+        self.assertIn("--clear-groups", command)
+        self.assertNotIn("--groups", command)
+        self.assertNotIn("SECRET_MOUNT_PATH", " ".join(command))
+        self.assertNotIn("ANTHROPIC_AUTH_TOKEN", " ".join(command))
         self.assertIn("/usr/local/bin/claude", command)
-        self.assertNotIn("ANTHROPIC_API_KEY", captured["env"])
+        self.assertEqual(captured["env"]["ANTHROPIC_API_KEY"], bridge.HOST_ONLY_DUMMY_API_KEY)
+        self.assertEqual(captured["env"]["ANTHROPIC_BASE_URL"], "http://harness-model-proxy.internal:8082")
+        for name in (
+            "SECRET_MOUNT_PATH",
+            "ANTHROPIC_API_KEY_SECRET_ID",
+            "ANTHROPIC_AUTH_TOKEN_SECRET_ID",
+            "SECRET_VERSION",
+            "HARNESS_SECRET_READERS_GID",
+            "ANTHROPIC_AUTH_TOKEN",
+        ):
+            self.assertNotIn(name, captured["env"])
         self.assertIn('"text":"hello"', captured["process"].stdin.writes[0])
 
     def test_claude_runner_uses_dummy_key_without_secret_mount(self):
@@ -587,7 +579,7 @@ class BridgeClientTest(unittest.TestCase):
             {
                 "CLAUDE_SESSION_UUID": "11111111-2222-3333-4444-555555555555",
                 "SESSION_ID": "sess",
-                "HARNESS_AGENT_HOME": "/agent-homes/sess",
+                "HARNESS_AGENT_HOME": "/agent-home",
                 "HARNESS_AGENT_UID": "65534",
                 "HARNESS_AGENT_GID": "65534",
                 "ANTHROPIC_BASE_URL": "http://harness-model-proxy.internal:8082",
@@ -643,7 +635,7 @@ class BridgeClientTest(unittest.TestCase):
             {
                 "CLAUDE_SESSION_UUID": "11111111-2222-3333-4444-555555555555",
                 "SESSION_ID": "sess",
-                "HARNESS_AGENT_HOME": "/agent-homes/sess",
+                "HARNESS_AGENT_HOME": "/agent-home",
                 "HARNESS_AGENT_UID": "65534",
                 "HARNESS_AGENT_GID": "65534",
                 "ANTHROPIC_BASE_URL": "http://harness-model-proxy.internal:8082",
@@ -685,23 +677,7 @@ class BridgeClientTest(unittest.TestCase):
             commands.append(command)
             return FakeProcess()
 
-        with mock.patch.dict(
-            os.environ,
-            {
-                "CLAUDE_SESSION_UUID": "11111111-2222-3333-4444-555555555555",
-                "SESSION_ID": "sess",
-                "HARNESS_AGENT_HOME": "/agent-homes/sess",
-                "HARNESS_AGENT_UID": "65534",
-                "HARNESS_AGENT_GID": "65534",
-                "HARNESS_SECRET_READERS_GID": "12345",
-                "ANTHROPIC_BASE_URL": "http://10.240.0.1:8082",
-                "SECRET_MOUNT_PATH": "/harness-secrets",
-                "ANTHROPIC_API_KEY_SECRET_ID": "anthropic_api_key",
-                "ANTHROPIC_AUTH_TOKEN_SECRET_ID": "anthropic_auth_token",
-                "SECRET_VERSION": "local",
-            },
-            clear=True,
-        ):
+        with mock.patch.dict(os.environ, claude_runner_env(), clear=True):
             with mock.patch.object(bridge.subprocess, "Popen", side_effect=popen):
                 runner = bridge.ClaudeTurnRunner()
                 runner.run_turn("first", lambda stream, line: None)
@@ -817,24 +793,30 @@ class EntrypointStaticTest(unittest.TestCase):
     def test_entrypoint_supports_host_only_claude_credentials(self):
         entrypoint = SCRIPT.with_name("harness-agent-entrypoint")
         text = entrypoint.read_text(encoding="utf-8")
-        self.assertIn("SECRET_BACKED_CLAUDE=0", text)
-        self.assertIn("secret-backed claude agent", text)
         self.assertIn("--clear-groups", text)
         self.assertIn("HARNESS_PROXY_DUMMY_API_KEY:-harness-model-proxy-dummy-key", text)
         self.assertIn("exec_bridge_client()", text)
         self.assertIn('/usr/local/bin/harness-bridge-client "$@"', text)
+        self.assertIn("sandbox secret mounts are not supported", text)
+        self.assertNotIn("SECRET_BACKED_CLAUDE", text)
+        self.assertNotIn("secret-backed claude agent", text)
+        self.assertNotIn("--groups \"$HARNESS_SECRET_READERS_GID\"", text)
 
     def test_claim_loop_starts_after_workspace_and_agent_home_setup(self):
         entrypoint = SCRIPT.with_name("harness-agent-entrypoint")
         text = entrypoint.read_text(encoding="utf-8")
         claim_loop = text.index('HARNESS_BRIDGE_MODE:-}" = "claim-loop"')
         cd_workspace = text.index("cd /workspace")
-        self.assertLess(text.index('SESSION_WORKSPACE="${SESSION_WORKSPACE:-/sessions/$SESSION_ID}"'), claim_loop)
-        self.assertLess(text.index('if [ "$SESSION_WORKSPACE" = "/workspace" ]; then'), claim_loop)
-        self.assertLess(text.index("ln -sfn \"$SESSION_WORKSPACE\" /workspace"), claim_loop)
+        self.assertLess(text.index(': "${SESSION_WORKSPACE:?SESSION_WORKSPACE is required in control file}"'), claim_loop)
+        self.assertLess(text.index(': "${HARNESS_AGENT_HOME:?HARNESS_AGENT_HOME is required in control file}"'), claim_loop)
+        self.assertLess(text.index('[ "$SESSION_WORKSPACE" != "/workspace" ]'), claim_loop)
+        self.assertLess(text.index('[ "$AGENT_HOME" != "/agent-home" ]'), claim_loop)
         self.assertLess(cd_workspace, claim_loop)
         self.assertLess(text.index("  ensure_agent_user", cd_workspace), claim_loop)
         self.assertLess(text.index("exec_bridge_client()"), claim_loop)
+        self.assertNotIn("/sessions/$SESSION_ID", text)
+        self.assertNotIn("/agent-homes/$SESSION_ID", text)
+        self.assertNotIn("ln -sfn", text)
 
 
 def argparse_namespace(**kwargs):
@@ -845,15 +827,10 @@ def claude_runner_env():
     return {
         "CLAUDE_SESSION_UUID": "11111111-2222-3333-4444-555555555555",
         "SESSION_ID": "sess",
-        "HARNESS_AGENT_HOME": "/agent-homes/sess",
+        "HARNESS_AGENT_HOME": "/agent-home",
         "HARNESS_AGENT_UID": "65534",
         "HARNESS_AGENT_GID": "65534",
-        "HARNESS_SECRET_READERS_GID": "12345",
-        "ANTHROPIC_BASE_URL": "http://10.240.0.1:8082",
-        "SECRET_MOUNT_PATH": "/harness-secrets",
-        "ANTHROPIC_API_KEY_SECRET_ID": "anthropic_api_key",
-        "ANTHROPIC_AUTH_TOKEN_SECRET_ID": "anthropic_auth_token",
-        "SECRET_VERSION": "local",
+        "ANTHROPIC_BASE_URL": "http://harness-model-proxy.internal:8082",
     }
 
 

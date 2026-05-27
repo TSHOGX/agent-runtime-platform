@@ -330,73 +330,40 @@ class ClaudeTurnRunner:
             claude_command.extend(["--resume", session_uuid])
         self.first_turn = False
 
-        agent_home = os.environ.get("HARNESS_AGENT_HOME", f"/agent-homes/{os.environ.get('SESSION_ID', '')}")
-        secret_mount_path = os.environ.get("SECRET_MOUNT_PATH", "")
-        api_key_secret_id = os.environ.get("ANTHROPIC_API_KEY_SECRET_ID", "")
-        auth_token_secret_id = os.environ.get("ANTHROPIC_AUTH_TOKEN_SECRET_ID", "")
-        secret_version = os.environ.get("SECRET_VERSION", "")
-        secret_backed = any([secret_mount_path, api_key_secret_id, auth_token_secret_id, secret_version])
-        env = os.environ.copy()
-        env["HOME"] = agent_home
-        env["USER"] = "harness"
-        env["LOGNAME"] = "harness"
-        env.pop("ANTHROPIC_API_KEY", None)
-        env.pop("ANTHROPIC_AUTH_TOKEN", None)
-        if secret_backed:
-            if not all([secret_mount_path, api_key_secret_id, auth_token_secret_id, secret_version]):
-                raise RuntimeError("secret-backed claude agent requires secret mount, ids, and version")
-            secret_readers_gid = os.environ.get("HARNESS_SECRET_READERS_GID", "")
-            if not secret_readers_gid:
-                raise RuntimeError("HARNESS_SECRET_READERS_GID is required for secret-backed claude agent")
+        agent_home = os.environ.get("HARNESS_AGENT_HOME", "")
+        if not agent_home:
+            raise RuntimeError("HARNESS_AGENT_HOME is required for claude agent")
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+            "HOME": agent_home,
+            "USER": "harness",
+            "LOGNAME": "harness",
+            "HARNESS_AGENT_HOME": agent_home,
+            "ANTHROPIC_BASE_URL": os.environ.get("ANTHROPIC_BASE_URL", ""),
+            "ANTHROPIC_API_KEY": HOST_ONLY_DUMMY_API_KEY,
+        }
+        for optional_name in ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "LANG", "TMPDIR"):
+            optional_value = os.environ.get(optional_name)
+            if optional_value:
+                env[optional_name] = optional_value
+        target_uid = os.environ.get("HARNESS_AGENT_UID", "65534")
+        target_gid = os.environ.get("HARNESS_AGENT_GID", "65534")
+        if str(os.geteuid()) == target_uid and str(os.getegid()) == target_gid:
+            command = claude_command
+        else:
             command = [
                 "setpriv",
                 "--reuid",
-                os.environ.get("HARNESS_AGENT_UID", "65534"),
+                target_uid,
                 "--regid",
-                os.environ.get("HARNESS_AGENT_GID", "65534"),
-                "--groups",
-                secret_readers_gid,
+                target_gid,
+                "--clear-groups",
                 "env",
                 f"HOME={agent_home}",
                 "USER=harness",
                 "LOGNAME=harness",
-                f"ANTHROPIC_BASE_URL={os.environ.get('ANTHROPIC_BASE_URL', '')}",
-                f"SECRET_MOUNT_PATH={secret_mount_path}",
-                f"ANTHROPIC_API_KEY_SECRET_ID={api_key_secret_id}",
-                f"ANTHROPIC_AUTH_TOKEN_SECRET_ID={auth_token_secret_id}",
-                f"SECRET_VERSION={secret_version}",
-                "sh",
-                "-c",
-                (
-                    'ANTHROPIC_API_KEY="$(cat "$SECRET_MOUNT_PATH/$ANTHROPIC_API_KEY_SECRET_ID/$SECRET_VERSION")"\n'
-                    'ANTHROPIC_AUTH_TOKEN="$(cat "$SECRET_MOUNT_PATH/$ANTHROPIC_AUTH_TOKEN_SECRET_ID/$SECRET_VERSION")"\n'
-                    "export ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN\n"
-                    'exec "$@"'
-                ),
-                "sh",
                 *claude_command,
             ]
-        else:
-            env["ANTHROPIC_BASE_URL"] = os.environ.get("ANTHROPIC_BASE_URL", "")
-            env["ANTHROPIC_API_KEY"] = HOST_ONLY_DUMMY_API_KEY
-            target_uid = os.environ.get("HARNESS_AGENT_UID", "65534")
-            target_gid = os.environ.get("HARNESS_AGENT_GID", "65534")
-            if str(os.geteuid()) == target_uid and str(os.getegid()) == target_gid:
-                command = claude_command
-            else:
-                command = [
-                    "setpriv",
-                    "--reuid",
-                    target_uid,
-                    "--regid",
-                    target_gid,
-                    "--clear-groups",
-                    "env",
-                    f"HOME={agent_home}",
-                    "USER=harness",
-                    "LOGNAME=harness",
-                    *claude_command,
-                ]
         frame = json.dumps(
             {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": content}]}},
             ensure_ascii=False,
@@ -472,19 +439,6 @@ def parse_statuses(value, default):
     return statuses
 
 
-def configured_secret(env_name, secret_id_env):
-    value = os.environ.get(env_name)
-    if value:
-        return value
-    mount_path = os.environ.get("SECRET_MOUNT_PATH")
-    secret_id = os.environ.get(secret_id_env)
-    secret_version = os.environ.get("SECRET_VERSION")
-    if not mount_path or not secret_id or not secret_version:
-        return ""
-    path = Path(mount_path) / secret_id / secret_version
-    return path.read_text(encoding="utf-8").strip()
-
-
 def http_status(url, method="GET", headers=None, body=None, timeout=3.0):
     request = urllib.request.Request(url, data=body, method=method, headers=headers or {})
     try:
@@ -534,8 +488,7 @@ def run_probe(args):
             parse_statuses(args.healthz_statuses, {200}),
             parse_statuses(args.message_statuses, {400}),
             args.http_timeout,
-            configured_secret("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_SECRET_ID"),
-            configured_secret("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN_SECRET_ID"),
+            "",
         )
     client.probe_network(timeout=args.timeout)
     client.touch_bridge_heartbeat()
@@ -597,8 +550,7 @@ def run_claim_loop(args, runner=None):
             parse_statuses(args.healthz_statuses, {200}),
             parse_statuses(args.message_statuses, {400}),
             args.http_timeout,
-            configured_secret("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_SECRET_ID"),
-            configured_secret("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN_SECRET_ID"),
+            "",
         )
     client.probe_network(timeout=args.timeout)
     client.mark_checkpoint_ready()
