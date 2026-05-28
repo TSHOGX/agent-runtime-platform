@@ -207,6 +207,13 @@ Sandbox bridge client:
 python3 -m unittest sandbox-image/tests/test_harness_bridge_client.py
 ```
 
+Runtime isolation release evidence:
+
+```bash
+tools/phase8/release-gates.py --output /tmp/harness-runtime-isolation-deterministic-gates.json
+tools/phase8/rootfs-inspect.py --output /tmp/harness-rootfs-inspection.json
+```
+
 Phase 7 release gates:
 
 ```bash

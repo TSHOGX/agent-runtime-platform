@@ -42,9 +42,25 @@ copy_overlay_files() {
   rsync -a --chmod=F755,D755 "${SCRIPT_DIR}/files/" "${ROOTFS_DIR}/"
 }
 
+sanitize_isolated_rootfs() {
+  log "sanitizing rootfs for sandbox-isolation-v1"
+  rm -rf --one-file-system \
+    "${ROOTFS_DIR}/workspace" \
+    "${ROOTFS_DIR}/agent-home" \
+    "${ROOTFS_DIR}/sessions" \
+    "${ROOTFS_DIR}/agent-homes" \
+    "${ROOTFS_DIR}/harness-secrets" \
+    "${ROOTFS_DIR}/root/.claude" \
+    "${ROOTFS_DIR}/root/.cache" \
+    "${ROOTFS_DIR}/root/.claude.json"
+  install -d -m 0755 "${ROOTFS_DIR}/workspace" "${ROOTFS_DIR}/agent-home"
+  find "${ROOTFS_DIR}" -maxdepth 1 -type f -name '.gvisor.filestore.*' -delete
+}
+
 if [ -d "${ROOTFS_DIR}" ] && [ "${FORCE}" != "1" ]; then
   log "reusing existing rootfs at ${ROOTFS_DIR}; set FORCE=1 to rebuild"
   copy_overlay_files
+  sanitize_isolated_rootfs
   log "done"
   exit 0
 fi
@@ -75,5 +91,6 @@ log "installing Claude Code CLI"
 chroot "${ROOTFS_DIR}" /bin/sh -lc "npm install -g @anthropic-ai/claude-code"
 
 copy_overlay_files
+sanitize_isolated_rootfs
 
 log "rootfs ready at ${ROOTFS_DIR}"

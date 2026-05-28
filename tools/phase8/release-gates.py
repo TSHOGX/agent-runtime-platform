@@ -37,6 +37,7 @@ class Gate:
 def parse_args():
     parser = argparse.ArgumentParser(description="Run runtime isolation release qualification gates and emit JSON evidence.")
     parser.add_argument("--include-prior-release", action="store_true", help="Run the prior deterministic release runner.")
+    parser.add_argument("--include-rootfs-inspection", action="store_true", help="Inspect the configured sandbox rootfs image.")
     parser.add_argument("--include-proxy", action="store_true", help="Run the pinned claude-code-proxy contract gate.")
     parser.add_argument("--include-bridge-lab", action="store_true", help="Run the gVisor bridge durability lab.")
     parser.add_argument("--include-live-latency", action="store_true", help="Run the live turn-start latency gate.")
@@ -92,6 +93,7 @@ def deterministic_gates():
                 "unittest",
                 "sandbox-image/tests/test_harness_bridge_client.py",
                 "tools/phase8/test_release_gates.py",
+                "tools/phase8/test_rootfs_inspect.py",
             ),
             cwd=REPO_ROOT,
             category="deterministic",
@@ -114,6 +116,15 @@ def optional_gates(args):
                 command=("tools/phase7/release-gates.py",),
                 cwd=REPO_ROOT,
                 category="compatibility",
+            )
+        )
+    if args.include_rootfs_inspection:
+        gates.append(
+            Gate(
+                name="rootfs_image_inspection",
+                command=("tools/phase8/rootfs-inspect.py",),
+                cwd=REPO_ROOT,
+                category="evidence",
             )
         )
     if args.include_proxy:
@@ -284,7 +295,7 @@ def tail(text, limit=12000):
 
 
 def attach_structured_output(result):
-    if result["name"] in {"live_turn_start_latency"} and result["stdout_tail"].strip():
+    if result["name"] in {"live_turn_start_latency", "rootfs_image_inspection"} and result["stdout_tail"].strip():
         try:
             result["structured_output"] = json.loads(result["stdout_tail"])
         except json.JSONDecodeError:
@@ -392,9 +403,27 @@ def release_completion(results, supplied_evidence, require_release_evidence=Fals
     }
 
 
+def supplied_evidence_from_gate_results(results):
+    supplied = {}
+    for result in results:
+        if result["name"] != "rootfs_image_inspection" or result["status"] != "passed":
+            continue
+        payload = result.get("structured_output")
+        if not isinstance(payload, dict):
+            continue
+        supplied["rootfs_image"] = {
+            "path": "gate:rootfs_image_inspection",
+            "digest": payload.get("rootfs_digest", ""),
+            "bytes": 0,
+            "status": payload.get("status", ""),
+            "payload": payload,
+        }
+    return supplied
+
+
 def evidence(results, commit=None, context=None, supplied_evidence=None, require_release_evidence=False):
     commit = commit or git_commit()
-    supplied_evidence = supplied_evidence or {}
+    supplied_evidence = {**supplied_evidence_from_gate_results(results), **(supplied_evidence or {})}
     completion = release_completion(results, supplied_evidence, require_release_evidence)
     status = "passed" if completion["selected_gates_passed"] else "failed"
     if require_release_evidence and completion["missing_supplied_evidence"]:
@@ -501,8 +530,9 @@ def main():
         return
 
     supplied = parse_supplied_evidence(args.evidence)
+    results = run_gates(gates, env=os.environ.copy())
     payload = evidence(
-        run_gates(gates, env=os.environ.copy()),
+        results,
         supplied_evidence=supplied,
         require_release_evidence=args.require_release_evidence,
     )

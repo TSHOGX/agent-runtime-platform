@@ -16,6 +16,7 @@ class ReleaseGatesTest(unittest.TestCase):
     def test_default_selected_gates_are_deterministic_only(self):
         args = argparse_namespace(
             include_prior_release=False,
+            include_rootfs_inspection=False,
             include_proxy=False,
             include_bridge_lab=False,
             include_live_latency=False,
@@ -34,10 +35,12 @@ class ReleaseGatesTest(unittest.TestCase):
         )
         self.assertEqual({gate.category for gate in gates}, {"deterministic"})
         self.assertIn("tools/phase8/test_release_gates.py", gates[2].command)
+        self.assertIn("tools/phase8/test_rootfs_inspect.py", gates[2].command)
 
     def test_optional_flags_add_external_and_compatibility_gates(self):
         args = argparse_namespace(
             include_prior_release=True,
+            include_rootfs_inspection=True,
             include_proxy=True,
             include_bridge_lab=True,
             include_live_latency=True,
@@ -46,15 +49,17 @@ class ReleaseGatesTest(unittest.TestCase):
         gates = MODULE.selected_gates(args)
 
         self.assertEqual(
-            [gate.name for gate in gates[-4:]],
+            [gate.name for gate in gates[-5:]],
             [
                 "prior_deterministic_release_runner",
+                "rootfs_image_inspection",
                 "pinned_proxy_contract",
                 "gvisor_bridge_durability_lab",
                 "live_turn_start_latency",
             ],
         )
-        self.assertEqual(gates[-4].category, "compatibility")
+        self.assertEqual(gates[-5].category, "compatibility")
+        self.assertEqual(gates[-4].category, "evidence")
         self.assertEqual({gate.category for gate in gates[-3:]}, {"external"})
 
     def test_run_gate_captures_success_and_failure(self):
@@ -117,6 +122,28 @@ class ReleaseGatesTest(unittest.TestCase):
 
         self.assertEqual(payload["result"], "failed")
         self.assertFalse(payload["release_completion"]["release_complete"])
+
+    def test_rootfs_gate_output_satisfies_rootfs_supplied_evidence(self):
+        rootfs_payload = {
+            "status": "passed",
+            "rootfs_digest": "sha256:" + "a" * 64,
+            "checks": [],
+        }
+
+        payload = MODULE.evidence(
+            [
+                {
+                    "name": "rootfs_image_inspection",
+                    "status": "passed",
+                    "structured_output": rootfs_payload,
+                }
+            ],
+            commit="abc123",
+            context={"git": {"commit": "abc123"}},
+        )
+
+        self.assertIn("rootfs_image", payload["supplied_evidence"])
+        self.assertEqual(payload["supplied_evidence"]["rootfs_image"]["digest"], rootfs_payload["rootfs_digest"])
 
     def test_supplied_evidence_records_digest_and_allows_release_completion(self):
         with tempfile.TemporaryDirectory() as tmp:
