@@ -162,9 +162,14 @@ HTTP routes, SSE/WebSocket endpoints, and the canonical event-name set are docum
   target lab host: `/tmp/harness-cutover-inventory.json` reports
   `blockers: []`, and `/tmp/harness-reconciliation-evidence.json` reports an
   empty `runtime_resource_instances` table with host absence checks passing.
-  Phase 8 is still not release-complete until rootfs and adversarial lab
-  evidence, the final supplied-evidence bundle, and every gate in
-  `docs/phase8/release-gates.md` are audited with evidence.
+  `/tmp/harness-runtime-isolation-evidence-gates.json` now records supplied
+  cutover, reconciliation, rootfs image, and proxy contract evidence, including
+  rootfs digest
+  `sha256:33e72ef872cf7ac1aeb7f887fe920f6065a0dafb440ed939be75bef9c24de41d`
+  and proxy commit `c74d5e0485b8457de68c2e5ac2b32877fbbb3932`. Phase 8 is
+  still not release-complete until adversarial lab evidence, the final
+  supplied-evidence bundle, and every gate in `docs/phase8/release-gates.md`
+  are audited with evidence.
 - Automatic idle checkpointing is disabled by the checked-in policy. It can be enabled only after operators accept the measured restore/resource-retention behavior for the lab.
 - Reclaimable runtime resources are retained for `harness.reaper.failed_retention` before physical cleanup, so recently failed/destroyed generations can remain visible briefly by design.
 - Phase 8 is planned as a destructive clean cutover for this lab, not an

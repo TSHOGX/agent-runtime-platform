@@ -169,10 +169,10 @@ Phases 0–7 and P0 lifetime separation are complete. Highlights below; full per
 
 - Automatic checkpointing is policy-gated and disabled in the checked-in lab config. The checkpoint/restore path is control-plane-safe, but default enablement should be a deliberate operations decision after retention, resource pressure, and restore SLOs are measured.
 - Phase 8 runtime isolation is active. Destructive cutover, host
-  reconciliation, deterministic release, and proxy contract evidence have
-  passed on the target host, but Phase 8 is not release-complete until rootfs,
-  adversarial lab, and the full `docs/phase8/release-gates.md` audit pass with
-  evidence.
+  reconciliation, deterministic release, rootfs image, and proxy contract
+  evidence have passed on the target host, but Phase 8 is not release-complete
+  until adversarial lab and the full `docs/phase8/release-gates.md` audit pass
+  with evidence.
 - Provider credentials are host/proxy-side for the active runtime. Real upstream
   credential storage, rotation, and GC remain Phase 10.
 - Reclaimable generation resources are retained for `harness.reaper.failed_retention` before physical cleanup. That is intentional for debugging, but production observability should make retained resources visible.
