@@ -160,6 +160,12 @@ func main() {
 		Handler:           app.Routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+	proxyCorrelationServer := app.ProxyCorrelationServer()
+	proxyCorrelationListener, proxyCorrelationSocket, err := app.ListenProxyCorrelation()
+	if err != nil {
+		log.Error("failed to listen on proxy correlation socket", "error", err)
+		os.Exit(1)
+	}
 
 	go func() {
 		log.Info("orchestrator listening", "addr", cfg.Addr)
@@ -168,10 +174,21 @@ func main() {
 			stop()
 		}
 	}()
+	go func() {
+		log.Info("proxy correlation listening", "socket", proxyCorrelationSocket)
+		if err := proxyCorrelationServer.Serve(proxyCorrelationListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("proxy correlation server stopped", "error", err)
+			stop()
+		}
+	}()
 
 	<-ctx.Done()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	if err := proxyCorrelationServer.Shutdown(shutdownCtx); err != nil {
+		log.Warn("proxy correlation shutdown failed", "error", err)
+	}
+	_ = os.Remove(proxyCorrelationSocket)
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		log.Warn("http shutdown failed", "error", err)
 	}

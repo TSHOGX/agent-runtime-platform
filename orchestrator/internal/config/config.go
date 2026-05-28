@@ -53,16 +53,17 @@ type ClaudeConfig struct {
 const defaultSandboxModelProxyBaseURL = "http://harness-model-proxy.internal:8082"
 
 type Phase7Config struct {
-	RunDir           string           `yaml:"run_dir"`
-	SessionRetention Duration         `yaml:"session_retention"`
-	MaxSessions      int              `yaml:"max_sessions"`
-	Network          NetworkConfig    `yaml:"network"`
-	Events           EventsConfig     `yaml:"events"`
-	Probe            ProbeConfig      `yaml:"probe"`
-	Bridge           BridgeConfig     `yaml:"bridge"`
-	Checkpoint       CheckpointConfig `yaml:"checkpoint"`
-	Reaper           ReaperConfig     `yaml:"reaper"`
-	SandboxIdentity  SandboxIdentity  `yaml:"sandbox_identity"`
+	RunDir               string               `yaml:"run_dir"`
+	SessionRetention     Duration             `yaml:"session_retention"`
+	MaxSessions          int                  `yaml:"max_sessions"`
+	Network              NetworkConfig        `yaml:"network"`
+	Events               EventsConfig         `yaml:"events"`
+	Probe                ProbeConfig          `yaml:"probe"`
+	Bridge               BridgeConfig         `yaml:"bridge"`
+	Checkpoint           CheckpointConfig     `yaml:"checkpoint"`
+	Reaper               ReaperConfig         `yaml:"reaper"`
+	SandboxIdentity      SandboxIdentity      `yaml:"sandbox_identity"`
+	ProxyServiceIdentity ProxyServiceIdentity `yaml:"proxy_service_identity"`
 }
 
 func (c Phase7Config) ControlRoot() string {
@@ -164,6 +165,11 @@ type SandboxIdentity struct {
 	UID              int   `yaml:"uid"`
 	GID              int   `yaml:"gid"`
 	SupplementalGIDs []int `yaml:"supplemental_gids"`
+}
+
+type ProxyServiceIdentity struct {
+	UID int `yaml:"uid"`
+	GID int `yaml:"gid"`
 }
 
 type Phase8IsolationRoots struct {
@@ -438,6 +444,10 @@ func defaultPhase7Config() Phase7Config {
 			UID: 65534,
 			GID: 65534,
 		},
+		ProxyServiceIdentity: ProxyServiceIdentity{
+			UID: os.Geteuid(),
+			GID: os.Getegid(),
+		},
 	}
 }
 
@@ -565,6 +575,9 @@ func validatePhase7Config(cfg Phase7Config) error {
 	if err := ValidateSandboxIdentity(cfg.SandboxIdentity); err != nil {
 		return err
 	}
+	if err := ValidateProxyServiceIdentity(cfg.ProxyServiceIdentity); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -584,6 +597,16 @@ func ValidateSandboxIdentity(identity SandboxIdentity) error {
 			return fmt.Errorf("harness.sandbox_identity.supplemental_gids contains duplicate gid %d", gid)
 		}
 		seen[gid] = struct{}{}
+	}
+	return nil
+}
+
+func ValidateProxyServiceIdentity(identity ProxyServiceIdentity) error {
+	if identity.UID < 0 {
+		return fmt.Errorf("harness.proxy_service_identity.uid must be >= 0")
+	}
+	if identity.GID < 0 {
+		return fmt.Errorf("harness.proxy_service_identity.gid must be >= 0")
 	}
 	return nil
 }

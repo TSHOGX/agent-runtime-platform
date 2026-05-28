@@ -20,6 +20,9 @@ func TestLoadProjectConfigUsesPhase7HarnessSchema(t *testing.T) {
     uid: 7000
     gid: 7001
     supplemental_gids: [44, 43]
+  proxy_service_identity:
+    uid: 7100
+    gid: 7101
   network:
     cidr_pool: 10.210.0.0/24
     egress:
@@ -75,6 +78,9 @@ func TestLoadProjectConfigUsesPhase7HarnessSchema(t *testing.T) {
 		phase7.SandboxIdentity.GID != 7001 ||
 		!sameInts(phase7.SandboxIdentity.SupplementalGIDs, []int{43, 44}) {
 		t.Fatalf("unexpected sandbox identity: %+v", phase7.SandboxIdentity)
+	}
+	if phase7.ProxyServiceIdentity.UID != 7100 || phase7.ProxyServiceIdentity.GID != 7101 {
+		t.Fatalf("unexpected proxy service identity: %+v", phase7.ProxyServiceIdentity)
 	}
 	if got := phase7.Network.CIDRPool.String(); got != "10.210.0.0/24" {
 		t.Fatalf("cidr_pool: %q", got)

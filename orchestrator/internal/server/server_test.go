@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -3365,9 +3367,13 @@ func TestSendMessageRejectsExpiredSessionBeforeAllocation(t *testing.T) {
 	}
 }
 
-func TestInternalProxyRequestEndpointsPublishDurableEvents(t *testing.T) {
+func TestProxyCorrelationUnixSocketPublishesDurableEvents(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
+	dir, err := os.MkdirTemp("", "hp-proxy-")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	st, owner := openServerOwnedStore(t, ctx, dir)
 	cfg := testServerConfig(dir)
 	now := time.Now().UTC()
@@ -3385,25 +3391,69 @@ func TestInternalProxyRequestEndpointsPublishDurableEvents(t *testing.T) {
 		log:     slog.Default(),
 	}
 
-	blocked := httptest.NewRequest(http.MethodPost, "/internal/proxy/requests/start", strings.NewReader(fmt.Sprintf(`{"sandbox_source_ip":%q,"proxy_request_id":"proxy_blocked"}`, sandboxSourceIP)))
-	blocked.RemoteAddr = "203.0.113.7:5000"
-	blockedRec := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(blockedRec, blocked)
-	if blockedRec.Code != http.StatusForbidden {
-		t.Fatalf("non-loopback proxy request status=%d body=%s", blockedRec.Code, blockedRec.Body.String())
+	publicReq := httptest.NewRequest(http.MethodPost, "/internal/proxy/requests/start", strings.NewReader(fmt.Sprintf(`{"sandbox_source_ip":%q,"proxy_request_id":"proxy_public"}`, sandboxSourceIP)))
+	publicRec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(publicRec, publicReq)
+	if publicRec.Code != http.StatusNotFound {
+		t.Fatalf("public proxy route status=%d body=%s", publicRec.Code, publicRec.Body.String())
 	}
 
-	startReq := httptest.NewRequest(http.MethodPost, "/internal/proxy/requests/start", strings.NewReader(fmt.Sprintf(`{
+	directReq := httptest.NewRequest(http.MethodPost, "/internal/proxy/requests/start", strings.NewReader(fmt.Sprintf(`{"sandbox_source_ip":%q,"proxy_request_id":"proxy_direct"}`, sandboxSourceIP)))
+	directRec := httptest.NewRecorder()
+	srv.ProxyCorrelationRoutes().ServeHTTP(directRec, directReq)
+	if directRec.Code != http.StatusForbidden {
+		t.Fatalf("proxy route without peer credentials status=%d body=%s", directRec.Code, directRec.Body.String())
+	}
+
+	listener, socketPath, err := srv.ListenProxyCorrelation()
+	if err != nil {
+		t.Fatalf("listen proxy correlation: %v", err)
+	}
+	proxyServer := srv.ProxyCorrelationServer()
+	errCh := make(chan error, 1)
+	go func() { errCh <- proxyServer.Serve(listener) }()
+	t.Cleanup(func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := proxyServer.Shutdown(shutdownCtx); err != nil {
+			t.Errorf("shutdown proxy server: %v", err)
+		}
+		_ = os.Remove(socketPath)
+		if err := <-errCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("proxy server stopped: %v", err)
+		}
+	})
+
+	client := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+		},
+	}}
+	clientPost := func(path, body string) (int, []byte) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://proxy.internal"+path, strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("build proxy request: %v", err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("proxy request %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		data, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read proxy response: %v", err)
+		}
+		return resp.StatusCode, data
+	}
+
+	startStatus, startBody := clientPost("/internal/proxy/requests/start", fmt.Sprintf(`{
 		"sandbox_source_ip":%q,
 		"proxy_request_id":"proxy_http_1",
 		"upstream_model":"claude-sonnet",
 		"upstream_base_url":"https://api.anthropic.test"
-	}`, sandboxSourceIP)))
-	startReq.RemoteAddr = "127.0.0.1:5001"
-	startRec := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(startRec, startReq)
-	if startRec.Code != http.StatusOK {
-		t.Fatalf("start status=%d body=%s", startRec.Code, startRec.Body.String())
+	}`, sandboxSourceIP))
+	if startStatus != http.StatusOK {
+		t.Fatalf("start status=%d body=%s", startStatus, string(startBody))
 	}
 	var startResp struct {
 		SessionID       string `json:"session_id"`
@@ -3413,7 +3463,7 @@ func TestInternalProxyRequestEndpointsPublishDurableEvents(t *testing.T) {
 		EventID         int64  `json:"event_id"`
 		Replayed        bool   `json:"replayed"`
 	}
-	if err := json.Unmarshal(startRec.Body.Bytes(), &startResp); err != nil {
+	if err := json.Unmarshal(startBody, &startResp); err != nil {
 		t.Fatalf("decode start response: %v", err)
 	}
 	if startResp.SessionID != "sess_proxy_http" || startResp.GenerationID != allocation.GenerationID ||
@@ -3426,17 +3476,14 @@ func TestInternalProxyRequestEndpointsPublishDurableEvents(t *testing.T) {
 		t.Fatalf("unexpected start hub event: %+v response=%+v", startEvent, startResp)
 	}
 
-	finishReq := httptest.NewRequest(http.MethodPost, "/internal/proxy/requests/finish", strings.NewReader(`{
+	finishStatus, finishBody := clientPost("/internal/proxy/requests/finish", `{
 		"proxy_request_id":"proxy_http_1",
 		"http_status":200,
 		"upstream_total_latency_ms":321,
 		"retry_count":0
-	}`))
-	finishReq.RemoteAddr = "[::1]:5002"
-	finishRec := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(finishRec, finishReq)
-	if finishRec.Code != http.StatusOK {
-		t.Fatalf("finish status=%d body=%s", finishRec.Code, finishRec.Body.String())
+	}`)
+	if finishStatus != http.StatusOK {
+		t.Fatalf("finish status=%d body=%s", finishStatus, string(finishBody))
 	}
 	var finishResp struct {
 		Status       string `json:"status"`
@@ -3447,7 +3494,7 @@ func TestInternalProxyRequestEndpointsPublishDurableEvents(t *testing.T) {
 		GenerationID string `json:"generation_id"`
 		Replayed     bool   `json:"replayed"`
 	}
-	if err := json.Unmarshal(finishRec.Body.Bytes(), &finishResp); err != nil {
+	if err := json.Unmarshal(finishBody, &finishResp); err != nil {
 		t.Fatalf("decode finish response: %v", err)
 	}
 	if finishResp.Status != "accepted" || finishResp.EventType != "proxy.request.completed" ||
@@ -3460,15 +3507,12 @@ func TestInternalProxyRequestEndpointsPublishDurableEvents(t *testing.T) {
 		t.Fatalf("unexpected finish hub event: %+v response=%+v", finishEvent, finishResp)
 	}
 
-	unknownReq := httptest.NewRequest(http.MethodPost, "/internal/proxy/requests/finish", strings.NewReader(`{"proxy_request_id":"proxy_missing"}`))
-	unknownReq.RemoteAddr = "127.0.0.1:5003"
-	unknownRec := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(unknownRec, unknownReq)
-	if unknownRec.Code != http.StatusOK {
-		t.Fatalf("unknown finish status=%d body=%s", unknownRec.Code, unknownRec.Body.String())
+	unknownStatus, unknownBody := clientPost("/internal/proxy/requests/finish", `{"proxy_request_id":"proxy_missing"}`)
+	if unknownStatus != http.StatusOK {
+		t.Fatalf("unknown finish status=%d body=%s", unknownStatus, string(unknownBody))
 	}
 	var unknownResp map[string]string
-	if err := json.Unmarshal(unknownRec.Body.Bytes(), &unknownResp); err != nil {
+	if err := json.Unmarshal(unknownBody, &unknownResp); err != nil {
 		t.Fatalf("decode unknown finish response: %v", err)
 	}
 	if unknownResp["status"] != "stale_unknown_request" {
@@ -4644,6 +4688,10 @@ func testServerConfig(dir string) config.Config {
 			SandboxIdentity: config.SandboxIdentity{
 				UID: serverTestSandboxUID(),
 				GID: serverTestSandboxGID(),
+			},
+			ProxyServiceIdentity: config.ProxyServiceIdentity{
+				UID: os.Geteuid(),
+				GID: os.Getegid(),
 			},
 		},
 	}
