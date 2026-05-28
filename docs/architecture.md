@@ -45,15 +45,13 @@ Go orchestrator
           |-- harness-agent-entrypoint
           |-- harness-bridge-client
           |-- Claude Code / PTY-backed shell agent
-          |-- /workspace -> /sessions/<session_id>
-          `-- /agent-homes/<session_id>
+          |-- /workspace exact bind -> verified session workspace
+          `-- /agent-home exact bind -> verified session+driver home
 ```
 
-Current implementation note: `/sessions` is a bind mount of the whole host
-workspace root and `/agent-homes` is a bind mount of the whole host agent-home
-root. That gives the sandbox a broader filesystem view than the target
-architecture. Phase 8 replaces these parent-root mounts with exact binds of the
-current session workspace at `/workspace` and persistent session+driver home at
+Phase 8 runtime rendering forbids parent `/sessions` and `/agent-homes` mounts.
+Generation launch receives verified DataVolume paths from the control plane and
+renders exact binds for only the current `/workspace` and selected
 `/agent-home`.
 
 The frontend talks to its own origin. Route handlers forward API calls to the orchestrator, including the SSE stream:
@@ -240,7 +238,7 @@ Orchestrator:
 | `HARNESS_AGENT_HOMES_ROOT` | `/var/lib/harness/agent-homes` | Host root for per-session agent HOME state, mounted outside `/workspace` |
 | `HARNESS_CHECKPOINTS_ROOT` | `/var/lib/harness/checkpoints` | Checkpoint image root |
 | `HARNESS_BUNDLE_ROOT` | `<repo>/bundle/out` | OCI bundle root |
-| `HARNESS_DB_PATH` | `<sessions_root>/orchestrator.db` | SQLite DB path |
+| `HARNESS_DB_PATH` | `/var/lib/harness/state/orchestrator.db` | SQLite DB path, outside sandbox-bindable roots |
 | `HARNESS_DEFAULT_AGENT` | `claude` | Default session agent |
 | `HARNESS_MAX_SESSIONS` | `harness.max_sessions` (`30`) | Non-terminal session ceiling; independent of live `/30` capacity |
 | `RUNSC_ROOT` | `/var/lib/harness/runsc` | runsc state root |
@@ -253,7 +251,7 @@ Project config:
 | --- | --- |
 | `config/harness.yaml` | Phase 7 typed control-plane schema and explicit lab runtime profile. |
 
-The config loader reads `config/harness.yaml` through a strict `gopkg.in/yaml.v3` decoder. The primary shape is the Phase 7 `harness:` schema: `run_dir`, `session_retention`, `max_sessions`, nested network egress, event retention, probe status, bridge lease, reaper, and secret-root settings are decoded into typed config and validated before startup. Legacy files containing only top-level `runtime:` / `claude:` sections still load for compatibility, but mixing legacy sections with `harness:` is rejected.
+The config loader reads `config/harness.yaml` through a strict `gopkg.in/yaml.v3` decoder. The primary shape is the Phase 7 `harness:` schema: `run_dir`, `session_retention`, `max_sessions`, nested network egress, event retention, probe status, bridge lease, and reaper settings are decoded into typed config and validated before startup. Legacy sandbox secret keys are rejected. Legacy files containing only top-level `runtime:` / `claude:` sections still load for compatibility, but mixing legacy sections with `harness:` is rejected.
 
 General orchestrator paths such as session roots and DB path still use the environment variables above. `HARNESS_SESSION_RETENTION` and `HARNESS_MAX_SESSIONS` override their `harness:` values and are revalidated against the Phase 7 schema. `HARNESS_SESSION_TTL` is obsolete and fails startup if present so deployments do not silently switch to no-expiry retention.
 
@@ -308,12 +306,12 @@ Claude control manifest:
 | Field | Purpose |
 | --- | --- |
 | `proxy_bind_url` | Explicit host bind URL for the local proxy, `http://0.0.0.0:8082` |
-| `anthropic_base_url` | Sandbox-visible proxy URL, derived from the generation's allocated `host_gateway_ip` |
-| `anthropic_api_key_secret_id` / `anthropic_auth_token_secret_id` | References to sandbox-readable local proxy credentials, fixed to `123` in the lab stack after secret materialization; Phase 8 sunsets this provider-secret path, moves upstream credentials host-side, and authorizes model requests through source-IP/generation/turn context plus driver entitlement |
+| `anthropic_base_url` | Sandbox-visible stable proxy alias, `http://harness-model-proxy.internal:8082` |
+| provider credentials | Absent from sandbox control files; upstream credentials stay host/proxy-side and model requests are authorized through source-IP/generation/turn context plus driver entitlement |
 | `claude_model` | Claude model alias, default `sonnet` |
 | `claude_code_disable_nonessential_traffic` | Keep Claude Code from making nonessential traffic during sandbox turns |
-| `session_workspace` | In-container sessions mount, default `/sessions/<session_id>` |
-| `harness_agent_home` | In-container agent home mount, default `/agent-homes/<session_id>` |
+| `session_workspace` | In-container workspace mount, `/workspace` |
+| `harness_agent_home` | In-container agent home mount, `/agent-home` |
 
 Frontend:
 
@@ -356,18 +354,12 @@ Checkpoint/restore remains policy-gated. Operators should enable automatic check
 
 ## Current Limitations
 
-- Runtime filesystem isolation is not yet at the intended boundary: the sandbox
-  can see parent `/sessions` and `/agent-homes` mounts, not only the current
-  session's workspace and persistent session+driver home. This is Phase 8's
-  highest-priority fix.
-- Claude-visible model credentials are still read from sandbox-mounted secret
-  files and exported before execing Claude. They are not stored in the
-  manifest/spec/rootfs, but they are visible to the Claude process and its tool
-  subprocesses. Phase 8 moves upstream credentials host-side.
-- Shell sessions currently start from the root entrypoint path and need the
-  Phase 8 non-root driver contract before being treated as least-privilege.
-- The OCI rootfs is currently writable. Phase 8 changes it to read-only with
-  explicit writable mounts for tmp/cache/workspace/home/bridge.
+- Phase 8 is still not release-complete until destructive cutover, proxy
+  contract re-pin evidence, host reconciliation evidence, and all adversarial
+  gates pass on the target lab host.
+- Legacy session `workspace`, `agent_home_path`, and `restore_id` columns remain
+  internal compatibility storage. Public DTOs omit them, and runtime launch uses
+  verified DataVolume rows instead.
 - Additional agent adapters beyond Claude Code and the shell shim need their own completion contract before they are first-class multi-turn citizens.
 - Artifact browsing is read-only. File creation, renaming, and deletion should still happen through the sandbox agent or shell session, with the UI reflecting those changes through metadata events.
 - Tenant-level resource limits and production egress policy management are Phase 10 work.

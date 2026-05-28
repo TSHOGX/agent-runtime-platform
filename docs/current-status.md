@@ -1,6 +1,6 @@
 # Current Status
 
-> Last updated: 2026-05-27
+> Last updated: 2026-05-28
 > Scope: current baseline after the Phase 7 checkpoint-safe control-plane refactor, release qualification, and completed P0 lifetime separation.
 
 ## Baseline
@@ -11,8 +11,7 @@ Harness Platform now has a working end-to-end lab stack:
 - Go orchestrator API on port `8090`.
 - gVisor `runsc` runtime using per-generation OCI specs, control manifests, bridge dirs, and network profiles.
 - SQLite persistence for sessions, messages, runtime generations, turns, durable events, proxy request context, resources, and artifact metadata.
-- Per-session workspace under `/var/lib/harness/sessions/<session_id>`, currently reached from the sandbox through a parent `/sessions` mount.
-- Per-session Claude HOME under `/var/lib/harness/agent-homes/<session_id>`, currently reached from the sandbox through a parent `/agent-homes` mount and kept outside `/workspace`.
+- Per-session workspace and per-session+driver HOME are provisioned through DataVolume rows with host-side evidence. Sandboxes receive exact `/workspace` and `/agent-home` binds, not parent `/sessions` or `/agent-homes` mounts.
 - Claude Code stream-json parsing into durable `emit_output` events, persisted assistant messages, and live UI deltas.
 - Shell sessions through the bridge-aware shell shim, with shell output persisted as assistant messages and interrupt support for running turns.
 - Phase 7 typed `config/harness.yaml` is loaded with strict YAML validation and drives per-generation network, probe, bridge, reaper, and checkpoint settings. Phase 8 removes the legacy sandbox secret config keys from the active schema.
@@ -155,11 +154,11 @@ HTTP routes, SSE/WebSocket endpoints, and the canonical event-name set are docum
 - The active Go runtime launches `runsc` directly. `bundle/bake-bundle.sh` and
   `bundle/restore-sandbox.sh` are quarantined legacy Phase 2 smoke tools: they
   fail closed and are not Phase 8 release evidence.
-- The current Go runtime uses `runsc -network sandbox -overlay2 none` with per-generation network profiles. The runtime creates the allocated netns/veth pair, configures host and sandbox addresses from the persisted `/30`, applies the static lab egress allow-list, probes the local proxy, and writes the generation-specific sandbox-visible Anthropic base URL into the control manifest. The local proxy key remains `123` for the lab path.
-- The current runtime still mounts the parent session root at `/sessions` and the parent agent-home root at `/agent-homes`, then points the active session at `/workspace`. This gives the sandbox a broader filesystem view than the intended per-session boundary and is the blocking Phase 8 fix.
-- Claude generations currently receive model/proxy credentials through sandbox-readable secret files and export them before execing Claude. The manifest/spec avoid plaintext credentials, but the Claude process can still observe the runtime values. Phase 8 moves upstream credentials host-side and authorizes model requests through source-IP/generation/turn context plus driver entitlement; it does not add a sandbox-visible proxy-token path.
-- Shell generations do not mount `/harness-secrets`, but the shell shim still starts from the root entrypoint path. Phase 8 makes shell driver execution non-root and gives it only its own workspace/home mounts.
-- The current OCI rootfs is writable. Phase 8 makes rootfs read-only and turns tmp/cache/workspace/agent-home/bridge into explicit writable surfaces.
+- The current Go runtime uses `runsc -network sandbox -overlay2 none` with per-generation network profiles. The runtime creates the allocated netns/veth pair, configures host and sandbox addresses from the persisted `/30`, applies the static lab egress allow-list, writes the stable sandbox-visible model proxy alias into the control manifest, and maps that alias through the generated `/etc/hosts` projection.
+- Runtime specs now use read-only rootfs, exact `/workspace` and `/agent-home` DataVolume binds, exact `/harness-control` and bridge binds, no `/harness-secrets`, no parent `/sessions` or `/agent-homes` mounts, empty OCI capabilities, and `noNewPrivileges`.
+- Claude provider credentials are host/proxy-side. Sandbox startup probes only health/bridge readiness before turns; model endpoints require a committed active model context, source-IP match, contract entitlement, and proxy correlation through the authenticated UDS.
+- Shell and Claude bridge claim-loop paths run under the configured non-root sandbox identity. Legacy session `workspace`, `agent_home_path`, and `restore_id` columns remain internal compatibility storage and are omitted from public API/event DTOs.
+- Phase 8 is not release-complete until destructive cutover, proxy re-pin evidence, host reconciliation evidence, and every release gate in `docs/phase8/release-gates.md` passes on the target lab host.
 - Automatic idle checkpointing is disabled by the checked-in policy. It can be enabled only after operators accept the measured restore/resource-retention behavior for the lab.
 - Reclaimable runtime resources are retained for `harness.reaper.failed_retention` before physical cleanup, so recently failed/destroyed generations can remain visible briefly by design.
 - Phase 8 is planned as a destructive clean cutover for this lab, not an
