@@ -17,10 +17,12 @@ import (
 const (
 	BridgeMountDestination = "/harness-control/bridge"
 
-	InboxDir     = "inbox"
-	OutboxDir    = "outbox"
-	HeartbeatDir = "heartbeat"
-	tmpDir       = "tmp"
+	InboxDir         = "inbox"
+	OutboxDir        = "outbox"
+	HeartbeatDir     = "heartbeat"
+	HostHeartbeatDir = "host-heartbeat"
+	SandboxTmpDir    = "tmp"
+	HostTmpDir       = "host-tmp"
 )
 
 const (
@@ -55,7 +57,9 @@ type Envelope struct {
 }
 
 type Queue struct {
-	dir string
+	name   string
+	dir    string
+	tmpDir string
 }
 
 type MessageFile struct {
@@ -69,16 +73,34 @@ func EnsureLayout(root string) error {
 		return fmt.Errorf("bridge root is required")
 	}
 	for _, dir := range []string{
-		filepath.Join(root, tmpDir),
+		root,
+		filepath.Join(root, SandboxTmpDir),
 		filepath.Join(root, InboxDir),
 		filepath.Join(root, OutboxDir),
 		filepath.Join(root, HeartbeatDir),
+		filepath.Join(root, HostHeartbeatDir),
+		filepath.Join(root, HostTmpDir),
+		HostControlRoot(root),
+		HostOwnedPath(root, InboxDir),
+		HostOwnedPath(root, HostHeartbeatDir),
+		HostOwnedPath(root, HostTmpDir),
 	} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
 		}
 	}
+	if err := syncDir(HostControlRoot(root)); err != nil {
+		return err
+	}
 	return syncDir(root)
+}
+
+func HostControlRoot(root string) string {
+	return filepath.Clean(root) + ".host"
+}
+
+func HostOwnedPath(root, name string) string {
+	return filepath.Join(HostControlRoot(root), name)
 }
 
 func OpenQueue(root, name string) (Queue, error) {
@@ -88,7 +110,13 @@ func OpenQueue(root, name string) (Queue, error) {
 	if err := EnsureLayout(root); err != nil {
 		return Queue{}, err
 	}
-	return Queue{dir: filepath.Join(root, name)}, nil
+	queueTmpDir := filepath.Join(root, SandboxTmpDir)
+	queueDir := filepath.Join(root, name)
+	if name == InboxDir {
+		queueDir = HostOwnedPath(root, InboxDir)
+		queueTmpDir = HostOwnedPath(root, HostTmpDir)
+	}
+	return Queue{name: name, dir: queueDir, tmpDir: queueTmpDir}, nil
 }
 
 func (q Queue) Write(ctx context.Context, envelope Envelope) (uint64, error) {
@@ -100,7 +128,12 @@ func (q Queue) Write(ctx context.Context, envelope Envelope) (uint64, error) {
 		return 0, err
 	}
 	payload = append(payload, '\n')
-	tmpPath := filepath.Join(filepath.Dir(q.dir), tmpDir, uuid.NewString()+".json")
+	if q.name == InboxDir {
+		if err := q.pruneSequenceFiles(); err != nil {
+			return 0, err
+		}
+	}
+	tmpPath := filepath.Join(q.tmpDir, uuid.NewString()+".json")
 	if err := writeFileDurable(tmpPath, payload, 0o644); err != nil {
 		return 0, err
 	}
@@ -126,6 +159,30 @@ func (q Queue) Write(ctx context.Context, envelope Envelope) (uint64, error) {
 			return 0, err
 		}
 	}
+}
+
+func (q Queue) pruneSequenceFiles() error {
+	entries, err := os.ReadDir(q.dir)
+	if err != nil {
+		return err
+	}
+	pruned := false
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if _, ok := parseSeqFileName(entry.Name()); !ok {
+			continue
+		}
+		if err := os.Remove(filepath.Join(q.dir, entry.Name())); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		pruned = true
+	}
+	if pruned {
+		return syncDir(q.dir)
+	}
+	return nil
 }
 
 func (q Queue) ReadAll() ([]MessageFile, error) {
@@ -173,7 +230,21 @@ func TouchHeartbeat(root, name string, now time.Time) error {
 	if name != BridgeHeartbeatFile && name != HostHeartbeatFile {
 		return fmt.Errorf("unsupported bridge heartbeat file %q", name)
 	}
-	return touchControlFile(root, HeartbeatDir, name, now, ".heartbeat")
+	return touchControlFile(root, heartbeatDir(name), name, now, ".heartbeat")
+}
+
+func HeartbeatPath(root, name string) string {
+	if name == HostHeartbeatFile {
+		return filepath.Join(HostOwnedPath(root, HostHeartbeatDir), name)
+	}
+	return filepath.Join(root, heartbeatDir(name), name)
+}
+
+func heartbeatDir(name string) string {
+	if name == HostHeartbeatFile {
+		return HostHeartbeatDir
+	}
+	return HeartbeatDir
 }
 
 func TouchCheckpointReady(root string, now time.Time) error {
@@ -203,17 +274,25 @@ func touchControlFile(root, dir, name string, now time.Time, suffix string) erro
 	if err := EnsureLayout(root); err != nil {
 		return err
 	}
-	tmpPath := filepath.Join(root, tmpDir, uuid.NewString()+suffix)
+	controlTmpDir := SandboxTmpDir
+	targetDir := filepath.Join(root, dir)
+	if dir == HostHeartbeatDir {
+		controlTmpDir = filepath.Join(HostControlRoot(root), HostTmpDir)
+		targetDir = filepath.Join(HostControlRoot(root), HostHeartbeatDir)
+	} else {
+		controlTmpDir = filepath.Join(root, controlTmpDir)
+	}
+	tmpPath := filepath.Join(controlTmpDir, uuid.NewString()+suffix)
 	payload := []byte(now.Format(time.RFC3339Nano) + "\n")
 	if err := writeFileDurable(tmpPath, payload, 0o644); err != nil {
 		return err
 	}
 	defer func() { _ = os.Remove(tmpPath) }()
-	target := filepath.Join(root, dir, name)
+	target := filepath.Join(targetDir, name)
 	if err := os.Rename(tmpPath, target); err != nil {
 		return err
 	}
-	return syncDir(filepath.Join(root, dir))
+	return syncDir(targetDir)
 }
 
 func (q Queue) nextSeq() (uint64, error) {

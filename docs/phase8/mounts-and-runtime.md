@@ -222,13 +222,14 @@ The queue is directional:
 
 ```text
 /harness-control/bridge/
-  inbox/       host publishes, sandbox reads
-  inbox-tmp/   host-only temp area
+  inbox/       read-only sandbox mount; host publishes from .host/inbox
+  host-tmp/    read-only sandbox mount; host temp lives under .host/host-tmp
   outbox/      sandbox publishes, host reads/cleans
-  outbox-tmp/  sandbox-only normal temp area
+  tmp/         sandbox-only temp area
   heartbeat/
-    host       host-owned heartbeat
     bridge     sandbox-owned heartbeat
+  host-heartbeat/
+    (empty sandbox placeholder; host heartbeat lives under .host/host-heartbeat)
 ```
 
 Equivalent layouts are allowed only if:

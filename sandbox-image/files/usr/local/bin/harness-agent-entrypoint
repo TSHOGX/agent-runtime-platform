@@ -138,6 +138,12 @@ fi
 
 exec_bridge_client() {
   if [ "${HARNESS_AGENT:-claude}" = "claude" ]; then
+    if [ "$(id -u)" = "$AGENT_UID" ] && [ "$(id -g)" = "$AGENT_GID" ]; then
+      exec env HOME="$AGENT_HOME" USER="$AGENT_USER" LOGNAME="$AGENT_USER" \
+        HARNESS_AGENT_HOME="$AGENT_HOME" \
+        ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-}" \
+        /usr/local/bin/harness-bridge-client "$@"
+    fi
     exec setpriv --reuid "$AGENT_UID" --regid "$AGENT_GID" --clear-groups \
       env HOME="$AGENT_HOME" USER="$AGENT_USER" LOGNAME="$AGENT_USER" \
       HARNESS_AGENT_HOME="$AGENT_HOME" \

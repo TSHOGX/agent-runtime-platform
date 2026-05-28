@@ -40,12 +40,14 @@ type allowedMountPlanSurface struct {
 }
 
 var contentMountPlanAllowList = map[string]allowedMountPlanSurface{
-	"workspace":     {Destination: "/workspace", Type: "bind", Mode: "rw"},
-	"agent_home":    {Destination: "/agent-home", Type: "bind", Mode: "rw"},
-	"control":       {Destination: "/harness-control", Type: "bind", Mode: "ro"},
-	"bridge":        {Destination: bridge.BridgeMountDestination, Type: "bind", Mode: "rw"},
-	"network_hosts": {Destination: "/etc/hosts", Type: "bind", Mode: "ro"},
-	"schema_pack":   {Destination: "/schema-pack", Type: "bind", Mode: "ro"},
+	"workspace":       {Destination: "/workspace", Type: "bind", Mode: "rw"},
+	"agent_home":      {Destination: "/agent-home", Type: "bind", Mode: "rw"},
+	"control":         {Destination: "/harness-control", Type: "bind", Mode: "ro"},
+	"bridge":          {Destination: bridge.BridgeMountDestination, Type: "bind", Mode: "rw"},
+	"bridge_inbox":    {Destination: filepath.Join(bridge.BridgeMountDestination, bridge.InboxDir), Type: "bind", Mode: "ro"},
+	"bridge_host_tmp": {Destination: filepath.Join(bridge.BridgeMountDestination, bridge.HostTmpDir), Type: "bind", Mode: "ro"},
+	"network_hosts":   {Destination: "/etc/hosts", Type: "bind", Mode: "ro"},
+	"schema_pack":     {Destination: "/schema-pack", Type: "bind", Mode: "ro"},
 }
 
 var scratchMountPlanAllowList = map[string]allowedMountPlanSurface{
@@ -64,6 +66,8 @@ func BuildSandboxMountPlan(input SandboxMountPlanInputs) (MountPlan, error) {
 				"dev.gvisor.spec.mount./harness-control/bridge.type":  "bind",
 				"dev.gvisor.spec.mount./harness-control/bridge.share": "exclusive",
 			}),
+			exactBindMount("bridge_inbox", bridge.HostOwnedPath(details.BridgeDirPath, bridge.InboxDir), filepath.Join(bridge.BridgeMountDestination, bridge.InboxDir), "ro", []string{"bind", "ro", "nosuid", "nodev", "noexec"}, nil),
+			exactBindMount("bridge_host_tmp", bridge.HostOwnedPath(details.BridgeDirPath, bridge.HostTmpDir), filepath.Join(bridge.BridgeMountDestination, bridge.HostTmpDir), "ro", []string{"bind", "ro", "nosuid", "nodev", "noexec"}, nil),
 		},
 		Scratch: []MountPlanMount{
 			tmpfsMount("tmp", "/tmp"),

@@ -14,13 +14,22 @@ func TestEnsureLayoutCreatesBridgeTransportDirs(t *testing.T) {
 	if err := EnsureLayout(root); err != nil {
 		t.Fatalf("ensure layout: %v", err)
 	}
-	for _, name := range []string{tmpDir, InboxDir, OutboxDir, HeartbeatDir} {
+	for _, name := range []string{SandboxTmpDir, HostTmpDir, InboxDir, OutboxDir, HeartbeatDir, HostHeartbeatDir} {
 		info, err := os.Stat(filepath.Join(root, name))
 		if err != nil {
 			t.Fatalf("stat %s: %v", name, err)
 		}
 		if !info.IsDir() {
 			t.Fatalf("%s is not a directory", name)
+		}
+	}
+	for _, name := range []string{InboxDir, HostTmpDir, HostHeartbeatDir} {
+		info, err := os.Stat(HostOwnedPath(root, name))
+		if err != nil {
+			t.Fatalf("stat host-owned %s: %v", name, err)
+		}
+		if !info.IsDir() {
+			t.Fatalf("host-owned %s is not a directory", name)
 		}
 	}
 }
@@ -102,14 +111,14 @@ func sameJSON(a, b json.RawMessage) bool {
 
 func TestQueueIgnoresInvalidNamesAndContinuesFromMaxSequence(t *testing.T) {
 	root := t.TempDir()
-	queue, err := OpenQueue(root, InboxDir)
+	queue, err := OpenQueue(root, OutboxDir)
 	if err != nil {
 		t.Fatalf("open queue: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(root, InboxDir, "not-a-message.json"), []byte("{}"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, OutboxDir, "not-a-message.json"), []byte("{}"), 0o644); err != nil {
 		t.Fatalf("write invalid name: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(root, InboxDir, "00000000000000000003.json"), []byte(`{"message_id":"m","type":"hello","session_id":"s","generation_id":"g"}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, OutboxDir, "00000000000000000003.json"), []byte(`{"message_id":"m","type":"hello","session_id":"s","generation_id":"g"}`), 0o644); err != nil {
 		t.Fatalf("write seq 3: %v", err)
 	}
 	seq, err := queue.Write(context.Background(), Envelope{
@@ -122,6 +131,45 @@ func TestQueueIgnoresInvalidNamesAndContinuesFromMaxSequence(t *testing.T) {
 	}
 	if seq != 4 {
 		t.Fatalf("seq=%d want 4", seq)
+	}
+}
+
+func TestInboxWritePrunesOldResponsesBeforeWriting(t *testing.T) {
+	root := t.TempDir()
+	queue, err := OpenQueue(root, InboxDir)
+	if err != nil {
+		t.Fatalf("open queue: %v", err)
+	}
+	inboxDir := HostOwnedPath(root, InboxDir)
+	for _, name := range []string{"00000000000000000001.json", "00000000000000000002.json"} {
+		if err := os.WriteFile(filepath.Join(inboxDir, name), []byte(`{"message_id":"old","type":"no_work","session_id":"s","generation_id":"g"}`), 0o644); err != nil {
+			t.Fatalf("write old response: %v", err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(inboxDir, "not-a-message.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write invalid name: %v", err)
+	}
+	seq, err := queue.Write(context.Background(), Envelope{
+		MessageID:    "new",
+		Type:         "no_work",
+		SessionID:    "s",
+		GenerationID: "g",
+	})
+	if err != nil {
+		t.Fatalf("write inbox: %v", err)
+	}
+	if seq != 1 {
+		t.Fatalf("seq=%d want 1 after prune", seq)
+	}
+	files, err := queue.ReadAll()
+	if err != nil {
+		t.Fatalf("read inbox: %v", err)
+	}
+	if len(files) != 1 || files[0].Envelope.MessageID != "new" {
+		t.Fatalf("unexpected inbox files after prune: %+v", files)
+	}
+	if _, err := os.Stat(filepath.Join(inboxDir, "not-a-message.json")); err != nil {
+		t.Fatalf("invalid non-sequence file should be left alone: %v", err)
 	}
 }
 
@@ -153,6 +201,17 @@ func TestTouchHeartbeatWritesDurableMtimeFile(t *testing.T) {
 	}
 	if secondInfo.ModTime().Before(firstInfo.ModTime()) {
 		t.Fatalf("heartbeat mtime moved backwards: first=%s second=%s", firstInfo.ModTime(), secondInfo.ModTime())
+	}
+
+	if err := TouchHeartbeat(root, HostHeartbeatFile, now); err != nil {
+		t.Fatalf("touch host heartbeat: %v", err)
+	}
+	hostPath := HeartbeatPath(root, HostHeartbeatFile)
+	if hostPath != filepath.Join(HostOwnedPath(root, HostHeartbeatDir), HostHeartbeatFile) {
+		t.Fatalf("host heartbeat path=%q", hostPath)
+	}
+	if _, err := os.Stat(hostPath); err != nil {
+		t.Fatalf("host heartbeat missing: %v", err)
 	}
 }
 

@@ -761,6 +761,8 @@ class EntrypointStaticTest(unittest.TestCase):
         entrypoint = SCRIPT.with_name("harness-agent-entrypoint")
         text = entrypoint.read_text(encoding="utf-8")
         self.assertIn("--clear-groups", text)
+        self.assertIn('[ "$(id -u)" = "$AGENT_UID" ]', text)
+        self.assertIn('[ "$(id -g)" = "$AGENT_GID" ]', text)
         self.assertIn("HARNESS_PROXY_DUMMY_API_KEY:-harness-model-proxy-dummy-key", text)
         self.assertIn("exec_bridge_client()", text)
         self.assertIn('/usr/local/bin/harness-bridge-client "$@"', text)

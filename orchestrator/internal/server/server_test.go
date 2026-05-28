@@ -2779,7 +2779,7 @@ func TestRunPhase7MaintenancePollsBridgeOutbox(t *testing.T) {
 	if response.GenerationID != allocation.GenerationID || response.SessionID != session.ID {
 		t.Fatalf("unexpected bridge response identity: %+v", response)
 	}
-	if _, err := os.Stat(filepath.Join(details.BridgeDirPath, bridge.HeartbeatDir, bridge.HostHeartbeatFile)); err != nil {
+	if _, err := os.Stat(bridge.HeartbeatPath(details.BridgeDirPath, bridge.HostHeartbeatFile)); err != nil {
 		t.Fatalf("host heartbeat file missing after bridge poll: %v", err)
 	}
 	cancel()

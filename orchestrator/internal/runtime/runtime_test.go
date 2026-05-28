@@ -12,9 +12,11 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
+	"harness-platform/orchestrator/internal/bridge"
 	"harness-platform/orchestrator/internal/store"
 )
 
@@ -1728,6 +1730,9 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndIsolatedRuntime(t *t
 		bridgeMount.Annotations["dev.gvisor.spec.mount./harness-control/bridge.type"] != "bind" {
 		t.Fatalf("bridge mount missing exclusive annotation: %+v", bridgeMount.Annotations)
 	}
+	assertReadOnlyBridgeSubmount(t, spec.Mounts, details, bridge.InboxDir)
+	assertReadOnlyBridgeSubmount(t, spec.Mounts, details, bridge.HostTmpDir)
+	assertNoBridgeSubmount(t, spec.Mounts, bridge.HostHeartbeatDir)
 	env := specEnv(spec.Process.Env)
 	if env["HARNESS_BRIDGE_DIR"] != "/harness-control/bridge" ||
 		env["HARNESS_BRIDGE_MODE"] != "claim-loop" ||
@@ -1757,6 +1762,39 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndIsolatedRuntime(t *t
 		if info, err := os.Stat(filepath.Join(details.BridgeDirPath, name)); err != nil || !info.IsDir() {
 			t.Fatalf("bridge dir %s not initialized: info=%v err=%v", name, info, err)
 		}
+	}
+	hostUID := 0
+	if os.Geteuid() != 0 {
+		hostUID = os.Geteuid()
+	}
+	for _, check := range []struct {
+		name string
+		uid  int
+		gid  int
+		mode os.FileMode
+	}{
+		{name: ".", uid: hostUID, gid: testSandboxGID(), mode: 0o750},
+		{name: "inbox", uid: hostUID, gid: testSandboxGID(), mode: 0o550},
+		{name: "host-heartbeat", uid: hostUID, gid: testSandboxGID(), mode: 0o550},
+		{name: "host-tmp", uid: hostUID, gid: testSandboxGID(), mode: 0o550},
+		{name: "outbox", uid: testSandboxUID(), gid: testSandboxGID(), mode: 0o770},
+		{name: "tmp", uid: testSandboxUID(), gid: testSandboxGID(), mode: 0o770},
+		{name: "heartbeat", uid: testSandboxUID(), gid: testSandboxGID(), mode: 0o770},
+	} {
+		assertBridgeDirOwnership(t, filepath.Join(details.BridgeDirPath, check.name), check.uid, check.gid, check.mode)
+	}
+	for _, check := range []struct {
+		path string
+		uid  int
+		gid  int
+		mode os.FileMode
+	}{
+		{path: bridge.HostControlRoot(details.BridgeDirPath), uid: hostUID, gid: testSandboxGID(), mode: 0o750},
+		{path: bridge.HostOwnedPath(details.BridgeDirPath, bridge.InboxDir), uid: hostUID, gid: testSandboxGID(), mode: 0o750},
+		{path: bridge.HostOwnedPath(details.BridgeDirPath, bridge.HostHeartbeatDir), uid: hostUID, gid: testSandboxGID(), mode: 0o750},
+		{path: bridge.HostOwnedPath(details.BridgeDirPath, bridge.HostTmpDir), uid: hostUID, gid: testSandboxGID(), mode: 0o750},
+	} {
+		assertBridgeDirOwnership(t, check.path, check.uid, check.gid, check.mode)
 	}
 }
 
@@ -2020,6 +2058,9 @@ func TestPrepareShellGenerationHasNoSecretMount(t *testing.T) {
 		bridgeMount.Annotations["dev.gvisor.spec.mount./harness-control/bridge.share"] != "exclusive" {
 		t.Fatalf("unexpected isolated bridge mount: %+v", bridgeMount)
 	}
+	assertReadOnlyBridgeSubmount(t, spec.Mounts, details, bridge.InboxDir)
+	assertReadOnlyBridgeSubmount(t, spec.Mounts, details, bridge.HostTmpDir)
+	assertNoBridgeSubmount(t, spec.Mounts, bridge.HostHeartbeatDir)
 	env := specEnv(spec.Process.Env)
 	if env["HARNESS_AGENT_UID"] != fmt.Sprint(testSandboxUID()) ||
 		env["HARNESS_AGENT_GID"] != fmt.Sprint(testSandboxGID()) ||
@@ -2285,6 +2326,45 @@ func assertGenerationFilesystemMissing(t *testing.T, paths []string) {
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {
 			t.Fatalf("expected cleanup path %s to be missing, stat err=%v", path, err)
 		}
+	}
+}
+
+func assertBridgeDirOwnership(t *testing.T, path string, uid, gid int, mode os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat bridge dir %s: %v", path, err)
+	}
+	if !info.IsDir() || info.Mode().Perm() != mode {
+		t.Fatalf("bridge dir %s mode=%#o is_dir=%v want mode=%#o", path, info.Mode().Perm(), info.IsDir(), mode)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("bridge dir %s stat type = %T", path, info.Sys())
+	}
+	if int(stat.Uid) != uid || int(stat.Gid) != gid {
+		t.Fatalf("bridge dir %s owner=%d:%d want %d:%d", path, stat.Uid, stat.Gid, uid, gid)
+	}
+}
+
+func assertReadOnlyBridgeSubmount(t *testing.T, mounts []specMount, details store.RuntimeGenerationDetails, name string) {
+	t.Helper()
+	destination := filepath.Join(bridge.BridgeMountDestination, name)
+	mount := mountByDestination(mounts, destination)
+	if mount == nil {
+		t.Fatalf("missing bridge submount %s: %+v", destination, mounts)
+	}
+	if mount.Source != bridge.HostOwnedPath(details.BridgeDirPath, name) ||
+		strings.Join(mount.Options, ",") != "bind,ro,nosuid,nodev,noexec" {
+		t.Fatalf("unexpected bridge submount %s: %+v", destination, mount)
+	}
+}
+
+func assertNoBridgeSubmount(t *testing.T, mounts []specMount, name string) {
+	t.Helper()
+	destination := filepath.Join(bridge.BridgeMountDestination, name)
+	if mountByDestination(mounts, destination) != nil {
+		t.Fatalf("bridge submount %s should not be mounted: %+v", destination, mounts)
 	}
 }
 

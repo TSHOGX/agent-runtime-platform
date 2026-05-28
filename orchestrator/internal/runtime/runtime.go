@@ -1930,7 +1930,7 @@ func (r *Runtime) prepareSandboxIsolationDataDirs(req StartRequest) error {
 		if err := bridge.EnsureLayout(req.Generation.BridgeDirPath); err != nil {
 			return fmt.Errorf("create sandbox bridge dir: %w", err)
 		}
-		if err := ensureSandboxOwnedTree(req.Generation.BridgeDirPath, identity.UID, identity.GID, 0o770); err != nil {
+		if err := prepareBridgeDirectoryPermissions(req.Generation.BridgeDirPath, identity.UID, identity.GID); err != nil {
 			return fmt.Errorf("sandbox bridge dir: %w", err)
 		}
 	}
@@ -2045,6 +2045,10 @@ func pathIsMountPoint(path string) (bool, error) {
 }
 
 func ensureSandboxOwnedDir(path string, uid, gid int, mode os.FileMode) error {
+	return ensureOwnedDir(path, uid, gid, mode)
+}
+
+func ensureOwnedDir(path string, uid, gid int, mode os.FileMode) error {
 	if err := os.MkdirAll(path, mode); err != nil {
 		return err
 	}
@@ -2064,26 +2068,34 @@ func ensureSandboxOwnedDir(path string, uid, gid int, mode os.FileMode) error {
 	return os.Chmod(path, mode)
 }
 
-func ensureSandboxOwnedTree(root string, uid, gid int, dirMode os.FileMode) error {
-	return filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
+func prepareBridgeDirectoryPermissions(root string, sandboxUID, sandboxGID int) error {
+	hostUID := 0
+	if os.Geteuid() != 0 {
+		hostUID = os.Geteuid()
+	}
+	for _, item := range []struct {
+		path string
+		uid  int
+		gid  int
+		mode os.FileMode
+	}{
+		{path: root, uid: hostUID, gid: sandboxGID, mode: 0o750},
+		{path: filepath.Join(root, bridge.InboxDir), uid: hostUID, gid: sandboxGID, mode: 0o550},
+		{path: filepath.Join(root, bridge.HostHeartbeatDir), uid: hostUID, gid: sandboxGID, mode: 0o550},
+		{path: filepath.Join(root, bridge.HostTmpDir), uid: hostUID, gid: sandboxGID, mode: 0o550},
+		{path: filepath.Join(root, bridge.OutboxDir), uid: sandboxUID, gid: sandboxGID, mode: 0o770},
+		{path: filepath.Join(root, bridge.SandboxTmpDir), uid: sandboxUID, gid: sandboxGID, mode: 0o770},
+		{path: filepath.Join(root, bridge.HeartbeatDir), uid: sandboxUID, gid: sandboxGID, mode: 0o770},
+		{path: bridge.HostControlRoot(root), uid: hostUID, gid: sandboxGID, mode: 0o750},
+		{path: bridge.HostOwnedPath(root, bridge.InboxDir), uid: hostUID, gid: sandboxGID, mode: 0o750},
+		{path: bridge.HostOwnedPath(root, bridge.HostHeartbeatDir), uid: hostUID, gid: sandboxGID, mode: 0o750},
+		{path: bridge.HostOwnedPath(root, bridge.HostTmpDir), uid: hostUID, gid: sandboxGID, mode: 0o750},
+	} {
+		if err := ensureOwnedDir(item.path, item.uid, item.gid, item.mode); err != nil {
 			return err
 		}
-		info, err := os.Lstat(path)
-		if err != nil {
-			return err
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("%q must not be a symlink", path)
-		}
-		if err := ensureSandboxOwnership(path, info, uid, gid); err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			return os.Chmod(path, dirMode)
-		}
-		return nil
-	})
+	}
+	return nil
 }
 
 func ensureSandboxOwnership(path string, info os.FileInfo, uid, gid int) error {

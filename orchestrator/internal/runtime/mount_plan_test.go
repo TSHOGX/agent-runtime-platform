@@ -34,6 +34,11 @@ func TestBuildSandboxMountPlanUsesExactSandboxSurface(t *testing.T) {
 	if bridgeMount.Annotations["dev.gvisor.spec.mount./harness-control/bridge.share"] != "exclusive" {
 		t.Fatalf("bridge mount missing exclusive annotation: %+v", bridgeMount.Annotations)
 	}
+	assertMount(t, mounts, filepath.Join(bridge.BridgeMountDestination, bridge.InboxDir), bridge.HostOwnedPath(filepath.Join(dir, "run", "bridge", "gen-1"), bridge.InboxDir), "ro", true)
+	assertMount(t, mounts, filepath.Join(bridge.BridgeMountDestination, bridge.HostTmpDir), bridge.HostOwnedPath(filepath.Join(dir, "run", "bridge", "gen-1"), bridge.HostTmpDir), "ro", true)
+	if mountByDestination(mounts, filepath.Join(bridge.BridgeMountDestination, bridge.HostHeartbeatDir)) != nil {
+		t.Fatalf("host heartbeat must remain host-only, not mounted into sandbox: %+v", mounts)
+	}
 	assertMount(t, mounts, "/etc/hosts", filepath.Join(dir, "run", "network", "gen-1", "hosts"), "ro", true)
 	assertMount(t, mounts, "/schema-pack", filepath.Join(dir, "schema-pack"), "ro", true)
 
