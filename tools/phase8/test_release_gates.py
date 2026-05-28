@@ -40,6 +40,7 @@ class ReleaseGatesTest(unittest.TestCase):
         self.assertEqual({gate.category for gate in gates}, {"deterministic"})
         self.assertIn("tools/phase8/test_release_gates.py", gates[2].command)
         self.assertIn("tools/phase8/test_adversarial_lab.py", gates[2].command)
+        self.assertIn("tools/phase8/test_cutover_cleanup.py", gates[2].command)
         self.assertIn("tools/phase8/test_cutover_inventory.py", gates[2].command)
         self.assertIn("tools/phase8/test_reconciliation_evidence.py", gates[2].command)
         self.assertIn("tools/phase8/test_rootfs_inspect.py", gates[2].command)

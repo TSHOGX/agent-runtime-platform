@@ -97,6 +97,7 @@ def deterministic_gates():
                 "unittest",
                 "sandbox-image/tests/test_harness_bridge_client.py",
                 "tools/phase8/test_adversarial_lab.py",
+                "tools/phase8/test_cutover_cleanup.py",
                 "tools/phase8/test_cutover_inventory.py",
                 "tools/phase8/test_reconciliation_evidence.py",
                 "tools/phase8/test_release_gates.py",
