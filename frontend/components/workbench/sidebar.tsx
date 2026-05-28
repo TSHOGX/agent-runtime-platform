@@ -7,8 +7,57 @@ import { useHarness } from "@/components/harness-provider";
 import { Button } from "@/components/ui/button";
 import { StatusDot, statusTone } from "@/components/ui/badge";
 import { NEW_SESSION_OPTIONS, agentLabel, type RuntimeAgent } from "@/lib/agents";
-import { formatRelative, statusLabel } from "@/lib/format";
+import { formatRelative, isTerminal, statusLabel } from "@/lib/format";
 import { cn } from "@/lib/cn";
+import type { ApiSession } from "@/lib/types";
+
+type SessionRowProps = {
+  session: ApiSession;
+  selected: boolean;
+  closing: boolean;
+  onSelect: (id: string) => void;
+  onClose: (id: string) => void;
+};
+
+function SessionRow({ session, selected, closing, onSelect, onClose }: SessionRowProps) {
+  return (
+    <li>
+      <div
+        className={cn(
+          "group flex w-full items-start gap-2 rounded-[var(--radius)] px-2.5 py-2 text-left transition-colors",
+          selected
+            ? "border-l-2 border-[var(--color-accent)] bg-[var(--color-surface-muted)] pl-[calc(0.625rem-2px)]"
+            : "hover:bg-[var(--color-surface-muted)]"
+        )}
+      >
+        <button className="flex min-w-0 flex-1 items-start gap-2 text-left" onClick={() => onSelect(session.id)}>
+          <StatusDot tone={statusTone(session.status)} />
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-sm leading-tight">{session.id}</div>
+            <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-[var(--color-foreground-muted)]">
+              <span>{agentLabel(session.agent)}</span>
+              <span aria-hidden>·</span>
+              <span>{statusLabel(session.status)}</span>
+              <span aria-hidden>·</span>
+              <span>{formatRelative(session.updated_at)}</span>
+            </div>
+          </div>
+        </button>
+        <Button
+          variant="danger"
+          size="icon"
+          className="h-7 w-7 shrink-0 opacity-70 hover:opacity-100 focus:opacity-100"
+          onClick={() => onClose(session.id)}
+          disabled={closing || session.status === "destroyed"}
+          aria-label={`Close session ${session.id}`}
+          title="Close session"
+        >
+          {closing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+        </Button>
+      </div>
+    </li>
+  );
+}
 
 export function Sidebar() {
   const { state, selectSession, createSession, destroySession, refresh } = useHarness();
@@ -17,6 +66,10 @@ export function Sidebar() {
   const [closeError, setCloseError] = useState<string | null>(null);
   const [closingId, setClosingId] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [endedOpen, setEndedOpen] = useState(false);
+
+  const activeSessions = state.sessions.filter((session) => !isTerminal(session.status));
+  const endedSessions = state.sessions.filter((session) => isTerminal(session.status));
 
   const handleCreate = async (agent: RuntimeAgent) => {
     setPickerOpen(false);
@@ -94,60 +147,68 @@ export function Sidebar() {
         <span className="text-[11px] text-[var(--color-foreground-muted)]">{state.sessions.length}</span>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="min-h-0 flex-1 overflow-hidden">
         {state.sessions.length === 0 ? (
           <p className="px-4 py-6 text-center text-xs text-[var(--color-foreground-muted)]">
             {state.ready || state.connection === "live" ? "No sessions yet. Create one to get started." : "Loading…"}
           </p>
         ) : (
-          <ul className="px-1.5 pb-3 space-y-0.5">
-            {state.sessions.map((s) => {
-              const active = s.id === state.selectedId;
-              const closing = closingId === s.id;
-              return (
-                <li key={s.id}>
-                  <div
-                    className={cn(
-                      "group flex w-full items-start gap-2 rounded-[var(--radius)] px-2.5 py-2 text-left transition-colors",
-                      active
-                        ? "bg-[var(--color-surface-muted)] border-l-2 border-[var(--color-accent)] pl-[calc(0.625rem-2px)]"
-                        : "hover:bg-[var(--color-surface-muted)]"
-                    )}
-                  >
-                    <button
-                      className="flex min-w-0 flex-1 items-start gap-2 text-left"
-                      onClick={() => selectSession(s.id)}
-                    >
-                      <StatusDot tone={statusTone(s.status)} />
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-sm leading-tight">
-                          {s.id}
-                        </div>
-                        <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-[var(--color-foreground-muted)]">
-                          <span>{agentLabel(s.agent)}</span>
-                          <span aria-hidden>·</span>
-                          <span>{statusLabel(s.status)}</span>
-                          <span aria-hidden>·</span>
-                          <span>{formatRelative(s.updated_at)}</span>
-                        </div>
-                      </div>
-                    </button>
-                    <Button
-                      variant="danger"
-                      size="icon"
-                      className="h-7 w-7 shrink-0 opacity-70 hover:opacity-100 focus:opacity-100"
-                      onClick={() => void handleClose(s.id)}
-                      disabled={closing || s.status === "destroyed"}
-                      aria-label={`Close session ${s.id}`}
-                      title="Close session"
-                    >
-                      {closing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
-                    </Button>
+          <div className="flex h-full min-h-0 flex-col">
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              {activeSessions.length === 0 ? (
+                <p className="px-4 py-6 text-center text-xs text-[var(--color-foreground-muted)]">
+                  No active sessions.
+                </p>
+              ) : (
+                <ul className="space-y-0.5 px-1.5 pb-3">
+                  {activeSessions.map((s) => (
+                    <SessionRow
+                      key={s.id}
+                      session={s}
+                      selected={s.id === state.selectedId}
+                      closing={closingId === s.id}
+                      onSelect={selectSession}
+                      onClose={(id) => void handleClose(id)}
+                    />
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            {endedSessions.length > 0 ? (
+              <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-surface)]">
+                <button
+                  className="flex h-9 w-full items-center justify-between px-3 text-left text-[11px] uppercase tracking-wider text-[var(--color-foreground-muted)] hover:bg-[var(--color-surface-muted)]"
+                  onClick={() => setEndedOpen((open) => !open)}
+                  aria-expanded={endedOpen}
+                >
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    <ChevronDown
+                      className={cn("h-3.5 w-3.5 shrink-0 transition-transform", endedOpen ? "" : "-rotate-90")}
+                    />
+                    <span>Ended</span>
+                  </span>
+                  <span>{endedSessions.length}</span>
+                </button>
+                {endedOpen ? (
+                  <div className="max-h-64 overflow-y-auto border-t border-[var(--color-border)]">
+                    <ul className="space-y-0.5 px-1.5 py-1.5">
+                      {endedSessions.map((s) => (
+                        <SessionRow
+                          key={s.id}
+                          session={s}
+                          selected={s.id === state.selectedId}
+                          closing={closingId === s.id}
+                          onSelect={selectSession}
+                          onClose={(id) => void handleClose(id)}
+                        />
+                      ))}
+                    </ul>
                   </div>
-                </li>
-              );
-            })}
-          </ul>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
         )}
       </div>
 
