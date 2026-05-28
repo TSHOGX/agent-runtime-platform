@@ -20,6 +20,8 @@ class ReleaseGatesTest(unittest.TestCase):
             include_reconciliation=False,
             include_rootfs_inspection=False,
             include_proxy=False,
+            include_adversarial_lab=False,
+            adversarial_lab_report="",
             include_bridge_lab=False,
             include_live_latency=False,
         )
@@ -37,6 +39,7 @@ class ReleaseGatesTest(unittest.TestCase):
         )
         self.assertEqual({gate.category for gate in gates}, {"deterministic"})
         self.assertIn("tools/phase8/test_release_gates.py", gates[2].command)
+        self.assertIn("tools/phase8/test_adversarial_lab.py", gates[2].command)
         self.assertIn("tools/phase8/test_cutover_inventory.py", gates[2].command)
         self.assertIn("tools/phase8/test_reconciliation_evidence.py", gates[2].command)
         self.assertIn("tools/phase8/test_rootfs_inspect.py", gates[2].command)
@@ -48,6 +51,8 @@ class ReleaseGatesTest(unittest.TestCase):
             include_reconciliation=True,
             include_rootfs_inspection=True,
             include_proxy=True,
+            include_adversarial_lab=True,
+            adversarial_lab_report="/tmp/phase8-lab.json",
             include_bridge_lab=True,
             include_live_latency=True,
         )
@@ -55,20 +60,22 @@ class ReleaseGatesTest(unittest.TestCase):
         gates = MODULE.selected_gates(args)
 
         self.assertEqual(
-            [gate.name for gate in gates[-7:]],
+            [gate.name for gate in gates[-8:]],
             [
                 "prior_deterministic_release_runner",
                 "cutover_inventory",
                 "runtime_reconciliation_evidence",
                 "rootfs_image_inspection",
                 "pinned_proxy_contract",
+                "phase8_adversarial_lab",
                 "gvisor_bridge_durability_lab",
                 "live_turn_start_latency",
             ],
         )
-        self.assertEqual(gates[-7].category, "compatibility")
-        self.assertEqual({gates[-6].category, gates[-5].category, gates[-4].category}, {"evidence"})
-        self.assertEqual({gate.category for gate in gates[-3:]}, {"external"})
+        self.assertEqual(gates[-8].category, "compatibility")
+        self.assertEqual({gates[-7].category, gates[-6].category, gates[-5].category, gates[-3].category}, {"evidence"})
+        self.assertEqual({gates[-4].category, gates[-2].category, gates[-1].category}, {"external"})
+        self.assertIn("/tmp/phase8-lab.json", gates[-3].command)
 
     def test_run_gate_captures_success_and_failure(self):
         ok = MODULE.Gate(
@@ -214,6 +221,31 @@ class ReleaseGatesTest(unittest.TestCase):
 
         self.assertIn("proxy_contract", payload["supplied_evidence"])
         self.assertEqual(payload["supplied_evidence"]["proxy_contract"]["digest"], "proxyabc")
+
+    def test_adversarial_lab_output_satisfies_supplied_evidence(self):
+        lab_payload = {
+            "status": "passed",
+            "qualification": "adversarial-lab",
+            "required_total": 112,
+            "reported_total": 112,
+            "passed_total": 112,
+            "issues": [],
+        }
+
+        payload = MODULE.evidence(
+            [
+                {
+                    "name": "phase8_adversarial_lab",
+                    "status": "passed",
+                    "structured_output": lab_payload,
+                }
+            ],
+            commit="abc123",
+            context={"git": {"commit": "abc123"}},
+        )
+
+        self.assertIn("adversarial_lab", payload["supplied_evidence"])
+        self.assertEqual(payload["supplied_evidence"]["adversarial_lab"]["status"], "passed")
 
     def test_supplied_evidence_records_digest_and_allows_release_completion(self):
         with tempfile.TemporaryDirectory() as tmp:

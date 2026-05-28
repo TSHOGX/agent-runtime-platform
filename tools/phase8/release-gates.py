@@ -41,6 +41,8 @@ def parse_args():
     parser.add_argument("--include-reconciliation", action="store_true", help="Run the runtime resource reconciliation evidence gate.")
     parser.add_argument("--include-rootfs-inspection", action="store_true", help="Inspect the configured sandbox rootfs image.")
     parser.add_argument("--include-proxy", action="store_true", help="Run the pinned claude-code-proxy contract gate.")
+    parser.add_argument("--include-adversarial-lab", action="store_true", help="Validate target-lab adversarial evidence coverage.")
+    parser.add_argument("--adversarial-lab-report", default=os.environ.get("HARNESS_PHASE8_ADVERSARIAL_LAB_REPORT", ""), help="Path to the target-lab adversarial JSON report.")
     parser.add_argument("--include-bridge-lab", action="store_true", help="Run the gVisor bridge durability lab.")
     parser.add_argument("--include-live-latency", action="store_true", help="Run the live turn-start latency gate.")
     parser.add_argument(
@@ -94,6 +96,7 @@ def deterministic_gates():
                 "-m",
                 "unittest",
                 "sandbox-image/tests/test_harness_bridge_client.py",
+                "tools/phase8/test_adversarial_lab.py",
                 "tools/phase8/test_cutover_inventory.py",
                 "tools/phase8/test_reconciliation_evidence.py",
                 "tools/phase8/test_release_gates.py",
@@ -162,6 +165,15 @@ def optional_gates(args):
                 command=(".venv/bin/python", "-m", "pytest", "-q", "tests/test_harness_probe_contract.py"),
                 cwd=PROXY_ROOT,
                 category="external",
+            )
+        )
+    if args.include_adversarial_lab:
+        gates.append(
+            Gate(
+                name="phase8_adversarial_lab",
+                command=("tools/phase8/adversarial-lab.py", "--report", args.adversarial_lab_report),
+                cwd=REPO_ROOT,
+                category="evidence",
             )
         )
     if args.include_bridge_lab:
@@ -323,7 +335,7 @@ def tail(text, limit=12000):
 
 
 def attach_structured_output(result):
-    if result["name"] in {"live_turn_start_latency", "rootfs_image_inspection", "cutover_inventory", "runtime_reconciliation_evidence"} and result["stdout_tail"].strip():
+    if result["name"] in {"live_turn_start_latency", "rootfs_image_inspection", "cutover_inventory", "runtime_reconciliation_evidence", "phase8_adversarial_lab"} and result["stdout_tail"].strip():
         try:
             result["structured_output"] = json.loads(result["stdout_tail"])
         except json.JSONDecodeError:
@@ -475,6 +487,14 @@ def supplied_evidence_from_gate_results(results, context=None):
         elif result["name"] == "runtime_reconciliation_evidence":
             supplied["reconciliation"] = {
                 "path": "gate:runtime_reconciliation_evidence",
+                "digest": "",
+                "bytes": 0,
+                "status": payload.get("status", ""),
+                "payload": payload,
+            }
+        elif result["name"] == "phase8_adversarial_lab":
+            supplied["adversarial_lab"] = {
+                "path": "gate:phase8_adversarial_lab",
                 "digest": "",
                 "bytes": 0,
                 "status": payload.get("status", ""),

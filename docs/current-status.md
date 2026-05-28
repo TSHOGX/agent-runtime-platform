@@ -215,6 +215,7 @@ tools/phase8/release-gates.py --include-proxy --output /tmp/harness-runtime-isol
 tools/phase8/cutover-inventory.py --expect-clean --require-host-inventory --output /tmp/harness-cutover-inventory.json
 tools/phase8/reconciliation-evidence.py --expect-clean --require-runtime-table --require-host-inventory --verify-host-absence --output /tmp/harness-reconciliation-evidence.json
 tools/phase8/rootfs-inspect.py --output /tmp/harness-rootfs-inspection.json
+tools/phase8/adversarial-lab.py --report /tmp/harness-phase8-adversarial-lab.json --output /tmp/harness-adversarial-lab-validation.json
 ```
 
 Phase 7 release gates:
