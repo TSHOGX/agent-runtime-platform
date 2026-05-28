@@ -143,12 +143,13 @@ Browser
   -> Next.js same-origin proxy
   -> Go orchestrator
   -> gVisor runtime
-  -> long-lived sandbox with current-session workspace
+  -> long-lived sandbox with exact /workspace and /agent-home binds
 ```
 
-Until Phase 8 lands, the sandbox reaches that workspace through parent
-`/sessions` and `/agent-homes` mounts. The target Phase 8 boundary is exact
-`/workspace` and `/agent-home` binds only.
+The active runtime no longer mounts parent `/sessions` or `/agent-homes`
+directories into the sandbox. Each generation receives exact DataVolume-backed
+`/workspace` and `/agent-home` binds, plus its generation-scoped
+`/harness-control` surfaces and explicit read-only content mounts.
 
 The browser reads live events from SSE at `/api/events/stream`. The orchestrator still keeps the WebSocket endpoint for compatibility and manual debugging.
 
