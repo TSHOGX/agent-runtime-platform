@@ -448,34 +448,13 @@ def http_status(url, method="GET", headers=None, body=None, timeout=3.0):
         return err.code
 
 
-def run_network_probe(base_url, healthz_statuses, message_statuses, timeout, api_key, auth_token=""):
+def run_network_probe(base_url, healthz_statuses, timeout):
     if not base_url:
         raise RuntimeError("ANTHROPIC_BASE_URL is required for probe")
     base_url = base_url.rstrip("/")
     healthz_status = http_status(f"{base_url}/healthz", timeout=timeout)
     if healthz_status not in healthz_statuses:
         raise RuntimeError(f"probe GET /healthz returned {healthz_status}, want one of {sorted(healthz_statuses)}")
-
-    if not api_key:
-        return
-    headers = {
-        "content-type": "application/json",
-        "anthropic-version": "2023-06-01",
-        "x-api-key": api_key,
-    }
-    if auth_token:
-        headers["authorization"] = f"Bearer {auth_token}"
-    message_status = http_status(
-        f"{base_url}/v1/messages",
-        method="POST",
-        headers=headers,
-        body=b"",
-        timeout=timeout,
-    )
-    if message_status not in message_statuses:
-        raise RuntimeError(
-            f"probe POST /v1/messages returned {message_status}, want one of {sorted(message_statuses)}"
-        )
 
 
 def run_probe(args):
@@ -486,9 +465,7 @@ def run_probe(args):
         run_network_probe(
             args.base_url,
             parse_statuses(args.healthz_statuses, {200}),
-            parse_statuses(args.message_statuses, {400}),
             args.http_timeout,
-            "",
         )
     client.probe_network(timeout=args.timeout)
     client.touch_bridge_heartbeat()
@@ -548,9 +525,7 @@ def run_claim_loop(args, runner=None):
         run_network_probe(
             args.base_url,
             parse_statuses(args.healthz_statuses, {200}),
-            parse_statuses(args.message_statuses, {400}),
             args.http_timeout,
-            "",
         )
     client.probe_network(timeout=args.timeout)
     client.mark_checkpoint_ready()
@@ -591,7 +566,6 @@ def main(argv=None):
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--base-url", default=os.environ.get("ANTHROPIC_BASE_URL", ""))
     parser.add_argument("--healthz-statuses", default=os.environ.get("HARNESS_PROBE_HEALTHZ_STATUSES", "200"))
-    parser.add_argument("--message-statuses", default=os.environ.get("HARNESS_PROBE_MESSAGE_STATUSES", "400"))
     parser.add_argument("--http-timeout", type=float, default=float(os.environ.get("HARNESS_PROBE_HTTP_TIMEOUT", "3")))
     subcommands = parser.add_subparsers(dest="command", required=True)
     subcommands.add_parser("probe")

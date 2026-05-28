@@ -1703,9 +1703,11 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndIsolatedRuntime(t *t
 		env["HARNESS_BRIDGE_HEARTBEAT_INTERVAL"] != "20" ||
 		env["HARNESS_BRIDGE_POLL_INTERVAL"] != "0.005" ||
 		env["HARNESS_BRIDGE_IDLE_INTERVAL"] != "0.005" ||
-		env["HARNESS_PROBE_HEALTHZ_STATUSES"] != "200" ||
-		env["HARNESS_PROBE_MESSAGE_STATUSES"] != "400" {
+		env["HARNESS_PROBE_HEALTHZ_STATUSES"] != "200" {
 		t.Fatalf("runtime spec missing bridge/probe env: %+v", env)
+	}
+	if _, ok := env["HARNESS_PROBE_MESSAGE_STATUSES"]; ok {
+		t.Fatalf("runtime spec must not configure pre-turn model endpoint probes: %+v", env)
 	}
 	if env["HARNESS_AGENT"] != "claude" ||
 		env["HARNESS_AGENT_UID"] != fmt.Sprint(testSandboxUID()) ||

@@ -47,7 +47,6 @@ type Config struct {
 	PreStartProbeAttempts   int
 	PreStartProbeInterval   time.Duration
 	ProbeHealthzStatuses    []int
-	ProbeMessageStatuses    []int
 	BridgeHeartbeat         time.Duration
 	BridgePollInterval      time.Duration
 	BridgeMode              string
@@ -1515,7 +1514,6 @@ func (r *Runtime) renderSandboxIsolatedRuntimeSpec(req StartRequest) (runtimeSpe
 		"HARNESS_BRIDGE_POLL_INTERVAL=" + formatSeconds(defaultDuration(r.cfg.BridgePollInterval, 5*time.Millisecond)),
 		"HARNESS_BRIDGE_IDLE_INTERVAL=" + formatSeconds(defaultDuration(r.cfg.BridgePollInterval, 5*time.Millisecond)),
 		"HARNESS_PROBE_HEALTHZ_STATUSES=" + joinInts(defaultIntSlice(r.cfg.ProbeHealthzStatuses, []int{200})),
-		"HARNESS_PROBE_MESSAGE_STATUSES=" + joinInts(defaultIntSlice(r.cfg.ProbeMessageStatuses, []int{400})),
 	}
 	spec.Process.Cwd = "/"
 	spec.Process.Capabilities = emptyCapabilities()

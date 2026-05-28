@@ -192,7 +192,6 @@ class BridgeClientTest(unittest.TestCase):
                 timeout=0.1,
                 base_url="",
                 healthz_statuses="200",
-                message_statuses="400",
                 http_timeout=0.1,
                 heartbeat_interval=60,
                 idle_interval=0.001,
@@ -265,7 +264,6 @@ class BridgeClientTest(unittest.TestCase):
                 timeout=0.1,
                 base_url="",
                 healthz_statuses="200",
-                message_statuses="400",
                 http_timeout=0.1,
                 heartbeat_interval=60,
                 idle_interval=0.001,
@@ -340,7 +338,6 @@ class BridgeClientTest(unittest.TestCase):
                 timeout=0.1,
                 base_url="",
                 healthz_statuses="200",
-                message_statuses="400",
                 http_timeout=0.1,
                 heartbeat_interval=60,
                 idle_interval=0.001,
@@ -392,45 +389,16 @@ class BridgeClientTest(unittest.TestCase):
             output = next(message for message in messages if message["type"] == "emit_output")
             self.assertEqual(output["payload"]["output_sequence"], 4)
 
-    def test_network_probe_checks_health_and_message_statuses(self):
-        statuses = iter([200, 400])
-        with mock.patch.object(bridge, "http_status", side_effect=lambda *args, **kwargs: next(statuses)) as http_status:
-            bridge.run_network_probe(
-                "http://10.240.0.1:8082",
-                {200},
-                {400},
-                0.1,
-                "test-key",
-                "test-token",
-            )
-
-        self.assertEqual(http_status.call_count, 2)
-        health_call = http_status.call_args_list[0]
-        self.assertEqual(health_call.args[0], "http://10.240.0.1:8082/healthz")
-        message_call = http_status.call_args_list[1]
-        self.assertEqual(message_call.args[0], "http://10.240.0.1:8082/v1/messages")
-        self.assertEqual(message_call.kwargs["method"], "POST")
-        self.assertEqual(message_call.kwargs["body"], b"")
-        self.assertEqual(message_call.kwargs["headers"]["content-type"], "application/json")
-        self.assertEqual(message_call.kwargs["headers"]["anthropic-version"], "2023-06-01")
-        self.assertEqual(message_call.kwargs["headers"]["x-api-key"], "test-key")
-        self.assertEqual(message_call.kwargs["headers"]["authorization"], "Bearer test-token")
-
-    def test_network_probe_skips_message_probe_without_api_key(self):
+    def test_network_probe_checks_health_only(self):
         with mock.patch.object(bridge, "http_status", return_value=200) as http_status:
-            bridge.run_network_probe("http://10.240.0.1:8082", {200}, {400}, 0.1, "")
+            bridge.run_network_probe("http://10.240.0.1:8082", {200}, 0.1)
 
         http_status.assert_called_once_with("http://10.240.0.1:8082/healthz", timeout=0.1)
 
     def test_network_probe_rejects_unaccepted_statuses(self):
         with mock.patch.object(bridge, "http_status", return_value=204):
             with self.assertRaisesRegex(RuntimeError, r"probe GET /healthz returned 204"):
-                bridge.run_network_probe("http://10.240.0.1:8082", {200}, {400}, 0.1, "test-key")
-
-        statuses = iter([200, 422])
-        with mock.patch.object(bridge, "http_status", side_effect=lambda *args, **kwargs: next(statuses)):
-            with self.assertRaisesRegex(RuntimeError, r"probe POST /v1/messages returned 422"):
-                bridge.run_network_probe("http://10.240.0.1:8082", {200}, {400}, 0.1, "test-key")
+                bridge.run_network_probe("http://10.240.0.1:8082", {200}, 0.1)
 
     def test_shell_probe_skips_proxy_http_probe(self):
         with tempfile.TemporaryDirectory() as root:
@@ -443,7 +411,6 @@ class BridgeClientTest(unittest.TestCase):
                 timeout=0.1,
                 base_url="",
                 healthz_statuses="200",
-                message_statuses="400",
                 http_timeout=0.1,
             )
             inbox = bridge.Queue(root, bridge.INBOX)
