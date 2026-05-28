@@ -76,7 +76,7 @@ func TestRuntimeResourceInstanceStateMachine(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("reserve checkpoint: %v", err)
 	}
-	evidence := runtimeResourceEvidenceForTest(instance.HostID)
+	evidence := runtimeResourceEvidenceForTest(instance)
 	if err := st.MarkRuntimeResourceAbsentVerified(ctx, RuntimeResourceEvidenceParams{
 		GenerationID: instance.GenerationID,
 		WorkerID:     workerID,
@@ -183,7 +183,7 @@ func TestRuntimeResourceIdentityReuseRequiresAbsentVerified(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("retire first: %v", err)
 	}
-	evidence := runtimeResourceEvidenceForTest(first.HostID)
+	evidence := runtimeResourceEvidenceForTest(first)
 	if err := st.MarkRuntimeResourceReconciling(ctx, RuntimeResourceEvidenceParams{
 		GenerationID: first.GenerationID,
 		WorkerID:     "worker-cleanup",
@@ -227,7 +227,7 @@ func TestRuntimeResourceAbsentVerifiedRejectsCorruptIdentityPayload(t *testing.T
 	}); err != nil {
 		t.Fatalf("retire resource: %v", err)
 	}
-	evidence := runtimeResourceEvidenceForTest(instance.HostID)
+	evidence := runtimeResourceEvidenceForTest(instance)
 	if err := st.MarkRuntimeResourceReconciling(ctx, RuntimeResourceEvidenceParams{
 		GenerationID: instance.GenerationID,
 		WorkerID:     "worker-cleanup",
@@ -285,7 +285,7 @@ WHERE generation_id = ?`, filepath.Join(t.TempDir(), "corrupt-bridge"), instance
 	}); err != nil {
 		t.Fatalf("retire resource: %v", err)
 	}
-	evidence := runtimeResourceEvidenceForTest(cleanupIdentity.HostID)
+	evidence := runtimeResourceEvidenceForTest(cleanupIdentity)
 	if err := st.MarkRuntimeResourceReconciling(ctx, RuntimeResourceEvidenceParams{
 		GenerationID: instance.GenerationID,
 		WorkerID:     "worker-cleanup",
@@ -336,7 +336,7 @@ func TestRuntimeResourceAbsentVerifiedRequiresHostEvidence(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("retire resource: %v", err)
 	}
-	evidence := runtimeResourceEvidenceForTest(instance.HostID)
+	evidence := runtimeResourceEvidenceForTest(instance)
 	if err := st.MarkRuntimeResourceReconciling(ctx, RuntimeResourceEvidenceParams{
 		GenerationID: instance.GenerationID,
 		WorkerID:     "worker-cleanup",
@@ -372,7 +372,7 @@ func TestRuntimeResourceAbsentVerifiedRejectsSyntheticAbsenceEvidence(t *testing
 	}); err != nil {
 		t.Fatalf("retire resource: %v", err)
 	}
-	evidence := runtimeResourceEvidenceForTest(instance.HostID)
+	evidence := runtimeResourceEvidenceForTest(instance)
 	if err := st.MarkRuntimeResourceReconciling(ctx, RuntimeResourceEvidenceParams{
 		GenerationID: instance.GenerationID,
 		WorkerID:     "worker-cleanup",
@@ -392,6 +392,47 @@ func TestRuntimeResourceAbsentVerifiedRejectsSyntheticAbsenceEvidence(t *testing
 	})
 	if err == nil || !strings.Contains(err.Error(), "independently verified") {
 		t.Fatalf("expected synthetic evidence rejection, got %v", err)
+	}
+}
+
+func TestRuntimeResourceAbsentVerifiedRequiresIdentityFilesystemEvidence(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	now := time.Now().UTC()
+	params := runtimeResourceInstanceParamsForTest(t, ctx, st, owner.UUID, "sess_resource_network_hosts_evidence", "host-1", now)
+	params.NetworkHostsPath = filepath.Join(filepath.Dir(filepath.Dir(params.ControlDirPath)), "network", "gen-"+params.GenerationID, "hosts")
+	instance, err := st.CreateRuntimeResourceInstance(ctx, params)
+	if err != nil {
+		t.Fatalf("create runtime resource instance: %v", err)
+	}
+	if err := st.ClaimRuntimeResourceRetiring(ctx, RuntimeResourceRetireParams{
+		GenerationID: instance.GenerationID,
+		WorkerID:     "worker-cleanup",
+		HostID:       instance.HostID,
+		Now:          now.Add(time.Second),
+	}); err != nil {
+		t.Fatalf("retire resource: %v", err)
+	}
+	evidence := runtimeResourceEvidenceForTest(instance)
+	if err := st.MarkRuntimeResourceReconciling(ctx, RuntimeResourceEvidenceParams{
+		GenerationID: instance.GenerationID,
+		WorkerID:     "worker-cleanup",
+		HostID:       instance.HostID,
+		Evidence:     evidence,
+		Now:          now.Add(2 * time.Second),
+	}); err != nil {
+		t.Fatalf("mark reconciling: %v", err)
+	}
+	delete(evidence.FilesystemLstat, "network_hosts:"+instance.NetworkHostsPath)
+	err = st.MarkRuntimeResourceAbsentVerified(ctx, RuntimeResourceEvidenceParams{
+		GenerationID: instance.GenerationID,
+		WorkerID:     "worker-cleanup",
+		HostID:       instance.HostID,
+		Evidence:     evidence,
+		Now:          now.Add(3 * time.Second),
+	})
+	if err == nil || !strings.Contains(err.Error(), "network_hosts") {
+		t.Fatalf("expected network_hosts evidence rejection, got %v", err)
 	}
 }
 
@@ -480,21 +521,28 @@ func sandboxIPFromCIDRForTest(t *testing.T, cidr string) string {
 	return prefix.Addr().String()
 }
 
-func runtimeResourceEvidenceForTest(hostID string) ResourceReconciliationEvidence {
-	return ResourceReconciliationEvidence{
-		HostID:     hostID,
+func runtimeResourceEvidenceForTest(instance RuntimeResourceInstance) ResourceReconciliationEvidence {
+	evidence := ResourceReconciliationEvidence{
+		HostID:     instance.HostID,
 		RunscState: "absent",
 		IPNetns:    "absent",
 		IPLink:     "absent",
 		NFT:        "absent",
 		FilesystemLstat: map[string]string{
-			"control":    "absent",
-			"bundle":     "absent",
-			"checkpoint": "absent",
-			"bridge":     "absent",
-			"log":        "absent",
+			"checkpoint:" + instance.CheckpointPath:            "lstat:absent",
+			"control:" + instance.ControlDirPath:               "lstat:absent",
+			"control_manifest:" + instance.ControlManifestPath: "lstat:absent",
+			"bundle:" + instance.BundleDirPath:                 "lstat:absent",
+			"spec:" + instance.SpecPath:                        "lstat:absent",
+			"bridge:" + instance.BridgeDirPath:                 "lstat:absent",
+			"log:" + instance.LogDirPath:                       "lstat:absent",
 		},
 	}
+	if strings.TrimSpace(instance.NetworkHostsPath) != "" {
+		evidence.FilesystemLstat["network:"+filepath.Dir(instance.NetworkHostsPath)] = "lstat:absent"
+		evidence.FilesystemLstat["network_hosts:"+instance.NetworkHostsPath] = "lstat:absent"
+	}
+	return evidence
 }
 
 func runtimeResourcePostStartProofForTest(instance RuntimeResourceInstance) *RuntimeResourcePostStartProof {

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -433,7 +434,7 @@ func (s *Store) MarkRuntimeResourceAbsentVerified(ctx context.Context, p Runtime
 	if instance.HostID != strings.TrimSpace(p.HostID) {
 		return fmt.Errorf("runtime resource host mismatch: row=%s evidence=%s", instance.HostID, strings.TrimSpace(p.HostID))
 	}
-	if err := validateAbsenceEvidence(p.Evidence, instance.HostID); err != nil {
+	if err := validateAbsenceEvidence(p.Evidence, instance); err != nil {
 		return err
 	}
 	evidenceJSON, evidenceDigest, err := runtimeResourceEvidenceDigest(p.Evidence)
@@ -787,7 +788,8 @@ func validateRuntimeResourcePostStartProof(instance RuntimeResourceInstance, p R
 	return nil
 }
 
-func validateAbsenceEvidence(evidence ResourceReconciliationEvidence, hostID string) error {
+func validateAbsenceEvidence(evidence ResourceReconciliationEvidence, instance RuntimeResourceInstance) error {
+	hostID := instance.HostID
 	if strings.TrimSpace(evidence.HostID) != hostID {
 		return fmt.Errorf("reconciliation evidence host_id = %q, want %q", strings.TrimSpace(evidence.HostID), hostID)
 	}
@@ -808,6 +810,15 @@ func validateAbsenceEvidence(evidence ResourceReconciliationEvidence, hostID str
 	if len(evidence.FilesystemLstat) == 0 {
 		return fmt.Errorf("reconciliation evidence filesystem lstat is required before absent_verified")
 	}
+	for _, key := range requiredFilesystemLstatEvidenceKeys(instance) {
+		value, ok := evidence.FilesystemLstat[key]
+		if !ok {
+			return fmt.Errorf("reconciliation evidence filesystem lstat missing %s before absent_verified", key)
+		}
+		if err := validateAbsenceEvidenceValue("filesystem lstat "+key, value); err != nil {
+			return err
+		}
+	}
 	for path, value := range evidence.FilesystemLstat {
 		if strings.TrimSpace(path) == "" || strings.TrimSpace(value) == "" {
 			return fmt.Errorf("reconciliation evidence filesystem lstat entries must be non-empty")
@@ -817,6 +828,46 @@ func validateAbsenceEvidence(evidence ResourceReconciliationEvidence, hostID str
 		}
 	}
 	return nil
+}
+
+func requiredFilesystemLstatEvidenceKeys(instance RuntimeResourceInstance) []string {
+	type filesystemEvidenceTarget struct {
+		kind string
+		path string
+	}
+	targets := []filesystemEvidenceTarget{
+		{"checkpoint", instance.CheckpointPath},
+		{"control", instance.ControlDirPath},
+		{"control_manifest", instance.ControlManifestPath},
+		{"bundle", instance.BundleDirPath},
+		{"spec", instance.SpecPath},
+		{"bridge", instance.BridgeDirPath},
+		{"log", instance.LogDirPath},
+	}
+	if strings.TrimSpace(instance.NetworkHostsPath) != "" {
+		networkHostsPath := cleanFilesystemLstatEvidencePath(instance.NetworkHostsPath)
+		targets = append(targets,
+			filesystemEvidenceTarget{"network", filepath.Dir(networkHostsPath)},
+			filesystemEvidenceTarget{"network_hosts", networkHostsPath},
+		)
+	}
+	keys := make([]string, 0, len(targets))
+	for _, target := range targets {
+		path := cleanFilesystemLstatEvidencePath(target.path)
+		if path == "" {
+			continue
+		}
+		keys = append(keys, target.kind+":"+path)
+	}
+	return keys
+}
+
+func cleanFilesystemLstatEvidencePath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	return filepath.Clean(path)
 }
 
 func validateAbsenceEvidenceValue(label, value string) error {

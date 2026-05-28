@@ -3969,8 +3969,11 @@ func runtimeCleanupEvidenceForDetails(details store.RuntimeGenerationDetails) ru
 	addFilesystem("bundle", details.BundleDirPath)
 	addFilesystem("spec", details.SpecPath)
 	addFilesystem("bridge", details.BridgeDirPath)
+	if strings.TrimSpace(details.NetworkHostsPath) != "" {
+		addFilesystem("network", filepath.Dir(details.NetworkHostsPath))
+	}
 	addFilesystem("network_hosts", details.NetworkHostsPath)
-	addFilesystem("logs", details.LogDirPath)
+	addFilesystem("log", details.LogDirPath)
 	if len(filesystem) == 0 {
 		filesystem["test:runtime_resource"] = "lstat:absent"
 	}
