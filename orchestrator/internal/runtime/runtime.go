@@ -1180,11 +1180,45 @@ func modelProxyBaseURLHost(raw string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid model proxy base url: %w", err)
 	}
+	if parsed.Scheme != "http" {
+		return "", fmt.Errorf("model proxy base url must use the local http proxy scheme")
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("model proxy base url must not include userinfo, query, or fragment")
+	}
+	if parsed.Path != "" && parsed.Path != "/" {
+		return "", fmt.Errorf("model proxy base url must not include a path")
+	}
 	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
 	if host == "" || strings.ContainsAny(host, " \t\r\n/") {
 		return "", fmt.Errorf("model proxy base url must include a hostname")
 	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return "", fmt.Errorf("model proxy base url must use a stable hostname alias, not an IP literal")
+	}
+	if modelProxyHostIsHostLocal(host) {
+		return "", fmt.Errorf("model proxy base url must not use a host-local name")
+	}
+	if modelProxyHostIsProviderUpstream(host) {
+		return "", fmt.Errorf("model proxy base url must not point at a provider upstream")
+	}
 	return host, nil
+}
+
+func modelProxyHostIsHostLocal(host string) bool {
+	return host == "localhost" ||
+		host == "host.docker.internal" ||
+		strings.HasSuffix(host, ".localhost") ||
+		strings.HasSuffix(host, ".local")
+}
+
+func modelProxyHostIsProviderUpstream(host string) bool {
+	switch host {
+	case "api.anthropic.com", "anthropic.com", "api.openai.com", "openai.com":
+		return true
+	default:
+		return strings.HasSuffix(host, ".anthropic.com") || strings.HasSuffix(host, ".openai.com")
+	}
 }
 
 func (r *Runtime) buildGenerationManifest(req StartRequest, runscVersion, bundleDigest, runtimeConfigDigest, specDigest string) (controlManifest, error) {
