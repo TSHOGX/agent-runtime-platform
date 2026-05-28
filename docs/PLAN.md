@@ -135,6 +135,22 @@ state — but any change that violates one should be revisited before it lands.
    re-pinned proxy gates pass.
 3. Keep artifact browsing in regression coverage while preserving the existing read-only metadata-backed UX.
 4. Defer a second harness adapter until the operational surface and adapter completion contract are stable.
+5. Treat bridge clients, turn runners, and sandboxes as restartable at any
+   turn boundary. No correctness rule may depend only on in-process flags such
+   as "first turn"; Claude logical resume must be derived from durable session
+   state, control-manifest intent, or driver-home evidence.
+6. Keep the sandbox-to-proxy compatibility key as an explicit contract. A proxy
+   health check is not enough: gates must prove the key mode used by Claude
+   Code (`no key` or the fixed dummy key) is accepted or ignored exactly as the
+   pinned proxy expects, and that model dispatch still requires active turn
+   context and contract authorization.
+7. After changing files under `sandbox-image/files/`, rebuild or overlay-sync
+   the active rootfs before live testing. The repo overlay is source of truth,
+   but gVisor launches the files currently present under `sandbox-image/rootfs`
+   or the configured `HARNESS_ROOTFS_PATH`.
+8. For runtime, bridge, Claude CLI, proxy, or session-lifecycle changes, run a
+   live two-turn Claude smoke on a fresh session and verify both turns complete
+   under the same Claude session UUID.
 
 ## Current Architecture
 

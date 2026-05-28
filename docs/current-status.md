@@ -158,6 +158,10 @@ HTTP routes, SSE/WebSocket endpoints, and the canonical event-name set are docum
 - Runtime specs now use read-only rootfs, exact `/workspace` and `/agent-home` DataVolume binds, exact `/harness-control` and bridge binds, no `/harness-secrets`, no parent `/sessions` or `/agent-homes` mounts, empty OCI capabilities, and `noNewPrivileges`.
 - Claude provider credentials are host/proxy-side. Sandbox startup probes only health/bridge readiness before turns; model endpoints require a committed active model context, source-IP match, contract entitlement, and proxy correlation through the authenticated UDS.
 - Shell and Claude bridge claim-loop paths run under the configured non-root sandbox identity. Legacy session `workspace`, `agent_home_path`, and `restore_id` columns remain internal compatibility storage and are omitted from public API/event DTOs.
+- Claude logical sessions are durable across bridge or runner restarts. Once a
+  Claude UUID has initialized in `/agent-home`, later turns for that UUID must
+  use Claude Code `--resume` even if the bridge client process was recreated.
+  The runner must not rely solely on an in-memory "first turn" flag.
 - Phase 8 destructive cutover and host reconciliation evidence now pass on the
   target lab host: `/tmp/harness-cutover-inventory.json` reports
   `blockers: []`, and `/tmp/harness-reconciliation-evidence.json` reports an
@@ -216,6 +220,16 @@ Sandbox bridge client:
 
 ```bash
 python3 -m unittest sandbox-image/tests/test_harness_bridge_client.py
+```
+
+Claude/proxy live smoke after runtime or bridge changes:
+
+```bash
+sandbox-image/build-rootfs.sh
+# Start orchestrator, frontend, and claude-code-proxy with the pinned dummy-key mode.
+# Then create a fresh Claude session and send two short turns.
+# Expected: both turns complete, assistant messages persist, proxy events are 200,
+# and the second turn reuses the same Claude session UUID via --resume.
 ```
 
 Runtime isolation release evidence:

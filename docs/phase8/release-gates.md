@@ -246,6 +246,10 @@ metadata, and crash recovery.
   gateway-literal connection with manually spoofed alias `Host` must be tested
   as indistinguishable from the alias path and still requires the normal
   authorization checks. Evidence records the proxy commit.
+- The selected Claude CLI compatibility key mode is gate-checked end to end:
+  bridge-client/rootfs behavior, proxy configuration, and pinned proxy contract
+  tests agree on `no key` or the fixed non-secret dummy key. `/healthz` alone
+  cannot qualify proxy readiness.
 - Claude CLI starts with the selected no-key or non-secret dummy-key mode, and
   the proxy ignores that compatibility value for authorization.
 - Changing `model_access_allowed` is gated as drain/retire/reallocate, not a

@@ -201,7 +201,10 @@ Claude CLI compatibility must be pinned as either:
 - a fixed non-secret dummy key ignored by the proxy authorizer.
 
 The selected mode must be proven against the pinned Claude Code CLI and
-re-pinned proxy checkout.
+re-pinned proxy checkout. The bridge client, rootfs, proxy `.env`, and proxy
+contract tests must agree on the exact mode; `/healthz` alone is not a valid
+proxy readiness signal for Claude sessions. A mismatch must fail before a user
+turn can report `api_retry` or a proxy-side "invalid API key" warning.
 
 ## Phase 7 Gate Replacement
 
@@ -212,6 +215,9 @@ Phase 8 has no sandbox-readable provider key. The replacement pinned proxy
 contract is:
 
 - `GET /healthz` through `sandbox_model_proxy_base_url` returns `200`;
+- the selected Claude CLI compatibility mode (`no key` or fixed dummy key)
+  matches the pinned proxy and cannot drift independently in local `.env`,
+  rootfs, or bridge-client code;
 - pre-turn `POST /v1/messages` from the sandbox rejects without an active
   context, regardless of the no-key or dummy-key CLI compatibility mode;
 - `POST /v1/messages` with malformed JSON is tested only after

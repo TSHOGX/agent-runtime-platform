@@ -168,6 +168,16 @@ strict (included in manifest digest projection — any mismatch -> cold fallback
 
 The manifest writer at checkpoint time and the restore validator both project the manifest through the same field-allowlist filter before computing the digest, so the comparison is `digest(strict_fields_at_checkpoint) == digest(strict_fields_at_restore)`. The orchestrator must reject a restore where the projected digest mismatches **and** must reject any code path that adds a new manifest field without explicitly classifying it as regenerable or strict; the migration that adds a new manifest field is required to update the projection function and ship the matching test.
 
+`manifest.resume_claude` is launch intent, not the only source of truth for
+per-turn Claude CLI arguments. A bridge client or turn runner may restart
+between turns, so the runner must also inspect durable driver-home state before
+choosing `--session-id` vs `--resume`. Once
+`manifest.claude_session_uuid` has initialized in the Claude driver home, every
+later turn for that UUID must use `--resume`, including cold fallback,
+same-generation reuse, restored generations, and bridge reconnect paths.
+Regression coverage must recreate the runner between turns and seed existing
+Claude session files to prove this behavior.
+
 > **Phase 9a compatibility note.** Checkpoint manifests created before Phase 9a do not contain `manifest.system_prompt_enabled`, `manifest.system_prompt_text`, or `manifest.system_prompt_digest`. After Phase 9a adds those fields to the strict projection, the first restore attempt for such a checkpoint will fail the projected-digest comparison and cold-fall back, consistent with the `runsc`-version invalidation policy below. The fallback allocates a replacement generation for the same migrated session using that session's stored disabled/empty prompt snapshot; it does not create a new session and does not read the current operator prompt config.
 
 ## `runsc` Version Exact-Match
