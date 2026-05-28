@@ -54,6 +54,14 @@ type FinishProxyRequestResult struct {
 	Replayed     bool
 }
 
+type proxyAuthorizationSnapshot struct {
+	SessionID        string
+	GenerationID     string
+	SandboxSourceIP  string
+	RuntimeProfileID string
+	RunscNetwork     string
+}
+
 func (s *Store) StartProxyRequest(ctx context.Context, p StartProxyRequestParams) (StartProxyRequestResult, error) {
 	if p.Now.IsZero() {
 		p.Now = time.Now().UTC()
@@ -83,14 +91,19 @@ func (s *Store) StartProxyRequest(ctx context.Context, p StartProxyRequestParams
 
 	var result StartProxyRequestResult
 	var nextRequestSequence int64
+	var snapshot proxyAuthorizationSnapshot
 	if err := tx.QueryRowContext(ctx, `
-SELECT c.session_id, c.generation_id, c.turn_id, c.next_request_sequence
+SELECT c.session_id, c.generation_id, c.turn_id, c.next_request_sequence,
+       g.agent_runtime_profile_id, np.runsc_network
 FROM active_model_request_contexts c
 JOIN turns t ON t.id = c.turn_id
   AND t.session_id = c.session_id
   AND t.generation_id = c.generation_id
 JOIN runtime_generations g ON g.generation_id = c.generation_id
   AND g.session_id = c.session_id
+JOIN network_profiles np ON np.network_profile_id = g.network_profile_id
+  AND np.generation_id = c.generation_id
+  AND np.session_id = c.session_id
 JOIN runtime_resource_instances ri ON ri.generation_id = c.generation_id
   AND ri.session_id = c.session_id
 JOIN agent_runtime_profiles a ON a.agent_runtime_profile_id = g.agent_runtime_profile_id
@@ -119,14 +132,21 @@ WHERE c.sandbox_source_ip = ?
       AND inflight.lease_expires_at > ?
   ) = 1`,
 		p.SandboxSourceIP, formatTime(p.Now), formatTime(p.Now), formatTime(p.Now), formatTime(p.Now),
-	).Scan(&result.SessionID, &result.GenerationID, &result.TurnID, &nextRequestSequence); err != nil {
+	).Scan(&result.SessionID, &result.GenerationID, &result.TurnID, &nextRequestSequence, &snapshot.RuntimeProfileID, &snapshot.RunscNetwork); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return StartProxyRequestResult{}, ErrProxyContextUnavailable
 		}
 		return StartProxyRequestResult{}, err
 	}
-	if _, err := getSandboxContractForGenerationWithMirrors(ctx, tx, result.SessionID, result.GenerationID); err != nil {
+	snapshot.SessionID = result.SessionID
+	snapshot.GenerationID = result.GenerationID
+	snapshot.SandboxSourceIP = p.SandboxSourceIP
+	contract, err := getSandboxContractForGenerationWithMirrors(ctx, tx, result.SessionID, result.GenerationID)
+	if err != nil {
 		return StartProxyRequestResult{}, err
+	}
+	if err := validateProxyAuthorizationContract(contract, snapshot); err != nil {
+		return StartProxyRequestResult{}, fmt.Errorf("%w: %v", ErrProxyContextUnavailable, err)
 	}
 	result.RequestSequence = nextRequestSequence
 
@@ -188,6 +208,50 @@ WHERE sandbox_source_ip = ?
 		return existing, tx.Commit()
 	}
 	return result, tx.Commit()
+}
+
+func validateProxyAuthorizationContract(record SandboxContractRecord, snapshot proxyAuthorizationSnapshot) error {
+	var payload struct {
+		RuntimeProfileID string `json:"runtime_profile_id"`
+		Identity         struct {
+			ModelAccessAllowed bool `json:"model_access_allowed"`
+		} `json:"identity"`
+		NetworkIdentity struct {
+			RunscNetwork string `json:"runsc_network"`
+			SandboxIP    string `json:"sandbox_ip"`
+		} `json:"network_identity"`
+		CredentialPolicy struct {
+			ProviderCredentials string `json:"provider_credentials"`
+			SandboxSecretMount  string `json:"sandbox_secret_mount"`
+			ProxyToken          string `json:"proxy_token"`
+		} `json:"credential_policy"`
+		ModelAccess struct {
+			ModelAccessAllowed bool `json:"model_access_allowed"`
+		} `json:"model_access"`
+	}
+	if err := json.Unmarshal(record.CanonicalPayload, &payload); err != nil {
+		return fmt.Errorf("decode sandbox contract authorization payload: %w", err)
+	}
+	if strings.TrimSpace(payload.RuntimeProfileID) != snapshot.RuntimeProfileID {
+		return fmt.Errorf("runtime profile mismatch")
+	}
+	if strings.TrimSpace(snapshot.RunscNetwork) != "sandbox" ||
+		strings.TrimSpace(payload.NetworkIdentity.RunscNetwork) != "sandbox" ||
+		strings.TrimSpace(payload.NetworkIdentity.RunscNetwork) != strings.TrimSpace(snapshot.RunscNetwork) {
+		return fmt.Errorf("runsc network mismatch")
+	}
+	if strings.TrimSpace(payload.NetworkIdentity.SandboxIP) != snapshot.SandboxSourceIP {
+		return fmt.Errorf("sandbox ip mismatch")
+	}
+	if !payload.Identity.ModelAccessAllowed || !payload.ModelAccess.ModelAccessAllowed {
+		return fmt.Errorf("contract model access denied")
+	}
+	if strings.TrimSpace(payload.CredentialPolicy.ProviderCredentials) != "host-only" ||
+		strings.TrimSpace(payload.CredentialPolicy.SandboxSecretMount) != "absent" ||
+		strings.TrimSpace(payload.CredentialPolicy.ProxyToken) != "absent" {
+		return fmt.Errorf("credential policy mismatch")
+	}
+	return nil
 }
 
 func (s *Store) FinishProxyRequest(ctx context.Context, p FinishProxyRequestParams) (FinishProxyRequestResult, error) {

@@ -277,6 +277,84 @@ WHERE proxy_request_id = 'proxy_entitlement_denied'`).Scan(&events); err != nil 
 	}
 }
 
+func TestProxyRequestStartRequiresContractAuthorizationFields(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		tamper func(map[string]any)
+	}{
+		{
+			name: "sandbox ip mismatch",
+			tamper: func(payload map[string]any) {
+				payload["network_identity"].(map[string]any)["sandbox_ip"] = "10.240.0.99"
+			},
+		},
+		{
+			name: "runsc network host",
+			tamper: func(payload map[string]any) {
+				payload["network_identity"].(map[string]any)["runsc_network"] = "host"
+			},
+		},
+		{
+			name: "runtime profile mismatch",
+			tamper: func(payload map[string]any) {
+				payload["runtime_profile_id"] = "arp_other"
+			},
+		},
+		{
+			name: "identity entitlement false",
+			tamper: func(payload map[string]any) {
+				payload["identity"].(map[string]any)["model_access_allowed"] = false
+			},
+		},
+		{
+			name: "model access entitlement false",
+			tamper: func(payload map[string]any) {
+				payload["model_access"].(map[string]any)["model_access_allowed"] = false
+			},
+		},
+		{
+			name: "provider credentials not host only",
+			tamper: func(payload map[string]any) {
+				payload["credential_policy"].(map[string]any)["provider_credentials"] = "sandbox"
+			},
+		},
+		{
+			name: "proxy token present",
+			tamper: func(payload map[string]any) {
+				payload["credential_policy"].(map[string]any)["proxy_token"] = "present"
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			st, owner := openOwnedStore(t, ctx)
+			now := time.Now().UTC()
+			allocation, _, sandboxSourceIP := createRunningProxyTurn(t, ctx, st, owner.UUID, "sess_proxy_contract_auth", now)
+			rewriteSandboxContractPayloadForTest(t, ctx, st, allocation.GenerationID, tc.tamper)
+
+			_, err := st.StartProxyRequest(ctx, StartProxyRequestParams{
+				SandboxSourceIP: sandboxSourceIP,
+				ProxyRequestID:  "proxy_contract_auth",
+				Now:             now.Add(5 * time.Second),
+			})
+			if !errors.Is(err, ErrProxyContextUnavailable) {
+				t.Fatalf("contract authorization err=%v want ErrProxyContextUnavailable", err)
+			}
+
+			var events int
+			if err := st.db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM events
+WHERE proxy_request_id = 'proxy_contract_auth'`).Scan(&events); err != nil {
+				t.Fatalf("count proxy events: %v", err)
+			}
+			if events != 0 {
+				t.Fatalf("denied proxy request wrote %d events", events)
+			}
+		})
+	}
+}
+
 func TestProxyRequestStartRejectsCrossSessionTampering(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -669,4 +747,31 @@ WHERE generation_id = ?`, generationID).Scan(&sandboxCIDR); err != nil {
 		t.Fatalf("unexpected sandbox ip cidr: %q", sandboxCIDR)
 	}
 	return parts[0]
+}
+
+func rewriteSandboxContractPayloadForTest(t *testing.T, ctx context.Context, st *Store, generationID string, mutate func(map[string]any)) {
+	t.Helper()
+	var raw string
+	if err := st.db.QueryRowContext(ctx, `
+SELECT canonical_payload
+FROM sandbox_contracts
+WHERE generation_id = ?`, generationID).Scan(&raw); err != nil {
+		t.Fatalf("load sandbox contract payload: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		t.Fatalf("decode sandbox contract payload: %v", err)
+	}
+	mutate(payload)
+	canonical, err := CanonicalSandboxContractPayload(payload)
+	if err != nil {
+		t.Fatalf("canonicalize sandbox contract payload: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE sandbox_contracts
+SET canonical_payload = ?,
+    sandbox_contract_digest = ?
+WHERE generation_id = ?`, string(canonical), SandboxContractDigest(canonical), generationID); err != nil {
+		t.Fatalf("rewrite sandbox contract payload: %v", err)
+	}
 }

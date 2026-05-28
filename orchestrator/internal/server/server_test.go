@@ -4310,6 +4310,14 @@ func currentRunscBinaryMetadataForServerTest() (string, string) {
 func createServerRuntimeResourceLive(t *testing.T, ctx context.Context, st *store.Store, sessionID string, allocation store.GenerationAllocation, ownerUUID, hostID string, now time.Time) store.RuntimeResourceInstance {
 	t.Helper()
 	contractID := sandboxContractID(allocation.GenerationID)
+	details, err := st.GetRuntimeGenerationDetails(ctx, sessionID, allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get generation details: %v", err)
+	}
+	prefix, err := netip.ParsePrefix(details.SandboxIPCIDR)
+	if err != nil {
+		t.Fatalf("parse sandbox cidr: %v", err)
+	}
 	if _, err := st.StoreSandboxContract(ctx, store.StoreSandboxContractParams{
 		ContractID:   contractID,
 		SessionID:    sessionID,
@@ -4322,18 +4330,25 @@ func createServerRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 			"generation_id":            allocation.GenerationID,
 			"runtime_profile_id":       allocation.AgentRuntimeProfileID,
 			"network_profile_id":       allocation.NetworkProfileID,
+			"identity": map[string]any{
+				"model_access_allowed": true,
+			},
+			"network_identity": map[string]any{
+				"runsc_network": details.RunscNetwork,
+				"sandbox_ip":    prefix.Addr().String(),
+			},
+			"credential_policy": map[string]any{
+				"provider_credentials": "host-only",
+				"sandbox_secret_mount": "absent",
+				"proxy_token":          "absent",
+			},
+			"model_access": map[string]any{
+				"model_access_allowed": true,
+			},
 		},
 		Now: now,
 	}); err != nil {
 		t.Fatalf("store sandbox contract: %v", err)
-	}
-	details, err := st.GetRuntimeGenerationDetails(ctx, sessionID, allocation.GenerationID)
-	if err != nil {
-		t.Fatalf("get generation details: %v", err)
-	}
-	prefix, err := netip.ParsePrefix(details.SandboxIPCIDR)
-	if err != nil {
-		t.Fatalf("parse sandbox cidr: %v", err)
 	}
 	artifacts := testGenerationArtifacts()
 	instance, err := st.CreateRuntimeResourceInstance(ctx, store.RuntimeResourceInstanceParams{

@@ -313,6 +313,11 @@ func testSandboxContractPayload(t *testing.T, sessionID string, allocation Gener
 			"sandbox_uid":               65534,
 			"sandbox_gid":               65534,
 			"sandbox_supplemental_gids": []int{},
+			"model_access_allowed":      true,
+		},
+		"network_identity": map[string]any{
+			"runsc_network": "sandbox",
+			"sandbox_ip":    "10.240.0.2",
 		},
 		"mount_plan": map[string]any{
 			"workspace":  map[string]any{"destination": "/workspace", "mode": "rw"},
