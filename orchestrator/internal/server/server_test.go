@@ -276,6 +276,57 @@ func TestCreateSessionUsesNullExpiryWhenSessionRetentionDisabled(t *testing.T) {
 	}
 }
 
+func TestCreateSessionDefersWorkspaceProvisioning(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	cfg := testServerConfig(dir)
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: runtime.New(runtime.Config{}),
+		watcher: newServerTestWatcher(t, cfg.SessionsRoot, st, events.NewHub()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(`{"agent":"claude"}`))
+	rec := httptest.NewRecorder()
+	srv.createSession(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d body %s", rec.Code, rec.Body.String())
+	}
+
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	session, err := st.GetSession(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("get created session: %v", err)
+	}
+	if strings.HasPrefix(session.RestoreID, "phase3-") {
+		t.Fatalf("new sessions must not receive phase3 restore ids: %+v", session)
+	}
+	if _, err := os.Stat(session.Workspace); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("session create should defer workspace provisioning, stat err=%v path=%s", err, session.Workspace)
+	}
+	var workspaceRows int
+	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM session_workspaces WHERE session_id = ?`, session.ID).Scan(&workspaceRows); err != nil {
+		t.Fatalf("count workspace evidence rows: %v", err)
+	}
+	if workspaceRows != 0 {
+		t.Fatalf("session create should not synthesize workspace evidence rows, got %d", workspaceRows)
+	}
+}
+
 func TestCreateSessionUsesPublicSessionDTO(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

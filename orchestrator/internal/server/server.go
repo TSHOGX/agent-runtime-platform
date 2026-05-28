@@ -367,16 +367,12 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		Status:                string(sessionstate.Created),
 		Agent:                 req.Agent,
 		Workspace:             filepath.Join(s.cfg.SessionsRoot, id),
-		RestoreID:             "phase3-" + id,
+		RestoreID:             "unused-" + id,
 		ClaudeSessionUUID:     uuid.NewString(),
 		AutoCheckpointEnabled: s.cfg.Phase7.Checkpoint.AutoEnabled,
 		CreatedAt:             now,
 		UpdatedAt:             now,
 		ExpiresAt:             expiresAt,
-	}
-	if err := os.MkdirAll(session.Workspace, 0o755); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
 	}
 	if err := s.store.CreateSession(r.Context(), session); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
