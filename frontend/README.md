@@ -1,6 +1,6 @@
 # Frontend
 
-Next.js workbench for the harness platform.
+Next.js workbench for the sandboxed agent runtime platform.
 
 ## Run
 

@@ -1,6 +1,6 @@
 # Orchestrator
 
-Go service for the local gVisor harness. It owns session metadata, starts or restores per-session sandboxes, parses agent output, publishes events, and records artifacts written under `/var/lib/harness/sessions/<session_id>/`.
+Go control plane for the sandboxed agent runtime platform. It owns session metadata, starts or restores per-session gVisor sandboxes, parses agent output, publishes events, and records artifacts written under `/var/lib/harness/sessions/<session_id>/`.
 
 ## Run
 

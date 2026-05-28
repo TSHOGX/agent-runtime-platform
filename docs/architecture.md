@@ -1,13 +1,18 @@
-# Harness Platform Architecture
+# Agent Runtime Platform Architecture
 
 > Last updated: 2026-05-28
 
 ## Overview
 
-Harness Platform runs one AI data-analysis agent per gVisor sandbox session.
-The orchestrator owns durable session state, starts per-generation sandboxes,
-routes user turns through the Agent Bridge claim/ack protocol, correlates model
-proxy requests, records artifacts, and publishes events to the frontend.
+This project is an Agent Runtime Platform for long-lived, sandboxed AI agent
+sessions. The host-side control plane runs one AI data-analysis agent per
+gVisor sandbox session. The orchestrator owns durable session state, starts
+per-generation sandboxes, routes user turns through the Agent Bridge claim/ack
+protocol, correlates model proxy requests, records artifacts, and publishes
+events to the frontend workbench.
+
+Architecturally, `runtime` is the execution and isolation layer; `control
+plane` is the durable state, scheduling, policy, and observability layer.
 
 Detailed phase records live in:
 
@@ -54,6 +59,19 @@ GET /api/events/stream -> orchestrator GET /api/events/stream
 
 The orchestrator still exposes `/api/events` as a WebSocket compatibility and
 manual-debug endpoint.
+
+## Runtime Vs Control Plane
+
+Runtime is the execution substrate: gVisor `runsc`, the sandbox process,
+rootfs, mounts, network namespace, bridge client, Claude Code or shell agent,
+and checkpoint/restore mechanics. Its concerns are isolation, resource shape,
+execution compatibility, and recovery behavior.
+
+Control plane is the host-side manager: session and turn state, generation
+allocation, resource reconciliation, control manifest rendering, bridge
+claim/ack processing, event persistence, artifact metadata, proxy correlation,
+quota, retention, and policy. Its concerns are correctness, durable state,
+governance, observability, and operational scale.
 
 ## Sandbox Boundary
 

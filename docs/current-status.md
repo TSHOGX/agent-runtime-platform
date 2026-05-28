@@ -6,6 +6,10 @@
 
 ## Snapshot
 
+Project positioning: this repository is best described as an Agent Runtime
+Platform: a host-side control plane plus per-session sandbox runtimes for
+long-lived AI agent work.
+
 - Frontend workbench: Next.js on port `8000`.
 - Orchestrator API: Go service on port `8090`, with optional shared-password
   lab auth via `HARNESS_LAB_PASSWORD`.

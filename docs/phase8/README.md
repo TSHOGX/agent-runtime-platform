@@ -3,7 +3,6 @@
 > Status: release-qualified baseline. Final target-lab evidence passed for
 > `345f684b6a6b146311efcb3b3d7a5d7ebb607822`; current HEAD changes must rerun
 > final evidence before a new runtime-isolation release.
-> Source audit: `.scratch/runtime-security-followups.md`.
 
 Phase 8 is a contract-first refactor of the runtime boundary. The roadmap phase
 is "Phase 8"; the code and persisted data contract is `sandbox-isolation-v1`.
