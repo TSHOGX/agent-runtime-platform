@@ -1128,18 +1128,6 @@ func (r *Runtime) evictContainerByRunscID(runscContainerID string) {
 	}
 }
 
-func (r *Runtime) readRestoreMS(sessionID string) *int64 {
-	data, err := os.ReadFile(filepath.Join(r.cfg.SessionsRoot, sessionID, "restore_ms.txt"))
-	if err != nil {
-		return nil
-	}
-	value, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
-	if err != nil {
-		return nil
-	}
-	return &value
-}
-
 func (r *Runtime) renderGenerationArtifacts(ctx context.Context, req StartRequest) (GenerationArtifacts, error) {
 	details := req.Generation
 	if strings.TrimSpace(details.GenerationID) == "" {
@@ -1934,37 +1922,18 @@ func (r *Runtime) prepareSandboxIsolationDataDirs(req StartRequest) error {
 }
 
 func (r *Runtime) sandboxIsolationDataPaths(req StartRequest) (string, string, error) {
-	if strings.TrimSpace(req.WorkspaceHostPath) != "" || strings.TrimSpace(req.AgentHomeHostPath) != "" {
-		if strings.TrimSpace(req.WorkspaceHostPath) == "" || strings.TrimSpace(req.AgentHomeHostPath) == "" {
-			return "", "", fmt.Errorf("workspace and agent home data volume paths must be provided together")
-		}
-		workspaceHostPath, err := cleanSandboxDataPath(req.WorkspaceHostPath, "workspace data volume path")
-		if err != nil {
-			return "", "", err
-		}
-		agentHomeHostPath, err := cleanSandboxDataPath(req.AgentHomeHostPath, "agent home data volume path")
-		if err != nil {
-			return "", "", err
-		}
-		return workspaceHostPath, agentHomeHostPath, nil
+	if strings.TrimSpace(req.WorkspaceHostPath) == "" || strings.TrimSpace(req.AgentHomeHostPath) == "" {
+		return "", "", fmt.Errorf("workspace and agent home data volume paths are required")
 	}
-	sessionsRoot, err := cleanAbsoluteRoot(r.cfg.SessionsRoot, "sessions root")
+	workspaceHostPath, err := cleanSandboxDataPath(req.WorkspaceHostPath, "workspace data volume path")
 	if err != nil {
 		return "", "", err
 	}
-	agentHomesRoot, err := cleanAbsoluteRoot(r.cfg.AgentHomesRoot, "agent homes root")
+	agentHomeHostPath, err := cleanSandboxDataPath(req.AgentHomeHostPath, "agent home data volume path")
 	if err != nil {
 		return "", "", err
 	}
-	sessionComponent, err := safePathComponent("session id", req.SessionID)
-	if err != nil {
-		return "", "", err
-	}
-	driverComponent, err := safePathComponent("driver", sandboxAgent(req))
-	if err != nil {
-		return "", "", err
-	}
-	return filepath.Join(sessionsRoot, sessionComponent), filepath.Join(agentHomesRoot, sessionComponent, driverComponent), nil
+	return workspaceHostPath, agentHomeHostPath, nil
 }
 
 func cleanSandboxDataPath(path, label string) (string, error) {

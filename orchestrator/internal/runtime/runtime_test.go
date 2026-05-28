@@ -1348,12 +1348,12 @@ func TestRenderRuntimeSpecUsesGenerationNetnsPath(t *testing.T) {
 	})
 	details := testGenerationDetails(dir, "gen_netns")
 	details.NetnsPath = "/var/run/netns/harness-gen-netns"
-	spec, _, err := rt.renderRuntimeSpec(StartRequest{
+	spec, _, err := rt.renderRuntimeSpec(withDataVolumePathsForTest(dir, StartRequest{
 		SessionID:    "sess_1",
 		GenerationID: details.GenerationID,
 		Agent:        "claude",
 		Generation:   details,
-	})
+	}))
 	if err != nil {
 		t.Fatalf("render runtime spec: %v", err)
 	}
@@ -1574,14 +1574,15 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndIsolatedRuntime(t *t
 	})
 	details := testGenerationDetails(dir, "gen_a")
 
-	artifacts, err := rt.PrepareGeneration(context.Background(), StartRequest{
+	workspacePath, agentHomePath := dataVolumePathsForTest(dir, "sess_1", "claude")
+	artifacts, err := rt.PrepareGeneration(context.Background(), withDataVolumePathsForTest(dir, StartRequest{
 		SessionID:         "sess_1",
 		GenerationID:      details.GenerationID,
 		Agent:             "claude",
 		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
 		ResumeClaude:      true,
 		Generation:        details,
-	})
+	}))
 	if err != nil {
 		t.Fatalf("prepare generation: %v", err)
 	}
@@ -1673,10 +1674,10 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndIsolatedRuntime(t *t
 			t.Fatalf("isolated mount %s uses recursive bind: %+v", mount.Destination, mount)
 		}
 	}
-	if mountSource(spec.Mounts, "/workspace") != filepath.Join(dir, "sessions", "sess_1") {
+	if mountSource(spec.Mounts, "/workspace") != workspacePath {
 		t.Fatalf("workspace mount = %q", mountSource(spec.Mounts, "/workspace"))
 	}
-	if mountSource(spec.Mounts, "/agent-home") != filepath.Join(dir, "agent-homes", "sess_1", "claude") {
+	if mountSource(spec.Mounts, "/agent-home") != agentHomePath {
 		t.Fatalf("agent-home mount = %q", mountSource(spec.Mounts, "/agent-home"))
 	}
 	if mountSource(spec.Mounts, "/harness-control") != details.ControlDirPath {
@@ -1753,13 +1754,13 @@ func TestPrepareClaudeHostOnlyGenerationHasNoSecretMount(t *testing.T) {
 	details.SecretsDirPath = ""
 	details.NetworkHostsPath = filepath.Join(dir, "run", "network", "gen-"+details.GenerationID, "hosts")
 
-	if _, err := rt.PrepareGeneration(context.Background(), StartRequest{
+	if _, err := rt.PrepareGeneration(context.Background(), withDataVolumePathsForTest(dir, StartRequest{
 		SessionID:         "sess_1",
 		GenerationID:      details.GenerationID,
 		Agent:             "claude",
 		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
 		Generation:        details,
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("prepare host-only claude generation: %v", err)
 	}
 
@@ -1871,12 +1872,12 @@ func TestPrepareGenerationConcurrentSessionsUseDistinctControlManifests(t *testi
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := rt.PrepareGeneration(context.Background(), StartRequest{
+			_, err := rt.PrepareGeneration(context.Background(), withDataVolumePathsForTest(dir, StartRequest{
 				SessionID:    tc.sessionID,
 				GenerationID: tc.details.GenerationID,
 				Agent:        "claude",
 				Generation:   tc.details,
-			})
+			}))
 			if err != nil {
 				errs <- fmt.Errorf("prepare %s: %w", tc.sessionID, err)
 			}
@@ -1932,12 +1933,13 @@ func TestPrepareShellGenerationHasNoSecretMount(t *testing.T) {
 	details.SecretVersion = ""
 	details.SecretsDirPath = ""
 
-	if _, err := rt.PrepareGeneration(context.Background(), StartRequest{
+	workspacePath, agentHomePath := dataVolumePathsForTest(dir, "sess_shell", "sh")
+	if _, err := rt.PrepareGeneration(context.Background(), withDataVolumePathsForTest(dir, StartRequest{
 		SessionID:    "sess_shell",
 		GenerationID: details.GenerationID,
 		Agent:        "sh",
 		Generation:   details,
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("prepare shell generation: %v", err)
 	}
 	specData, err := os.ReadFile(details.SpecPath)
@@ -1971,10 +1973,10 @@ func TestPrepareShellGenerationHasNoSecretMount(t *testing.T) {
 			t.Fatalf("shell isolated mount %s uses recursive bind: %+v", mount.Destination, mount)
 		}
 	}
-	if mountSource(spec.Mounts, "/workspace") != filepath.Join(dir, "sessions", "sess_shell") {
+	if mountSource(spec.Mounts, "/workspace") != workspacePath {
 		t.Fatalf("workspace mount = %q", mountSource(spec.Mounts, "/workspace"))
 	}
-	if mountSource(spec.Mounts, "/agent-home") != filepath.Join(dir, "agent-homes", "sess_shell", "sh") {
+	if mountSource(spec.Mounts, "/agent-home") != agentHomePath {
 		t.Fatalf("agent-home mount = %q", mountSource(spec.Mounts, "/agent-home"))
 	}
 	if control := mountByDestination(spec.Mounts, "/harness-control"); control == nil || strings.Join(control.Options, ",") != "bind,ro,nosuid,nodev,noexec" {
@@ -2046,6 +2048,35 @@ func TestPrepareGenerationUsesProvidedDataVolumePaths(t *testing.T) {
 	}
 	if mountSource(spec.Mounts, "/agent-home") != agentHomePath {
 		t.Fatalf("agent-home mount source=%q want %q", mountSource(spec.Mounts, "/agent-home"), agentHomePath)
+	}
+}
+
+func TestPrepareGenerationRequiresDataVolumePaths(t *testing.T) {
+	dir := t.TempDir()
+	rt := New(Config{
+		SessionsRoot:   filepath.Join(dir, "legacy-sessions"),
+		AgentHomesRoot: filepath.Join(dir, "legacy-agent-homes"),
+		BundleRoot:     filepath.Join(dir, "bundle", "out"),
+		RootFSPath:     filepath.Join(dir, "rootfs"),
+		RunscNetwork:   "host",
+		SandboxUID:     testSandboxUID(),
+		SandboxGID:     testSandboxGID(),
+	})
+	details := testGenerationDetails(dir, "gen_missing_data_volume_paths")
+	details.SessionID = "sess_missing_data_volume_paths"
+	details.Agent = "sh"
+	details.OutputFormat = "shell_pty"
+	details.RequiresSecretDrop = false
+	details.ManifestAnthropicBaseURL = ""
+
+	_, err := rt.PrepareGeneration(context.Background(), StartRequest{
+		SessionID:    details.SessionID,
+		GenerationID: details.GenerationID,
+		Agent:        "sh",
+		Generation:   details,
+	})
+	if err == nil || !strings.Contains(err.Error(), "data volume paths are required") {
+		t.Fatalf("expected data volume path rejection, got %v", err)
 	}
 }
 
@@ -2121,6 +2152,23 @@ func TestPrepareGenerationRejectsMismatchedIdentity(t *testing.T) {
 	if !strings.Contains(err.Error(), "generation session mismatch") {
 		t.Fatalf("expected generation session mismatch, got %v", err)
 	}
+}
+
+func withDataVolumePathsForTest(dir string, req StartRequest) StartRequest {
+	sessionID := req.SessionID
+	if sessionID == "" {
+		sessionID = req.Generation.SessionID
+	}
+	agent := sandboxAgent(req)
+	workspacePath, agentHomePath := dataVolumePathsForTest(dir, sessionID, agent)
+	req.WorkspaceHostPath = workspacePath
+	req.AgentHomeHostPath = agentHomePath
+	return req
+}
+
+func dataVolumePathsForTest(dir, sessionID, agent string) (string, string) {
+	return filepath.Join(dir, "volumes", "workspaces", sessionID),
+		filepath.Join(dir, "volumes", "driver-homes", sessionID, agent)
 }
 
 func testGenerationDetails(dir, generationID string) store.RuntimeGenerationDetails {
