@@ -1315,6 +1315,37 @@ func TestRuntimePostStartProofRecordsContainerAndNetworkEvidence(t *testing.T) {
 	}
 }
 
+func TestRunscRunningEvidenceRetriesTransientStateMiss(t *testing.T) {
+	dir := t.TempDir()
+	runscRoot := filepath.Join(dir, "runsc-root")
+	containerID := "harness-gen-gen_retry"
+	runscBinary := "/usr/local/bin/runsc-proof"
+	command := runscBinary + " -root " + runscRoot + " state " + containerID
+	runner := &recordingCommandRunner{
+		sequence: map[string][]commandResult{
+			command: {
+				{out: []byte("FetchSpec failed: loading container: file does not exist"), err: errors.New("exit status 128")},
+				{out: []byte(`{"id":"` + containerID + `","status":"running"}`)},
+			},
+		},
+	}
+	rt := New(Config{
+		RunscRoot:     runscRoot,
+		CommandRunner: runner,
+	})
+
+	evidence, err := rt.runscContainerRunningEvidence(context.Background(), runscBinary, containerID)
+	if err != nil {
+		t.Fatalf("runsc running evidence: %v", err)
+	}
+	if !strings.Contains(evidence, containerID) || !strings.Contains(evidence, "running") {
+		t.Fatalf("unexpected evidence: %s", evidence)
+	}
+	if got := runner.Commands(); len(got) != 2 || got[0] != command || got[1] != command {
+		t.Fatalf("unexpected retry commands: %v", got)
+	}
+}
+
 func TestDestroyTreatsMissingRunscContainerAsAbsent(t *testing.T) {
 	runner := &recordingCommandRunner{
 		sequence: map[string][]commandResult{

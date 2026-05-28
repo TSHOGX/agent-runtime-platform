@@ -39,6 +39,15 @@ type bridgeState struct {
 	probed    bool
 }
 
+func (p *Processor) MarkReady(sessionID, generationID string) {
+	key := stateKey(sessionID, generationID)
+	p.setState(key, func(state bridgeState) bridgeState {
+		state.helloSeen = true
+		state.probed = true
+		return state
+	})
+}
+
 type grantPayload struct {
 	TurnID    int64     `json:"turn_id"`
 	Sequence  int64     `json:"sequence"`

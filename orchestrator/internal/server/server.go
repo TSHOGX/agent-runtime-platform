@@ -2167,6 +2167,7 @@ func (s *Server) RunPhase7Maintenance(ctx context.Context) error {
 			return
 		}
 		for _, generation := range generations {
+			processor.MarkReady(generation.SessionID, generation.GenerationID)
 			if err := processor.ProcessOnce(ctx, generation.BridgeDirPath); err != nil {
 				if errors.Is(err, context.Canceled) {
 					return

@@ -92,6 +92,47 @@ func TestProcessorRequiresHelloAndProbeBeforeClaimGrant(t *testing.T) {
 	}
 }
 
+func TestProcessorMarkReadyAllowsClaimAfterExternalStartupProbe(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openBridgeStore(t, ctx)
+	sessionID := "sess_bridge_mark_ready"
+	createBridgeSession(t, ctx, st, sessionID)
+	allocation, details := allocateBridgeGeneration(t, ctx, st, owner, sessionID)
+	if _, err := st.EnqueueTurn(ctx, sessionID, "after startup probe", time.Now().UTC()); err != nil {
+		t.Fatalf("enqueue turn: %v", err)
+	}
+
+	now := time.Now().UTC()
+	processor := &Processor{
+		Store:    st,
+		Owner:    allocation.Owner,
+		LeaseTTL: time.Minute,
+		Now: func() time.Time {
+			return now
+		},
+	}
+	processor.MarkReady(sessionID, allocation.GenerationID)
+
+	writeOutbox(t, ctx, details.BridgeDirPath, Envelope{
+		MessageID:    "msg_mark_ready_claim",
+		RequestID:    "req_mark_ready_claim",
+		Type:         TypeClaimNextTurn,
+		SessionID:    sessionID,
+		GenerationID: allocation.GenerationID,
+	})
+	if err := processor.ProcessOnce(ctx, details.BridgeDirPath); err != nil {
+		t.Fatalf("process marked-ready claim: %v", err)
+	}
+	response := assertSingleInboxResponse(t, details.BridgeDirPath, TypeGrant, "req_mark_ready_claim")
+	var grant grantPayload
+	if err := json.Unmarshal(response.Payload, &grant); err != nil {
+		t.Fatalf("decode grant: %v", err)
+	}
+	if grant.Content != "after startup probe" || grant.TurnID == 0 {
+		t.Fatalf("unexpected grant: %+v", grant)
+	}
+}
+
 func TestProcessorRequiresProbeBeforeRestoredGenerationClaimsTurn(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openBridgeStore(t, ctx)

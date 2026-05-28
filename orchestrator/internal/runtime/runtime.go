@@ -57,6 +57,8 @@ const controlFileName = "session.json"
 const checkpointImageManifestFileName = "harness-checkpoint-manifest.json"
 const checkpointImageManifestVersion = 1
 const defaultRunscPlatform = "systrap"
+const runscRunningProofTimeout = 2 * time.Second
+const runscRunningProofPollInterval = 25 * time.Millisecond
 
 var requiredCheckpointImageFiles = []string{"checkpoint.img", "pages.img", "pages_meta.img"}
 
@@ -699,19 +701,33 @@ func (r *Runtime) runtimePostStartProof(ctx context.Context, details store.Runti
 
 func (r *Runtime) runscContainerRunningEvidence(ctx context.Context, runscBinary, containerID string) (string, error) {
 	runscBinary = defaultString(runscBinary, "runsc")
-	output, err := r.runner.CombinedOutput(ctx, runscBinary, "-root", r.cfg.RunscRoot, "state", containerID)
-	if err != nil {
-		return "", fmt.Errorf("verify runsc container %s running: %w: %s", containerID, err, strings.TrimSpace(string(output)))
+	deadline := time.Now().Add(runscRunningProofTimeout)
+	var lastErr error
+	for {
+		output, err := r.runner.CombinedOutput(ctx, runscBinary, "-root", r.cfg.RunscRoot, "state", containerID)
+		trimmed := strings.TrimSpace(string(output))
+		if err != nil {
+			lastErr = fmt.Errorf("verify runsc container %s running: %w: %s", containerID, err, trimmed)
+		} else if trimmed == "" {
+			return "runsc_container:" + containerID + ":running; check=" + runscBinary + " state " + containerID, nil
+		} else {
+			lower := strings.ToLower(trimmed)
+			if strings.Contains(trimmed, containerID) && strings.Contains(lower, "running") {
+				return "runsc_container:" + containerID + ":running; check=" + runscBinary + " state " + containerID + "; output=" + trimmed, nil
+			}
+			lastErr = fmt.Errorf("verify runsc container %s running: unexpected state %q", containerID, trimmed)
+		}
+		if time.Now().After(deadline) {
+			return "", lastErr
+		}
+		timer := time.NewTimer(runscRunningProofPollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", fmt.Errorf("verify runsc container %s running: %w", containerID, ctx.Err())
+		case <-timer.C:
+		}
 	}
-	trimmed := strings.TrimSpace(string(output))
-	if trimmed == "" {
-		return "runsc_container:" + containerID + ":running; check=" + runscBinary + " state " + containerID, nil
-	}
-	lower := strings.ToLower(trimmed)
-	if !strings.Contains(trimmed, containerID) || !strings.Contains(lower, "running") {
-		return "", fmt.Errorf("verify runsc container %s running: unexpected state %q", containerID, trimmed)
-	}
-	return "runsc_container:" + containerID + ":running; check=" + runscBinary + " state " + containerID + "; output=" + trimmed, nil
 }
 
 func (r *Runtime) netnsPresenceEvidence(ctx context.Context, netnsName string) (string, error) {
