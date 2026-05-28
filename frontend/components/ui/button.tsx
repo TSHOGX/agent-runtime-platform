@@ -11,7 +11,7 @@ const button = cva(
     variants: {
       variant: {
         primary:
-          "bg-[var(--color-accent)] text-[var(--color-accent-foreground)] hover:bg-[oklch(0.56_0.13_38)]",
+          "bg-[var(--color-accent)] text-[var(--color-accent-foreground)] hover:bg-[var(--color-accent-hover)]",
         ghost:
           "bg-transparent text-[var(--color-foreground)] hover:bg-[var(--color-surface-muted)]",
         outline:

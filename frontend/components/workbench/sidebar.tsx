@@ -41,7 +41,7 @@ export function Sidebar() {
     <aside className="flex h-full min-h-0 w-[280px] min-w-0 flex-col overflow-hidden border-r border-[var(--color-border)] bg-[var(--color-surface)]">
       <div className="flex shrink-0 items-center justify-between px-4 py-3">
         <div className="flex flex-col">
-          <span className="text-sm font-semibold tracking-tight">Harness</span>
+          <span className="text-sm font-semibold tracking-tight">BatteryGPT</span>
           <span className="text-[11px] text-[var(--color-foreground-muted)]">Workbench</span>
         </div>
         <Button
