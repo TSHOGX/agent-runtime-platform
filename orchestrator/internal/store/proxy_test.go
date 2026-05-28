@@ -153,6 +153,49 @@ WHERE id = ?`,
 	}
 }
 
+func TestProxyRequestStartRejectsAdditionalLeasedTurnForGeneration(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	now := time.Now().UTC()
+	allocation, _, sandboxSourceIP := createRunningProxyTurn(t, ctx, st, owner.UUID, "sess_proxy_extra_leased", now)
+	injectedTurnID, err := st.EnqueueTurn(ctx, "sess_proxy_extra_leased", "injected leased turn", now.Add(5*time.Second))
+	if err != nil {
+		t.Fatalf("enqueue injected turn: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE turns
+SET status = 'leased',
+    generation_id = ?,
+    lease_owner = ?,
+    lease_expires_at = ?,
+    claim_request_id = ?,
+    claim_granted_at = ?
+WHERE id = ?`,
+		allocation.GenerationID, allocation.Owner, formatTime(now.Add(time.Minute)),
+		"claim_injected_leased", formatTime(now.Add(5*time.Second)), injectedTurnID); err != nil {
+		t.Fatalf("inject leased turn: %v", err)
+	}
+
+	_, err = st.StartProxyRequest(ctx, StartProxyRequestParams{
+		SandboxSourceIP: sandboxSourceIP,
+		ProxyRequestID:  "proxy_extra_leased",
+		Now:             now.Add(6 * time.Second),
+	})
+	if !errors.Is(err, ErrProxyContextUnavailable) {
+		t.Fatalf("extra leased turn err=%v want ErrProxyContextUnavailable", err)
+	}
+	var events int
+	if err := st.db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM events
+WHERE proxy_request_id = 'proxy_extra_leased'`).Scan(&events); err != nil {
+		t.Fatalf("count proxy events: %v", err)
+	}
+	if events != 0 {
+		t.Fatalf("denied proxy request wrote %d events", events)
+	}
+}
+
 func TestProxyRequestStartRequiresLiveRuntimeResource(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)

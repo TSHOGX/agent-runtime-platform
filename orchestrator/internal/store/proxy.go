@@ -111,12 +111,12 @@ WHERE c.sandbox_source_ip = ?
   AND s.status NOT IN ('failed', 'destroyed')
   AND (
     SELECT COUNT(*)
-    FROM turns running
-    WHERE running.session_id = c.session_id
-      AND running.generation_id = c.generation_id
-      AND running.status = 'running'
-      AND running.lease_owner = c.lease_owner
-      AND running.lease_expires_at > ?
+    FROM turns inflight
+    WHERE inflight.session_id = c.session_id
+      AND inflight.generation_id = c.generation_id
+      AND inflight.status IN ('leased', 'running')
+      AND inflight.lease_owner = c.lease_owner
+      AND inflight.lease_expires_at > ?
   ) = 1`,
 		p.SandboxSourceIP, formatTime(p.Now), formatTime(p.Now), formatTime(p.Now), formatTime(p.Now),
 	).Scan(&result.SessionID, &result.GenerationID, &result.TurnID, &nextRequestSequence); err != nil {
