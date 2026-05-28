@@ -158,7 +158,13 @@ HTTP routes, SSE/WebSocket endpoints, and the canonical event-name set are docum
 - Runtime specs now use read-only rootfs, exact `/workspace` and `/agent-home` DataVolume binds, exact `/harness-control` and bridge binds, no `/harness-secrets`, no parent `/sessions` or `/agent-homes` mounts, empty OCI capabilities, and `noNewPrivileges`.
 - Claude provider credentials are host/proxy-side. Sandbox startup probes only health/bridge readiness before turns; model endpoints require a committed active model context, source-IP match, contract entitlement, and proxy correlation through the authenticated UDS.
 - Shell and Claude bridge claim-loop paths run under the configured non-root sandbox identity. Legacy session `workspace`, `agent_home_path`, and `restore_id` columns remain internal compatibility storage and are omitted from public API/event DTOs.
-- Phase 8 is not release-complete until destructive cutover, proxy re-pin evidence, host reconciliation evidence, and every release gate in `docs/phase8/release-gates.md` passes on the target lab host.
+- Phase 8 destructive cutover and host reconciliation evidence now pass on the
+  target lab host: `/tmp/harness-cutover-inventory.json` reports
+  `blockers: []`, and `/tmp/harness-reconciliation-evidence.json` reports an
+  empty `runtime_resource_instances` table with host absence checks passing.
+  Phase 8 is still not release-complete until rootfs and adversarial lab
+  evidence, the final supplied-evidence bundle, and every gate in
+  `docs/phase8/release-gates.md` are audited with evidence.
 - Automatic idle checkpointing is disabled by the checked-in policy. It can be enabled only after operators accept the measured restore/resource-retention behavior for the lab.
 - Reclaimable runtime resources are retained for `harness.reaper.failed_retention` before physical cleanup, so recently failed/destroyed generations can remain visible briefly by design.
 - Phase 8 is planned as a destructive clean cutover for this lab, not an
