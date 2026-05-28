@@ -211,6 +211,7 @@ Runtime isolation release evidence:
 
 ```bash
 tools/phase8/release-gates.py --output /tmp/harness-runtime-isolation-deterministic-gates.json
+tools/phase8/cutover-inventory.py --expect-clean --require-host-inventory --output /tmp/harness-cutover-inventory.json
 tools/phase8/rootfs-inspect.py --output /tmp/harness-rootfs-inspection.json
 ```
 

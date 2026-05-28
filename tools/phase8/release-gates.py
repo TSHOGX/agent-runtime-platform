@@ -37,6 +37,7 @@ class Gate:
 def parse_args():
     parser = argparse.ArgumentParser(description="Run runtime isolation release qualification gates and emit JSON evidence.")
     parser.add_argument("--include-prior-release", action="store_true", help="Run the prior deterministic release runner.")
+    parser.add_argument("--include-cutover-inventory", action="store_true", help="Run the cutover inventory clean-state gate.")
     parser.add_argument("--include-rootfs-inspection", action="store_true", help="Inspect the configured sandbox rootfs image.")
     parser.add_argument("--include-proxy", action="store_true", help="Run the pinned claude-code-proxy contract gate.")
     parser.add_argument("--include-bridge-lab", action="store_true", help="Run the gVisor bridge durability lab.")
@@ -92,6 +93,7 @@ def deterministic_gates():
                 "-m",
                 "unittest",
                 "sandbox-image/tests/test_harness_bridge_client.py",
+                "tools/phase8/test_cutover_inventory.py",
                 "tools/phase8/test_release_gates.py",
                 "tools/phase8/test_rootfs_inspect.py",
             ),
@@ -116,6 +118,15 @@ def optional_gates(args):
                 command=("tools/phase7/release-gates.py",),
                 cwd=REPO_ROOT,
                 category="compatibility",
+            )
+        )
+    if args.include_cutover_inventory:
+        gates.append(
+            Gate(
+                name="cutover_inventory",
+                command=("tools/phase8/cutover-inventory.py", "--expect-clean", "--require-host-inventory"),
+                cwd=REPO_ROOT,
+                category="evidence",
             )
         )
     if args.include_rootfs_inspection:
@@ -295,7 +306,7 @@ def tail(text, limit=12000):
 
 
 def attach_structured_output(result):
-    if result["name"] in {"live_turn_start_latency", "rootfs_image_inspection"} and result["stdout_tail"].strip():
+    if result["name"] in {"live_turn_start_latency", "rootfs_image_inspection", "cutover_inventory"} and result["stdout_tail"].strip():
         try:
             result["structured_output"] = json.loads(result["stdout_tail"])
         except json.JSONDecodeError:
@@ -406,18 +417,27 @@ def release_completion(results, supplied_evidence, require_release_evidence=Fals
 def supplied_evidence_from_gate_results(results):
     supplied = {}
     for result in results:
-        if result["name"] != "rootfs_image_inspection" or result["status"] != "passed":
+        if result["status"] != "passed":
             continue
         payload = result.get("structured_output")
         if not isinstance(payload, dict):
             continue
-        supplied["rootfs_image"] = {
-            "path": "gate:rootfs_image_inspection",
-            "digest": payload.get("rootfs_digest", ""),
-            "bytes": 0,
-            "status": payload.get("status", ""),
-            "payload": payload,
-        }
+        if result["name"] == "rootfs_image_inspection":
+            supplied["rootfs_image"] = {
+                "path": "gate:rootfs_image_inspection",
+                "digest": payload.get("rootfs_digest", ""),
+                "bytes": 0,
+                "status": payload.get("status", ""),
+                "payload": payload,
+            }
+        elif result["name"] == "cutover_inventory":
+            supplied["cutover"] = {
+                "path": "gate:cutover_inventory",
+                "digest": "",
+                "bytes": 0,
+                "status": payload.get("status", ""),
+                "payload": payload,
+            }
     return supplied
 
 

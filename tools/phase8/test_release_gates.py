@@ -16,6 +16,7 @@ class ReleaseGatesTest(unittest.TestCase):
     def test_default_selected_gates_are_deterministic_only(self):
         args = argparse_namespace(
             include_prior_release=False,
+            include_cutover_inventory=False,
             include_rootfs_inspection=False,
             include_proxy=False,
             include_bridge_lab=False,
@@ -35,11 +36,13 @@ class ReleaseGatesTest(unittest.TestCase):
         )
         self.assertEqual({gate.category for gate in gates}, {"deterministic"})
         self.assertIn("tools/phase8/test_release_gates.py", gates[2].command)
+        self.assertIn("tools/phase8/test_cutover_inventory.py", gates[2].command)
         self.assertIn("tools/phase8/test_rootfs_inspect.py", gates[2].command)
 
     def test_optional_flags_add_external_and_compatibility_gates(self):
         args = argparse_namespace(
             include_prior_release=True,
+            include_cutover_inventory=True,
             include_rootfs_inspection=True,
             include_proxy=True,
             include_bridge_lab=True,
@@ -49,17 +52,18 @@ class ReleaseGatesTest(unittest.TestCase):
         gates = MODULE.selected_gates(args)
 
         self.assertEqual(
-            [gate.name for gate in gates[-5:]],
+            [gate.name for gate in gates[-6:]],
             [
                 "prior_deterministic_release_runner",
+                "cutover_inventory",
                 "rootfs_image_inspection",
                 "pinned_proxy_contract",
                 "gvisor_bridge_durability_lab",
                 "live_turn_start_latency",
             ],
         )
-        self.assertEqual(gates[-5].category, "compatibility")
-        self.assertEqual(gates[-4].category, "evidence")
+        self.assertEqual(gates[-6].category, "compatibility")
+        self.assertEqual({gates[-5].category, gates[-4].category}, {"evidence"})
         self.assertEqual({gate.category for gate in gates[-3:]}, {"external"})
 
     def test_run_gate_captures_success_and_failure(self):
@@ -144,6 +148,28 @@ class ReleaseGatesTest(unittest.TestCase):
 
         self.assertIn("rootfs_image", payload["supplied_evidence"])
         self.assertEqual(payload["supplied_evidence"]["rootfs_image"]["digest"], rootfs_payload["rootfs_digest"])
+
+    def test_cutover_gate_output_satisfies_cutover_supplied_evidence(self):
+        cutover_payload = {
+            "status": "passed",
+            "qualification": "cutover-inventory",
+            "blockers": [],
+        }
+
+        payload = MODULE.evidence(
+            [
+                {
+                    "name": "cutover_inventory",
+                    "status": "passed",
+                    "structured_output": cutover_payload,
+                }
+            ],
+            commit="abc123",
+            context={"git": {"commit": "abc123"}},
+        )
+
+        self.assertIn("cutover", payload["supplied_evidence"])
+        self.assertEqual(payload["supplied_evidence"]["cutover"]["status"], "passed")
 
     def test_supplied_evidence_records_digest_and_allows_release_completion(self):
         with tempfile.TemporaryDirectory() as tmp:
