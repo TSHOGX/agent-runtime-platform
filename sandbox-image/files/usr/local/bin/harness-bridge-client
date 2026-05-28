@@ -21,6 +21,8 @@ BRIDGE_HEARTBEAT = "bridge"
 HOST_HEARTBEAT = "host"
 CHECKPOINT_READY = "checkpoint-ready"
 HOST_ONLY_DUMMY_API_KEY = "harness-model-proxy-dummy-key"
+CLAUDE_MARKER_DIR = ".harness"
+CLAUDE_SESSION_MARKER = "claude-session-initialized.json"
 
 
 def seq_name(seq):
@@ -86,6 +88,80 @@ def write_control_file(root, dirname, name, suffix):
             tmp_path.unlink()
         except FileNotFoundError:
             pass
+
+
+def claude_session_marker_path(agent_home):
+    return Path(agent_home) / CLAUDE_MARKER_DIR / CLAUDE_SESSION_MARKER
+
+
+def claude_session_marker_matches(agent_home, session_uuid):
+    marker = claude_session_marker_path(agent_home)
+    try:
+        raw = marker.read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    if raw == session_uuid:
+        return True
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    return payload.get("claude_session_uuid") == session_uuid
+
+
+def claude_session_state_exists(agent_home, session_uuid):
+    projects = Path(agent_home) / ".claude" / "projects"
+    if not projects.is_dir():
+        return False
+    try:
+        for path in projects.glob(f"**/{session_uuid}.jsonl"):
+            if path.is_file() and path.stat().st_size > 0:
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def claude_session_initialized(agent_home, session_uuid):
+    return claude_session_marker_matches(agent_home, session_uuid) or claude_session_state_exists(
+        agent_home,
+        session_uuid,
+    )
+
+
+def mark_claude_session_initialized(agent_home, session_uuid):
+    marker = claude_session_marker_path(agent_home)
+    marker_dir = marker.parent
+    marker_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = marker_dir / f".{uuid.uuid4()}.tmp"
+    payload = {
+        "claude_session_uuid": session_uuid,
+        "marked_at_ns": time.time_ns(),
+    }
+    data = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    with open(tmp_path, "xb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    try:
+        os.replace(tmp_path, marker)
+        fsync_dir(marker_dir)
+    finally:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def try_mark_claude_session_initialized(agent_home, session_uuid):
+    try:
+        mark_claude_session_initialized(agent_home, session_uuid)
+    except OSError:
+        pass
+
+
+def payload_mentions_claude_session(payload, session_uuid):
+    return payload.get("session_id") == session_uuid or payload.get("sessionId") == session_uuid
 
 
 class Queue:
@@ -310,6 +386,9 @@ class ClaudeTurnRunner:
         session_uuid = os.environ.get("CLAUDE_SESSION_UUID", "")
         if not session_uuid:
             raise RuntimeError("CLAUDE_SESSION_UUID is required for claude agent")
+        agent_home = os.environ.get("HARNESS_AGENT_HOME", "")
+        if not agent_home:
+            raise RuntimeError("HARNESS_AGENT_HOME is required for claude agent")
         claude_command = [
             "/usr/local/bin/claude",
             "--bare",
@@ -326,15 +405,17 @@ class ClaudeTurnRunner:
             "--replay-user-messages",
             "--verbose",
         ]
-        if self.first_turn and os.environ.get("CLAUDE_RESUME", "0") != "1":
-            claude_command.extend(["--session-id", session_uuid])
-        else:
+        resume_claude = (
+            os.environ.get("CLAUDE_RESUME", "0") == "1"
+            or not self.first_turn
+            or claude_session_initialized(agent_home, session_uuid)
+        )
+        if resume_claude:
             claude_command.extend(["--resume", session_uuid])
+        else:
+            claude_command.extend(["--session-id", session_uuid])
         self.first_turn = False
 
-        agent_home = os.environ.get("HARNESS_AGENT_HOME", "")
-        if not agent_home:
-            raise RuntimeError("HARNESS_AGENT_HOME is required for claude agent")
         env = {
             "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
             "HOME": agent_home,
@@ -385,6 +466,7 @@ class ClaudeTurnRunner:
         status = "completed"
         error_class = ""
         error = ""
+        saw_session = False
         for line in proc.stdout:
             stripped = line.rstrip("\n")
             if stripped:
@@ -393,6 +475,8 @@ class ClaudeTurnRunner:
                     payload = json.loads(stripped)
                 except json.JSONDecodeError:
                     continue
+                if payload_mentions_claude_session(payload, session_uuid):
+                    saw_session = True
                 if payload.get("type") == "error":
                     status = "failed"
                     error_class = "agent_execution_failed"
@@ -402,6 +486,8 @@ class ClaudeTurnRunner:
             status = "failed"
             error_class = "agent_exit_nonzero"
             error = f"claude exited with status {rc}"
+        if saw_session or claude_session_state_exists(agent_home, session_uuid):
+            try_mark_claude_session_initialized(agent_home, session_uuid)
         return status, error_class, error
 
     def close(self):

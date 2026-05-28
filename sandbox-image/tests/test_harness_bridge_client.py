@@ -655,6 +655,93 @@ class BridgeClientTest(unittest.TestCase):
         self.assertIn("--resume", commands[1])
         self.assertNotIn("--session-id", commands[1])
 
+    def test_claude_runner_resumes_after_recreated_runner_when_marker_written(self):
+        class FakeStdin:
+            def write(self, value):
+                pass
+
+            def close(self):
+                pass
+
+        class FakeProcess:
+            def __init__(self, lines):
+                self.stdin = FakeStdin()
+                self.stdout = iter(lines)
+
+            def wait(self):
+                return 0
+
+        session_uuid = "11111111-2222-3333-4444-555555555555"
+        command_outputs = iter(
+            [
+                [
+                    f'{{"type":"system","subtype":"init","session_id":"{session_uuid}"}}\n',
+                    f'{{"type":"result","result":"ok","session_id":"{session_uuid}"}}\n',
+                ],
+                ['{"type":"result","result":"ok"}\n'],
+            ]
+        )
+        commands = []
+
+        def popen(command, **kwargs):
+            commands.append(command)
+            return FakeProcess(next(command_outputs))
+
+        with tempfile.TemporaryDirectory() as agent_home:
+            env = claude_runner_env()
+            env["HARNESS_AGENT_HOME"] = agent_home
+            with mock.patch.dict(os.environ, env, clear=True):
+                with mock.patch.object(bridge.subprocess, "Popen", side_effect=popen):
+                    bridge.ClaudeTurnRunner().run_turn("first", lambda stream, line: None)
+                    bridge.ClaudeTurnRunner().run_turn("second", lambda stream, line: None)
+
+            marker = Path(agent_home) / bridge.CLAUDE_MARKER_DIR / bridge.CLAUDE_SESSION_MARKER
+            self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))["claude_session_uuid"], session_uuid)
+
+        self.assertIn("--session-id", commands[0])
+        self.assertNotIn("--resume", commands[0])
+        self.assertIn("--resume", commands[1])
+        self.assertNotIn("--session-id", commands[1])
+
+    def test_claude_runner_resumes_after_recreated_runner_when_claude_state_exists(self):
+        class FakeStdin:
+            def write(self, value):
+                pass
+
+            def close(self):
+                pass
+
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = FakeStdin()
+                self.stdout = iter(['{"type":"result","result":"ok"}\n'])
+
+            def wait(self):
+                return 0
+
+        session_uuid = "11111111-2222-3333-4444-555555555555"
+        commands = []
+
+        def popen(command, **kwargs):
+            commands.append(command)
+            return FakeProcess()
+
+        with tempfile.TemporaryDirectory() as agent_home:
+            state_dir = Path(agent_home) / ".claude" / "projects" / "-workspace"
+            state_dir.mkdir(parents=True)
+            (state_dir / f"{session_uuid}.jsonl").write_text(
+                f'{{"type":"last-prompt","sessionId":"{session_uuid}"}}\n',
+                encoding="utf-8",
+            )
+            env = claude_runner_env()
+            env["HARNESS_AGENT_HOME"] = agent_home
+            with mock.patch.dict(os.environ, env, clear=True):
+                with mock.patch.object(bridge.subprocess, "Popen", side_effect=popen):
+                    bridge.ClaudeTurnRunner().run_turn("second", lambda stream, line: None)
+
+        self.assertIn("--resume", commands[0])
+        self.assertNotIn("--session-id", commands[0])
+
     def test_claude_runner_maps_stream_error_to_failed_turn(self):
         class FakeStdin:
             def write(self, value):
