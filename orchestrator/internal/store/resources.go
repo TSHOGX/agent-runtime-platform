@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +20,8 @@ import (
 )
 
 const RuntimeManagerRoleTag = "runtime_manager"
+const defaultSandboxModelProxyAliasHost = "harness-model-proxy.internal"
+const defaultSandboxModelProxyAliasPort = 8082
 const defaultSandboxModelProxyAliasURL = "http://harness-model-proxy.internal:8082"
 
 var ErrPoolExhausted = errors.New("pool exhausted")
@@ -2654,7 +2657,8 @@ func containsHostname(hosts []string) bool {
 }
 
 func egressPolicyID(cfg ResourceAllocatorConfig) string {
-	payload := strings.Join(cfg.EgressDorisFEHosts, ",") + "|" +
+	payload := fmt.Sprintf("proxy_port=%d", cfg.proxyPort()) + "|" +
+		strings.Join(cfg.EgressDorisFEHosts, ",") + "|" +
 		strings.Join(cfg.EgressDorisBEHosts, ",") + "|" +
 		fmt.Sprint(cfg.EgressDorisPorts) + "|" + cfg.EgressDNSPolicy + "|" +
 		fmt.Sprintf("dns_allowed=%t", egressAllowsDNS(cfg))
@@ -2754,9 +2758,16 @@ func (c ResourceAllocatorConfig) sandboxModelProxyBaseURL() string {
 		return value
 	}
 	if c.providerCredentialsHostOnly() && c.modelAccessAllowed() {
-		return defaultSandboxModelProxyAliasURL
+		return defaultSandboxModelProxyAliasURLForPort(c.proxyPort())
 	}
 	return ""
+}
+
+func defaultSandboxModelProxyAliasURLForPort(port int) string {
+	if port <= 0 {
+		port = defaultSandboxModelProxyAliasPort
+	}
+	return fmt.Sprintf("http://%s:%d", defaultSandboxModelProxyAliasHost, port)
 }
 
 func (c ResourceAllocatorConfig) validateSandboxModelProxyBaseURL() error {
@@ -2789,6 +2800,17 @@ func (c ResourceAllocatorConfig) validateSandboxModelProxyBaseURL() error {
 	}
 	if modelProxyHostIsProviderUpstream(host) {
 		return fmt.Errorf("sandbox model proxy base url %q must not point at a provider upstream", raw)
+	}
+	portRaw := parsed.Port()
+	if portRaw == "" {
+		return fmt.Errorf("sandbox model proxy base url %q must include an explicit port matching proxy port %d", raw, c.proxyPort())
+	}
+	port, err := strconv.Atoi(portRaw)
+	if err != nil || port <= 0 || port > 65535 {
+		return fmt.Errorf("sandbox model proxy base url %q contains invalid port %q", raw, portRaw)
+	}
+	if port != c.proxyPort() {
+		return fmt.Errorf("sandbox model proxy base url %q port must match proxy port %d", raw, c.proxyPort())
 	}
 	return nil
 }

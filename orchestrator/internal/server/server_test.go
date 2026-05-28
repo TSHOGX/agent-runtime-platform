@@ -1843,8 +1843,8 @@ func TestGetQuotaReportsSessionAndPoolCeilings(t *testing.T) {
 			EgressDorisBEHosts: cfg.Phase7.Network.Egress.DorisBEHosts,
 			EgressDorisPorts:   cfg.Phase7.Network.Egress.DorisPorts,
 			EgressDNSPolicy:    string(cfg.Phase7.Network.Egress.DNSPolicy),
-			HostProxyBindURL:   cfg.Claude.ProxyBindURL,
-			ProxyPort:          8082,
+			HostProxyBindURL:   cfg.ModelProxy.BindURL,
+			ProxyPort:          cfg.ModelProxy.BindPort,
 			Agent:              "claude",
 			AgentModel:         cfg.Claude.Model,
 			AgentOutputFormat:  cfg.Claude.OutputFormat,
@@ -2727,8 +2727,8 @@ func TestRunPhase7MaintenancePollsBridgeOutbox(t *testing.T) {
 			EgressDorisBEHosts: cfg.Phase7.Network.Egress.DorisBEHosts,
 			EgressDorisPorts:   cfg.Phase7.Network.Egress.DorisPorts,
 			EgressDNSPolicy:    string(cfg.Phase7.Network.Egress.DNSPolicy),
-			HostProxyBindURL:   cfg.Claude.ProxyBindURL,
-			ProxyPort:          8082,
+			HostProxyBindURL:   cfg.ModelProxy.BindURL,
+			ProxyPort:          cfg.ModelProxy.BindPort,
 			Agent:              "claude",
 			AgentModel:         cfg.Claude.Model,
 			AgentOutputFormat:  cfg.Claude.OutputFormat,
@@ -4729,6 +4729,11 @@ func testServerConfig(dir string) config.Config {
 			OutputFormat:               "stream-json",
 			DisableNonessentialTraffic: true,
 		},
+		ModelProxy: config.ModelProxyConfig{
+			BindURL:        "http://0.0.0.0:8082",
+			SandboxBaseURL: "http://harness-model-proxy.internal:8082",
+			BindPort:       8082,
+		},
 		Phase7: config.Phase7Config{
 			RunDir: filepath.Join(dir, "run"),
 			Network: config.NetworkConfig{
@@ -4786,7 +4791,7 @@ func serverTestSandboxGID() int {
 
 func TestResourceAllocatorConfigUsesHostOnlyClaudeCredentials(t *testing.T) {
 	cfg := testServerConfig(t.TempDir())
-	cfg.Claude.SandboxBaseURL = "http://harness-model-proxy.internal:8082"
+	cfg.ModelProxy.SandboxBaseURL = "http://harness-model-proxy.internal:8082"
 	srv := &Server{cfg: cfg}
 
 	claudeConfig := srv.resourceAllocatorConfig("claude")
@@ -4807,6 +4812,23 @@ func TestResourceAllocatorConfigUsesHostOnlyClaudeCredentials(t *testing.T) {
 	}
 }
 
+func TestResourceAllocatorConfigUsesModelProxyPort(t *testing.T) {
+	cfg := testServerConfig(t.TempDir())
+	cfg.ModelProxy = config.ModelProxyConfig{
+		BindURL:        "http://0.0.0.0:8083",
+		SandboxBaseURL: "http://harness-model-proxy.internal:8083",
+		BindPort:       8083,
+	}
+	srv := &Server{cfg: cfg}
+
+	allocatorConfig := srv.resourceAllocatorConfig("claude")
+	if allocatorConfig.HostProxyBindURL != "http://0.0.0.0:8083" ||
+		allocatorConfig.ProxyPort != 8083 ||
+		allocatorConfig.SandboxModelProxyBaseURL != "http://harness-model-proxy.internal:8083" {
+		t.Fatalf("allocator model proxy config = %+v", allocatorConfig)
+	}
+}
+
 func serverTestAllocatorConfig(cfg config.Config, agent string) store.ResourceAllocatorConfig {
 	outputFormat := cfg.Claude.OutputFormat
 	if agent == "sh" {
@@ -4819,8 +4841,8 @@ func serverTestAllocatorConfig(cfg config.Config, agent string) store.ResourceAl
 		EgressDorisBEHosts:          cfg.Phase7.Network.Egress.DorisBEHosts,
 		EgressDorisPorts:            cfg.Phase7.Network.Egress.DorisPorts,
 		EgressDNSPolicy:             string(cfg.Phase7.Network.Egress.DNSPolicy),
-		HostProxyBindURL:            cfg.Claude.ProxyBindURL,
-		ProxyPort:                   8082,
+		HostProxyBindURL:            cfg.ModelProxy.BindURL,
+		ProxyPort:                   cfg.ModelProxy.BindPort,
 		Agent:                       agent,
 		AgentModel:                  cfg.Claude.Model,
 		AgentOutputFormat:           outputFormat,
@@ -4829,7 +4851,7 @@ func serverTestAllocatorConfig(cfg config.Config, agent string) store.ResourceAl
 		SandboxGID:                  cfg.Phase7.SandboxIdentity.GID,
 		SandboxSupplementalGIDs:     cfg.Phase7.SandboxIdentity.SupplementalGIDs,
 		ProviderCredentialsHostOnly: agent == "claude",
-		SandboxModelProxyBaseURL:    cfg.Claude.SandboxBaseURL,
+		SandboxModelProxyBaseURL:    cfg.ModelProxy.SandboxBaseURL,
 	}
 }
 

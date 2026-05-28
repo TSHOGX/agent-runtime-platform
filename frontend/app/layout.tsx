@@ -3,8 +3,8 @@ import { Toaster } from "sonner";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Harness Workbench",
-  description: "Phase 4 frontend MVP for the harness platform"
+  title: "Agent Runtime Workbench",
+  description: "Workbench for sandboxed AI agent sessions"
 };
 
 export default function RootLayout({

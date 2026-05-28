@@ -2,6 +2,9 @@ harness:
   run_dir: /var/lib/harness/run
   session_retention: 0s
   max_sessions: 30
+  model_proxy:
+    bind_url: http://0.0.0.0:8082
+    sandbox_base_url: http://harness-model-proxy.internal:8082
   sandbox_identity:
     uid: 65534
     gid: 65534

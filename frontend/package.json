@@ -1,5 +1,5 @@
 {
-  "name": "harness-platform-frontend",
+  "name": "agent-runtime-frontend",
   "version": "0.1.0",
   "private": true,
   "scripts": {

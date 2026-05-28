@@ -154,6 +154,113 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ne
 	}
 }
 
+func TestAllocateGenerationUsesConfiguredModelProxyPort(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	createStoreSession(t, ctx, st, "sess_proxy_port")
+	cfg := testAllocatorConfig(t)
+	cfg.HostProxyBindURL = "http://0.0.0.0:8083"
+	cfg.ProxyPort = 8083
+	cfg.SandboxModelProxyBaseURL = "http://harness-model-proxy.internal:8083"
+
+	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_proxy_port",
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    cfg,
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	details, err := st.GetRuntimeGenerationDetails(ctx, "sess_proxy_port", allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get runtime generation details: %v", err)
+	}
+	if details.ProxyPort != 8083 ||
+		details.HostProxyBindURL != "http://0.0.0.0:8083" ||
+		details.SandboxBaseURL != "http://10.240.0.1:8083" ||
+		details.ProbeURL != "http://10.240.0.1:8083" ||
+		details.ManifestAnthropicBaseURL != "http://harness-model-proxy.internal:8083" {
+		t.Fatalf("generation did not use configured model proxy port: %+v", details)
+	}
+	assertJSONStrings(t, details.AllowedEgressRules, []string{
+		"tcp:10.240.0.1:8083",
+		"tcp:172.16.0.138:9030",
+		"tcp:172.16.0.138:8040",
+		"tcp:172.16.0.139:9030",
+		"tcp:172.16.0.139:8040",
+	})
+	if !strings.Contains(details.EgressPolicyID, "proxy_port=8083") ||
+		!strings.Contains(details.EgressPolicyDigest, "proxy_port=8083") {
+		t.Fatalf("egress policy identity does not include proxy port: id=%q digest=%q", details.EgressPolicyID, details.EgressPolicyDigest)
+	}
+}
+
+func TestAllocateGenerationEgressPolicyIdentityIncludesProxyPort(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	createStoreSession(t, ctx, st, "sess_proxy_policy_8082")
+	createStoreSession(t, ctx, st, "sess_proxy_policy_8083")
+	cfg := testAllocatorConfig(t)
+
+	first, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_proxy_policy_8082",
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    cfg,
+	})
+	if err != nil {
+		t.Fatalf("allocate first generation: %v", err)
+	}
+	firstDetails, err := st.GetRuntimeGenerationDetails(ctx, "sess_proxy_policy_8082", first.GenerationID)
+	if err != nil {
+		t.Fatalf("get first generation details: %v", err)
+	}
+
+	cfg.HostProxyBindURL = "http://0.0.0.0:8083"
+	cfg.ProxyPort = 8083
+	cfg.SandboxModelProxyBaseURL = ""
+	second, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_proxy_policy_8083",
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC().Add(time.Second),
+		Config:    cfg,
+	})
+	if err != nil {
+		t.Fatalf("allocate second generation: %v", err)
+	}
+	secondDetails, err := st.GetRuntimeGenerationDetails(ctx, "sess_proxy_policy_8083", second.GenerationID)
+	if err != nil {
+		t.Fatalf("get second generation details: %v", err)
+	}
+	if firstDetails.EgressPolicyID == secondDetails.EgressPolicyID {
+		t.Fatalf("proxy port change reused egress policy id %q", secondDetails.EgressPolicyID)
+	}
+	if secondDetails.ManifestAnthropicBaseURL != "http://harness-model-proxy.internal:8083" {
+		t.Fatalf("default manifest proxy alias was not derived from proxy port: %+v", secondDetails)
+	}
+	wantSecondRules := []string{
+		"tcp:10.240.0.5:8083",
+		"tcp:172.16.0.138:9030",
+		"tcp:172.16.0.138:8040",
+		"tcp:172.16.0.139:9030",
+		"tcp:172.16.0.139:8040",
+	}
+	assertJSONStrings(t, secondDetails.AllowedEgressRules, wantSecondRules)
+
+	var policyRules string
+	if err := st.db.QueryRowContext(ctx, `
+SELECT allowed_egress_rules
+FROM egress_policies
+WHERE egress_policy_id = ?`, secondDetails.EgressPolicyID).Scan(&policyRules); err != nil {
+		t.Fatalf("query egress policy rules: %v", err)
+	}
+	assertJSONStrings(t, policyRules, wantSecondRules)
+}
+
 func TestAllowedEgressRulesHonorsDNSPolicy(t *testing.T) {
 	base := testAllocatorConfig(t)
 	base.EgressDorisPorts = []int{9030}
@@ -835,6 +942,26 @@ func TestAllocateClaudeRejectsInvalidSandboxModelProxyBaseURL(t *testing.T) {
 				t.Fatalf("expected %q rejection, got %v", tt.want, err)
 			}
 		})
+	}
+}
+
+func TestAllocateClaudeRejectsMismatchedSandboxModelProxyPort(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	createStoreSession(t, ctx, st, "sess_invalid_proxy_port")
+	cfg := testAllocatorConfig(t)
+	cfg.ProxyPort = 8083
+	cfg.SandboxModelProxyBaseURL = "http://harness-model-proxy.internal:8082"
+
+	_, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_invalid_proxy_port",
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    cfg,
+	})
+	if err == nil || !strings.Contains(err.Error(), "must match proxy port 8083") {
+		t.Fatalf("expected proxy port mismatch rejection, got %v", err)
 	}
 }
 

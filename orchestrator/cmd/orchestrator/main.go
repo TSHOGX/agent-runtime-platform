@@ -86,7 +86,7 @@ func main() {
 				BridgeHeartbeat:         cfg.Phase7.Bridge.HeartbeatInterval.Duration,
 				BridgePollInterval:      cfg.Phase7.Bridge.PollInterval.Duration,
 				Claude: runtime.ClaudeConfig{
-					ProxyBindURL:               cfg.Claude.ProxyBindURL,
+					ProxyBindURL:               cfg.ModelProxy.BindURL,
 					APIKey:                     cfg.Claude.APIKey,
 					AuthToken:                  cfg.Claude.AuthToken,
 					Model:                      cfg.Claude.Model,

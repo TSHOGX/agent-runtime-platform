@@ -1185,8 +1185,8 @@ func (s *Server) resourceAllocatorConfig(agent string) store.ResourceAllocatorCo
 		EgressDorisBEHosts:          s.cfg.Phase7.Network.Egress.DorisBEHosts,
 		EgressDorisPorts:            s.cfg.Phase7.Network.Egress.DorisPorts,
 		EgressDNSPolicy:             string(s.cfg.Phase7.Network.Egress.DNSPolicy),
-		HostProxyBindURL:            s.cfg.Claude.ProxyBindURL,
-		ProxyPort:                   8082,
+		HostProxyBindURL:            s.cfg.ModelProxy.BindURL,
+		ProxyPort:                   s.cfg.ModelProxy.BindPort,
 		Agent:                       agent,
 		AgentModel:                  s.cfg.Claude.Model,
 		AgentOutputFormat:           outputFormat,
@@ -1195,7 +1195,7 @@ func (s *Server) resourceAllocatorConfig(agent string) store.ResourceAllocatorCo
 		SandboxGID:                  s.cfg.Phase7.SandboxIdentity.GID,
 		SandboxSupplementalGIDs:     s.cfg.Phase7.SandboxIdentity.SupplementalGIDs,
 		ProviderCredentialsHostOnly: agent == string(agents.Claude),
-		SandboxModelProxyBaseURL:    s.cfg.Claude.SandboxBaseURL,
+		SandboxModelProxyBaseURL:    s.cfg.ModelProxy.SandboxBaseURL,
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"net"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -36,6 +37,7 @@ type Config struct {
 	RunscNetwork     string
 	RunscOverlay2    string
 	Claude           ClaudeConfig
+	ModelProxy       ModelProxyConfig
 	Phase7           Phase7Config
 	Warnings         []string
 }
@@ -50,6 +52,15 @@ type ClaudeConfig struct {
 	DisableNonessentialTraffic bool   `yaml:"disable_nonessential_traffic"`
 }
 
+type ModelProxyConfig struct {
+	BindURL        string `yaml:"bind_url"`
+	SandboxBaseURL string `yaml:"sandbox_base_url"`
+	BindPort       int    `yaml:"-"`
+}
+
+const defaultModelProxyBindPort = 8082
+const defaultModelProxyBindURL = "http://0.0.0.0:8082"
+const defaultSandboxModelProxyHost = "harness-model-proxy.internal"
 const defaultSandboxModelProxyBaseURL = "http://harness-model-proxy.internal:8082"
 
 type Phase7Config struct {
@@ -64,6 +75,7 @@ type Phase7Config struct {
 	Reaper               ReaperConfig         `yaml:"reaper"`
 	SandboxIdentity      SandboxIdentity      `yaml:"sandbox_identity"`
 	ProxyServiceIdentity ProxyServiceIdentity `yaml:"proxy_service_identity"`
+	ModelProxy           ModelProxyConfig     `yaml:"model_proxy"`
 }
 
 func (c Phase7Config) ControlRoot() string {
@@ -276,6 +288,7 @@ func Load() (Config, error) {
 		RunscNetwork:     defaultString(projectConfig.Runtime.RunscNetwork, "sandbox"),
 		RunscOverlay2:    defaultString(projectConfig.Runtime.RunscOverlay2, "none"),
 		Claude:           projectConfig.Claude,
+		ModelProxy:       projectConfig.Phase7.ModelProxy,
 		Phase7:           projectConfig.Phase7,
 	}
 	cfg.Phase7.SessionRetention = Duration{Duration: sessionRetention}
@@ -287,7 +300,9 @@ func Load() (Config, error) {
 	if err := validatePhase7Config(cfg.Phase7); err != nil {
 		return Config{}, err
 	}
+	cfg.ModelProxy = cfg.Phase7.ModelProxy
 	cfg.Claude = normalizeClaudeConfig(cfg.Claude)
+	cfg.Claude = syncClaudeModelProxy(cfg.Claude, cfg.ModelProxy)
 	cfg.Warnings = phase7ConfigWarnings(cfg.Phase7)
 	return cfg, nil
 }
@@ -306,7 +321,7 @@ func loadProjectConfig(path string) (projectConfig, error) {
 			RunscOverlay2: "none",
 		},
 		Claude: ClaudeConfig{
-			ProxyBindURL:               "http://0.0.0.0:8082",
+			ProxyBindURL:               defaultModelProxyBindURL,
 			SandboxBaseURL:             defaultSandboxModelProxyBaseURL,
 			APIKey:                     "123",
 			AuthToken:                  "123",
@@ -318,13 +333,13 @@ func loadProjectConfig(path string) (projectConfig, error) {
 
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return cfg, nil
+		return finalizeProjectConfig(path, cfg, false)
 	}
 	if err != nil {
 		return cfg, err
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
-		return cfg, nil
+		return finalizeProjectConfig(path, cfg, false)
 	}
 
 	hasHarness, hasLegacy, err := inspectProjectConfigTopLevel(data)
@@ -339,6 +354,7 @@ func loadProjectConfig(path string) (projectConfig, error) {
 			Harness Phase7Config `yaml:"harness"`
 		}
 		target.Harness = cfg.Phase7
+		target.Harness.ModelProxy.SandboxBaseURL = ""
 		decoder := yaml.NewDecoder(bytes.NewReader(data))
 		decoder.KnownFields(true)
 		if err := decoder.Decode(&target); err != nil {
@@ -352,6 +368,7 @@ func loadProjectConfig(path string) (projectConfig, error) {
 		}
 		target.Runtime = cfg.Runtime
 		target.Claude = cfg.Claude
+		target.Claude.SandboxBaseURL = ""
 		decoder := yaml.NewDecoder(bytes.NewReader(data))
 		decoder.KnownFields(true)
 		if err := decoder.Decode(&target); err != nil {
@@ -360,8 +377,22 @@ func loadProjectConfig(path string) (projectConfig, error) {
 		cfg.Runtime = target.Runtime
 		cfg.Claude = target.Claude
 	}
-	cfg.Phase7 = normalizePhase7Config(cfg.Phase7)
+	return finalizeProjectConfig(path, cfg, hasLegacy)
+}
+
+func finalizeProjectConfig(path string, cfg projectConfig, legacy bool) (projectConfig, error) {
 	cfg.Claude = normalizeClaudeConfig(cfg.Claude)
+	if legacy {
+		cfg.Phase7.ModelProxy = ModelProxyConfig{
+			BindURL:        cfg.Claude.ProxyBindURL,
+			SandboxBaseURL: cfg.Claude.SandboxBaseURL,
+		}
+	}
+	cfg.Phase7 = normalizePhase7Config(cfg.Phase7)
+	if err := validateModelProxyConfig(cfg.Phase7.ModelProxy); err != nil {
+		return cfg, fmt.Errorf("load %s: %w", path, err)
+	}
+	cfg.Claude = syncClaudeModelProxy(cfg.Claude, cfg.Phase7.ModelProxy)
 	return cfg, nil
 }
 
@@ -448,11 +479,17 @@ func defaultPhase7Config() Phase7Config {
 			UID: os.Geteuid(),
 			GID: os.Getegid(),
 		},
+		ModelProxy: ModelProxyConfig{
+			BindURL:        defaultModelProxyBindURL,
+			SandboxBaseURL: defaultSandboxModelProxyBaseURL,
+			BindPort:       8082,
+		},
 	}
 }
 
 func normalizePhase7Config(cfg Phase7Config) Phase7Config {
 	cfg.SandboxIdentity = NormalizeSandboxIdentity(cfg.SandboxIdentity)
+	cfg.ModelProxy = normalizeModelProxyConfig(cfg.ModelProxy)
 	return cfg
 }
 
@@ -576,6 +613,9 @@ func validatePhase7Config(cfg Phase7Config) error {
 		return err
 	}
 	if err := ValidateProxyServiceIdentity(cfg.ProxyServiceIdentity); err != nil {
+		return err
+	}
+	if err := validateModelProxyConfig(cfg.ModelProxy); err != nil {
 		return err
 	}
 	return nil
@@ -859,13 +899,132 @@ func validateHosts(field string, values []string) error {
 }
 
 func normalizeClaudeConfig(cfg ClaudeConfig) ClaudeConfig {
-	cfg.ProxyBindURL = defaultString(cfg.ProxyBindURL, "http://0.0.0.0:8082")
-	cfg.SandboxBaseURL = defaultString(cfg.SandboxBaseURL, defaultSandboxModelProxyBaseURL)
+	cfg.ProxyBindURL = defaultString(cfg.ProxyBindURL, defaultModelProxyBindURL)
+	cfg.SandboxBaseURL = defaultString(cfg.SandboxBaseURL, defaultSandboxModelProxyBaseURLForBindURL(cfg.ProxyBindURL))
 	cfg.APIKey = defaultString(cfg.APIKey, "123")
 	cfg.AuthToken = defaultString(cfg.AuthToken, cfg.APIKey)
 	cfg.Model = defaultString(cfg.Model, "sonnet")
 	cfg.OutputFormat = defaultString(cfg.OutputFormat, "stream-json")
 	return cfg
+}
+
+func syncClaudeModelProxy(claude ClaudeConfig, modelProxy ModelProxyConfig) ClaudeConfig {
+	claude.ProxyBindURL = modelProxy.BindURL
+	claude.SandboxBaseURL = modelProxy.SandboxBaseURL
+	return claude
+}
+
+func normalizeModelProxyConfig(cfg ModelProxyConfig) ModelProxyConfig {
+	cfg.BindURL = defaultString(cfg.BindURL, defaultModelProxyBindURL)
+	if port, err := parseModelProxyBindPort(cfg.BindURL); err == nil {
+		cfg.BindPort = port
+	} else {
+		cfg.BindPort = 0
+	}
+	cfg.SandboxBaseURL = defaultString(cfg.SandboxBaseURL, defaultSandboxModelProxyBaseURLForPort(cfg.BindPort))
+	return cfg
+}
+
+func validateModelProxyConfig(cfg ModelProxyConfig) error {
+	bindPort, err := parseModelProxyBindPort(cfg.BindURL)
+	if err != nil {
+		return err
+	}
+	return validateModelProxySandboxBaseURL(cfg.SandboxBaseURL, bindPort)
+}
+
+func defaultSandboxModelProxyBaseURLForBindURL(bindURL string) string {
+	port, err := parseModelProxyBindPort(bindURL)
+	if err != nil {
+		return defaultSandboxModelProxyBaseURL
+	}
+	return defaultSandboxModelProxyBaseURLForPort(port)
+}
+
+func defaultSandboxModelProxyBaseURLForPort(port int) string {
+	if port <= 0 {
+		port = defaultModelProxyBindPort
+	}
+	return fmt.Sprintf("http://%s:%d", defaultSandboxModelProxyHost, port)
+}
+
+func validateModelProxySandboxBaseURL(raw string, bindPort int) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("harness.model_proxy.sandbox_base_url is invalid: %w", err)
+	}
+	if parsed.Scheme != "http" {
+		return fmt.Errorf("harness.model_proxy.sandbox_base_url must use http scheme")
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("harness.model_proxy.sandbox_base_url must not include userinfo, query, or fragment")
+	}
+	if parsed.Path != "" && parsed.Path != "/" {
+		return fmt.Errorf("harness.model_proxy.sandbox_base_url must not include a path")
+	}
+	if strings.TrimSpace(parsed.Hostname()) == "" {
+		return fmt.Errorf("harness.model_proxy.sandbox_base_url must include a host")
+	}
+	portRaw := parsed.Port()
+	if portRaw == "" {
+		return fmt.Errorf("harness.model_proxy.sandbox_base_url must include an explicit port matching bind_url")
+	}
+	port, err := strconv.Atoi(portRaw)
+	if err != nil || port <= 0 || port > 65535 {
+		return fmt.Errorf("harness.model_proxy.sandbox_base_url contains invalid port %q", portRaw)
+	}
+	if port != bindPort {
+		return fmt.Errorf("harness.model_proxy.sandbox_base_url port %d must match bind_url port %d", port, bindPort)
+	}
+	return nil
+}
+
+func parseModelProxyBindPort(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, fmt.Errorf("harness.model_proxy.bind_url is required")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return 0, fmt.Errorf("harness.model_proxy.bind_url is invalid: %w", err)
+	}
+	if parsed.Scheme != "http" {
+		return 0, fmt.Errorf("harness.model_proxy.bind_url must use http scheme")
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return 0, fmt.Errorf("harness.model_proxy.bind_url must not include userinfo, query, or fragment")
+	}
+	if parsed.Path != "" && parsed.Path != "/" {
+		return 0, fmt.Errorf("harness.model_proxy.bind_url must not include a path")
+	}
+	host, portRaw, err := net.SplitHostPort(parsed.Host)
+	if err != nil || strings.TrimSpace(portRaw) == "" {
+		return 0, fmt.Errorf("harness.model_proxy.bind_url must include an explicit port")
+	}
+	if strings.Trim(strings.TrimSpace(host), "[]") == "" {
+		return 0, fmt.Errorf("harness.model_proxy.bind_url must include a host")
+	}
+	if !isUnspecifiedModelProxyBindHost(host) {
+		return 0, fmt.Errorf("harness.model_proxy.bind_url host must be an unspecified address")
+	}
+	port, err := strconv.Atoi(portRaw)
+	if err != nil || port <= 0 || port > 65535 {
+		return 0, fmt.Errorf("harness.model_proxy.bind_url contains invalid port %q", portRaw)
+	}
+	return port, nil
+}
+
+func isUnspecifiedModelProxyBindHost(host string) bool {
+	host = strings.Trim(strings.ToLower(strings.TrimSpace(host)), "[]")
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	return addr.IsUnspecified()
 }
 
 func defaultString(value, fallback string) string {
