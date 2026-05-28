@@ -120,6 +120,39 @@ func TestProxyRequestStartRejectsExpiredContext(t *testing.T) {
 	}
 }
 
+func TestProxyRequestStartRejectsMultipleRunningTurnsForGeneration(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	now := time.Now().UTC()
+	allocation, _, sandboxSourceIP := createRunningProxyTurn(t, ctx, st, owner.UUID, "sess_proxy_multi_running", now)
+	injectedTurnID, err := st.EnqueueTurn(ctx, "sess_proxy_multi_running", "injected running turn", now.Add(5*time.Second))
+	if err != nil {
+		t.Fatalf("enqueue injected turn: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE turns
+SET status = 'running',
+    generation_id = ?,
+    lease_owner = ?,
+    lease_expires_at = ?,
+    started_at = ?,
+    ack_started_at = ?
+WHERE id = ?`,
+		allocation.GenerationID, allocation.Owner, formatTime(now.Add(time.Minute)),
+		formatTime(now.Add(5*time.Second)), formatTime(now.Add(5*time.Second)), injectedTurnID); err != nil {
+		t.Fatalf("inject second running turn: %v", err)
+	}
+
+	_, err = st.StartProxyRequest(ctx, StartProxyRequestParams{
+		SandboxSourceIP: sandboxSourceIP,
+		ProxyRequestID:  "proxy_multi_running",
+		Now:             now.Add(6 * time.Second),
+	})
+	if !errors.Is(err, ErrProxyContextUnavailable) {
+		t.Fatalf("multiple running turns err=%v want ErrProxyContextUnavailable", err)
+	}
+}
+
 func TestProxyRequestStartRequiresLiveRuntimeResource(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)

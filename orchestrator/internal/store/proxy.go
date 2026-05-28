@@ -108,8 +108,17 @@ WHERE c.sandbox_source_ip = ?
   AND g.lease_owner = c.lease_owner
   AND g.lease_expires_at > ?
   AND s.active_generation_id = c.generation_id
-  AND s.status NOT IN ('failed', 'destroyed')`,
-		p.SandboxSourceIP, formatTime(p.Now), formatTime(p.Now), formatTime(p.Now),
+  AND s.status NOT IN ('failed', 'destroyed')
+  AND (
+    SELECT COUNT(*)
+    FROM turns running
+    WHERE running.session_id = c.session_id
+      AND running.generation_id = c.generation_id
+      AND running.status = 'running'
+      AND running.lease_owner = c.lease_owner
+      AND running.lease_expires_at > ?
+  ) = 1`,
+		p.SandboxSourceIP, formatTime(p.Now), formatTime(p.Now), formatTime(p.Now), formatTime(p.Now),
 	).Scan(&result.SessionID, &result.GenerationID, &result.TurnID, &nextRequestSequence); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return StartProxyRequestResult{}, ErrProxyContextUnavailable
