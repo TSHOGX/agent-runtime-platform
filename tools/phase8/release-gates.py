@@ -35,8 +35,8 @@ class Gate:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run Phase 8 release qualification gates and emit JSON evidence.")
-    parser.add_argument("--include-phase7", action="store_true", help="Run the Phase 7 deterministic release runner.")
+    parser = argparse.ArgumentParser(description="Run runtime isolation release qualification gates and emit JSON evidence.")
+    parser.add_argument("--include-prior-release", action="store_true", help="Run the prior deterministic release runner.")
     parser.add_argument("--include-proxy", action="store_true", help="Run the pinned claude-code-proxy contract gate.")
     parser.add_argument("--include-bridge-lab", action="store_true", help="Run the gVisor bridge durability lab.")
     parser.add_argument("--include-live-latency", action="store_true", help="Run the live turn-start latency gate.")
@@ -62,13 +62,13 @@ def parse_args():
 def deterministic_gates():
     return [
         Gate(
-            name="go_phase8_all_packages",
+            name="go_runtime_isolation_packages",
             command=("go", "test", "-count=1", "./..."),
             cwd=REPO_ROOT / "orchestrator",
             category="deterministic",
         ),
         Gate(
-            name="go_phase7_turn_start_latency_bench",
+            name="go_turn_start_latency_bench",
             command=(
                 "go",
                 "test",
@@ -83,7 +83,7 @@ def deterministic_gates():
             category="deterministic",
         ),
         Gate(
-            name="python_phase8_sandbox_and_tools",
+            name="python_sandbox_and_release_tools",
             command=(
                 "python3",
                 "-W",
@@ -97,7 +97,7 @@ def deterministic_gates():
             category="deterministic",
         ),
         Gate(
-            name="phase8_static_release_scans",
+            name="runtime_isolation_static_release_scans",
             command=("python3", "tools/phase8/release-gates.py", "--static-only"),
             cwd=REPO_ROOT,
             category="deterministic",
@@ -107,10 +107,10 @@ def deterministic_gates():
 
 def optional_gates(args):
     gates = []
-    if args.include_phase7:
+    if args.include_prior_release:
         gates.append(
             Gate(
-                name="phase7_deterministic_release_runner",
+                name="prior_deterministic_release_runner",
                 command=("tools/phase7/release-gates.py",),
                 cwd=REPO_ROOT,
                 category="compatibility",
@@ -380,7 +380,7 @@ def release_completion(results, supplied_evidence, require_release_evidence=Fals
     selected_passed = all(result["status"] == "passed" for result in results)
     missing = [label for label in REQUIRED_SUPPLIED_EVIDENCE if label not in supplied_evidence]
     release_complete = bool(require_release_evidence and selected_passed and not missing)
-    note = "Phase 8 release requires target-lab adversarial evidence for every gate in docs/phase8/release-gates.md."
+    note = "Runtime isolation release requires target-lab adversarial evidence for every gate in docs/phase8/release-gates.md."
     if release_complete:
         note = "Selected gates passed and all required supplied evidence labels were attached."
     return {
@@ -400,7 +400,8 @@ def evidence(results, commit=None, context=None, supplied_evidence=None, require
     if require_release_evidence and completion["missing_supplied_evidence"]:
         status = "failed"
     return {
-        "phase": "phase8",
+        "contract": "sandbox-isolation-v1",
+        "qualification": "runtime-isolation",
         "result": status,
         "commit": commit,
         "generated_at": utc_now(),
@@ -438,7 +439,7 @@ def static_checks():
             **check_file_lacks(
                 REPO_ROOT / "docs" / "PLAN.md",
                 (
-                    ("obsolete_phase8_parent_mount_boundary", "Until Phase 8 lands, the sandbox reaches"),
+                    ("obsolete_parent_mount_boundary", "Until Phase 8 lands, the sandbox reaches"),
                     ("obsolete_parent_mount_target", "parent `/sessions` and `/agent-homes` mounts"),
                 ),
             ),
@@ -519,5 +520,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         raise SystemExit(130)
     except Exception as err:
-        print(f"phase8 release gates failed: {err}", file=sys.stderr)
+        print(f"runtime isolation release gates failed: {err}", file=sys.stderr)
         raise SystemExit(1)

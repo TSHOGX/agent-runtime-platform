@@ -15,7 +15,7 @@ SPEC.loader.exec_module(MODULE)
 class ReleaseGatesTest(unittest.TestCase):
     def test_default_selected_gates_are_deterministic_only(self):
         args = argparse_namespace(
-            include_phase7=False,
+            include_prior_release=False,
             include_proxy=False,
             include_bridge_lab=False,
             include_live_latency=False,
@@ -26,10 +26,10 @@ class ReleaseGatesTest(unittest.TestCase):
         self.assertEqual(
             [gate.name for gate in gates],
             [
-                "go_phase8_all_packages",
-                "go_phase7_turn_start_latency_bench",
-                "python_phase8_sandbox_and_tools",
-                "phase8_static_release_scans",
+                "go_runtime_isolation_packages",
+                "go_turn_start_latency_bench",
+                "python_sandbox_and_release_tools",
+                "runtime_isolation_static_release_scans",
             ],
         )
         self.assertEqual({gate.category for gate in gates}, {"deterministic"})
@@ -37,7 +37,7 @@ class ReleaseGatesTest(unittest.TestCase):
 
     def test_optional_flags_add_external_and_compatibility_gates(self):
         args = argparse_namespace(
-            include_phase7=True,
+            include_prior_release=True,
             include_proxy=True,
             include_bridge_lab=True,
             include_live_latency=True,
@@ -48,7 +48,7 @@ class ReleaseGatesTest(unittest.TestCase):
         self.assertEqual(
             [gate.name for gate in gates[-4:]],
             [
-                "phase7_deterministic_release_runner",
+                "prior_deterministic_release_runner",
                 "pinned_proxy_contract",
                 "gvisor_bridge_durability_lab",
                 "live_turn_start_latency",
@@ -104,6 +104,8 @@ class ReleaseGatesTest(unittest.TestCase):
             list(MODULE.REQUIRED_SUPPLIED_EVIDENCE),
         )
         self.assertIn("release_gate_inventory", payload)
+        self.assertEqual(payload["contract"], "sandbox-isolation-v1")
+        self.assertNotIn("phase", payload)
 
     def test_require_release_evidence_fails_when_supplied_labels_are_missing(self):
         payload = MODULE.evidence(
@@ -145,11 +147,11 @@ class ReleaseGatesTest(unittest.TestCase):
         json.dumps(payload)
 
     def test_write_output(self):
-        payload = {"phase": "phase8", "result": "passed"}
+        payload = {"contract": "sandbox-isolation-v1", "result": "passed"}
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "nested" / "evidence.json"
             MODULE.write_output(output, payload)
-            self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["phase"], "phase8")
+            self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["contract"], "sandbox-isolation-v1")
 
 
 def argparse_namespace(**kwargs):
