@@ -497,6 +497,24 @@ def static_checks():
                 ),
             ),
         },
+        {
+            "name": "phase9_skills_docs_use_exact_bind_prerequisite",
+            **check_file_lacks(
+                REPO_ROOT / "docs" / "phase9" / "system-skills-mount.md",
+                (
+                    ("workspace_symlink_to_sessions", "`/workspace` is a symlink to `/sessions/<session_id>`"),
+                    ("agent_home_parent_root", "`/agent-homes/<session_id>`"),
+                    ("legacy_mount_centralization", "Runtime spec generation already centralizes mounts"),
+                ),
+            ),
+        },
+        {
+            "name": "phase9_managed_settings_do_not_reference_live_secret_mount",
+            **check_file_lacks(
+                REPO_ROOT / "docs" / "phase9" / "managed-settings.md",
+                (("existing_model_provider_secret_mount", "existing model-provider `/harness-secrets` mount"),),
+            ),
+        },
     ]
     status = "passed" if all(check["status"] == "passed" for check in checks) else "failed"
     return {"status": status, "checks": checks}
