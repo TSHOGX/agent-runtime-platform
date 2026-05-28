@@ -3062,15 +3062,25 @@ func (r *Runtime) Checkpoint(ctx context.Context, req CheckpointRequest) error {
 	if strings.TrimSpace(req.Generation.RunscContainerID) != "" && req.Generation.RunscContainerID != container.RunscContainerID {
 		return fmt.Errorf("checkpoint runsc container mismatch")
 	}
+	generationCheckpointPath := strings.TrimSpace(req.Generation.CheckpointPath)
+	checkpointPath := strings.TrimSpace(req.CheckpointPath)
+	if checkpointPath == "" {
+		checkpointPath = generationCheckpointPath
+	}
+	if checkpointPath == "" {
+		return errors.New("generation checkpoint path is required")
+	}
+	if !filepath.IsAbs(checkpointPath) || filepath.Clean(checkpointPath) != checkpointPath {
+		return fmt.Errorf("generation checkpoint path %q must be canonical absolute path", checkpointPath)
+	}
+	if generationCheckpointPath != "" && filepath.Clean(generationCheckpointPath) != checkpointPath {
+		return fmt.Errorf("checkpoint path mismatch: got %q want generation path %q", checkpointPath, generationCheckpointPath)
+	}
 	currentRunsc, err := r.verifyGenerationRunscPin(ctx, "checkpoint", req.Generation)
 	if err != nil {
 		return err
 	}
 
-	checkpointPath := strings.TrimSpace(req.CheckpointPath)
-	if checkpointPath == "" {
-		checkpointPath = filepath.Join(r.cfg.CheckpointsRoot, req.SessionID)
-	}
 	if err := os.MkdirAll(filepath.Dir(checkpointPath), 0o755); err != nil {
 		return fmt.Errorf("create checkpoint dir: %w", err)
 	}

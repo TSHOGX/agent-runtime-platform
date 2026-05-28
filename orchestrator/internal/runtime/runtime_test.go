@@ -526,6 +526,7 @@ func TestCheckpointRejectsRunscPinMismatchBeforeFilesystemMutation(t *testing.T)
 	if err := os.WriteFile(marker, []byte("keep"), 0o644); err != nil {
 		t.Fatalf("write checkpoint marker: %v", err)
 	}
+	details.CheckpointPath = checkpointPath
 
 	err := rt.Checkpoint(context.Background(), CheckpointRequest{
 		SessionID:      details.SessionID,
@@ -654,6 +655,54 @@ func TestCheckpointRequiresGenerationIdentity(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "checkpoint runsc container mismatch") {
 		t.Fatalf("expected runsc container mismatch error, got %v", err)
+	}
+}
+
+func TestCheckpointRequiresGenerationScopedPath(t *testing.T) {
+	dir := t.TempDir()
+	runscPath, runscDigest := installFakeRunsc(t, dir, "checkpoint-path")
+	runner := &recordingCommandRunner{
+		outputs: map[string][]byte{
+			"runsc --version": []byte("runsc checkpoint-path"),
+		},
+	}
+	rt := New(Config{
+		CheckpointsRoot: filepath.Join(dir, "legacy-checkpoints"),
+		CommandRunner:   runner,
+	})
+	details := testGenerationDetails(dir, "gen_checkpoint_path")
+	details.RunscVersion = "runsc checkpoint-path"
+	details.RunscBinaryPath = runscPath
+	details.RunscBinaryDigest = runscDigest
+	details.CheckpointPath = ""
+	rt.containers[details.SessionID] = &Container{
+		SessionID:        details.SessionID,
+		GenerationID:     details.GenerationID,
+		RunscContainerID: details.RunscContainerID,
+		Cancel:           func() {},
+	}
+
+	err := rt.Checkpoint(context.Background(), CheckpointRequest{
+		SessionID:    details.SessionID,
+		GenerationID: details.GenerationID,
+		Generation:   details,
+	})
+	if err == nil || !strings.Contains(err.Error(), "generation checkpoint path is required") {
+		t.Fatalf("expected missing generation checkpoint path error, got %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "legacy-checkpoints", details.SessionID)); !os.IsNotExist(statErr) {
+		t.Fatalf("checkpoint should not create legacy session path, stat err=%v", statErr)
+	}
+
+	details.CheckpointPath = filepath.Join(dir, "run", "gen-"+details.GenerationID, "checkpoint")
+	err = rt.Checkpoint(context.Background(), CheckpointRequest{
+		SessionID:      details.SessionID,
+		GenerationID:   details.GenerationID,
+		CheckpointPath: filepath.Join(dir, "legacy-checkpoints", details.SessionID),
+		Generation:     details,
+	})
+	if err == nil || !strings.Contains(err.Error(), "checkpoint path mismatch") {
+		t.Fatalf("expected checkpoint path mismatch error, got %v", err)
 	}
 }
 
