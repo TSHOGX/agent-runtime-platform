@@ -582,6 +582,18 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			retireRuntimeResource()
 			return err
 		}
+		if err := s.store.MarkGenerationStarting(ctx, session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
+			if leaseErr := leaseKeeper.err(); leaseErr != nil {
+				return leaseErr
+			}
+			retireRuntimeResource()
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+			return err
+		}
+		if err := leaseKeeper.ensureOwned(); err != nil {
+			retireRuntimeResource()
+			return err
+		}
 	}
 	if ensured.RestoreFromCheckpoint {
 		instance, resourceTracked, err := s.prepareRuntimeResourceRestore(ctx, allocation.GenerationID, resourceWorkerID, resourceHostID, s.cfg.Phase7.Bridge.LeaseTTL.Duration)
@@ -626,11 +638,111 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		retireRuntimeResource()
 		return err
 	}
+	bridgeStartupEvidence := ""
+	if runtimeResourceCreated {
+		renewRuntimeResourceWorkerLease := func() error {
+			now := time.Now().UTC()
+			return s.store.RenewRuntimeResourceWorkerLease(ctx, store.RuntimeResourceWorkerLeaseRenewalParams{
+				GenerationID:   allocation.GenerationID,
+				WorkerID:       resourceWorkerID,
+				HostID:         resourceHostID,
+				LeaseExpiresAt: now.Add(s.cfg.Phase7.Bridge.LeaseTTL.Duration),
+				Now:            now,
+			})
+		}
+		if err := renewRuntimeResourceWorkerLease(); err != nil {
+			if leaseErr := leaseKeeper.err(); leaseErr != nil {
+				return leaseErr
+			}
+			if destroyErr := s.destroyGenerationRuntime(ctx, generationDetails); destroyErr != nil && !errors.Is(destroyErr, context.Canceled) {
+				s.log.Warn("failed to destroy runtime after resource lease renewal failure", "session_id", session.ID, "generation_id", allocation.GenerationID, "error", destroyErr)
+				return destroyErr
+			}
+			retireRuntimeResource()
+			if ensured.RestoreFromCheckpoint {
+				if retireErr := s.retireGenerationForRestoreFallback(session.ID, allocation.GenerationID, allocation.Owner, err); retireErr != nil {
+					return retireErr
+				}
+			} else {
+				s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+			}
+			return err
+		}
+		bridgeStartupEvidence, err = s.waitForBridgeStartupReadiness(startCtx, allocation, runtimeResourceInstance)
+		if err != nil {
+			if leaseErr := leaseKeeper.err(); leaseErr != nil {
+				if destroyErr := s.destroyGenerationRuntime(context.Background(), generationDetails); destroyErr != nil && !errors.Is(destroyErr, context.Canceled) {
+					s.log.Warn("failed to destroy runtime after bridge startup lease loss", "session_id", session.ID, "generation_id", allocation.GenerationID, "error", destroyErr)
+					return destroyErr
+				}
+				retireRuntimeResource()
+				return leaseErr
+			}
+			if leaseErr := leaseKeeper.ensureOwned(); leaseErr != nil {
+				if destroyErr := s.destroyGenerationRuntime(context.Background(), generationDetails); destroyErr != nil && !errors.Is(destroyErr, context.Canceled) {
+					s.log.Warn("failed to destroy runtime after bridge startup lease loss", "session_id", session.ID, "generation_id", allocation.GenerationID, "error", destroyErr)
+					return destroyErr
+				}
+				retireRuntimeResource()
+				return leaseErr
+			}
+			if destroyErr := s.destroyGenerationRuntime(ctx, generationDetails); destroyErr != nil && !errors.Is(destroyErr, context.Canceled) {
+				s.log.Warn("failed to destroy runtime after bridge startup probe failure", "session_id", session.ID, "generation_id", allocation.GenerationID, "error", destroyErr)
+				return destroyErr
+			}
+			retireRuntimeResource()
+			if ensured.RestoreFromCheckpoint {
+				if retireErr := s.retireGenerationForRestoreFallback(session.ID, allocation.GenerationID, allocation.Owner, err); retireErr != nil {
+					return retireErr
+				}
+			} else {
+				s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+			}
+			return err
+		}
+		if err := renewRuntimeResourceWorkerLease(); err != nil {
+			if leaseErr := leaseKeeper.err(); leaseErr != nil {
+				return leaseErr
+			}
+			if destroyErr := s.destroyGenerationRuntime(ctx, generationDetails); destroyErr != nil && !errors.Is(destroyErr, context.Canceled) {
+				s.log.Warn("failed to destroy runtime after resource lease renewal failure", "session_id", session.ID, "generation_id", allocation.GenerationID, "error", destroyErr)
+				return destroyErr
+			}
+			retireRuntimeResource()
+			if ensured.RestoreFromCheckpoint {
+				if retireErr := s.retireGenerationForRestoreFallback(session.ID, allocation.GenerationID, allocation.Owner, err); retireErr != nil {
+					return retireErr
+				}
+			} else {
+				s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+			}
+			return err
+		}
+		if err := leaseKeeper.ensureOwned(); err != nil {
+			if destroyErr := s.destroyGenerationRuntime(context.Background(), generationDetails); destroyErr != nil && !errors.Is(destroyErr, context.Canceled) {
+				s.log.Warn("failed to destroy runtime after bridge startup lease loss", "session_id", session.ID, "generation_id", allocation.GenerationID, "error", destroyErr)
+				return destroyErr
+			}
+			retireRuntimeResource()
+			return err
+		}
+	}
 	if ensured.IsNew {
+		postStartProof, err := runtimeResourcePostStartProof(runtimeResourceInstance, result, bridgeStartupEvidence)
+		if err != nil {
+			if destroyErr := s.destroyGenerationRuntime(ctx, generationDetails); destroyErr != nil && !errors.Is(destroyErr, context.Canceled) {
+				s.log.Warn("failed to destroy runtime after missing post-start proof", "session_id", session.ID, "generation_id", allocation.GenerationID, "error", destroyErr)
+				return destroyErr
+			}
+			retireRuntimeResource()
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+			return err
+		}
 		if err := s.store.MarkRuntimeResourceLive(ctx, store.RuntimeResourceWorkerTransitionParams{
 			GenerationID: allocation.GenerationID,
 			WorkerID:     resourceWorkerID,
 			HostID:       resourceHostID,
+			PostStart:    &postStartProof,
 			Now:          time.Now().UTC(),
 		}); err != nil {
 			if destroyErr := s.destroyGenerationRuntime(ctx, generationDetails); destroyErr != nil && !errors.Is(destroyErr, context.Canceled) {
@@ -669,10 +781,26 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 	}
 	if ensured.RestoreFromCheckpoint {
 		if runtimeResourceCreated {
+			postStartProof, err := runtimeResourcePostStartProof(runtimeResourceInstance, result, bridgeStartupEvidence)
+			if err != nil {
+				if destroyErr := s.destroyGenerationRuntime(ctx, generationDetails); destroyErr != nil && !errors.Is(destroyErr, context.Canceled) {
+					s.log.Warn("failed to destroy runtime after restore missing post-start proof", "session_id", session.ID, "generation_id", allocation.GenerationID, "error", destroyErr)
+					return destroyErr
+				}
+				retireRuntimeResource()
+				if leaseErr := leaseKeeper.ensureOwned(); leaseErr != nil {
+					return leaseErr
+				}
+				if retireErr := s.retireGenerationForRestoreFallback(session.ID, allocation.GenerationID, allocation.Owner, err); retireErr != nil {
+					return retireErr
+				}
+				return err
+			}
 			if err := s.store.MarkRuntimeResourceLive(ctx, store.RuntimeResourceWorkerTransitionParams{
 				GenerationID: allocation.GenerationID,
 				WorkerID:     resourceWorkerID,
 				HostID:       resourceHostID,
+				PostStart:    &postStartProof,
 				Now:          time.Now().UTC(),
 			}); err != nil {
 				if destroyErr := s.destroyGenerationRuntime(ctx, generationDetails); destroyErr != nil && !errors.Is(destroyErr, context.Canceled) {
@@ -1434,6 +1562,205 @@ func runtimeDetailsWithResourceInstance(details store.RuntimeGenerationDetails, 
 	return details
 }
 
+type bridgeStartupProbeState struct {
+	heartbeatSeen bool
+	helloSeen     bool
+	probeSeen     bool
+	heartbeatSeq  uint64
+	helloSeq      uint64
+	probeSeq      uint64
+}
+
+type bridgeHelloAckPayload struct {
+	LastOutputSequenceByTurn map[string]int64 `json:"last_output_sequence_by_turn"`
+	LeasedTurnID             *int64           `json:"leased_turn_id,omitempty"`
+	ServerTime               time.Time        `json:"server_time"`
+}
+
+func (s *Server) waitForBridgeStartupReadiness(ctx context.Context, allocation store.GenerationAllocation, instance store.RuntimeResourceInstance) (string, error) {
+	attempts := s.cfg.Phase7.Probe.PostStartAttempts
+	if attempts <= 0 {
+		attempts = 5
+	}
+	interval := s.cfg.Phase7.Probe.PostStartInterval.Duration
+	if interval <= 0 {
+		interval = time.Second
+	}
+	inbox, err := bridge.OpenQueue(instance.BridgeDirPath, bridge.InboxDir)
+	if err != nil {
+		return "", fmt.Errorf("bridge startup probe open inbox: %w", err)
+	}
+	outbox, err := bridge.OpenQueue(instance.BridgeDirPath, bridge.OutboxDir)
+	if err != nil {
+		return "", fmt.Errorf("bridge startup probe open outbox: %w", err)
+	}
+	state := bridgeStartupProbeState{}
+	for attempt := 1; attempt <= attempts; attempt++ {
+		ready, err := s.processBridgeStartupBatch(ctx, inbox, outbox, allocation.Owner, instance, &state)
+		if err != nil {
+			return "", err
+		}
+		if ready {
+			return state.evidence(), nil
+		}
+		if attempt == attempts {
+			break
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return "", fmt.Errorf("bridge startup probe did not complete: missing %s", state.missing())
+}
+
+func (s *Server) processBridgeStartupBatch(ctx context.Context, inbox, outbox bridge.Queue, owner string, instance store.RuntimeResourceInstance, state *bridgeStartupProbeState) (bool, error) {
+	files, err := outbox.ReadAll()
+	if err != nil {
+		return false, fmt.Errorf("bridge startup probe read outbox: %w", err)
+	}
+	for _, file := range files {
+		if state.ready() {
+			return true, nil
+		}
+		envelope := file.Envelope
+		if err := validateBridgeStartupEnvelope(envelope, instance); err != nil {
+			return false, err
+		}
+		switch envelope.Type {
+		case bridge.TypeHeartbeat:
+			state.heartbeatSeen = true
+			if state.heartbeatSeq == 0 {
+				state.heartbeatSeq = file.Seq
+			}
+		case bridge.TypeHello:
+			ack, err := s.store.BridgeHelloAck(ctx, envelope.SessionID, envelope.GenerationID, owner, time.Now().UTC(), 0)
+			if err != nil {
+				return false, fmt.Errorf("bridge startup probe hello failed: %w", err)
+			}
+			if err := writeBridgeStartupResponse(ctx, inbox, envelope, bridge.TypeHelloAck, bridgeHelloAckPayload{
+				LastOutputSequenceByTurn: bridgeHelloLastSequences(ack.LastOutputSequenceByTurn),
+				LeasedTurnID:             ack.LeasedTurnID,
+				ServerTime:               ack.ServerTime,
+			}); err != nil {
+				return false, fmt.Errorf("bridge startup probe hello response: %w", err)
+			}
+			state.helloSeen = true
+			if state.helloSeq == 0 {
+				state.helloSeq = file.Seq
+			}
+		case bridge.TypeProbeNetwork:
+			if !state.helloSeen {
+				return false, fmt.Errorf("bridge startup probe received probe_network before hello")
+			}
+			if err := writeBridgeStartupResponse(ctx, inbox, envelope, bridge.TypeNoWork, map[string]string{"status": "probe_ok"}); err != nil {
+				return false, fmt.Errorf("bridge startup probe response: %w", err)
+			}
+			state.probeSeen = true
+			if state.probeSeq == 0 {
+				state.probeSeq = file.Seq
+			}
+		case bridge.TypeClaimNextTurn, bridge.TypeResumeTurn, bridge.TypeAckTurnStarted, bridge.TypeEmitOutput, bridge.TypeAckTurnCompleted:
+			return false, fmt.Errorf("bridge startup probe received %s before ready -> live", envelope.Type)
+		default:
+			return false, fmt.Errorf("bridge startup probe received unsupported message type %q", envelope.Type)
+		}
+		if err := file.Unlink(); err != nil {
+			return false, fmt.Errorf("bridge startup probe unlink %s: %w", envelope.Type, err)
+		}
+		if state.ready() {
+			return true, nil
+		}
+	}
+	return state.ready(), nil
+}
+
+func validateBridgeStartupEnvelope(envelope bridge.Envelope, instance store.RuntimeResourceInstance) error {
+	if strings.TrimSpace(envelope.MessageID) == "" {
+		return fmt.Errorf("bridge startup probe envelope missing message_id")
+	}
+	if envelope.SessionID != instance.SessionID || envelope.GenerationID != instance.GenerationID {
+		return fmt.Errorf("bridge startup probe identity mismatch: session=%s generation=%s, want session=%s generation=%s",
+			envelope.SessionID, envelope.GenerationID, instance.SessionID, instance.GenerationID)
+	}
+	return nil
+}
+
+func writeBridgeStartupResponse(ctx context.Context, inbox bridge.Queue, request bridge.Envelope, responseType string, payload any) error {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	_, err = inbox.Write(ctx, bridge.Envelope{
+		RequestID:    bridgeRequestID(request),
+		Type:         responseType,
+		SessionID:    request.SessionID,
+		GenerationID: request.GenerationID,
+		TurnID:       request.TurnID,
+		Payload:      raw,
+	})
+	return err
+}
+
+func bridgeRequestID(envelope bridge.Envelope) string {
+	if strings.TrimSpace(envelope.RequestID) != "" {
+		return envelope.RequestID
+	}
+	return envelope.MessageID
+}
+
+func bridgeHelloLastSequences(values map[int64]int64) map[string]int64 {
+	out := make(map[string]int64, len(values))
+	for turnID, sequence := range values {
+		out[fmt.Sprint(turnID)] = sequence
+	}
+	return out
+}
+
+func (s bridgeStartupProbeState) ready() bool {
+	return s.heartbeatSeen && s.helloSeen && s.probeSeen
+}
+
+func (s bridgeStartupProbeState) missing() string {
+	missing := []string{}
+	if !s.heartbeatSeen {
+		missing = append(missing, "heartbeat")
+	}
+	if !s.helloSeen {
+		missing = append(missing, "hello")
+	}
+	if !s.probeSeen {
+		missing = append(missing, "probe_network")
+	}
+	return strings.Join(missing, ",")
+}
+
+func (s bridgeStartupProbeState) evidence() string {
+	return fmt.Sprintf("bridge_startup_probe:passed; check=bridge_bootstrap; heartbeat_seq=%d; hello_seq=%d; probe_network_seq=%d",
+		s.heartbeatSeq, s.helloSeq, s.probeSeq)
+}
+
+func runtimeResourcePostStartProof(instance store.RuntimeResourceInstance, result runtime.Result, bridgeStartupEvidence string) (store.RuntimeResourcePostStartProof, error) {
+	if result.PostStartProof == nil {
+		return store.RuntimeResourcePostStartProof{}, fmt.Errorf("runtime start did not return post-start proof for generation %s", instance.GenerationID)
+	}
+	proof := *result.PostStartProof
+	proof.HostID = instance.HostID
+	proof.ContractID = instance.ContractID
+	proof.SandboxContractVersion = instance.SandboxContractVersion
+	proof.BridgeStartup = strings.TrimSpace(bridgeStartupEvidence)
+	if strings.TrimSpace(proof.GenerationID) == "" {
+		proof.GenerationID = instance.GenerationID
+	}
+	if strings.TrimSpace(proof.RunscContainerID) == "" {
+		proof.RunscContainerID = instance.RunscContainerID
+	}
+	return proof, nil
+}
+
 func runtimeResourceCleanupEvidence(instance store.RuntimeResourceInstance, cleanup runtime.GenerationResourceCleanup) store.ResourceReconciliationEvidence {
 	filesystem := make(map[string]string, len(cleanup.FilesystemLstat))
 	for path, value := range cleanup.FilesystemLstat {
@@ -1570,6 +1897,7 @@ func runtimeFailureClass(message string) string {
 	}
 	if strings.Contains(message, "harness-bridge-client probe") ||
 		strings.Contains(message, "bridge probe") ||
+		strings.Contains(message, "bridge startup probe") ||
 		strings.Contains(message, "probe GET /healthz") ||
 		strings.Contains(message, "probe POST /v1/messages") {
 		return "probe_failed_post_start"

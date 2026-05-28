@@ -107,10 +107,19 @@ type RuntimeResourceMaterializationClaimParams struct {
 	Now              time.Time
 }
 
+type RuntimeResourceWorkerLeaseRenewalParams struct {
+	GenerationID   string
+	WorkerID       string
+	HostID         string
+	LeaseExpiresAt time.Time
+	Now            time.Time
+}
+
 type RuntimeResourceWorkerTransitionParams struct {
 	GenerationID string
 	WorkerID     string
 	HostID       string
+	PostStart    *RuntimeResourcePostStartProof
 	Now          time.Time
 }
 
@@ -136,6 +145,23 @@ type ResourceReconciliationEvidence struct {
 	IPLink          string            `json:"ip_link"`
 	NFT             string            `json:"nft"`
 	FilesystemLstat map[string]string `json:"filesystem_lstat"`
+}
+
+type RuntimeResourcePostStartProof struct {
+	HostID                 string `json:"host_id"`
+	GenerationID           string `json:"generation_id"`
+	ContractID             string `json:"contract_id"`
+	SandboxContractVersion string `json:"sandbox_contract_version"`
+	RunscContainerID       string `json:"runsc_container_id"`
+	RunscState             string `json:"runsc_state"`
+	RunscPlatform          string `json:"runsc_platform"`
+	RunscVersion           string `json:"runsc_version"`
+	RunscBinaryPath        string `json:"runsc_binary_path"`
+	RunscBinaryDigest      string `json:"runsc_binary_digest"`
+	IPNetns                string `json:"ip_netns"`
+	IPLink                 string `json:"ip_link"`
+	NFT                    string `json:"nft"`
+	BridgeStartup          string `json:"bridge_startup"`
 }
 
 type runtimeResourceIdentityPayload struct {
@@ -269,8 +295,72 @@ func (s *Store) MarkRuntimeResourceReady(ctx context.Context, p RuntimeResourceW
 	return s.workerStateTransition(ctx, p, RuntimeResourceMaterializing, RuntimeResourceReady)
 }
 
+func (s *Store) RenewRuntimeResourceWorkerLease(ctx context.Context, p RuntimeResourceWorkerLeaseRenewalParams) error {
+	if p.Now.IsZero() {
+		p.Now = time.Now().UTC()
+	}
+	if strings.TrimSpace(p.GenerationID) == "" || strings.TrimSpace(p.WorkerID) == "" || strings.TrimSpace(p.HostID) == "" {
+		return fmt.Errorf("generation id, worker id, and host id are required")
+	}
+	if p.LeaseExpiresAt.IsZero() || !p.LeaseExpiresAt.After(p.Now) {
+		return fmt.Errorf("runtime resource worker lease must be in the future")
+	}
+	res, err := s.db.ExecContext(ctx, `
+UPDATE runtime_resource_instances
+SET lease_expires_at = ?,
+    updated_at = ?
+WHERE generation_id = ?
+  AND worker_id = ?
+  AND host_id = ?
+  AND state IN ('materializing','ready')
+  AND lease_expires_at > ?`,
+		formatTime(p.LeaseExpiresAt), formatTime(p.Now), strings.TrimSpace(p.GenerationID),
+		strings.TrimSpace(p.WorkerID), strings.TrimSpace(p.HostID), formatTime(p.Now))
+	if err != nil {
+		return err
+	}
+	return requireOneRow(res, "runtime resource worker lease renewal CAS failed")
+}
+
 func (s *Store) MarkRuntimeResourceLive(ctx context.Context, p RuntimeResourceWorkerTransitionParams) error {
-	return s.workerStateTransition(ctx, p, RuntimeResourceReady, RuntimeResourceLive)
+	if p.Now.IsZero() {
+		p.Now = time.Now().UTC()
+	}
+	if strings.TrimSpace(p.GenerationID) == "" || strings.TrimSpace(p.WorkerID) == "" || strings.TrimSpace(p.HostID) == "" {
+		return fmt.Errorf("generation id, worker id, and host id are required")
+	}
+	instance, err := s.GetRuntimeResourceInstance(ctx, p.GenerationID)
+	if err != nil {
+		return err
+	}
+	if err := validateRuntimeResourcePostStartProof(instance, p); err != nil {
+		return err
+	}
+	evidenceJSON, evidenceDigest, err := runtimeResourcePostStartProofDigest(*p.PostStart)
+	if err != nil {
+		return err
+	}
+	res, err := s.db.ExecContext(ctx, `
+UPDATE runtime_resource_instances
+SET state = 'live',
+    lease_expires_at = NULL,
+    idempotency_token = NULL,
+    evidence_json = ?,
+    evidence_digest = ?,
+    verified_at = ?,
+    updated_at = ?
+WHERE generation_id = ?
+  AND worker_id = ?
+  AND host_id = ?
+  AND state = 'ready'
+  AND (lease_expires_at IS NULL OR lease_expires_at > ?)`,
+		string(evidenceJSON), evidenceDigest, formatTime(p.Now), formatTime(p.Now),
+		strings.TrimSpace(p.GenerationID), strings.TrimSpace(p.WorkerID),
+		strings.TrimSpace(p.HostID), formatTime(p.Now))
+	if err != nil {
+		return err
+	}
+	return requireOneRow(res, "runtime resource ready -> live CAS failed")
 }
 
 func (s *Store) ReserveRuntimeResourceCheckpoint(ctx context.Context, p RuntimeResourceWorkerTransitionParams) error {
@@ -623,6 +713,78 @@ func runtimeResourceEvidenceDigest(evidence ResourceReconciliationEvidence) ([]b
 		return nil, "", err
 	}
 	return data, SandboxContractDigest(data), nil
+}
+
+func runtimeResourcePostStartProofDigest(proof RuntimeResourcePostStartProof) ([]byte, string, error) {
+	data, err := canonicalDataVolumeJSON(proof)
+	if err != nil {
+		return nil, "", err
+	}
+	return data, SandboxContractDigest(data), nil
+}
+
+func validateRuntimeResourcePostStartProof(instance RuntimeResourceInstance, p RuntimeResourceWorkerTransitionParams) error {
+	if p.PostStart == nil {
+		return fmt.Errorf("runtime resource ready -> live requires post-start proof")
+	}
+	proof := *p.PostStart
+	checks := []struct {
+		label string
+		got   string
+		want  string
+	}{
+		{"host_id", proof.HostID, instance.HostID},
+		{"generation_id", proof.GenerationID, instance.GenerationID},
+		{"contract_id", proof.ContractID, instance.ContractID},
+		{"sandbox_contract_version", proof.SandboxContractVersion, instance.SandboxContractVersion},
+		{"runsc_container_id", proof.RunscContainerID, instance.RunscContainerID},
+		{"runsc_platform", proof.RunscPlatform, instance.RunscPlatform},
+		{"runsc_version", proof.RunscVersion, instance.RunscVersion},
+		{"runsc_binary_path", proof.RunscBinaryPath, instance.RunscBinaryPath},
+		{"runsc_binary_digest", proof.RunscBinaryDigest, instance.RunscBinaryDigest},
+	}
+	for _, check := range checks {
+		if strings.TrimSpace(check.got) != strings.TrimSpace(check.want) {
+			return fmt.Errorf("runtime resource post-start proof %s = %q, want %q", check.label, strings.TrimSpace(check.got), strings.TrimSpace(check.want))
+		}
+	}
+	required := map[string]string{
+		"runsc state":              proof.RunscState,
+		"network namespace":        proof.IPNetns,
+		"host veth":                proof.IPLink,
+		"nft table":                proof.NFT,
+		"bridge startup probe":     proof.BridgeStartup,
+		"runsc container id":       proof.RunscContainerID,
+		"runsc binary digest":      proof.RunscBinaryDigest,
+		"sandbox contract id":      proof.ContractID,
+		"sandbox contract version": proof.SandboxContractVersion,
+	}
+	for label, value := range required {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("runtime resource post-start proof %s is required", label)
+		}
+	}
+	if !strings.Contains(proof.RunscState, instance.RunscContainerID) {
+		return fmt.Errorf("runtime resource post-start proof runsc state must mention container %q", instance.RunscContainerID)
+	}
+	if !strings.Contains(strings.ToLower(proof.RunscState), "running") {
+		return fmt.Errorf("runtime resource post-start proof runsc state must confirm running container")
+	}
+	if strings.Contains(strings.ToLower(proof.BridgeStartup), "failed") ||
+		!strings.Contains(strings.ToLower(proof.BridgeStartup), "passed") {
+		return fmt.Errorf("runtime resource post-start proof bridge startup probe must pass")
+	}
+	for label, value := range map[string]string{
+		"network namespace": proof.IPNetns,
+		"host veth":         proof.IPLink,
+		"nft table":         proof.NFT,
+	} {
+		lower := strings.ToLower(value)
+		if strings.Contains(lower, "absent") || strings.Contains(lower, "not found") || strings.Contains(lower, "does not exist") {
+			return fmt.Errorf("runtime resource post-start proof %s must prove presence", label)
+		}
+	}
+	return nil
 }
 
 func validateAbsenceEvidence(evidence ResourceReconciliationEvidence, hostID string) error {

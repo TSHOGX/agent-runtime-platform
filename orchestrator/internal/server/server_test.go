@@ -2202,6 +2202,56 @@ WHERE contract_id = ?`, contract.ContractID).Scan(&manifestDigest, &specDigest, 
 	}
 }
 
+func TestStartEnsuredGenerationLeavesBridgeClaimsUntilLivePoll(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_start_claim_deferred", string(sessionstate.Created), time.Now().UTC(), nil)
+	cfg := testServerConfig(dir)
+	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     store.GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    serverTestAllocatorConfig(cfg, session.Agent),
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	rt := &claimAfterProbeRuntime{}
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: rt,
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+
+	if err := srv.startEnsuredGeneration(ctx, session, ensuredGeneration{
+		Allocation: allocation,
+		IsNew:      true,
+	}, startFailureInputAcceptable); err != nil {
+		t.Fatalf("start ensured generation: %v", err)
+	}
+	details, err := st.GetRuntimeGenerationDetails(ctx, session.ID, allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("generation details: %v", err)
+	}
+	outbox, err := bridge.OpenQueue(details.BridgeDirPath, bridge.OutboxDir)
+	if err != nil {
+		t.Fatalf("open bridge outbox: %v", err)
+	}
+	files, err := outbox.ReadAll()
+	if err != nil {
+		t.Fatalf("read bridge outbox: %v", err)
+	}
+	if len(files) != 1 || files[0].Envelope.Type != bridge.TypeClaimNextTurn {
+		t.Fatalf("startup probe should leave only claim for live poller, got %+v", files)
+	}
+}
+
 func TestRuntimeResourceInstanceCheckpointRestoreTransitions(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -2356,7 +2406,7 @@ JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
 WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&status, &ownerValue, &errorClass, &networkState, &resourceState); err != nil {
 		t.Fatalf("query generation after owner loss: %v", err)
 	}
-	if status != "allocating" ||
+	if status != "starting" ||
 		ownerValue != "other_owner" ||
 		errorClass != "" ||
 		networkState != "allocating" ||
@@ -2387,6 +2437,7 @@ func TestRuntimeFailureClassDetectsPostStartProbeFailure(t *testing.T) {
 	cases := []string{
 		"harness-bridge-client probe exited with status 1",
 		"bridge probe starting failed",
+		"bridge startup probe did not complete: missing probe_network",
 		"probe GET /healthz returned 503, want one of [200]",
 		"probe POST /v1/messages returned 502, want one of [400]",
 	}
@@ -3729,7 +3780,7 @@ func (instantRuntime) Start(ctx context.Context, req runtime.StartRequest, outpu
 	if output != nil {
 		output(runtime.Output{Stream: "stdout", Line: `{"type":"result","subtype":"success","result":"ok"}`})
 	}
-	return runtime.Result{ControlManifestDigest: req.PreparedArtifacts.ManifestDigest, RunscVersion: req.PreparedArtifacts.RunscVersion}
+	return serverRuntimeStartResult(req)
 }
 
 func (instantRuntime) Destroy(context.Context, string) error {
@@ -3804,7 +3855,34 @@ func (r *startHookRuntime) Start(_ context.Context, req runtime.StartRequest, _ 
 	if r.onStart != nil {
 		r.onStart(req)
 	}
-	return runtime.Result{ControlManifestDigest: req.PreparedArtifacts.ManifestDigest, RunscVersion: req.PreparedArtifacts.RunscVersion}
+	return serverRuntimeStartResult(req)
+}
+
+type claimAfterProbeRuntime struct {
+	recordingRuntime
+}
+
+func (r *claimAfterProbeRuntime) Start(_ context.Context, req runtime.StartRequest, _ func(runtime.Output)) runtime.Result {
+	r.mu.Lock()
+	r.startRequests = append(r.startRequests, req)
+	r.mu.Unlock()
+	result := serverRuntimeStartResult(req)
+	if result.Err != nil {
+		return result
+	}
+	outbox, err := bridge.OpenQueue(req.Generation.BridgeDirPath, bridge.OutboxDir)
+	if err != nil {
+		return runtime.Result{Err: err}
+	}
+	if _, err := outbox.Write(context.Background(), bridge.Envelope{
+		RequestID:    "test_claim_after_probe",
+		Type:         bridge.TypeClaimNextTurn,
+		SessionID:    req.SessionID,
+		GenerationID: req.GenerationID,
+	}); err != nil {
+		return runtime.Result{Err: err}
+	}
+	return result
 }
 
 func (r *recordingRuntime) PrepareGeneration(_ context.Context, req runtime.StartRequest) (runtime.GenerationArtifacts, error) {
@@ -3818,7 +3896,7 @@ func (r *recordingRuntime) Start(_ context.Context, req runtime.StartRequest, _ 
 	r.mu.Lock()
 	r.startRequests = append(r.startRequests, req)
 	r.mu.Unlock()
-	return runtime.Result{ControlManifestDigest: req.PreparedArtifacts.ManifestDigest, RunscVersion: req.PreparedArtifacts.RunscVersion}
+	return serverRuntimeStartResult(req)
 }
 
 func (r *recordingRuntime) DestroyGenerationResources(_ context.Context, details store.RuntimeGenerationDetails) (runtime.GenerationResourceCleanup, error) {
@@ -3931,7 +4009,7 @@ func (r *restoreFailoverRuntime) Start(_ context.Context, req runtime.StartReque
 	if r.coldErr != nil {
 		return runtime.Result{Err: r.coldErr}
 	}
-	return runtime.Result{ControlManifestDigest: req.PreparedArtifacts.ManifestDigest, RunscVersion: req.PreparedArtifacts.RunscVersion}
+	return serverRuntimeStartResult(req)
 }
 
 type restoreStartHookRuntime struct {
@@ -3946,7 +4024,7 @@ func (r *restoreStartHookRuntime) Start(_ context.Context, req runtime.StartRequ
 	if req.RestoreFromCheckpoint && r.onRestoreStart != nil {
 		r.onRestoreStart()
 	}
-	return runtime.Result{ControlManifestDigest: req.PreparedArtifacts.ManifestDigest, RunscVersion: req.PreparedArtifacts.RunscVersion}
+	return serverRuntimeStartResult(req)
 }
 
 type restoreValidationRuntime struct {
@@ -3963,7 +4041,7 @@ func (r *restoreValidationRuntime) Start(ctx context.Context, req runtime.StartR
 	if req.RestoreFromCheckpoint {
 		return r.restore.Start(ctx, req, output)
 	}
-	return runtime.Result{ControlManifestDigest: req.PreparedArtifacts.ManifestDigest, RunscVersion: req.PreparedArtifacts.RunscVersion}
+	return serverRuntimeStartResult(req)
 }
 
 func (r *restoreValidationRuntime) Destroy(context.Context, string) error {
@@ -4044,6 +4122,99 @@ func testGenerationArtifacts() runtime.GenerationArtifacts {
 		RunscVersion:            "runsc test",
 		RunscBinaryPath:         "/usr/local/bin/runsc-test",
 		RunscBinaryDigest:       "sha256:runsc-test",
+	}
+}
+
+func serverRuntimeStartResult(req runtime.StartRequest) runtime.Result {
+	if err := writeServerBridgeBootstrapForRequest(req); err != nil {
+		return runtime.Result{Err: err}
+	}
+	return runtime.Result{
+		ControlManifestDigest: req.PreparedArtifacts.ManifestDigest,
+		RunscVersion:          req.PreparedArtifacts.RunscVersion,
+		PostStartProof:        serverPostStartProofForRequest(req),
+	}
+}
+
+func writeServerBridgeBootstrapForRequest(req runtime.StartRequest) error {
+	if strings.TrimSpace(req.Generation.BridgeDirPath) == "" {
+		return nil
+	}
+	if err := bridge.EnsureLayout(req.Generation.BridgeDirPath); err != nil {
+		return err
+	}
+	if err := bridge.TouchHeartbeat(req.Generation.BridgeDirPath, bridge.BridgeHeartbeatFile, time.Now().UTC()); err != nil {
+		return err
+	}
+	outbox, err := bridge.OpenQueue(req.Generation.BridgeDirPath, bridge.OutboxDir)
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	helloPayload, err := json.Marshal(map[string]any{"agent": req.Agent, "protocol_version": 1})
+	if err != nil {
+		return err
+	}
+	for _, envelope := range []bridge.Envelope{
+		{
+			RequestID:    "test_heartbeat",
+			Type:         bridge.TypeHeartbeat,
+			SessionID:    req.SessionID,
+			GenerationID: req.GenerationID,
+		},
+		{
+			RequestID:    "test_hello",
+			Type:         bridge.TypeHello,
+			SessionID:    req.SessionID,
+			GenerationID: req.GenerationID,
+			Payload:      helloPayload,
+		},
+		{
+			RequestID:    "test_probe",
+			Type:         bridge.TypeProbeNetwork,
+			SessionID:    req.SessionID,
+			GenerationID: req.GenerationID,
+		},
+	} {
+		if _, err := outbox.Write(ctx, envelope); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func serverPostStartProofForRequest(req runtime.StartRequest) *store.RuntimeResourcePostStartProof {
+	containerID := strings.TrimSpace(req.Generation.RunscContainerID)
+	if containerID == "" {
+		containerID = "harness-gen-" + req.GenerationID
+	}
+	runscPlatform := strings.TrimSpace(req.Generation.RunscPlatform)
+	if runscPlatform == "" {
+		runscPlatform = "systrap"
+	}
+	runscVersion := strings.TrimSpace(req.Generation.RunscVersion)
+	if runscVersion == "" {
+		runscVersion = req.PreparedArtifacts.RunscVersion
+	}
+	runscBinaryPath := strings.TrimSpace(req.Generation.RunscBinaryPath)
+	if runscBinaryPath == "" {
+		runscBinaryPath = req.PreparedArtifacts.RunscBinaryPath
+	}
+	runscBinaryDigest := strings.TrimSpace(req.Generation.RunscBinaryDigest)
+	if runscBinaryDigest == "" {
+		runscBinaryDigest = req.PreparedArtifacts.RunscBinaryDigest
+	}
+	return &store.RuntimeResourcePostStartProof{
+		GenerationID:      req.Generation.GenerationID,
+		RunscContainerID:  containerID,
+		RunscState:        "runsc_container:" + containerID + ":running; check=test",
+		RunscPlatform:     runscPlatform,
+		RunscVersion:      runscVersion,
+		RunscBinaryPath:   runscBinaryPath,
+		RunscBinaryDigest: runscBinaryDigest,
+		IPNetns:           "netns:present; check=test",
+		IPLink:            "host_veth:present; check=test",
+		NFT:               "nft_table:present; check=test",
 	}
 }
 
@@ -4186,11 +4357,31 @@ func createServerRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 		GenerationID: allocation.GenerationID,
 		WorkerID:     workerID,
 		HostID:       hostID,
+		PostStart:    serverPostStartProofForTest(instance),
 		Now:          now.Add(3 * time.Millisecond),
 	}); err != nil {
 		t.Fatalf("mark runtime resource live: %v", err)
 	}
 	return instance
+}
+
+func serverPostStartProofForTest(instance store.RuntimeResourceInstance) *store.RuntimeResourcePostStartProof {
+	return &store.RuntimeResourcePostStartProof{
+		HostID:                 instance.HostID,
+		GenerationID:           instance.GenerationID,
+		ContractID:             instance.ContractID,
+		SandboxContractVersion: instance.SandboxContractVersion,
+		RunscContainerID:       instance.RunscContainerID,
+		RunscState:             "runsc_container:" + instance.RunscContainerID + ":running; check=test",
+		RunscPlatform:          instance.RunscPlatform,
+		RunscVersion:           instance.RunscVersion,
+		RunscBinaryPath:        instance.RunscBinaryPath,
+		RunscBinaryDigest:      instance.RunscBinaryDigest,
+		IPNetns:                "netns:present; check=test",
+		IPLink:                 "host_veth:present; check=test",
+		NFT:                    "nft_table:present; check=test",
+		BridgeStartup:          "bridge_startup_probe:passed; check=test",
+	}
 }
 
 type serverCheckpointImageManifest struct {

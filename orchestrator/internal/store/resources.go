@@ -464,6 +464,31 @@ INSERT INTO runtime_generation_resources (
 	}, nil
 }
 
+func (s *Store) MarkGenerationStarting(ctx context.Context, sessionID, generationID, owner string, now time.Time) error {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	res, err := s.db.ExecContext(ctx, `
+UPDATE runtime_generations
+SET status = 'starting',
+    last_seen_at = ?
+WHERE generation_id = ?
+  AND session_id = ?
+  AND status = 'allocating'
+  AND lease_owner = ?
+  AND lease_expires_at > ?
+  AND EXISTS (
+    SELECT 1 FROM sessions
+    WHERE id = ?
+      AND active_generation_id = ?
+      AND status NOT IN ('failed', 'destroyed')
+  )`, formatTime(now), generationID, sessionID, owner, formatTime(now), sessionID, generationID)
+	if err != nil {
+		return err
+	}
+	return requireOneRow(res, "generation starting CAS failed")
+}
+
 func (s *Store) MarkGenerationResourcesLive(ctx context.Context, sessionID, generationID, owner string, now time.Time) error {
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -479,7 +504,7 @@ SET status = 'idle',
     last_seen_at = ?
 WHERE generation_id = ?
   AND session_id = ?
-  AND status IN ('allocating','restoring')
+  AND status IN ('allocating','starting','probing','restoring')
   AND lease_owner = ?
   AND lease_expires_at > ?
   AND EXISTS (

@@ -1211,6 +1211,61 @@ func TestDestroyGenerationResourcesCleansFilesystemWithIncompleteSandboxMetadata
 	}
 }
 
+func TestRuntimePostStartProofRecordsContainerAndNetworkEvidence(t *testing.T) {
+	dir := t.TempDir()
+	runscRoot := filepath.Join(dir, "runsc-root")
+	details := testGenerationDetails(dir, "gen_post_start")
+	details.RunscNetwork = "sandbox"
+	details.NetnsName = "harness-gen-post-start"
+	details.HostVeth = "hgenpsh"
+	pin := runscPin{
+		Platform:     "systrap",
+		Version:      "runsc proof",
+		BinaryPath:   "/usr/local/bin/runsc-proof",
+		BinaryDigest: "sha256:runsc-proof",
+	}
+	containerID := details.RunscContainerID
+	runner := &recordingCommandRunner{
+		outputs: map[string][]byte{
+			pin.BinaryPath + " -root " + runscRoot + " state " + containerID: []byte(`{"id":"` + containerID + `","status":"running"}`),
+			"ip netns list":                                          []byte(details.NetnsName + "\n"),
+			"ip link show " + details.HostVeth:                       []byte("42: " + details.HostVeth + ": <BROADCAST,UP>"),
+			"nft list table inet " + generationNftTableName(details): []byte("table inet " + generationNftTableName(details)),
+		},
+	}
+	rt := New(Config{
+		RunscRoot:     runscRoot,
+		RunscNetwork:  "sandbox",
+		CommandRunner: runner,
+	})
+
+	proof, err := rt.runtimePostStartProof(context.Background(), details, pin, containerID)
+	if err != nil {
+		t.Fatalf("runtime post-start proof: %v", err)
+	}
+	if proof.GenerationID != details.GenerationID ||
+		proof.RunscContainerID != containerID ||
+		proof.RunscPlatform != pin.Platform ||
+		proof.RunscVersion != pin.Version ||
+		proof.RunscBinaryPath != pin.BinaryPath ||
+		proof.RunscBinaryDigest != pin.BinaryDigest {
+		t.Fatalf("post-start proof missing runsc identity: %+v", proof)
+	}
+	for label, value := range map[string]string{
+		"runsc":  proof.RunscState,
+		"netns":  proof.IPNetns,
+		"iplink": proof.IPLink,
+		"nft":    proof.NFT,
+	} {
+		if strings.TrimSpace(value) == "" {
+			t.Fatalf("post-start proof missing %s evidence: %+v", label, proof)
+		}
+	}
+	if !strings.Contains(proof.RunscState, containerID) || !strings.Contains(proof.RunscState, "running") {
+		t.Fatalf("post-start proof did not record running container: %+v", proof)
+	}
+}
+
 func TestDestroyTreatsMissingRunscContainerAsAbsent(t *testing.T) {
 	runner := &recordingCommandRunner{
 		sequence: map[string][]commandResult{

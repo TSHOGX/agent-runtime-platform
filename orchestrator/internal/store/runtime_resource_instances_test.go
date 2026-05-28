@@ -48,6 +48,15 @@ func TestRuntimeResourceInstanceStateMachine(t *testing.T) {
 		GenerationID: instance.GenerationID,
 		WorkerID:     workerID,
 		HostID:       instance.HostID,
+		Now:          now.Add(3500 * time.Millisecond),
+	}); err == nil || !strings.Contains(err.Error(), "post-start proof") {
+		t.Fatalf("expected ready -> live proof rejection, got %v", err)
+	}
+	if err := st.MarkRuntimeResourceLive(ctx, RuntimeResourceWorkerTransitionParams{
+		GenerationID: instance.GenerationID,
+		WorkerID:     workerID,
+		HostID:       instance.HostID,
+		PostStart:    runtimeResourcePostStartProofForTest(instance),
 		Now:          now.Add(4 * time.Second),
 	}); err != nil {
 		t.Fatalf("mark live: %v", err)
@@ -107,6 +116,7 @@ func TestRuntimeResourceInstanceStateMachine(t *testing.T) {
 		GenerationID: instance.GenerationID,
 		WorkerID:     workerID,
 		HostID:       instance.HostID,
+		PostStart:    runtimeResourcePostStartProofForTest(instance),
 		Now:          now.Add(9 * time.Second),
 	}); err != nil {
 		t.Fatalf("mark restored live: %v", err)
@@ -484,5 +494,24 @@ func runtimeResourceEvidenceForTest(hostID string) ResourceReconciliationEvidenc
 			"bridge":     "absent",
 			"log":        "absent",
 		},
+	}
+}
+
+func runtimeResourcePostStartProofForTest(instance RuntimeResourceInstance) *RuntimeResourcePostStartProof {
+	return &RuntimeResourcePostStartProof{
+		HostID:                 instance.HostID,
+		GenerationID:           instance.GenerationID,
+		ContractID:             instance.ContractID,
+		SandboxContractVersion: instance.SandboxContractVersion,
+		RunscContainerID:       instance.RunscContainerID,
+		RunscState:             "runsc_container:" + instance.RunscContainerID + ":running; check=test",
+		RunscPlatform:          instance.RunscPlatform,
+		RunscVersion:           instance.RunscVersion,
+		RunscBinaryPath:        instance.RunscBinaryPath,
+		RunscBinaryDigest:      instance.RunscBinaryDigest,
+		IPNetns:                "netns:present; check=test",
+		IPLink:                 "host_veth:present; check=test",
+		NFT:                    "nft_table:present; check=test",
+		BridgeStartup:          "bridge_startup_probe:passed; check=test",
 	}
 }

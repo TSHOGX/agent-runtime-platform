@@ -2758,6 +2758,7 @@ func createLiveRuntimeResourceInstanceForAllocation(t *testing.T, ctx context.Co
 		GenerationID: allocation.GenerationID,
 		WorkerID:     workerID,
 		HostID:       hostID,
+		PostStart:    runtimeResourcePostStartProofForTest(instance),
 		Now:          now.Add(3 * time.Millisecond),
 	}); err != nil {
 		t.Fatalf("mark runtime resource live: %v", err)

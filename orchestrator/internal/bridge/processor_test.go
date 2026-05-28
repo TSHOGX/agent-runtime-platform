@@ -1005,9 +1005,29 @@ func createBridgeRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 		GenerationID: allocation.GenerationID,
 		WorkerID:     ownerUUID,
 		HostID:       instance.HostID,
+		PostStart:    bridgePostStartProofForTest(instance),
 		Now:          time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("mark runtime resource live: %v", err)
+	}
+}
+
+func bridgePostStartProofForTest(instance store.RuntimeResourceInstance) *store.RuntimeResourcePostStartProof {
+	return &store.RuntimeResourcePostStartProof{
+		HostID:                 instance.HostID,
+		GenerationID:           instance.GenerationID,
+		ContractID:             instance.ContractID,
+		SandboxContractVersion: instance.SandboxContractVersion,
+		RunscContainerID:       instance.RunscContainerID,
+		RunscState:             "runsc_container:" + instance.RunscContainerID + ":running; check=test",
+		RunscPlatform:          instance.RunscPlatform,
+		RunscVersion:           instance.RunscVersion,
+		RunscBinaryPath:        instance.RunscBinaryPath,
+		RunscBinaryDigest:      instance.RunscBinaryDigest,
+		IPNetns:                "netns:present; check=test",
+		IPLink:                 "host_veth:present; check=test",
+		NFT:                    "nft_table:present; check=test",
+		BridgeStartup:          "bridge_startup_probe:passed; check=test",
 	}
 }
 
