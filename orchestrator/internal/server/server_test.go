@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -3409,6 +3410,7 @@ func TestProxyCorrelationUnixSocketPublishesDurableEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen proxy correlation: %v", err)
 	}
+	assertProxyCorrelationSocketPermissions(t, socketPath, cfg.Phase7.ProxyServiceIdentity.GID)
 	proxyServer := srv.ProxyCorrelationServer()
 	errCh := make(chan error, 1)
 	go func() { errCh <- proxyServer.Serve(listener) }()
@@ -5021,6 +5023,36 @@ func waitForHubEvent(t *testing.T, ch <-chan events.Event, eventType string) eve
 			}
 		case <-deadline:
 			t.Fatalf("timeout waiting for hub event %s", eventType)
+		}
+	}
+}
+
+func assertProxyCorrelationSocketPermissions(t *testing.T, socketPath string, proxyServiceGID int) {
+	t.Helper()
+	for _, check := range []struct {
+		name string
+		path string
+		mode os.FileMode
+	}{
+		{name: "socket root", path: filepath.Dir(socketPath), mode: 0o750},
+		{name: "socket", path: socketPath, mode: 0o660},
+	} {
+		info, err := os.Stat(check.path)
+		if err != nil {
+			t.Fatalf("stat proxy correlation %s: %v", check.name, err)
+		}
+		if info.Mode().Perm() != check.mode {
+			t.Fatalf("proxy correlation %s mode=%#o want %#o", check.name, info.Mode().Perm(), check.mode)
+		}
+		if os.Geteuid() != 0 {
+			continue
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			t.Fatalf("proxy correlation %s stat type = %T", check.name, info.Sys())
+		}
+		if stat.Uid != 0 || stat.Gid != uint32(proxyServiceGID) {
+			t.Fatalf("proxy correlation %s ownership=%d:%d want 0:%d", check.name, stat.Uid, stat.Gid, proxyServiceGID)
 		}
 	}
 }

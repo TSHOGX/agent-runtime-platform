@@ -175,6 +175,9 @@ func (s *Server) ListenProxyCorrelation() (net.Listener, string, error) {
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0o750); err != nil {
 		return nil, "", fmt.Errorf("create proxy correlation socket root: %w", err)
 	}
+	if err := chownProxyCorrelationPath(filepath.Dir(socketPath), s.cfg.Phase7.ProxyServiceIdentity.GID); err != nil {
+		return nil, "", fmt.Errorf("chown proxy correlation socket root: %w", err)
+	}
 	if err := os.Chmod(filepath.Dir(socketPath), 0o750); err != nil {
 		return nil, "", fmt.Errorf("chmod proxy correlation socket root: %w", err)
 	}
@@ -196,7 +199,21 @@ func (s *Server) ListenProxyCorrelation() (net.Listener, string, error) {
 		_ = listener.Close()
 		return nil, "", fmt.Errorf("chmod proxy correlation socket: %w", err)
 	}
+	if err := chownProxyCorrelationPath(socketPath, s.cfg.Phase7.ProxyServiceIdentity.GID); err != nil {
+		_ = listener.Close()
+		return nil, "", fmt.Errorf("chown proxy correlation socket: %w", err)
+	}
 	return listener, socketPath, nil
+}
+
+func chownProxyCorrelationPath(path string, proxyServiceGID int) error {
+	if os.Geteuid() != 0 {
+		return nil
+	}
+	if proxyServiceGID < 0 {
+		return fmt.Errorf("proxy service gid must be >= 0")
+	}
+	return os.Chown(path, 0, proxyServiceGID)
 }
 
 func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
