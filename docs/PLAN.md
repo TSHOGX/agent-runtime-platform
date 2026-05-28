@@ -168,11 +168,11 @@ Phases 0–7 and P0 lifetime separation are complete. Highlights below; full per
 ## Remaining Risks
 
 - Automatic checkpointing is policy-gated and disabled in the checked-in lab config. The checkpoint/restore path is control-plane-safe, but default enablement should be a deliberate operations decision after retention, resource pressure, and restore SLOs are measured.
-- Current runtime specs still mount the parent session and agent-home roots into
-  each sandbox, and Claude-visible model credentials are still delivered through
-  sandbox-readable secret files before exec. Phase 8 is the blocking fix for
-  these isolation gaps.
-- Phase 7 uses `secret_id` / `secret_version` indirection and per-generation mounted secret files. Real upstream credential storage, rotation, and GC remain Phase 10.
+- Phase 8 runtime isolation is active but not release-complete until the
+  destructive cutover, reconciliation, proxy contract, rootfs, and adversarial
+  lab evidence all pass on the target host.
+- Provider credentials are host/proxy-side for the active runtime. Real upstream
+  credential storage, rotation, and GC remain Phase 10.
 - Reclaimable generation resources are retained for `harness.reaper.failed_retention` before physical cleanup. That is intentional for debugging, but production observability should make retained resources visible.
 
 ## Notes on Prior Docs

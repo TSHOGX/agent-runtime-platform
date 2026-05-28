@@ -20,20 +20,16 @@ Phase 9c does **not** introduce a separate skills release system. Versioning is 
 
 ## Runtime Prerequisite
 
-Phase 9c starts after Phase 8 narrows the runtime mount contract. The older
-runtime facts below describe the pre-Phase-8 layout and are not sufficient for
-new sandbox-visible content:
+Phase 9c starts from the Phase 8 MountPlan contract. The active sandbox receives
+exact DataVolume-backed `/workspace` and `/agent-home` binds, generation-scoped
+`/harness-control` surfaces, optional exact read-only content binds such as
+`/schema-pack`, and no parent `/sessions`, `/agent-homes`, or
+`/harness-secrets` mounts.
 
-- `/workspace` is a symlink to `/sessions/<session_id>`.
-- The agent HOME is `/agent-homes/<session_id>`, outside `/workspace`.
-- The artifact watcher only scans the sessions root and ignores symlinks.
-- Runtime spec generation already centralizes mounts for `/sessions`, `/agent-homes`, `/harness-control`, `/schema-pack`, and `/harness-secrets`.
-
-Phase 8 replaces `/sessions` and `/agent-homes` parent binds with exact
-`/workspace` and `/agent-home` mounts. The skills mount must be a separate
-read-only exact subtree, never below `/sessions`, `/agent-homes`, or
-`/workspace`, then optionally linked into the selected driver's private HOME for
-a conventional discovery path.
+The skills mount must be a separate read-only exact subtree, never below
+`/workspace`, `/agent-home`, or any host root used for DataVolume storage. The
+entrypoint may then link it into the selected driver's private HOME for a
+conventional discovery path.
 
 ## Directory Layout
 
@@ -187,7 +183,7 @@ The agent HOME is already outside `/workspace`, so this does not appear in the r
 Do not mount skills below:
 
 - `/workspace`
-- `/sessions`
+- `/agent-home`
 - any path scanned by the artifact watcher
 
 With the proposed `/harness-skills` mount:

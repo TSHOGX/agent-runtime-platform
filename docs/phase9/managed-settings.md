@@ -100,9 +100,9 @@ until then, credential-bearing headers should be omitted.
 
 Managed settings may reference credentials only after a separate broker/token
 design has provided scoped, short-lived, non-upstream tokens for that trust
-domain. Direct reads from the existing model-provider `/harness-secrets` mount
-are rejected for Phase 9d, and Phase 8 model proxy authorization is not a token
-source for this file.
+domain. The legacy model-provider `/harness-secrets` mount is not part of the
+Phase 8 runtime contract and must not be reintroduced for Phase 9d. Phase 8
+model proxy authorization is not a token source for this file.
 
 The placeholder shape is reserved for that future broker design:
 
