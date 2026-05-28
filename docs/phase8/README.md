@@ -73,7 +73,7 @@ to Firecracker or Kata.
 /harness-control/bridge    rw exact bind: current generation bridge queue
 /etc/hosts                 ro exact bind: proxy alias projection, if enabled
 /schema-pack               ro exact bind, if configured
-/harness-skills            ro exact bind, when Phase 9c lands
+/harness-skills            ro exact bind, when Phase 10c lands
 /tmp, /var/tmp, caches     tmpfs or explicit scratch mounts
 /harness-secrets           absent; legacy secret root config removed
 ```
@@ -207,9 +207,10 @@ revocation.
   resource-state machine, store fences, and rollback policy.
 - [Release gates](./release-gates.md): adversarial acceptance checklist.
 
-## Phase 9 Boundary
+## Phase 10 Boundary
 
-Phase 9 may add read-only sandbox-visible content such as system skills or
-managed Claude settings. Those mounts must enter through the Phase 8
-`MountPlan`, use exact read-only binds, include content digests, pass nested
-mount checks, and never render bearer tokens into Claude-visible files.
+Phase 10 may add read-only sandbox-visible content such as system skills or
+managed driver settings. Those mounts must enter through the Phase 8
+`MountPlan`, use exact read-only binds to content-addressed or
+generation-rendered snapshots, include content digests, pass nested mount
+checks, and never render bearer tokens into Claude-visible files.

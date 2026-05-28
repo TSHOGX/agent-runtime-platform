@@ -545,6 +545,19 @@ def check_file_lacks(path, patterns):
     }
 
 
+def check_file_contains(path, patterns):
+    text = path.read_text(encoding="utf-8")
+    failures = []
+    for label, pattern in patterns:
+        if pattern not in text:
+            failures.append({"label": label, "pattern": pattern})
+    return {
+        "path": str(path),
+        "status": "passed" if not failures else "failed",
+        "failures": failures,
+    }
+
+
 def static_checks():
     checks = [
         {
@@ -582,9 +595,9 @@ def static_checks():
             ),
         },
         {
-            "name": "phase9_skills_docs_use_exact_bind_prerequisite",
+            "name": "phase10_skills_docs_use_exact_bind_prerequisite",
             **check_file_lacks(
-                REPO_ROOT / "docs" / "phase9" / "system-skills-mount.md",
+                REPO_ROOT / "docs" / "phase10" / "system-skills-mount.md",
                 (
                     ("workspace_symlink_to_sessions", "`/workspace` is a symlink to `/sessions/<session_id>`"),
                     ("agent_home_parent_root", "`/agent-homes/<session_id>`"),
@@ -593,10 +606,30 @@ def static_checks():
             ),
         },
         {
-            "name": "phase9_managed_settings_do_not_reference_live_secret_mount",
+            "name": "phase10_skills_docs_pin_content_snapshots",
+            **check_file_contains(
+                REPO_ROOT / "docs" / "phase10" / "system-skills-mount.md",
+                (
+                    ("content_addressed_snapshot", "content-addressed runtime snapshot"),
+                    ("no_mutable_repo_bind", "current repo path as a"),
+                ),
+            ),
+        },
+        {
+            "name": "phase10_managed_settings_do_not_reference_live_secret_mount",
             **check_file_lacks(
-                REPO_ROOT / "docs" / "phase9" / "managed-settings.md",
+                REPO_ROOT / "docs" / "phase10" / "managed-settings.md",
                 (("existing_model_provider_secret_mount", "existing model-provider `/harness-secrets` mount"),),
+            ),
+        },
+        {
+            "name": "phase10_managed_settings_docs_pin_content_snapshots",
+            **check_file_contains(
+                REPO_ROOT / "docs" / "phase10" / "managed-settings.md",
+                (
+                    ("content_addressed_snapshot", "content-addressed snapshot"),
+                    ("no_mutable_repo_bind", "mutable repository path directly"),
+                ),
             ),
         },
     ]

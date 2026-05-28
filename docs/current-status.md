@@ -2,7 +2,8 @@
 
 > Last updated: 2026-05-28
 > Scope: live baseline after Phase 7 control-plane qualification, completed P0
-> lifetime separation, and Phase 8 runtime-isolation qualification.
+> lifetime separation, Phase 8 runtime-isolation qualification, and the
+> pre-Phase 9 runtime cleanup.
 
 ## Snapshot
 
@@ -26,6 +27,8 @@ long-lived AI agent work.
 - Model boundary: upstream provider credentials stay host/proxy-side. Sandbox
   model access uses the stable proxy alias and proxy authorization based on
   live turn context, source IP, contract/resource identity, and entitlement.
+  The listener and sandbox alias are configured by `harness.model_proxy`;
+  checked-in defaults use host port `8082`.
 - Session lifetime: `harness.session_retention: 0s` is the checked-in default,
   so sessions/history/workspaces do not expire automatically. Runtime resource
   lifetime is separate from session/history lifetime.
@@ -107,10 +110,13 @@ behavior.
   only on an in-memory "first turn" flag.
 - Reclaimable runtime resources remain visible for
   `harness.reaper.failed_retention` before physical cleanup by design.
-- Phase 9 is the active architecture target: system prompt, context compaction,
-  system skills, and managed Claude Code settings. Production auth/authorization,
-  credential rotation, tenant egress policy, resource limits, observability, and
-  multi-orchestrator HA are Phase 10.
+- Phase 9 is the active architecture target after the pre-Phase 9 runtime cleanup
+  gate: Agent Driver abstraction, runtime provider contract, deployment-selected
+  agent driver, and Pi Agent integration. System prompt, context compaction,
+  system skills, and managed driver settings move to Phase 10 behind driver
+  adapters. Production auth/authorization, credential rotation, tenant egress
+  policy, resource limits, observability, and multi-orchestrator HA are Phase
+  11.
 
 ## Checks
 

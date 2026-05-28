@@ -3,7 +3,7 @@
 > 日期：2026-05-19
 > 决策人：项目主理 + 本机 Phase 0 排查
 > 状态：✅ 已生效，PLAN.md 已按此重写
-> 当前注记：gVisor 运行时选择仍然有效；Phase 7 已在 `runsc` + bridge/control-plane 路径上完成 checkpoint-safe 基线，详见 [`phase7/README.md`](./phase7/README.md)。
+> 当前注记：gVisor 运行时选择仍然有效；Phase 7 已完成 `runsc` + bridge/control-plane 的 checkpoint-safe 基线，Phase 8 已在同一运行时上完成 runtime-isolation hardening。当前基线见 [`current-status.md`](./current-status.md)。
 
 ## 1. 上下文
 

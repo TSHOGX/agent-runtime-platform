@@ -16,7 +16,7 @@ Control plane for long-lived, sandboxed AI agent sessions.
 
 - **Backend**: Go orchestrator, SQLite, HTTP API, SSE/WebSocket event endpoints
 - **Frontend**: Next.js, TypeScript, same-origin API proxy, live artifact browser
-- **Runtime**: gVisor `runsc`, OCI bundle/rootfs, per-session sandbox resources
+- **Runtime**: gVisor `runsc`, OCI bundle/rootfs, per-generation sandbox resources
 - **Agent paths**: Claude Code agent and PTY-backed shell session
 - **Control protocol**: Agent Bridge file-queue claim/ack protocol
 - **Artifacts**: host-side metadata watcher with safe read-only downloads/previews
@@ -46,7 +46,7 @@ PORT=8000 npm run dev
 ## 目录结构
 
 ```text
-harness-platform/
+agent-runtime-platform/
 ├── config/             # runtime / proxy / lab 配置
 ├── docs/               # 架构、路线图、阶段记录和设计文档
 ├── orchestrator/       # Go control plane

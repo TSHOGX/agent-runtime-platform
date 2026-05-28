@@ -39,7 +39,7 @@ CAS predicates do not protect host-level resource creation (netns/veth/control d
    aborts the sweep and exits the process.
 ```
 
-The flock is the primary defense; the meta row is for diagnostics and for catching the case where flock is silently broken (network filesystems, container bind mounts that strip locks). Multi-orchestrator HA is deferred — see [README.md](./README.md#out-of-scope-deferred-to-phase-10). The architectural rule that every critical transition is expressed as one SQL statement whose `WHERE` clause encodes the precondition holds independently of the deployment substrate; whether that statement runs against SQLite or a future Postgres deployment is a deployment detail, and the same CAS predicates carry over unchanged.
+The flock is the primary defense; the meta row is for diagnostics and for catching the case where flock is silently broken (network filesystems, container bind mounts that strip locks). Multi-orchestrator HA is deferred — see [README.md](./README.md#out-of-scope-deferred-to-phase-11). The architectural rule that every critical transition is expressed as one SQL statement whose `WHERE` clause encodes the precondition holds independently of the deployment substrate; whether that statement runs against SQLite or a future Postgres deployment is a deployment detail, and the same CAS predicates carry over unchanged.
 
 ## Hard Invariants
 
@@ -115,7 +115,7 @@ During 7a the runtime-manager goroutine itself remains the lease renewer on the 
 
 The one consequence worth calling out: a 7a deploy that crashes mid-turn cannot recover the in-flight turn from the ledger — the existing stdin path owns it. This is unchanged from the pre-Phase-7 behavior; restart recovery on the 7a ledger only reconciles `queued` rows and timestamps. 7b is what makes turn recovery durable.
 
-The pre-Phase-7 lab violated these rules with three legacy patterns: the fixed shared netns `/run/netns/phase1-demo`, the shared writable control manifest `/var/lib/harness/control/phase2-template/session.json`, and the shared static runtime spec under `bundle/out/phase2-template-bundle/config.json` reused as live mutable state. The runtime hot path now renders per-generation netns/spec/control paths; tests assert those legacy identifiers do not reappear. Phase 7 also ships the `secret_id`/`secret_version` indirection so the manifest does not carry plaintext upstream credentials; Phase 10 wires that contract to a real secret store.
+The pre-Phase-7 lab violated these rules with three legacy patterns: the fixed shared netns `/run/netns/phase1-demo`, the shared writable control manifest `/var/lib/harness/control/phase2-template/session.json`, and the shared static runtime spec under `bundle/out/phase2-template-bundle/config.json` reused as live mutable state. The runtime hot path now renders per-generation netns/spec/control paths; tests assert those legacy identifiers do not reappear. Phase 7 also ships the `secret_id`/`secret_version` indirection so the manifest does not carry plaintext upstream credentials; Phase 11 wires that contract to a real secret store.
 
 ## Lease And CAS Fencing
 

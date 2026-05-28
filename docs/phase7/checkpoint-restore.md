@@ -12,6 +12,12 @@ Physical resume:
 
 The target architecture treats logical resume as required for correctness and physical resume as an optimization.
 
+Current reading note: this is the Phase 7 checkpoint/restore design. The active
+Phase 8 baseline removes sandbox-mounted provider secrets and keeps upstream
+credentials host/proxy-side. The strict/regenerable digest rule still applies,
+but later phases replace Claude/Anthropic-specific manifest fields with
+driver/model-access fields instead of reintroducing `/harness-secrets`.
+
 ## Hot Path
 
 ```text
@@ -152,16 +158,17 @@ strict (included in manifest digest projection — any mismatch -> cold fallback
   - manifest.anthropic_api_key_secret_id
   - manifest.anthropic_auth_token_secret_id
   - manifest.secret_version (rotation invalidates the checkpoint by
-      design — Phase 10 will lift this with a separate indirection)
+      design — a future credential-store design may lift this with a
+      separate indirection)
   - manifest.secret_mount_path
   - manifest.model
   - manifest.workspace_path
   - manifest.agent_home_path
   - manifest.manifest_version
   - manifest.egress_policy_digest         (Doris/DNS allow-list contents)
-  - manifest.system_prompt_enabled      (Phase 9a addition)
-  - manifest.system_prompt_text         (Phase 9a addition)
-  - manifest.system_prompt_digest       (Phase 9a addition)
+  - manifest.system_prompt_enabled      (Phase 10a addition)
+  - manifest.system_prompt_text         (Phase 10a addition)
+  - manifest.system_prompt_digest       (Phase 10a addition)
   - manifest.spec_digest                  (the config.json that runsc
       restore will see after re-rendering)
 ```
@@ -178,7 +185,7 @@ same-generation reuse, restored generations, and bridge reconnect paths.
 Regression coverage must recreate the runner between turns and seed existing
 Claude session files to prove this behavior.
 
-> **Phase 9a compatibility note.** Checkpoint manifests created before Phase 9a do not contain `manifest.system_prompt_enabled`, `manifest.system_prompt_text`, or `manifest.system_prompt_digest`. After Phase 9a adds those fields to the strict projection, the first restore attempt for such a checkpoint will fail the projected-digest comparison and cold-fall back, consistent with the `runsc`-version invalidation policy below. The fallback allocates a replacement generation for the same migrated session using that session's stored disabled/empty prompt snapshot; it does not create a new session and does not read the current operator prompt config.
+> **Phase 10a compatibility note.** Checkpoint manifests created before Phase 10a do not contain `manifest.system_prompt_enabled`, `manifest.system_prompt_text`, or `manifest.system_prompt_digest`. After Phase 10a adds those fields to the strict projection, the first restore attempt for such a checkpoint will fail the projected-digest comparison and cold-fall back, consistent with the `runsc`-version invalidation policy below. The fallback allocates a replacement generation for the same migrated session using that session's stored disabled/empty prompt snapshot; it does not create a new session and does not read the current operator prompt config.
 
 ## `runsc` Version Exact-Match
 

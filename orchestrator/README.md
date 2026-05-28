@@ -1,6 +1,6 @@
 # Orchestrator
 
-Go control plane for the sandboxed agent runtime platform. It owns session metadata, starts or restores per-session gVisor sandboxes, parses agent output, publishes events, and records artifacts written under `/var/lib/harness/sessions/<session_id>/`.
+Go control plane for the sandboxed agent runtime platform. It owns session metadata, starts or restores per-generation gVisor sandboxes, parses agent output, publishes events, and records artifacts written under the session workspace.
 
 ## Run
 
@@ -54,13 +54,16 @@ Useful environment variables:
 
 `HARNESS_SESSION_TTL` is obsolete and fails startup if present; use `HARNESS_SESSION_RETENTION`.
 
-Runtime network and Claude proxy settings are explicit in `config/harness.yaml`:
+Runtime network and model proxy settings are explicit in `config/harness.yaml`:
 
 ```yaml
 harness:
   run_dir: /var/lib/harness/run
   session_retention: 0s
   max_sessions: 30
+  model_proxy:
+    bind_url: http://0.0.0.0:8082
+    sandbox_base_url: http://harness-model-proxy.internal:8082
   network:
     cidr_pool: 10.200.0.0/16
     egress:
@@ -98,7 +101,7 @@ harness:
     checkpoint_image_retention: 720h
 ```
 
-The loader uses strict YAML decoding for the Phase 7 `harness:` schema. Legacy files containing only top-level `runtime:` / `claude:` sections still load for compatibility, but mixing them with `harness:` is rejected. Legacy `harness.secrets.*` keys are rejected; provider credentials stay host-side.
+The loader uses strict YAML decoding for the Phase 7 `harness:` schema. `harness.model_proxy.bind_url` controls the host listener port used for probes and egress allow-listing; `harness.model_proxy.sandbox_base_url` is the sandbox-visible alias written into generated control manifests. Legacy files containing only top-level `runtime:` / `claude:` sections still load for compatibility, and legacy `claude.proxy_bind_url` / `claude.sandbox_base_url` map to `harness.model_proxy`, but mixing them with `harness:` is rejected. Legacy `harness.secrets.*` keys are rejected; provider credentials stay host-side.
 
 With `session_retention: 0s`, retained non-terminal sessions keep counting toward `max_sessions` even after runtime resources are retired. The `/api/quota` response reports the session ceiling and live `/30` pool ceiling separately. Use `DELETE /api/sessions/<id>` to close sessions and free session quota; close preserves messages, artifacts, workspace, and agent-home paths while reclaiming runtime resources.
 
@@ -171,4 +174,4 @@ Artifact downloads are read-only and limited to regular files under the session 
 
 - The current Claude path uses stream-json turns and a per-container output hub.
 - `sh` is the interactive shell session path; it is still useful for smoke tests and shell-style debugging.
-- Checkpoint/restore is generation-aware. Automatic checkpointing remains default-off while Phase 7b validates the policy, and should be enabled only for the lab profile or explicit test environments.
+- Checkpoint/restore is generation-aware. Automatic checkpointing remains default-off in the checked-in lab config, and should be enabled only for lab profiles or explicit test environments.

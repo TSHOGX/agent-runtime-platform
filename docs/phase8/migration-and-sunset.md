@@ -42,7 +42,7 @@ The DB/control-plane root must be disjoint from:
 - checkpoint roots
 - prepared-bundle roots
 - rootfs/content roots
-- schema-pack and future Phase 9 content roots
+- schema-pack and future Phase 10 content roots
 - DataVolume provisioning evidence roots, unless configured as a reserved
   host-only subroot under the DB/control-plane root
 - file-backed provider credential roots

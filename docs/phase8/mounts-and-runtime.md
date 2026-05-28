@@ -2,7 +2,7 @@
 
 `MountPlan` is the only API that produces sandbox content mounts: exact binds
 and tmp/cache mounts that expose product data to the sandbox. Runtime code,
-Phase 9 content mounts, manifest rendering, restore validation, and release
+Phase 10 content mounts, manifest rendering, restore validation, and release
 gates consume the typed plan instead of rebuilding paths locally.
 
 OCI pseudo mounts such as `/proc`, `/dev`, and `/sys` are owned by the
@@ -24,7 +24,7 @@ Required canonical roots and reserved host-only roots:
 - prepared-bundle root
 - rootfs/image content root
 - schema-pack root, if configured
-- future skills/settings content roots
+- future Phase 10 content-addressed snapshot roots for skills/settings
 - DB/control-plane state root
 - DataVolume provisioning evidence root, normally under the DB/control-plane
   state root as a reserved host-only subroot
@@ -60,7 +60,7 @@ Phase 8 removes the legacy sandbox secret root contract. Config keys such as
 config loading. Any code that still understands those keys is pre-Phase-8
 compatibility tooling and is quarantined from release evidence. Old secret roots
 are deleted or quarantined outside all Phase 8 roots during cutover. Provider
-credentials move to host/proxy-only storage until a future Phase 10 credential
+credentials move to host/proxy-only storage until a future Phase 11 credential
 storage design exists.
 
 ## Sandbox Content Mounts
@@ -73,8 +73,8 @@ storage design exists.
 | Bridge queue | `/harness-control/bridge` | rw exact bind | `nosuid,nodev,noexec` plus runsc exclusive annotation |
 | Network alias projection | `/etc/hosts` | ro exact bind, when model access aliasing is enabled | generated file, `nosuid,nodev,noexec`, content digest |
 | Schema pack | `/schema-pack` | ro exact bind | `nosuid,nodev,noexec` |
-| Phase 9 skills | `/harness-skills` | ro exact bind | `nosuid,nodev,noexec` |
-| Phase 9 settings | configured target | ro exact bind | `nosuid,nodev,noexec` |
+| Phase 10 skills | `/harness-skills` | ro exact bind to content-addressed snapshot | `nosuid,nodev,noexec` |
+| Phase 10 settings | configured target | ro exact bind to content-addressed/rendered snapshot | `nosuid,nodev,noexec` |
 | Scratch/cache | `/tmp`, `/var/tmp`, tool caches | tmpfs or explicit bind | size limit, `nosuid,nodev`; `noexec` where compatible |
 
 Parent `/sessions` and `/agent-homes` mounts are forbidden. `/harness-secrets`
@@ -130,6 +130,9 @@ are selected from verified provisioning rows:
 - network alias projection: `<run_dir>/network/gen-<generation_id>/hosts`
 - bundle/spec/log/checkpoint paths: generation-derived paths under their own
   disjoint roots
+- Phase 10 read-only content: content-addressed snapshots derived from repo
+  authoring paths, verified by digest before mount; generation specs must not
+  bind mutable repo working tree paths directly
 
 The first provisioning of a workspace or driver home derives the expected path
 from configured roots and typed IDs, then writes host-trusted evidence to the

@@ -70,7 +70,7 @@ namespaces, proxy peer addresses, filesystem metadata, and crash recovery.
 
 - Configured top-level roots are canonical, symlink-safe, and mutually disjoint:
   sessions, agent homes, run, checkpoint, prepared bundle, rootfs/content,
-  schema pack, Phase 9 content, DB/control-plane, and any file-backed provider
+  schema pack, Phase 10 content, DB/control-plane, and any file-backed provider
   credential roots.
 - The proxy-internal socket root is canonical, symlink-safe, host-only, and not
   equal to, contained by, or containing any sandbox content bind source.
@@ -306,8 +306,9 @@ namespaces, proxy peer addresses, filesystem metadata, and crash recovery.
 - `docs/PLAN.md`, `docs/current-status.md`, `docs/architecture.md`, and Phase 7
   runtime-resource docs do not imply stronger isolation than the implementation
   provides.
-- Phase 9 skills and managed-settings docs use the Phase 8 MountPlan exact-bind
-  contract.
+- Phase 10 skills and managed-settings docs use the Phase 8 MountPlan exact-bind
+  contract and bind content-addressed/generated snapshots rather than mutable
+  repo authoring paths.
 - Managed settings do not render upstream bearer tokens or remote MCP bearer
   tokens into Claude-visible files unless a separate broker/token design exists.
 

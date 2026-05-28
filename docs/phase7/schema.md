@@ -299,7 +299,7 @@ destroyed_at
 
 ### `egress_policies`
 
-Materialized allow-rules referenced by `network_profiles.egress_policy_id`. On 7a, every `network_profiles` row gets an `egress_policies` row whose contents are the lab-wide static allow-list; Phase 10 turns this into per-tenant policy. The schema is identical between Phase 7 and Phase 10; what changes in Phase 10 is the *source* of values and the enforcement strength. See [network-and-probes.md](./network-and-probes.md#egress-policy).
+Materialized allow-rules referenced by `network_profiles.egress_policy_id`. On 7a, every `network_profiles` row gets an `egress_policies` row whose contents are the lab-wide static allow-list; Phase 11 turns this into per-tenant policy. The schema is identical between Phase 7 and Phase 11; what changes in Phase 11 is the *source* of values and the enforcement strength. See [network-and-probes.md](./network-and-probes.md#egress-policy).
 
 ### `orchestrator_owner`
 

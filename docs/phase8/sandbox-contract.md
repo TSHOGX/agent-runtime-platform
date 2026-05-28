@@ -43,7 +43,7 @@ mount_plan:
   bridge:      <run dir>/bridge/gen-<generation_id> -> /harness-control/bridge rw
   network_hosts: optional <run dir>/network/gen-<generation_id>/hosts -> /etc/hosts ro
   schema_pack: optional ro exact content bind
-  skills:      optional Phase 9 ro exact content bind
+  skills:      optional Phase 10c ro exact content bind
   scratch:     explicit tmpfs/cache mounts
 
 network_identity:
@@ -92,7 +92,7 @@ input_digests:
   runtime_config_digest: sha256:...
   rootfs_image_digest: sha256:...
   schema_pack_digest: sha256:... | null
-  future_content_digests: [...]
+  future_content_digests: [...]  # e.g. Phase 10 skills/settings snapshots
 ```
 
 ## Digest Rules
@@ -137,7 +137,7 @@ through an allow-list. The projection may contain only:
 - contract/version identifiers and digests needed for compatibility checks;
 - sandbox-visible paths such as `/workspace`, `/agent-home`,
   `/harness-control`, `/harness-control/bridge`, `/schema-pack`, and future
-  Phase 9 content paths;
+  Phase 10 content paths;
 - sandbox-visible feature flags, driver settings, and content digests;
 - `sandbox_model_proxy_base_url`, when model access is enabled. This value is a
   stable sandbox-visible alias URL from the verified contract, for example

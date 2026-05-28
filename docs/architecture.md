@@ -88,9 +88,9 @@ The active runtime contract is `sandbox-isolation-v1`.
 - `/harness-secrets` is absent; legacy sandbox secret config keys are rejected.
 - Rootfs is read-only; writable surfaces are explicit binds or scratch mounts.
 - Agent processes run as the configured non-root sandbox identity.
-- Provider credentials remain host/proxy-side. The sandbox sees only the stable
-  model proxy alias (`http://harness-model-proxy.internal:8082`) when model
-  access is enabled.
+- Provider credentials remain host/proxy-side. The sandbox sees only the
+  configured stable model proxy alias
+  (`harness.model_proxy.sandbox_base_url`) when model access is enabled.
 
 Normal model dispatch requires active turn context, source-IP/resource/contract
 match, driver entitlement, and proxy correlation through the authenticated
@@ -208,6 +208,8 @@ The checked-in lab profile currently sets:
 - `run_dir: /var/lib/harness/run`
 - `session_retention: 0s`
 - `max_sessions: 30`
+- `model_proxy.bind_url: http://0.0.0.0:8082`
+- `model_proxy.sandbox_base_url: http://harness-model-proxy.internal:8082`
 - `sandbox_identity: 65534:65534`
 - `network.cidr_pool: 10.200.0.0/16`
 - Doris egress allow-list: `172.16.0.138:9030`
@@ -230,8 +232,10 @@ Important environment overrides:
 - `RUNSC_ROOT`
 
 `HARNESS_SESSION_TTL` is obsolete and fails startup if present. Legacy top-level
-`runtime:` / `claude:` config can still load for compatibility, but it cannot be
-mixed with the `harness:` schema. Legacy sandbox secret keys are rejected.
+`runtime:` / `claude:` config can still load for compatibility, including
+mapping `claude.proxy_bind_url` and `claude.sandbox_base_url` to
+`harness.model_proxy`, but it cannot be mixed with the `harness:` schema.
+Legacy sandbox secret keys are rejected.
 
 With `session_retention: 0s`, sessions, messages, artifacts, workspaces, and
 agent homes do not expire automatically. `harness.max_sessions` counts
@@ -277,7 +281,7 @@ metadata events.
 - Legacy `workspace`, `agent_home_path`, and `restore_id` columns remain
   internal compatibility storage; public DTOs omit them.
 - Tenant authz, credential storage/rotation/GC, tenant egress policy, resource
-  limits, observability, and multi-orchestrator HA are Phase 10 work.
+  limits, observability, and multi-orchestrator HA are Phase 11 work.
 
 ## Source Map
 

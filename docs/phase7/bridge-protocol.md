@@ -156,7 +156,7 @@ The global SSE endpoint at `/api/events/stream` emits typed frames with `id:` (h
 
 ### Why a global stream
 
-The orchestrator exposes one global SSE endpoint that the frontend opens once per browser session and demultiplexes client-side. The optional `?session_id=` filter is for narrow views only; it is not a portable cursor namespace (`orchestrator/internal/server/server.go:523`, `frontend/components/harness-provider.tsx:459`). The workbench keeps the global stream open so sidebar updates for other sessions do not require reconnecting or re-seeding cursor state.
+The orchestrator exposes one global SSE endpoint that the frontend opens once per browser session and demultiplexes client-side. The optional `?session_id=` filter is for narrow views only; it is not a portable cursor namespace. The workbench keeps the global stream open so sidebar updates for other sessions do not require reconnecting or re-seeding cursor state.
 
 For the global stream to work, **`event_id` must be globally monotonic per orchestrator process**, not per session. The host event store assigns `event_id` from a single sequence; the SQL is `INSERT INTO events (...) RETURNING event_id` against an `INTEGER PRIMARY KEY AUTOINCREMENT` column under the orchestrator's single-writer SQLite. `Last-Event-ID` on the global stream is therefore one cursor that survives session selection changes. A cursor captured under one `?session_id=` filter may only be reused with the same filter; widening to a different filter, or to the global stream, starts from a fresh cursor.
 

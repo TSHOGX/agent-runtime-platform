@@ -1,19 +1,19 @@
-# Phase 11: Trajectory → Memory → Skill Pipeline
+# Phase 12: Trajectory → Memory → Skill Pipeline
 
 > Status: design only / future. Not actively planned.
-> Roadmap entry: [PLAN.md → Phase 11](./PLAN.md#phase-11-trajectory--memory--skill-pipeline-future).
-> Depends on [Phase 9c system-skills mount](./phase9/system-skills-mount.md). Phase 11 may add a reviewed skills release layer on top of that mount.
+> Roadmap entry: [PLAN.md -> Phase 12](./PLAN.md#phases).
+> Depends on [Phase 10c system-skills mount](./phase10/system-skills-mount.md). Phase 12 may add a reviewed skills release layer on top of that mount.
 
 ## Goal
 
 Use historical session trajectories to continuously improve the shared skills and memory available to future sandbox sessions.
 
-The design assumes all data stays on internal servers. Therefore, this pipeline keeps full raw trajectories and does not include a redaction stage.
+The design assumes trajectory data stays inside the internal trust boundary. The first implementation can keep full raw trajectories internally, but any export outside that boundary requires an explicit redaction and approval stage.
 
 The core rule:
 
 ```text
-raw trajectory -> episode memory -> semantic memory -> skill candidate -> versioned skills release
+raw trajectory -> episode memory -> semantic memory -> skill candidate -> reviewed skills payload
 ```
 
 Do not compile raw sessions directly into skills. Skills should be stable, actionable, and supported by evidence across trajectories.
@@ -32,7 +32,7 @@ A few ideas borrowed from agent memory and skill-evolution work:
 Practical takeaway: a two-track output:
 
 - **Memory:** many small facts, heuristics, preferences, pitfalls, bug signals.
-- **Skills:** fewer, curated, versioned operating procedures mounted into every new container.
+- **Skills:** fewer, curated operating procedures mounted into every new container through the Phase 10c skills payload.
 
 ## Data Levels
 
@@ -69,7 +69,7 @@ trajectory_snapshots
 - event_max_id
 - artifact_manifest_json
 - skills_digest
-- skills_release_id (nullable; populated only if Phase 11 introduces a release layer above the 9c mount)
+- skills_release_id (nullable; populated only if Phase 12 introduces a release layer above the 10c mount)
 - fidelity: full | partial
 - created_at
 - processed_at
@@ -167,14 +167,14 @@ skill_candidates
 - status: draft | needs_review | accepted | rejected | published
 - created_at
 - reviewed_at
-- published_release_id
+- published_release_id (nullable; used only if the optional release layer exists)
 ```
 
 Skill candidates should be human-reviewable Markdown, not opaque model output.
 
-### 5. Skill Release
+### 5. Skill Payload / Optional Release
 
-A versioned skills bundle consumed by [Phase 9c](./phase9/system-skills-mount.md).
+The reviewed skills payload consumed by [Phase 10c](./phase10/system-skills-mount.md). Phase 12 can either commit accepted changes back to `sandbox-image/system-skills/` or add a formal release layer above that mount if independent review, rollback, and promotion require it.
 
 Table:
 
@@ -189,6 +189,8 @@ skill_releases
 - created_at
 - activated_at
 ```
+
+This table is required only if Phase 12 chooses the formal release-layer path. If accepted skills are committed directly to `sandbox-image/system-skills/`, the repo commit plus `skills_digest` remains the versioning contract.
 
 ## Nightly Pipeline
 
@@ -292,7 +294,7 @@ Bug memories become bug candidates, not skills, unless a stable workaround exist
 Write draft skills to:
 
 ```text
-/var/lib/harness/system-skills/drafts/<date>-nightly/
+/var/lib/harness/trajectory-pipeline/skill-drafts/<date>-nightly/
 ```
 
 Each generated skill includes:
@@ -316,7 +318,7 @@ Each generated skill includes:
 - generated_at:
 ```
 
-Drafts are not mounted by default (see [Phase 9c](./phase9/system-skills-mount.md) — drafts require an explicit development flag).
+Drafts are not mounted by default (see [Phase 10c](./phase10/system-skills-mount.md) — drafts require an explicit development flag).
 
 ### Step 6: Review and Publish
 
@@ -325,8 +327,8 @@ Review flow:
 1. Human reviews `skill_candidates`.
 2. Accepted candidates update a draft skills bundle.
 3. Run a small replay/eval set.
-4. Publish to `releases/<release_id>`.
-5. Atomically update `current`.
+4. Publish by committing accepted changes to `sandbox-image/system-skills/`, or to `releases/<release_id>` if Phase 12 introduces the optional release layer.
+5. If using the optional release layer, atomically update `current`.
 
 The eval can start simple:
 
@@ -341,7 +343,7 @@ The easiest landing path is static skills refresh:
 
 1. Nightly pipeline generates draft skills.
 2. Human publishes a reviewed skills payload.
-3. Phase 11 either commits the accepted payload back to `sandbox-image/system-skills/` or introduces a formal `releases/<release_id>` tree above the Phase 9c mount.
+3. Phase 12 either commits the accepted payload back to `sandbox-image/system-skills/` or introduces a formal `releases/<release_id>` tree above the Phase 10c mount.
 4. New sessions mount the selected skills payload.
 5. Existing sessions stay pinned to their original skills digest.
 
@@ -383,32 +385,32 @@ Report sections:
 
 ## Implementation Sub-Phases
 
-### 11A: Snapshot and Episode Memory
+### 12A: Snapshot and Episode Memory
 
 - Add `trajectory_snapshots`.
 - Export raw JSON for completed/idle sessions.
 - Add `episode_memories`.
 - Produce a daily Markdown report.
 
-### 11B: Semantic Memory
+### 12B: Semantic Memory
 
 - Add `semantic_memories`.
 - Cluster and merge candidate memories.
 - Track support, contradiction, confidence, and evidence.
 
-### 11C: Skill Candidates
+### 12C: Skill Candidates
 
 - Add `skill_candidates`.
 - Generate Markdown draft skill changes.
 - Keep all candidates in review state by default.
 
-### 11D: Publish to Mounted Skills
+### 12D: Publish to Mounted Skills
 
-- Integrate with the Phase 9c skills mount.
+- Integrate with the Phase 10c skills mount.
 - Publish accepted drafts into `sandbox-image/system-skills/`, or introduce a formal `releases/<release_id>` tree if independent rollback/review requires it.
 - Ensure new sessions resolve the selected payload while existing sessions remain digest-pinned.
 
-### 11E: Runtime Retrieval (optional)
+### 12E: Runtime Retrieval (optional)
 
 - Retrieve relevant semantic memories at turn time.
 - Keep this separate from static system skills to avoid coupling nightly memory updates to every active session.

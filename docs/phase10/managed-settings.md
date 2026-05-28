@@ -1,12 +1,12 @@
-# Phase 9d: Harness-Managed Claude Code Settings
+# Phase 10d: Control-Plane-Managed Driver Settings
 
 > Status: planned on top of the completed [Phase 8 runtime isolation hardening](../phase8/README.md).
-> Part of [Phase 9](./README.md).
+> Part of [Phase 10](./README.md).
 
 Phase 8 is the completed baseline for this design. Earlier drafts allowed MCP
 bearer tokens to be rendered from `/harness-secrets` into Claude-visible managed
 settings. That is no longer acceptable for upstream or remote-service secrets.
-Phase 9d may mount settings and non-secret endpoint config, but any
+Phase 10d may mount settings and non-secret endpoint config, but any
 credential-bearing MCP path requires a separate broker/token design. Phase 8
 moves model credentials host-side and uses source-IP plus driver entitlement
 for model proxy authorization; it does not provide scoped proxy tokens for
@@ -14,15 +14,16 @@ managed settings.
 
 ## Goal
 
-Give the harness operator a single, mandatory Claude Code settings surface inside every sandbox session for:
+Give the platform operator a single, mandatory driver settings/policy surface
+for every supported model-backed agent session:
 
-- system hooks (`hooks`) that enforce harness-side policy or observability;
+- system hooks (`hooks`) that enforce control-plane policy or observability;
 - remote MCP servers (`mcpServers`) that are deployed outside this repo but should be available to every agent;
 - optional MCP credentials only after a separate broker/token design exists,
   not upstream bearer tokens rendered from `/harness-secrets` and not Phase 8
   model proxy tokens.
 
-The target file is Claude Code's Linux enterprise managed settings path:
+The first renderer targets Claude Code's Linux enterprise managed settings path:
 
 ```text
 /etc/claude-code/managed-settings.json
@@ -38,21 +39,23 @@ Managed settings are a better fit than writing `$AGENT_HOME/.claude/settings.jso
 
 ## Scope
 
-In Phase 9d, MCP servers themselves are **not** packaged in `harness-platform` and are **not** run as stdio child processes inside the sandbox. They are deployed elsewhere. The sandbox only receives Claude Code config that tells it how to reach those remote MCP endpoints.
+In Phase 10d, MCP servers themselves are **not** packaged in this repository and are **not** run as stdio child processes inside the sandbox. They are deployed elsewhere. The sandbox only receives Claude Code config that tells it how to reach those remote MCP endpoints.
 
 Supported MCP transport in this phase:
 
 - `http` (Streamable HTTP) — recommended for new remote MCP servers.
 - `sse` — allowed for legacy remote MCP servers.
 
-Out of scope for Phase 9d:
+Out of scope for Phase 10d:
 
 - stdio MCP servers bundled in the sandbox image;
 - MCP server lifecycle management;
 - independent managed-settings release trees;
 - per-user MCP catalogs or UI toggles.
 
-Versioning of the managed-settings payload is the `harness-platform` git history. The runtime pins only a content digest.
+Versioning of the managed-settings authoring payload is the repository git
+history. Generation preparation pins a content digest and renders from a
+content-addressed snapshot, not from a mutable repo working tree path.
 
 ## Repository Layout
 
@@ -96,12 +99,19 @@ The file committed to git must not contain live credentials. `${TOKEN:...}`
 placeholders are allowed only after the separate broker/token design exists;
 until then, credential-bearing headers should be omitted.
 
+The repository file is the authoring source. During generation preparation the
+orchestrator validates it, computes `managed_settings_digest`, and copies it
+into a runtime-owned content-addressed snapshot before any rendering. The
+generated OCI spec may bind the rendered output, and may bind the source
+snapshot only when the selected driver needs to inspect it. It must not bind the
+mutable repository path directly.
+
 ## Credential Placeholder Resolution
 
 Managed settings may reference credentials only after a separate broker/token
 design has provided scoped, short-lived, non-upstream tokens for that trust
 domain. The legacy model-provider `/harness-secrets` mount is not part of the
-Phase 8 runtime contract and must not be reintroduced for Phase 9d. Phase 8
+Phase 8 runtime contract and must not be reintroduced for Phase 10d. Phase 8
 model proxy authorization is not a token source for this file.
 
 The placeholder shape is reserved for that future broker design:
@@ -116,15 +126,16 @@ Example:
 "Authorization": "Bearer ${TOKEN:mcp_doris_generation_token}"
 ```
 
-Entrypoint behavior:
+Rendering behavior:
 
-1. Read the managed-settings template from the read-only mount.
+1. Read the managed-settings template from the source snapshot.
 2. If no broker/token design is enabled, reject any `${TOKEN:...}` placeholder
    during generation preparation.
 3. If a future broker is enabled, replace each token placeholder using that
    broker for the current generation/turn.
-4. Write the rendered JSON to `/etc/claude-code/managed-settings.json` before
-   `setpriv` launches Claude Code.
+4. Write the rendered JSON to a per-generation rendered artifact that is mounted
+   at `/etc/claude-code/managed-settings.json` before `setpriv` launches
+   Claude Code.
 5. Keep the rendered file outside `/workspace` and outside `/agent-home`.
 
 Security notes:
@@ -164,7 +175,7 @@ type TokenRef struct {
 }
 ```
 
-`source_path` is resolved relative to the harness repo root unless absolute.
+`source_path` is resolved relative to the repository root unless absolute.
 
 `token_refs` makes MCP credential use explicit at generation preparation time.
 Until a separate broker/token design exists, any configured `token_refs` or
@@ -174,29 +185,30 @@ and include the token policy identity in the digest pin.
 
 ## Runtime Spec Mount
 
-Mount the template file or containing directory read-only through the Phase 8
-MountPlan exact-bind contract:
+Mount only generation-pinned material through the Phase 8 MountPlan exact-bind
+contract. For example, a source snapshot may be mounted read-only if the driver
+needs it:
 
 ```json
 {
   "destination": "/harness-managed-settings",
   "type": "bind",
-  "source": "/opt/harness-platform/sandbox-image/managed-settings",
+  "source": "/var/lib/harness/content/managed-settings/sha256-10a4c...",
   "options": ["bind", "ro", "nosuid", "nodev", "noexec"]
 }
 ```
 
 If a worker can only use a recursive fallback, it must satisfy the Phase 8
 nested-mount rejection, private/slave propagation, and post-launch adversarial
-submount gate. Phase 9d must not mount a repository root or parent config
+submount gate. Phase 10d must not mount a repository root or parent config
 directory into the sandbox.
 
 `/etc/claude-code/managed-settings.json` must not depend on a writable rootfs.
-Preferred Phase 9d behavior is host-side rendering into a per-generation
-runtime/control directory, followed by a read-only bind mount of the rendered
-file or containing directory. If any rendering remains inside the sandbox, the
-destination must be an explicit tmpfs or bind mount declared by the Phase 8
-mount plan, not an arbitrary rootfs write.
+Preferred Phase 10d behavior is host-side rendering from the source snapshot
+into a per-generation runtime/control directory, followed by a read-only bind
+mount of the rendered file or containing directory. If any rendering remains
+inside the sandbox, the destination must be an explicit tmpfs or bind mount
+declared by the Phase 8 mount plan, not an arbitrary rootfs write.
 
 ## Control Manifest Fields
 
@@ -205,7 +217,7 @@ Add to the per-generation control manifest:
 ```json
 {
   "managed_settings_enabled": true,
-  "managed_settings_digest": "sha256:9a4c...",
+  "managed_settings_digest": "sha256:10a4c...",
   "managed_settings_mount_path": "/harness-managed-settings",
   "managed_settings_source_file": "managed-settings.json",
   "managed_settings_rendered_path": "/etc/claude-code/managed-settings.json",
@@ -220,6 +232,8 @@ Include these fields in the strict-field projection used by the control-manifest
 - A change to declared MCP token policy also forces cold fallback after a
   separate broker/token design exists.
 - New sessions pick up the managed settings from the deployed repo at generation creation time.
+- Restore uses the pinned source snapshot or rendered artifact; it must not bind
+  the current repo path as a substitute.
 
 ## Digest Rules
 
@@ -229,7 +243,7 @@ Compute `managed_settings_digest` from the source template bytes, not from the r
 sha256:<hex canonical UTF-8 bytes of managed-settings.json template>
 ```
 
-If the managed-settings directory later grows helper files, switch to the same directory digest algorithm as 9c. For the first cut, a single template file is enough.
+If the managed-settings directory later grows helper files, switch to the same directory digest algorithm as 10c. For the first cut, a single template file is enough.
 
 ## Entrypoint Integration
 
@@ -266,7 +280,7 @@ The host-side renderer should:
 
 ## Remote MCP and Network Policy
 
-Remote MCP endpoints must be reachable from the sandbox network namespace. Phase 9d should reuse Phase 7's per-generation egress controls:
+Remote MCP endpoints must be reachable from the sandbox network namespace. Phase 10d should reuse Phase 7's per-generation egress controls:
 
 - add MCP host/port entries to the allowed egress config;
 - keep MCP endpoints internal where possible;
@@ -277,7 +291,7 @@ If the MCP host is not in the generation egress allowlist, Claude Code will see 
 
 ## Hooks Policy
 
-Managed settings can carry harness-owned hooks. Recommended first posture:
+Managed settings can carry platform-owned hooks. Recommended first posture:
 
 ```json
 {
@@ -293,26 +307,31 @@ Managed settings can carry harness-owned hooks. Recommended first posture:
 
 `allowManagedHooksOnly=true` means user/project/local hooks do not run. Use this only if product policy requires harness hooks to be the only trusted hooks. If users should be allowed to add their own hooks, leave it false and rely on managed settings precedence for harness-provided hooks.
 
-Hooks are powerful: they can observe tool inputs/outputs and block tool use. Product docs should state whether harness-managed hooks are active and what they record.
+Hooks are powerful: they can observe tool inputs/outputs and block tool use. Product docs should state whether managed hooks are active and what they record.
 
 ## Implementation Steps
 
 1. Add `harness.managed_settings` config with validation and defaults.
 2. Add runtime config fields for source path, mount path, rendered path, and token refs.
 3. Add template digest calculation.
-4. Reject declared MCP token refs unless a separate broker/token design is
+4. Materialize the validated template into a content-addressed runtime snapshot.
+5. Reject declared MCP token refs unless a separate broker/token design is
    enabled; after that design lands, validate token refs against the broker
    allowlist.
-5. Add read-only source and rendered managed-settings exact binds through the
+6. Add read-only source-snapshot and rendered managed-settings exact binds through the
    Phase 8 MountPlan.
-6. Add managed-settings fields to the control manifest and projected digest logic.
-7. Add host-side managed-settings rendering during generation preparation.
-8. Update the entrypoint to validate `/etc/claude-code/managed-settings.json` before launching Claude Code.
+7. Add managed-settings fields to the control manifest and projected digest logic.
+8. Add host-side managed-settings rendering during generation preparation.
 9. Add egress config/lab validation for remote MCP hosts.
-10. Tests:
+10. Add snapshot/rendered-artifact retention/GC that never removes content still
+    referenced by a live, prepared, or checkpointed generation.
+11. Update the entrypoint to validate `/etc/claude-code/managed-settings.json` before launching Claude Code.
+12. Tests:
     - `enabled=false` means no mount and no rendered managed settings.
     - Missing template with `enabled=true` fails generation preparation.
     - Template digest changes when hooks or MCP config changes.
+    - The generated spec binds a content-addressed source snapshot and/or
+      generation-rendered file, not the mutable repo authoring path.
     - Unsupported token placeholders fail generation preparation before Claude
       launches.
     - After a separate broker/token design exists, missing declared token policy
@@ -321,12 +340,14 @@ Hooks are powerful: they can observe tool inputs/outputs and block tool use. Pro
     - Generated control manifest includes managed-settings metadata and the projected digest reflects it.
     - Remote MCP host not in egress allowlist fails the lab validation.
     - User workspace and artifact watcher never expose the source or rendered settings file.
+    - Snapshot/rendered-artifact GC does not remove content referenced by live
+      or checkpointed generations.
 
 ## Open Decisions
 
-- Whether `allowManagedHooksOnly` should default true. Recommendation: true for production harness policy; false in local development if users need custom hooks.
+- Whether `allowManagedHooksOnly` should default true. Recommendation: true for production policy; false in local development if users need custom hooks.
 - Whether token policies should be pinned per MCP server or reused through a
   single MCP token issuer. Recommendation: one token policy per remote MCP trust
   domain, designed separately from Phase 8 model proxy auth.
-- Whether the rendered managed settings file should be `0600` root-owned. Claude Code runs as uid 65534, so it needs read access unless Claude Code reads before privilege drop; current entrypoint launches Claude after `setpriv`, so use `0644` unless Claude Code supports another managed settings location readable by the harness group.
-- Whether future Phase 10 credential storage should back token issuance with real per-tenant secret versions. Recommendation: yes, but do not block non-secret Phase 9d settings.
+- Whether the rendered managed settings file should be `0600` root-owned. Claude Code runs as uid 65534, so it needs read access unless Claude Code reads before privilege drop; current entrypoint launches Claude after `setpriv`, so use `0644` unless Claude Code supports another managed settings location readable by the configured sandbox group.
+- Whether future Phase 11 credential storage should back token issuance with real per-tenant secret versions. Recommendation: yes, but do not block non-secret Phase 10d settings.
