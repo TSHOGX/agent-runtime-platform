@@ -431,10 +431,27 @@ def release_completion(results, supplied_evidence, require_release_evidence=Fals
     }
 
 
-def supplied_evidence_from_gate_results(results):
+def supplied_evidence_from_gate_results(results, context=None):
+    context = context or {}
     supplied = {}
     for result in results:
         if result["status"] != "passed":
+            continue
+        if result["name"] == "pinned_proxy_contract":
+            proxy = context.get("proxy", {}) if isinstance(context, dict) else {}
+            supplied["proxy_contract"] = {
+                "path": "gate:pinned_proxy_contract",
+                "digest": proxy.get("commit", ""),
+                "bytes": 0,
+                "status": "passed",
+                "payload": {
+                    "proxy": proxy,
+                    "gate": {
+                        "name": result["name"],
+                        "status": result["status"],
+                    },
+                },
+            }
             continue
         payload = result.get("structured_output")
         if not isinstance(payload, dict):
@@ -468,7 +485,8 @@ def supplied_evidence_from_gate_results(results):
 
 def evidence(results, commit=None, context=None, supplied_evidence=None, require_release_evidence=False):
     commit = commit or git_commit()
-    supplied_evidence = {**supplied_evidence_from_gate_results(results), **(supplied_evidence or {})}
+    context = context or release_context(commit)
+    supplied_evidence = {**supplied_evidence_from_gate_results(results, context), **(supplied_evidence or {})}
     completion = release_completion(results, supplied_evidence, require_release_evidence)
     status = "passed" if completion["selected_gates_passed"] else "failed"
     if require_release_evidence and completion["missing_supplied_evidence"]:
@@ -479,7 +497,7 @@ def evidence(results, commit=None, context=None, supplied_evidence=None, require
         "result": status,
         "commit": commit,
         "generated_at": utc_now(),
-        "context": context or release_context(commit),
+        "context": context,
         "release_completion": completion,
         "release_gate_inventory": release_gate_inventory(),
         "supplied_evidence": supplied_evidence,

@@ -197,6 +197,24 @@ class ReleaseGatesTest(unittest.TestCase):
         self.assertIn("reconciliation", payload["supplied_evidence"])
         self.assertEqual(payload["supplied_evidence"]["reconciliation"]["status"], "passed")
 
+    def test_proxy_gate_output_satisfies_proxy_supplied_evidence(self):
+        payload = MODULE.evidence(
+            [
+                {
+                    "name": "pinned_proxy_contract",
+                    "status": "passed",
+                }
+            ],
+            commit="abc123",
+            context={
+                "git": {"commit": "abc123"},
+                "proxy": {"commit": "proxyabc", "dirty": False},
+            },
+        )
+
+        self.assertIn("proxy_contract", payload["supplied_evidence"])
+        self.assertEqual(payload["supplied_evidence"]["proxy_contract"]["digest"], "proxyabc")
+
     def test_supplied_evidence_records_digest_and_allows_release_completion(self):
         with tempfile.TemporaryDirectory() as tmp:
             specs = []
