@@ -77,6 +77,45 @@ class CutoverInventoryTest(unittest.TestCase):
             blockers = {(item["name"], item["kind"]) for item in payload["blockers"]}
             self.assertIn(("proxy_internal_root", "proxy_internal_entries"), blockers)
 
+    def test_expect_clean_fails_on_host_runtime_resources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = args_for(tmp, expect_clean=True)
+            db = MODULE.db_inventory(args.db)
+            roots = MODULE.root_inventories(args)
+            host = {
+                "status": "passed",
+                "commands": [
+                    {
+                        "name": "runsc_containers",
+                        "status": "passed",
+                        "output_tail": "ID PID STATUS\nphase3-sess_old -1 stopped",
+                    },
+                    {
+                        "name": "ip_netns",
+                        "status": "passed",
+                        "output_tail": "harness-gen-old (id: 1)\ndocker-system (id: 2)",
+                    },
+                    {
+                        "name": "ip_links",
+                        "status": "passed",
+                        "output_tail": "48: hgenold@if47: <BROADCAST> link-netns harness-gen-old",
+                    },
+                    {
+                        "name": "nft_tables",
+                        "status": "passed",
+                        "output_tail": "table inet harness_gen_old",
+                    },
+                ],
+            }
+
+            blockers = MODULE.blockers_for_inventory(db, roots, host, args)
+
+            found = {(item["name"], item["kind"]): item["count"] for item in blockers}
+            self.assertEqual(found[("runsc_containers", "host_runtime_resources")], 1)
+            self.assertEqual(found[("ip_netns", "host_runtime_resources")], 1)
+            self.assertEqual(found[("ip_links", "host_runtime_resources")], 1)
+            self.assertEqual(found[("nft_tables", "host_runtime_resources")], 1)
+
     def test_write_output(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "nested" / "cutover.json"

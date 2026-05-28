@@ -295,7 +295,32 @@ def blockers_for_inventory(db, roots, host, args):
             blockers.append({"name": name, "kind": "root_entries", "count": entries})
     if args.require_host_inventory and host.get("status") != "passed":
         blockers.append({"name": "host_inventory", "kind": "incomplete", "status": host.get("status")})
+    for command in host.get("commands", []):
+        count = host_runtime_resource_count(command)
+        if count > 0:
+            blockers.append({"name": command.get("name", "host_command"), "kind": "host_runtime_resources", "count": count})
     return blockers
+
+
+def host_runtime_resource_count(command):
+    if command.get("status") != "passed":
+        return 0
+    name = command.get("name", "")
+    lines = [line.strip() for line in command.get("output_tail", "").splitlines() if line.strip()]
+    if name == "runsc_containers":
+        return sum(1 for line in lines if not line.lower().startswith("id "))
+    if name == "ip_netns":
+        return sum(1 for line in lines if host_runtime_line_matches(line))
+    if name == "ip_links":
+        return sum(1 for line in lines if host_runtime_line_matches(line))
+    if name == "nft_tables":
+        return sum(1 for line in lines if host_runtime_line_matches(line))
+    return 0
+
+
+def host_runtime_line_matches(line):
+    lower = line.lower()
+    return any(marker in lower for marker in ("harness", "phase", "hgen", "hv-", "sv-"))
 
 
 def inspect_cutover(args):
