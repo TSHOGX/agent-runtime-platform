@@ -1,6 +1,6 @@
 # Phase 9c: System-Skills Mount
 
-> Status: planned after [Phase 8 runtime isolation hardening](../phase8/README.md).
+> Status: planned on top of the completed [Phase 8 runtime isolation hardening](../phase8/README.md).
 > Part of [Phase 9](./README.md).
 > Foundation for [Phase 11 trajectory→skill evolution](../phase11-trajectory-pipeline.md).
 

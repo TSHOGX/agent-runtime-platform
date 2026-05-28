@@ -272,7 +272,7 @@ output.
 
 ### Container Lifecycle
 
-Current baseline (long-lived container per session, automatic checkpoint disabled) is documented in [../architecture.md](../architecture.md#runtime-flow). Target:
+Current baseline (long-lived container per session, automatic checkpoint disabled) is documented in [../architecture.md](../architecture.md#runtime-and-turns). Target:
 
 ```text
 create session

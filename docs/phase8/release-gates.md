@@ -1,9 +1,11 @@
 # Phase 8 Release Gates
 
-Phase 8 is accepted only when adversarial gates pass on the target lab host.
-Unit tests are necessary but not sufficient because the risky behavior involves
-actual runsc mounts, network namespaces, proxy peer addresses, filesystem
-metadata, and crash recovery.
+These gates define the acceptance criteria for any `sandbox-isolation-v1`
+runtime-isolation release candidate. The qualified Phase 8 baseline passed them
+on the target lab host; current HEAD changes must rerun the final evidence
+bundle before a new runtime-isolation release. Unit tests are necessary but not
+sufficient because the risky behavior involves actual runsc mounts, network
+namespaces, proxy peer addresses, filesystem metadata, and crash recovery.
 
 ## Contract Gates
 
@@ -311,7 +313,7 @@ metadata, and crash recovery.
 
 ## Acceptance
 
-Phase 8 is complete only when:
+A runtime-isolation release candidate is complete only when:
 
 - `sandbox-isolation-v1` is enabled atomically after contract schema, root
   validation, DataVolume provisioning, MountPlan, RuntimeAdapter,

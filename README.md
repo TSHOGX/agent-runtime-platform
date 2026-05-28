@@ -1,6 +1,6 @@
 # harness-platform
 
-每会话独立 **gVisor sandbox** 的数据分析 Agent 平台。Agent 运行在 sandbox 内，通过 stdio 与 Go orchestrator 通信，可查询远端 Apache Doris、生成文件 artifact，并由 Next.js 工作台展示会话、对话和产物。
+每会话独立 **gVisor sandbox** 的数据分析 Agent 平台。Agent 运行在 sandbox 内，通过 Agent Bridge 与 Go orchestrator 通信，可查询远端 Apache Doris、生成文件 artifact，并由 Next.js 工作台展示会话、对话和产物。
 
 当前底层运行时是 gVisor `runsc` 的 `systrap` 平台。宿主机不依赖 Docker daemon，直接消费 OCI bundle（`config.json` + `rootfs/`）。
 
@@ -8,8 +8,9 @@
 
 最新基线见 [docs/current-status.md](./docs/current-status.md)。
 
-- Orchestrator 目前使用长生命周期容器：会话在消息之间保持运行。自动空闲 checkpoint 已暂时关闭，直到 Phase 7 的 checkpoint-safe 控制面落地。
-- 多轮输出路由已通过 per-container `OutputHub` 修复；每次用户 turn 都会订阅当前容器输出。
+- Orchestrator 使用长生命周期 generation：会话在消息之间保持运行。自动空闲 checkpoint 由策略关闭，checkpoint-safe 控制面已落地。
+- Phase 8 `sandbox-isolation-v1` 已完成：精确 `/workspace`/`/agent-home` 绑定、无父目录挂载、无 `/harness-secrets`、只读 rootfs、非 root agent、模型凭证留在宿主/proxy 侧。
+- 多轮输出路由走 Agent Bridge 和 per-container `OutputHub`；每次用户 turn 都会订阅当前容器输出。
 - 浏览器事件流走 frontend same-origin SSE：`GET /api/events/stream`，orchestrator 仍保留 WebSocket 兼容端点 `/api/events`。
 - 前端会在发送消息后轮询 messages/session/artifacts，作为 SSE 断线时的状态补偿。
 - Claude Code 是当前主路径；`Shell` 是 PTY-backed 的交互式命令会话，`Agent` 直接映射到 Claude Code。
@@ -20,8 +21,8 @@
 
 ### 当前设计
 
-- [docs/current-status.md](./docs/current-status.md) - 当前可用能力、近期提交影响和约束
-- [docs/architecture.md](./docs/architecture.md) - 当前架构、状态机、事件流和运行时设计
+- [docs/current-status.md](./docs/current-status.md) - 当前基线、资格证据和约束
+- [docs/architecture.md](./docs/architecture.md) - 当前架构、状态机、事件流和运行时边界
 - [docs/phase7/](./docs/phase7/README.md) - checkpoint-safe 控制面与 Phase 7 重构目标（按主题拆分）
 - [docs/PLAN.md](./docs/PLAN.md) - 总体路线图和后续阶段
 

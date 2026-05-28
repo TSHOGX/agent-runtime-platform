@@ -294,10 +294,10 @@ Phase 8 migration policy.
 
 ## Phase 2 Tooling
 
-Before Phase 8 is complete, `bundle/bake-bundle.sh` and
-`bundle/restore-sandbox.sh` must either emit/restore `sandbox-isolation-v1`
-specs or be quarantined as pre-Phase-8-only smoke tooling. Legacy Phase 2
-bundles cannot be release evidence.
+`bundle/bake-bundle.sh` and `bundle/restore-sandbox.sh` are quarantined as
+pre-Phase-8-only smoke tooling. They fail closed and are not valid
+`sandbox-isolation-v1` release evidence. Legacy Phase 2 bundles cannot be
+release evidence.
 
 ## Rollback
 

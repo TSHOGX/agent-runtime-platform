@@ -1,15 +1,30 @@
 # Phase 8: Runtime Isolation Hardening
 
-> Status: planned. Phase 8 must land before Phase 9 agent-capability work.
+> Status: release-qualified baseline. Final target-lab evidence passed for
+> `345f684b6a6b146311efcb3b3d7a5d7ebb607822`; current HEAD changes must rerun
+> final evidence before a new runtime-isolation release.
 > Source audit: `.scratch/runtime-security-followups.md`.
 
 Phase 8 is a contract-first refactor of the runtime boundary. The roadmap phase
 is "Phase 8"; the code and persisted data contract is `sandbox-isolation-v1`.
 
-The goal is to remove current sandbox overexposure without changing the Phase 7
-session, turn, bridge, or event semantics. Each generation gets one immutable
-runtime contract. Launch, restore, cleanup, checkpointing, bridge polling, proxy
-authorization, migration, and release evidence consume that same contract.
+The qualified baseline removes the previous sandbox overexposure without
+changing the Phase 7 session, turn, bridge, or event semantics. Each generation
+gets one immutable runtime contract. Launch, restore, cleanup, checkpointing,
+bridge polling, proxy authorization, migration, and release evidence consume
+that same contract.
+
+Final evidence for the qualified baseline:
+
+- `/tmp/harness-runtime-isolation-final-gates-with-compat.json`
+- `release_complete: true`
+- supplied evidence: cutover, reconciliation, rootfs image, proxy contract, and
+  adversarial lab
+- proxy commit: `c74d5e0485b8457de68c2e5ac2b32877fbbb3932`
+- rootfs digest:
+  `sha256:192e6982a36016113633e258947c5a7302a820649cbf91195a34101e590886a5`
+- `runsc` binary digest:
+  `sha256:82b042a8f27f9dd65c58ef6adf87a905ec6c377ec0259ccaf34dd9028b55dc5a`
 
 ## Design Decision
 
@@ -107,15 +122,18 @@ absent. It is not a substitute for session, turn, generation execution, or
 bridge ownership state.
 
 Phase 7 release gates remain blocking unless Phase 8 explicitly replaces them.
-Phase 8 keeps the gVisor bridge durability and live turn-start latency gates,
-but replaces the legacy sandbox secret permission lab and authenticated
-malformed `/v1/messages` pre-turn proxy probe because their contracts are
-removed. The replacements are the host-only credential/no-`/harness-secrets`
-gates, stable proxy alias plus proxy-side `Host` validation, active-context
-model authorization, and the re-pinned proxy contract in
-[Release gates](./release-gates.md).
+Phase 8 keeps deterministic turn-start latency coverage in the
+runtime-isolation release runner and includes the gVisor bridge durability lab
+in the final compatibility evidence. The external Phase 7 live turn-start
+latency gate remains a release-only gate for runtime/proxy/config changes when
+prewarmed sessions are available. Phase 8 replaces the legacy sandbox secret
+permission lab and authenticated malformed `/v1/messages` pre-turn proxy probe
+because their contracts are removed. The replacements are the host-only
+credential/no-`/harness-secrets` gates, stable proxy alias plus proxy-side
+`Host` validation, active-context model authorization, and the re-pinned proxy
+contract in [Release gates](./release-gates.md).
 
-## Implementation Order
+## Landed Implementation Order
 
 1. Add the canonical `SandboxContract` payload/table, version fields, digest
    verification, `runsc` platform, version, and binary digest inputs, and
@@ -141,7 +159,7 @@ model authorization, and the re-pinned proxy contract in
 11. Run destructive cutover and adversarial release gates on the target lab
     host.
 
-Do not enable `sandbox-isolation-v1` while:
+Release gates reject `sandbox-isolation-v1` enablement while:
 
 - the DB or any control-plane state is under a sandbox-bindable root;
 - configured roots overlap or nest unexpectedly;

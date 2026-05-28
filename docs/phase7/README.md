@@ -3,6 +3,9 @@
 > Date: 2026-05-22 (split from `docs/checkpoint-safe-control-plane-architecture.md` on 2026-05-24)
 > Status: Phase 7 qualified baseline and target architecture
 > Scope: make sessions addable, checkpointable, recoverable, reconnectable, network-correct, and multi-turn reliable.
+> Current reading note: Phase 8 supersedes the Phase 7 sandbox secret mount and
+> runtime overexposure assumptions. Use [../phase8/README.md](../phase8/README.md)
+> for the active runtime-isolation boundary.
 
 This directory is the reading order for Phase 7. Each file owns a slice of the design; rules are defined once and linked from every place that needs them. If a fact appears in two files, the one named in the heading is authoritative and the other links to it.
 
@@ -84,7 +87,7 @@ The main difference from the current architecture is the **Agent Bridge**: inste
 6. [checkpoint-restore.md](./checkpoint-restore.md) — Claude logical resume, physical checkpoint/restore, digest equivalence rules, `unknown_after_ack_started` UX.
 7. [implementation-plan.md](./implementation-plan.md) — Phase 7 configuration schema, Step 1–10 PR boundaries with prerequisites and acceptance signals, operational notes.
 8. [test-matrix.md](./test-matrix.md) — observable assertions that make every invariant a runtime guarantee. Cross-references every other file.
-9. [release-qualification.md](./release-qualification.md) — release-only gates for the pinned proxy contract, gVisor bridge durability lab, secret permission lab, and live turn-start latency benchmark.
+9. [release-qualification.md](./release-qualification.md) — historical Phase 7 release gates for the pinned proxy contract, gVisor bridge durability lab, secret permission lab, and live turn-start latency benchmark. Phase 8 replaces the gates tied to removed contracts.
 
 ## Out of scope (deferred to Phase 10)
 

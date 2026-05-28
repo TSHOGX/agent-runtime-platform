@@ -2,6 +2,12 @@
 
 This file lists the Phase 7 gates that are intentionally outside the default unit-test suite. A release candidate is blocked if any required gate is skipped, fails, or cannot produce evidence tied to the candidate commit.
 
+Current reading note: this is the historical Phase 7 qualification record for
+commit `d0cdaf608b9397e5bcae7f93daf2b6550a5654c5`. Phase 8 supersedes the
+legacy sandbox secret lab and authenticated malformed `/v1/messages` pre-turn
+proxy probe with the gates documented in
+[../phase8/release-gates.md](../phase8/release-gates.md).
+
 ## Deterministic Repo Gates
 
 Run from `orchestrator/`:

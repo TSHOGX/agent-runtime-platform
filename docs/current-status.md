@@ -1,257 +1,127 @@
 # Current Status
 
 > Last updated: 2026-05-28
-> Scope: current baseline after the Phase 7 checkpoint-safe control-plane refactor, release qualification, and completed P0 lifetime separation.
+> Scope: live baseline after Phase 7 control-plane qualification, completed P0
+> lifetime separation, and Phase 8 runtime-isolation qualification.
 
-## Baseline
+## Snapshot
 
-Harness Platform now has a working end-to-end lab stack:
+- Frontend workbench: Next.js on port `8000`.
+- Orchestrator API: Go service on port `8090`, with optional shared-password
+  lab auth via `HARNESS_LAB_PASSWORD`.
+- Runtime: gVisor `runsc` direct launch with per-generation OCI specs,
+  control manifests, bridge dirs, network profiles, and SQLite persistence.
+- Turn execution: Agent Bridge claim/ack is the live path for Claude Code and
+  shell sessions. Durable turns, events, output, proxy correlation, generation
+  state, resource state, messages, sessions, and artifact metadata are stored in
+  SQLite before in-memory publish.
+- Sandbox boundary: Phase 8 `sandbox-isolation-v1` is active. Sandboxes get
+  exact `/workspace`, `/agent-home`, `/harness-control`, and bridge binds; no
+  parent `/sessions` or `/agent-homes` mounts; no `/harness-secrets`; read-only
+  rootfs; empty OCI capabilities; `noNewPrivileges`; non-root agent execution.
+- Model boundary: upstream provider credentials stay host/proxy-side. Sandbox
+  model access uses the stable proxy alias and proxy authorization based on
+  live turn context, source IP, contract/resource identity, and entitlement.
+- Session lifetime: `harness.session_retention: 0s` is the checked-in default,
+  so sessions/history/workspaces do not expire automatically. Runtime resource
+  lifetime is separate from session/history lifetime.
+- Quota: `harness.max_sessions` is a non-terminal session ceiling, independent
+  of live `/30` pool capacity. `DELETE /api/sessions/<id>` closes a session and
+  frees session quota while preserving history/workspace state.
+- Checkpointing: primitives exist behind the Phase 7 control plane, but
+  automatic idle checkpointing is disabled in checked-in config.
+- Artifacts: host-side metadata scanning backs a read-only live file tree with
+  safe downloads and previews for Markdown, code, text, images, JSON, CSV/TSV,
+  and PDF.
 
-- Next.js frontend workbench on port `8000`.
-- Go orchestrator API on port `8090`.
-- gVisor `runsc` runtime using per-generation OCI specs, control manifests, bridge dirs, and network profiles.
-- SQLite persistence for sessions, messages, runtime generations, turns, durable events, proxy request context, resources, and artifact metadata.
-- Per-session workspace and per-session+driver HOME are provisioned through DataVolume rows with host-side evidence. Sandboxes receive exact `/workspace` and `/agent-home` binds, not parent `/sessions` or `/agent-homes` mounts.
-- Claude Code stream-json parsing into durable `emit_output` events, persisted assistant messages, and live UI deltas.
-- Shell sessions through the bridge-aware shell shim, with shell output persisted as assistant messages and interrupt support for running turns.
-- Phase 7 typed `config/harness.yaml` is loaded with strict YAML validation and drives per-generation network, probe, bridge, reaper, and checkpoint settings. Phase 8 removes the legacy sandbox secret config keys from the active schema.
-- Agent Bridge claim/ack is the live turn execution path. Turns transition through `queued`, `leased`, `running`, and terminal states with CAS fencing and durable events.
-- Checkpoint/restore primitives are behind the Phase 7 control plane. Automatic idle checkpointing is policy-gated and disabled in the checked-in lab config.
-- Session/history retention is decoupled from runtime resource lifetime. `harness.session_retention: 0s` is the checked-in default, active sessions store `expires_at = NULL`, and retryable generation/runtime/turn failures no longer make the session terminal.
-- Checkpoint image retirement is controlled by `harness.reaper.checkpoint_image_retention`; checkpoint-retired and restore-fallback generations clear checkpoint metadata through durable non-terminal events and can cold-start replacement generations for the same session.
-- `harness.max_sessions` is a non-terminal session ceiling independent of live `/30` pool capacity. `/api/quota` reports the session ceiling and live pool ceiling separately, and `DELETE /api/sessions/<id>` closes a session while preserving history/workspace state.
-- Artifact browsing is a metadata-backed live file tree with search, safe downloads, delete/rename event handling, and richer previews for Markdown, code, text, images, JSON, CSV/TSV, and PDF.
+## Qualification
 
-## Notable Commits And Qualification
+Phase 8 `sandbox-isolation-v1` is release-qualified at
+`345f684b6a6b146311efcb3b3d7a5d7ebb607822`.
 
-### P0 Lifetime Separation - `20a8c07`
+Final evidence:
+`/tmp/harness-runtime-isolation-final-gates-with-compat.json`
 
-The P0 lifetime baseline is complete at `20a8c07`. The roadmap now treats
-Phase 8 runtime isolation hardening as active work on top of long-lived
-sessions. Key commits in this slice:
+Recorded pins:
 
-- `5cf0ddb fix(config): rename session ttl to retention` - renames the user-facing retention knob and makes `0s` the no-expiry default.
-- `c46c3db feat(config): add checkpoint image retention` and `fd01372 feat(store): retire expired checkpoint metadata` - add explicit checkpoint-image retirement.
-- `bb28e0c fix(server): retire restore fallback checkpoints` and `62ec903 fix(server): refetch stale checkpoint restore` - make restore fallback non-terminal and retryable.
-- `c1c59a4 fix(bridge): keep failed turns session-retryable` and `1f98f47 test(bridge): cover claude turn failures` - keep agent execution failures at turn scope.
-- `02c0384 fix(server): renew generation start leases`, `b538ef0 fix(server): require runtime cleanup before recovery`, and `7f9dcfa fix(store): reject stale generation start failures` - tighten retryable generation lifecycle fencing.
-- `fc08a33 fix(server): clean resources on session close`, `0e317eb fix(config): decouple session ceiling from pool capacity`, and `dac665c feat(frontend): expose session close action` - make retained-session quota recoverable without deleting history.
+- rootfs digest: `sha256:192e6982a36016113633e258947c5a7302a820649cbf91195a34101e590886a5`
+- `runsc`: `release-20260511.0`, binary digest `sha256:82b042a8f27f9dd65c58ef6adf87a905ec6c377ec0259ccaf34dd9028b55dc5a`
+- proxy commit: `c74d5e0485b8457de68c2e5ac2b32877fbbb3932`
 
-### Phase 7 Release Qualification - `d0cdaf6`
+The evidence records `result: passed`, `release_complete: true`, supplied
+cutover/reconciliation/rootfs/proxy/adversarial evidence, prior deterministic
+compatibility, and gVisor bridge durability compatibility. Runtime/proxy/config
+release candidates after `345f684` must regenerate final Phase 8 evidence before
+publishing.
 
-The Phase 7 lab candidate is qualified at `d0cdaf6` after these final follow-up commits:
+Other completed baselines:
 
-- `a7754da fix(runtime): tune bridge polling for live latency` - passes the 5 ms bridge poll interval through to sandbox bridge clients and keeps live turn-start latency under the 50 ms budget.
-- `108aa65 docs(plan): mark phase7 qualified` - updates the roadmap/status docs from pre-Phase-7 wording to the qualified Phase 7 baseline.
-- `d0cdaf6 fix(runtime): preserve secret root owner` - historical Phase 7 qualification work for the old sandbox secret root. Phase 8 supersedes that path by rejecting the legacy secret config keys.
-
-Latest release evidence: `/tmp/harness-phase7-external-gates.json`.
-
-Last observed result on this host: `passed`, clean worktree, commit `d0cdaf608b9397e5bcae7f93daf2b6550a5654c5`, live turn-start max `27.284 ms`.
-
-### `e8b84f0` - Same-Origin SSE Event Stream
-
-The frontend no longer opens a browser WebSocket directly to the orchestrator. It uses `EventSource` against the frontend origin:
-
-```text
-Browser -> Next.js route handler -> Orchestrator /api/events/stream
-```
-
-The orchestrator still serves the legacy WebSocket endpoint at `/api/events`, but the frontend path is now:
-
-- `GET /api/events/stream?session_id=<id>` for SSE events.
-- `GET /api/healthz` and `/api/*` through the same-origin proxy.
-- Polling of messages/session/artifacts after message submission, so the UI can recover state if an SSE frame is missed.
-
-### `9b803b6` - Runtime Output Routed Through Session State
-
-Runtime output is now decoupled from a single callback:
-
-- Each active container owns an `OutputHub`.
-- stdout/stderr scanner goroutines publish `OutputEvent` values to that hub.
-- Each `runSession()` call subscribes while its current turn is active.
-- The stream parser closes the turn when Claude emits a `result` or `error` frame.
-- Assistant text is persisted in SQLite and published as `agent.message`; partial Claude text is published as `agent.delta`.
-- Runtime lifecycle lines use a separate `runtime` stream and become `system.status` events.
-
-This fixes the previous multi-turn issue where only the first `Start()` callback could receive container output.
-
-### `051f251` - Interactive Shell Sessions
-
-The frontend now exposes `Shell` as a first-class session mode instead of a smoke-only shortcut:
-
-- `sh` sessions run through the PTY-backed `harness-shell-agent` shim.
-- Shell turns emit `harness.shell_output` and `harness.turn_done` frames.
-- Shell output is persisted as assistant messages and published as `agent.output`.
-- `POST /api/sessions/<id>/interrupt` interrupts a running shell turn.
-- The session picker offers `Shell` and `Agent`, where `Agent` maps to Claude Code.
-
-### `a422e44` - Checkpoint Safety Recovery
-
-The orchestrator no longer treats automatic idle checkpoint/restore as the default path:
-
-- `MonitorIdleSessions()` reconciles `checkpointing` and `checkpointed` sessions on startup.
-- At that point, automatic idle checkpointing was disabled because `runsc restore` could not reliably reconnect the long-lived stdin turn channel. Phase 7 replaces that turn channel with the Agent Bridge.
-- `Runtime.Start()` only restores from checkpoint when `RestoreFromCheckpoint` is explicitly enabled.
-- Replacement container cleanup only removes the current container instance, avoiding stale cleanup races.
-
-The practical result is that active sessions stay on the live-container path, and stale checkpoint states are recovered back to usable session states instead of leaving the UI stuck.
-
-### `90a5f32` - Phase 6 Artifact Browser
-
-Artifact handling moved from a flat metadata list to a read-only file browser:
-
-- Artifact downloads reject traversal, symlink escape, directories, and non-regular files.
-- Host-side artifact scanning skips symlink artifacts.
-- File/directory remove and rename events delete stored metadata and publish `artifact.deleted`.
-- The frontend derives a live folder tree from artifact metadata and keeps open tabs in sync when files disappear.
-- Artifact previews now cover Markdown, code, text, images, JSON, CSV/TSV, and PDF.
-
-### Phase 7 Config Loader
-
-The current codebase loads `config/harness.yaml` through the Phase 7 typed `harness:` schema. The full file shape and per-field semantics live in [architecture.md → Configuration](./architecture.md#configuration). Legacy `runtime:` / `claude:`-only files still parse for compatibility, but cannot be mixed with `harness:`.
-
-### Phase 7 Release Qualification
-
-Phase 7 release qualification is evidence-producing. The current candidate records deterministic repo gates, the pinned `claude-code-proxy` contract, the gVisor bridge durability lab, the secret permission lab, and live turn-start latency. The latest evidence file is `/tmp/harness-phase7-external-gates.json` and is tied to commit `d0cdaf608b9397e5bcae7f93daf2b6550a5654c5`.
+- Phase 7 checkpoint-safe control plane: qualified at `d0cdaf6`; details in
+  [phase7/README.md](./phase7/README.md) and
+  [phase7/release-qualification.md](./phase7/release-qualification.md).
+- P0 lifetime separation: complete at `20a8c07`; details in
+  [p0-session-lifetime.md](./p0-session-lifetime.md).
+- Phase 8 design and gate map: [phase8/README.md](./phase8/README.md).
 
 ## Current Flow
 
 ```text
 POST /api/sessions
-  -> session status: created
+  -> created
 
 POST /api/sessions/<id>/messages
   -> persist user message
-  -> status: running_active
-  -> ensure active runtime generation
-     -> cold path: allocate per-generation resources and runsc run
-     -> restore path: recreate compatible resources and runsc restore
-     -> live path: reuse the active bridge generation
+  -> running_active
+  -> ensure active generation
+     -> reuse live generation, restore checkpointed generation, or cold-start
   -> bridge claim_next_turn / ack_turn_started
   -> bridge emit_output / ack_turn_completed
-  -> stream parser persists assistant message from durable output
-  -> artifact watcher scans workspace
-  -> status: running_idle
-
-Shell turns follow the same bridge lifecycle, but they complete through the shell runner and can be interrupted with `POST /api/sessions/<id>/interrupt`.
-
-Idle monitor
-  -> reconcile stale checkpointing/checkpointed rows
-  -> checkpoint eligible idle generations only when policy is enabled
+  -> persist assistant output and artifact metadata
+  -> running_idle
 ```
 
-Canonical session statuses and per-state semantics live in [architecture.md → Session State Machine](./architecture.md#session-state-machine). Note: `running`, `idle`, and `completed` are not current session statuses.
+Shell turns use the same bridge lifecycle, complete through
+`harness.turn_done`, and can be interrupted with
+`POST /api/sessions/<id>/interrupt`.
 
-## Public Interfaces
+Canonical session states and public API/event details live in
+[architecture.md](./architecture.md). Historical phase logs remain useful as
+implementation history, but they are not the source of truth for current
+behavior.
 
-HTTP routes, SSE/WebSocket endpoints, and the canonical event-name set are documented in [architecture.md → API Surface](./architecture.md#api-surface) and [architecture.md → Event Model](./architecture.md#event-model). This document does not duplicate those lists.
+## Constraints
 
-## Current Constraints
-
-- Claude Code is the primary supported analysis path.
-- `Shell` is the supported interactive command path and has its own `turn_done`/`interrupt` contract; future adapters still need their own completion protocol before they are first-class multi-turn citizens.
-- The active Go runtime launches `runsc` directly. `bundle/bake-bundle.sh` and
-  `bundle/restore-sandbox.sh` are quarantined legacy Phase 2 smoke tools: they
-  fail closed and are not Phase 8 release evidence.
-- The current Go runtime uses `runsc -network sandbox -overlay2 none` with per-generation network profiles. The runtime creates the allocated netns/veth pair, configures host and sandbox addresses from the persisted `/30`, applies the static lab egress allow-list, writes the stable sandbox-visible model proxy alias into the control manifest, and maps that alias through the generated `/etc/hosts` projection.
-- Runtime specs now use read-only rootfs, exact `/workspace` and `/agent-home` DataVolume binds, exact `/harness-control` and bridge binds, no `/harness-secrets`, no parent `/sessions` or `/agent-homes` mounts, empty OCI capabilities, and `noNewPrivileges`.
-- Claude provider credentials are host/proxy-side. Sandbox startup probes only health/bridge readiness before turns; model endpoints require a committed active model context, source-IP match, contract entitlement, and proxy correlation through the authenticated UDS.
-- Shell and Claude bridge claim-loop paths run under the configured non-root sandbox identity. Legacy session `workspace`, `agent_home_path`, and `restore_id` columns remain internal compatibility storage and are omitted from public API/event DTOs.
-- Claude logical sessions are durable across bridge or runner restarts. Once a
-  Claude UUID has initialized in `/agent-home`, later turns for that UUID must
-  use Claude Code `--resume` even if the bridge client process was recreated.
-  The runner must not rely solely on an in-memory "first turn" flag.
-- Phase 8 destructive cutover and host reconciliation evidence now pass on the
-  target lab host: `/tmp/harness-cutover-inventory.json` reports
-  `blockers: []`, and `/tmp/harness-reconciliation-evidence.json` reports an
-  empty `runtime_resource_instances` table with host absence checks passing.
-  `/tmp/harness-runtime-isolation-evidence-gates.json` now records supplied
-  cutover, reconciliation, rootfs image, and proxy contract evidence, including
-  rootfs digest
-  `sha256:33e72ef872cf7ac1aeb7f887fe920f6065a0dafb440ed939be75bef9c24de41d`
-  and proxy commit `c74d5e0485b8457de68c2e5ac2b32877fbbb3932`. Phase 8 is
-  still not release-complete until adversarial lab evidence, the final
-  supplied-evidence bundle, and every gate in `docs/phase8/release-gates.md`
-  are audited with evidence.
-- Automatic idle checkpointing is disabled by the checked-in policy. It can be enabled only after operators accept the measured restore/resource-retention behavior for the lab.
-- Reclaimable runtime resources are retained for `harness.reaper.failed_retention` before physical cleanup, so recently failed/destroyed generations can remain visible briefly by design.
-- Phase 8 is planned as a destructive clean cutover for this lab, not an
-  in-place compatibility migration. Old sessions, workspaces, agent homes,
-  runtime rows, checkpoints, and prepared bundles are wiped or quarantined from
-  active roots before `sandbox-isolation-v1` is enabled. Phase 8 also replaces
-  split network/resource cleanup state with one `runtime_resource_instances`
-  lifecycle; Phase 7 session/turn/generation execution semantics remain
-  authoritative.
-- Retained non-terminal sessions count toward `harness.max_sessions` even when they have no live runtime resources. Use the workbench close action or `DELETE /api/sessions/<id>` to free session quota while keeping history and workspace files.
-- Artifact metadata is recorded by host-side scanning/watching and rendered as a read-only live file tree. Direct file mutation operations remain outside the UI; use the sandbox agent or shell path to create, rename, or delete files.
-- Auth is lab shared-password cookie auth when `HARNESS_LAB_PASSWORD` is set.
-
-## Next Architecture Target
-
-Active architecture work is Phase 8: runtime isolation hardening. It narrows
-each sandbox to exact per-session/per-driver mounts, runs shell non-root, makes
-the rootfs read-only, moves upstream model credentials host-side, and unifies
-generation-owned host resource reconciliation before allocator reuse. Phase 9
-agent capability work follows Phase 8; production auth/authorization, real
-secret storage and rotation, tenant-level egress policy, resource limits,
-observability, and multi-orchestrator HA are Phase 10.
+- Supported interactive paths are Claude Code and the shell shim. Future agent
+  adapters need their own completion contract.
+- Phase 2 bundle scripts are quarantined smoke tooling and are not
+  `sandbox-isolation-v1` release evidence.
+- Legacy public session path fields (`workspace`, `agent_home_path`,
+  `restore_id`) remain internal compatibility storage and are omitted from
+  public DTOs/events.
+- Claude logical resume is durable. After a Claude UUID exists in
+  `/agent-home`, later turns must use `--resume`; correctness must not depend
+  only on an in-memory "first turn" flag.
+- Reclaimable runtime resources remain visible for
+  `harness.reaper.failed_retention` before physical cleanup by design.
+- Phase 9 is the active architecture target: system prompt, context compaction,
+  system skills, and managed Claude Code settings. Production auth/authorization,
+  credential rotation, tenant egress policy, resource limits, observability, and
+  multi-orchestrator HA are Phase 10.
 
 ## Checks
 
-Backend:
+Common regression checks:
 
 ```bash
-cd orchestrator
-go test ./...
-```
-
-Frontend:
-
-```bash
-cd frontend
-npm run lint
-npm run typecheck
-npm test
-npm run build
-```
-
-Sandbox bridge client:
-
-```bash
+(cd orchestrator && go test ./...)
+(cd frontend && npm run lint && npm run typecheck && npm test && npm run build)
 python3 -m unittest sandbox-image/tests/test_harness_bridge_client.py
+python3 tools/phase8/release-gates.py --static-only
 ```
 
-Claude/proxy live smoke after runtime or bridge changes:
+After runtime, bridge, Claude CLI, proxy, or session-lifecycle changes, also run
+a live two-turn Claude smoke on a fresh session and verify both turns complete
+under the same Claude session UUID.
 
-```bash
-sandbox-image/build-rootfs.sh
-# Start orchestrator, frontend, and claude-code-proxy with the pinned dummy-key mode.
-# Then create a fresh Claude session and send two short turns.
-# Expected: both turns complete, assistant messages persist, proxy events are 200,
-# and the second turn reuses the same Claude session UUID via --resume.
-```
-
-Runtime isolation release evidence:
-
-```bash
-tools/phase8/release-gates.py --output /tmp/harness-runtime-isolation-deterministic-gates.json
-tools/phase8/release-gates.py --include-proxy --output /tmp/harness-runtime-isolation-proxy-gates.json
-tools/phase8/cutover-inventory.py --expect-clean --require-host-inventory --output /tmp/harness-cutover-inventory.json
-tools/phase8/reconciliation-evidence.py --expect-clean --require-runtime-table --require-host-inventory --verify-host-absence --output /tmp/harness-reconciliation-evidence.json
-tools/phase8/rootfs-inspect.py --output /tmp/harness-rootfs-inspection.json
-tools/phase8/adversarial-lab.py --report /tmp/harness-phase8-adversarial-lab.json --output /tmp/harness-adversarial-lab-validation.json
-```
-
-Phase 7 release gates:
-
-```bash
-PHASE7_LATENCY_SESSION_IDS=<prewarmed_running_idle_session> \
-PHASE7_LATENCY_CONTENT='Reply exactly OK. Probe {nonce}' \
-tools/phase7/release-gates.py \
-  --include-proxy \
-  --include-bridge-lab \
-  --include-secret-lab \
-  --include-live-latency \
-  --output /tmp/harness-phase7-external-gates.json
-```
+For publishable runtime-isolation candidates, rerun the full evidence-producing
+Phase 8 gate sequence in [phase8/release-gates.md](./phase8/release-gates.md).

@@ -1,6 +1,6 @@
 # Phase 9b: Proactive Context Compaction
 
-> Status: planned after [Phase 8 runtime isolation hardening](../phase8/README.md).
+> Status: planned on top of the completed [Phase 8 runtime isolation hardening](../phase8/README.md).
 > Part of [Phase 9](./README.md).
 
 ## Goal
@@ -11,9 +11,9 @@ Today: Claude Code self-triggers compaction based on its own assumptions about t
 
 The fix is in two parts: (1) get accurate per-turn token usage into the orchestrator, (2) have the orchestrator instruct compaction before the running total crosses a configurable budget.
 
-Phase 8 is a hard prerequisite. Phase 9b depends on proxy request correlation
-from the verified contract/resource sandbox identity, not the broader
-pre-Phase-8 source-IP assumptions.
+Phase 8 is the completed baseline. Phase 9b depends on proxy request
+correlation from the verified contract/resource sandbox identity, not the
+broader pre-Phase-8 source-IP assumptions.
 
 ## Background: Where Token Usage Lives Today
 

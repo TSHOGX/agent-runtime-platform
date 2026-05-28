@@ -1,18 +1,20 @@
 # Phase 9a: Configurable Harness System Prompt
 
-> Status: planned after [Phase 8 runtime isolation hardening](../phase8/README.md).
+> Status: planned on top of the completed [Phase 8 runtime isolation hardening](../phase8/README.md).
 > Part of [Phase 9](./README.md).
 
 ## Merge Gate
 
-Phase 9a has two prerequisites:
+Phase 9a has completed baseline prerequisites and one remaining
+Phase 9a-specific merge gate:
 
-- Phase 8 runtime isolation, because 9a adds control-manifest fields and a
-  Claude-visible sidecar that must use the sandbox-visible projection and exact
-  mount contract.
-- The completed P0 session-lifetime baseline: retryable generation start
-  failures, restore-fallback retirement, durable non-terminal runtime events,
-  and failed/canceled bridge turn completions that do not fail the session.
+- Completed baseline: Phase 8 runtime isolation, because 9a adds
+  control-manifest fields and a Claude-visible sidecar that must use the
+  sandbox-visible projection and exact mount contract.
+- Completed baseline: P0 session-lifetime separation, including retryable
+  generation start failures, restore-fallback retirement, durable non-terminal
+  runtime events, and failed/canceled bridge turn completions that do not fail
+  the session.
 
 The remaining Phase 9a-specific merge gate is prepared-artifact compatibility. Phase 9a introduces stricter manifest/sidecar validation for already prepared generations, so the implementation must add:
 
@@ -202,7 +204,7 @@ emit("HARNESS_SYSTEM_PROMPT_FILE", "/harness-control/system_prompt.txt")
 
 The legacy `/harness-control/session.env` control path must not bypass the fail-closed prompt checks. Phase 9a may either deprecate env control files and reject `session.env` for Claude launches, or require an equivalent env contract with `HARNESS_SYSTEM_PROMPT_ENABLED`, `HARNESS_SYSTEM_PROMPT_DIGEST`, and `HARNESS_SYSTEM_PROMPT_FILE` plus the same sidecar verification before any bridge or legacy Claude branch. If env support remains, enabled prompts require a non-empty digest and digest-matching `/harness-control/system_prompt.txt`; disabled prompts require the file to be absent. Missing env prompt metadata is an incompatible control file, not an implicit disabled prompt.
 
-Known legacy producer: `bundle/restore-sandbox.sh` currently writes `session.env` without prompt metadata while `docs/architecture.md`, `docs/current-status.md`, and `docs/phase2-status.md` still describe it as a useful smoke/restore boundary. Phase 9a must explicitly update that script and those docs. If the script remains a Claude smoke tool, it must emit the equivalent prompt env fields, disabled/empty defaults, and sidecar behavior described above. If the env control path is deprecated, the script must be marked non-Claude/Phase-2-only or fail closed before launching Claude so it cannot silently exercise a bypass path.
+Known legacy producer: `bundle/restore-sandbox.sh` currently writes `session.env` without prompt metadata. Current docs mark the Phase 2 bundle scripts as quarantined smoke tooling, not active runtime evidence. Phase 9a must preserve that boundary or update/deprecate the script explicitly. If the script remains a Claude smoke tool, it must emit the equivalent prompt env fields, disabled/empty defaults, and sidecar behavior described above. If the env control path is deprecated, the script must be marked non-Claude/Phase-2-only or fail closed before launching Claude so it cannot silently exercise a bypass path.
 
 Common sidecar verification:
 
@@ -370,7 +372,7 @@ The shell shim doesn't talk to an LLM, so the system prompt does not apply direc
 12. Route prepared-artifact validation failures by lifecycle state instead of using the generic pre-start helper. If validation fails while `ensured.RestoreFromCheckpoint=true`, call the P0 restore-fallback retirement helper so the already-claimed `restoring` generation is failed/reclaimable and the session cold-falls back instead of remaining stuck in restore state. If validation fails for a non-restore prepared generation, call a new retryable prepared-generation retirement helper that first tears down any live runtime for generation N, then fails/reclaims only generation N, does not call `store.FailSession` or publish terminal session failure, and makes `sendMessage` re-run `ensureActiveGeneration` to allocate and start generation N+1 for the same session. Keep the normal retryable start-failure helper for newly allocated generations; use the prepared-retirement helper only when already prepared artifacts or live runtime state must be retired.
 13. Add a read-only bind mount or include the file in the existing `/harness-control` mount (current entrypoint already reads `/harness-control/session.json`; add the prompt file alongside it).
 14. Update the entrypoint JSON manifest export to require `system_prompt_enabled`, `system_prompt_text`, and `system_prompt_digest` keys before Claude launch. Missing keys are an incompatible manifest and must fail with stable text such as `missing system prompt manifest field`, not silently default to disabled. Export `HARNESS_SYSTEM_PROMPT_ENABLED`, `HARNESS_SYSTEM_PROMPT_DIGEST`, and `HARNESS_SYSTEM_PROMPT_FILE`; do not export the prompt text.
-15. Close the legacy `session.env` path and its producers explicitly. Either remove/env-reject `session.env` for Claude control files in Phase 9a, or require equivalent prompt env fields and run the same enabled/disabled sidecar verification before any bridge or legacy Claude launch. Update or deprecate `bundle/restore-sandbox.sh`, which currently writes `session.env` without prompt metadata, and align `docs/architecture.md`, `docs/current-status.md`, and `docs/phase2-status.md` with the chosen support status.
+15. Close the legacy `session.env` path and its producers explicitly. Either remove/env-reject `session.env` for Claude control files in Phase 9a, or require equivalent prompt env fields and run the same enabled/disabled sidecar verification before any bridge or legacy Claude launch. Update or deprecate `bundle/restore-sandbox.sh`, which currently writes `session.env` without prompt metadata, and keep `docs/architecture.md`, `docs/current-status.md`, and `docs/phase2-status.md` aligned with the chosen support status.
 16. Keep entrypoint sidecar verification before any Claude-launch branch as defense in depth. Enabled manifests require a present digest-matching sidecar; disabled manifests require no `system_prompt.txt` sidecar. Required prompt metadata failures must echo stable classifier text such as `system prompt snapshot missing`; do not rely on shell-generated `${VAR:?message}` errors.
 17. Pin the Claude Code CLI installed by `sandbox-image/build-rootfs.sh` to the version validated for `--append-system-prompt-file`, or introduce an equivalent build arg defaulting to that pinned version.
 18. Update the existing-rootfs reuse branch in `sandbox-image/build-rootfs.sh` to assert the installed Claude version **without `chroot`**: resolve `${ROOTFS_DIR}/usr/local/bin/claude` to the installed package when possible, rebasing absolute symlink targets under `${ROOTFS_DIR}`; otherwise search `${ROOTFS_DIR}/opt/node-*/lib/node_modules/@anthropic-ai/claude-code/package.json` and `${ROOTFS_DIR}/usr/lib/node_modules/@anthropic-ai/claude-code/package.json`, or run the discovered JS entry with the host's `node`. Keep the reuse branch before `require_root`. Fail with a `FORCE=1`/upgrade instruction instead of silently reusing an old CLI.
@@ -420,7 +422,7 @@ The shell shim doesn't talk to an LLM, so the system prompt does not apply direc
    - `entrypoint`: JSON manifests missing any of `system_prompt_enabled`, `system_prompt_text`, or `system_prompt_digest` fail before Claude launch rather than defaulting to disabled.
    - `entrypoint`: legacy `session.env` either fails closed as deprecated for Claude launches, or requires equivalent prompt env metadata and applies the same missing/stale/mismatch sidecar checks before bridge and legacy Claude launch.
    - `entrypoint`: enabled `session.env` with missing `HARNESS_SYSTEM_PROMPT_FILE` or `HARNESS_SYSTEM_PROMPT_DIGEST` exits with explicit `system prompt snapshot missing` text, not a shell-generated required-variable error.
-   - `bundle/restore-sandbox.sh`: chosen legacy-env policy is enforced. If `session.env` remains supported for Claude smoke tests, the script writes the prompt env metadata with disabled/empty defaults and sidecar behavior; if deprecated, the script fails closed or is documented and guarded as non-Claude/Phase-2-only. Update `docs/architecture.md`, `docs/current-status.md`, and `docs/phase2-status.md` in the same implementation patch.
+   - `bundle/restore-sandbox.sh`: chosen legacy-env policy is enforced. If `session.env` remains supported for Claude smoke tests, the script writes the prompt env metadata with disabled/empty defaults and sidecar behavior; if deprecated, the script fails closed or is documented and guarded as non-Claude/Phase-2-only. Keep `docs/architecture.md`, `docs/current-status.md`, and `docs/phase2-status.md` aligned in the same implementation patch.
    - `entrypoint`: missing or digest-mismatched sidecar exits before Claude launch.
    - `entrypoint`: a disabled manifest with leftover `/harness-control/system_prompt.txt` exits before Claude launch.
    - `server`: sidecar missing/stale/mismatch, missing or type-mismatched manifest field, snapshot missing/mismatch, projected manifest mismatch, and both `checkpoint metadata mismatch: checkpoint_control_manifest_digest` and `checkpoint metadata missing: checkpoint_control_manifest_digest` messages classify as `manifest_digest_mismatch`.

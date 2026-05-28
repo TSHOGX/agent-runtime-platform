@@ -1,16 +1,16 @@
 # Phase 9d: Harness-Managed Claude Code Settings
 
-> Status: planned after [Phase 8 runtime isolation hardening](../phase8/README.md).
+> Status: planned on top of the completed [Phase 8 runtime isolation hardening](../phase8/README.md).
 > Part of [Phase 9](./README.md).
 
-Phase 8 is a hard prerequisite for this design. Earlier drafts allowed MCP
+Phase 8 is the completed baseline for this design. Earlier drafts allowed MCP
 bearer tokens to be rendered from `/harness-secrets` into Claude-visible managed
 settings. That is no longer acceptable for upstream or remote-service secrets.
 Phase 9d may mount settings and non-secret endpoint config, but any
-credential-bearing MCP path requires a separate broker/token design after Phase
-8. Phase 8 moves model credentials host-side and uses source-IP plus driver
-entitlement for model proxy authorization; it does not provide scoped proxy
-tokens for managed settings.
+credential-bearing MCP path requires a separate broker/token design. Phase 8
+moves model credentials host-side and uses source-IP plus driver entitlement
+for model proxy authorization; it does not provide scoped proxy tokens for
+managed settings.
 
 ## Goal
 

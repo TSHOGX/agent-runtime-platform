@@ -2,6 +2,12 @@
 
 Per-generation host artifacts: control manifest, secret materialization, allocator, reaper, recovery sweep. The DB rows that back these artifacts (`runtime_generations`, `network_profiles`, `runtime_generation_resources`) are defined in [schema.md](./schema.md). This file owns *what lives on disk and how it is created, validated, and destroyed*.
 
+Current reading note: this is the Phase 7 resource design. The active Phase 8
+baseline rejects legacy `harness.secrets.*` config, has no `/harness-secrets`
+mount, and keeps provider credentials host/proxy-side. Treat the secret
+materialization sections below as historical Phase 7 context unless a later
+phase explicitly introduces a new scoped-secret design.
+
 Step 2 only lands the row/state/reaper skeleton; the concrete bundle/control and network objects arrive in Steps 3 and 4.
 
 ## Control Manifest
@@ -109,16 +115,16 @@ environment/proc inspection. Phase 8 retires this mounted provider-credential
 path and replaces it with a host-side upstream credential boundary plus
 source-IP/generation/turn proxy authorization and driver entitlement.
 
-After Phase 8, upstream model provider credentials and remote MCP bearer tokens
-must not be mounted into `/harness-secrets`, exported through the driver
-environment, or made readable by the sandbox entrypoint. Any future
-`/harness-secrets` use is limited to scoped non-provider driver secrets after
-that driver proves non-root execution and least-privilege access.
+In the active Phase 8 baseline, upstream model provider credentials and remote
+MCP bearer tokens must not be mounted into the sandbox, exported through the
+driver environment, or made readable by the sandbox entrypoint. There is no
+current `/harness-secrets` interface. Any future scoped non-provider secret
+delivery needs a new post-Phase-8 design, including non-root execution,
+least-privilege access, and explicit release gates.
 
 **Shell agent (`HARNESS_AGENT=sh`) does not mount secrets.** The shell shim does not need upstream model credentials, and Phase 7 forbids shell secret mounts by construction: the shell generation's `agent_runtime_profile` is `agent = sh`, `requires_secret_drop = false`, carries no `anthropic_api_key_secret_id` / `anthropic_auth_token_secret_id`, the per-generation control dir for a shell generation has no `secrets/` subdirectory materialized, and `secret_mount_path` is unset so no bind-mount is added to the runtime spec. The orchestrator validates this at generation-start time: a shell generation whose manifest carries any secret reference is rejected with `error_class = shell_secret_disallowed`. After Phase 8, shell or BYO-agent model access must use the host-side proxy credential boundary, not a provider-secret mount. If a future shell or BYO-agent variant ever needs scoped non-provider secrets, it must first land its own `setpriv --groups "$HARNESS_SECRET_READERS_GID"` drop in the entrypoint and explicitly opt in via `agent_runtime_profile.requires_secret_drop = true` — the doc-level rule is "no secret mount unless the entrypoint demonstrably runs the agent under a non-root UID with the readers group."
 
-For the legacy provider-secret mount path, and for any future explicitly
-approved scoped non-provider secret mount, the per-generation secrets directory
+For the legacy provider-secret mount path, the per-generation secrets directory
 under the control dir is created mode `0750` owned by
 `orchestrator:harness-secret-readers`; each `<secret_id>` subdirectory uses the
 same mode and ownership, and the `<secret_version>` file is hard-linked or
@@ -126,17 +132,17 @@ copied into it preserving owner/group/mode. The bind-mount into the sandbox at
 `secret_mount_path` is read-only (`ro,nosuid,nodev,noexec`); read-only bind
 enforces that the agent cannot mutate the file, while `0440
 group=harness-secret-readers` is what makes the in-sandbox read succeed. This
-mount option set is part of the contract, not a test-only detail.
+mount option set is part of the historical Phase 7 contract, not a current
+Phase 8 interface.
 
 Phase 10 KMS must not preserve or reintroduce sandbox entrypoint reads for
 upstream model provider credentials; those remain host-side after Phase 8. If a
-future Phase 10 design supports scoped non-provider driver secrets through
-`/harness-secrets`, it may reuse this materialization shape with a KMS-backed
-materializer writing files with the same owner/group/mode, optionally via tmpfs
-to keep plaintext off persistent storage. If that design uses gVisor
-`--file-access=shared` with idmap mounts, the contract becomes "the
-materialized file must be readable by the sandbox-mapped UID" and the host group
-convention is replaced by idmap remapping.
+future Phase 10 design supports scoped non-provider driver secrets, it may reuse
+only the write-once/versioned materialization idea from Phase 7 after defining a
+new mount name, policy, and gate set. If that design uses gVisor
+`--file-access=shared` with idmap mounts, the contract becomes "the materialized
+file must be readable by the sandbox-mapped UID" and the host group convention
+is replaced by idmap remapping.
 
 On the legacy provider-secret path, generation start materializes the
 per-generation secrets dir under the control dir and bind-mounts it read-only

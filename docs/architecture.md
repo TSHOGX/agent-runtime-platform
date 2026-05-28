@@ -1,23 +1,20 @@
 # Harness Platform Architecture
 
-> Last updated: 2026-05-25
+> Last updated: 2026-05-28
 
 ## Overview
 
-Harness Platform runs one AI data-analysis agent per gVisor sandbox session. The orchestrator owns session state, starts per-generation sandboxes, routes user turns through the Agent Bridge claim/ack protocol, persists durable turn and event records, correlates model proxy requests, and publishes events to the frontend.
+Harness Platform runs one AI data-analysis agent per gVisor sandbox session.
+The orchestrator owns durable session state, starts per-generation sandboxes,
+routes user turns through the Agent Bridge claim/ack protocol, correlates model
+proxy requests, records artifacts, and publishes events to the frontend.
 
-The current baseline uses:
+Detailed phase records live in:
 
-- gVisor `runsc` with the `systrap` platform.
-- Per-generation OCI specs, bundles, control manifests, bridge dirs, and network profiles under `harness.run_dir`.
-- Long-lived active runtime generations while the conversation is active.
-- Checkpoint/restore primitives behind the Phase 7 control plane, with automatic idle checkpointing disabled by the checked-in policy.
-- Same-origin Server-Sent Events for the browser event path.
-- Durable `events` table replay for multi-turn output routing.
-- Bridge-backed Claude and shell sessions with interrupt support.
-- Explicit local Claude proxy configuration loaded from `config/harness.yaml`.
-
-The checkpoint-safe architecture is tracked in [phase7/README.md](./phase7/README.md).
+- [phase7/README.md](./phase7/README.md) for the checkpoint-safe control plane.
+- [phase8/README.md](./phase8/README.md) for the runtime-isolation boundary.
+- [current-status.md](./current-status.md) for live baseline and qualification
+  evidence.
 
 ## Component Model
 
@@ -29,14 +26,13 @@ Next.js frontend
   | same-origin route handlers
   v
 Go orchestrator
-  |-- HTTP API / auth
-  |-- global Event Hub
-  |-- canonical Session State
-  |-- SQLite Store
-  |-- Artifact Watcher
-  `-- Runtime
-        |-- runtime generation manager
-        |-- resource allocator/reaper
+  |-- HTTP API / lab auth
+  |-- SQLite store
+  |-- durable event hub
+  |-- artifact watcher
+  |-- proxy correlation UDS
+  `-- runtime manager
+        |-- generation/resource reconciler
         |-- bridge processor
         `-- runsc run / restore / checkpoint / delete
               |
@@ -44,35 +40,47 @@ Go orchestrator
         gVisor sandbox
           |-- harness-agent-entrypoint
           |-- harness-bridge-client
-          |-- Claude Code / PTY-backed shell agent
-          |-- /workspace exact bind -> verified session workspace
-          `-- /agent-home exact bind -> verified session+driver home
+          |-- Claude Code or PTY shell agent
+          |-- /workspace exact bind
+          `-- /agent-home exact bind
 ```
 
-Phase 8 runtime rendering forbids parent `/sessions` and `/agent-homes` mounts.
-Generation launch receives verified DataVolume paths from the control plane and
-renders exact binds for only the current `/workspace` and selected
-`/agent-home`.
-
-The frontend talks to its own origin. Route handlers forward API calls to the orchestrator, including the SSE stream:
+The browser talks to the frontend origin. Frontend route handlers proxy API and
+artifact requests to the orchestrator. Live browser events use same-origin SSE:
 
 ```text
 GET /api/events/stream -> orchestrator GET /api/events/stream
 ```
 
-The orchestrator still exposes `/api/events` as a WebSocket endpoint for compatibility and manual debugging.
+The orchestrator still exposes `/api/events` as a WebSocket compatibility and
+manual-debug endpoint.
 
-## Session State Machine
+## Sandbox Boundary
 
-```text
-created
-  -> running_active
-  -> running_idle
+The active runtime contract is `sandbox-isolation-v1`.
 
-Any active state can fail or be destroyed.
-```
+- gVisor uses `runsc` with the `systrap` platform.
+- The runtime launches `runsc` directly with sandbox networking and
+  `overlay2=none`.
+- Each generation receives an immutable sandbox contract and rendered OCI spec,
+  control manifest, bridge dir, resource identity, and network profile.
+- Workspace and agent HOME are provisioned through host-trusted DataVolume rows
+  and mounted as exact `/workspace` and `/agent-home` binds.
+- Parent `/sessions` and `/agent-homes` mounts are forbidden.
+- `/harness-secrets` is absent; legacy sandbox secret config keys are rejected.
+- Rootfs is read-only; writable surfaces are explicit binds or scratch mounts.
+- Agent processes run as the configured non-root sandbox identity.
+- Provider credentials remain host/proxy-side. The sandbox sees only the stable
+  model proxy alias (`http://harness-model-proxy.internal:8082`) when model
+  access is enabled.
 
-The canonical session status set is:
+Normal model dispatch requires active turn context, source-IP/resource/contract
+match, driver entitlement, and proxy correlation through the authenticated
+host-side UDS. Sandbox-sent source-IP claims are diagnostics, not authority.
+
+## Session State
+
+Canonical statuses:
 
 ```text
 created
@@ -84,100 +92,69 @@ failed
 destroyed
 ```
 
-State meanings:
+Input is accepted only in `created`, `running_idle`, and `checkpointed`.
+`running_active` and `checkpointing` are busy states. `failed` and `destroyed`
+are terminal states. The older `running`, `idle`, and `completed` names are not
+current API statuses.
 
-| State | Meaning |
-| --- | --- |
-| `created` | Session exists but no sandbox has been started for it yet. |
-| `running_active` | A user turn is being processed. |
-| `running_idle` | The container is still alive and ready for another turn. |
-| `checkpointing` | Legacy/experimental busy state for a checkpoint in progress. Startup reconciliation recovers stale rows. |
-| `checkpointed` | A generation has a persisted checkpoint and reserved allocation identity. The next accepted turn claims it for restore, validates metadata, recreates resources, and requires a bridge probe before claiming work. Legacy pre-Phase-7 checkpoint rows are fenced by migration as unrestorable. |
-| `failed` | Runtime or parser error. |
-| `destroyed` | User or API explicitly ended the session. |
+`DELETE /api/sessions/{id}` moves a session to `destroyed` and reclaims runtime
+resources while preserving retained history and workspace state.
 
-Input is accepted only in `created`, `running_idle`, and `checkpointed`. `running_active` and `checkpointing` are busy states. `failed` and `destroyed` are terminal states. The older `running`, `idle`, and `completed` names are not part of the current schema or API contract.
+## Runtime And Turns
 
-## Runtime Flow
+`Runtime.Start()` takes one of three paths:
 
-`Runtime.Start()` chooses one of three paths:
+1. Reuse the active live generation.
+2. Restore a `checkpointed` generation after metadata/resource validation.
+3. Cold-start a new generation by allocating resources, rendering artifacts,
+   probing the proxy/bridge path, and starting `runsc`.
 
-1. **Live path**: if the session has an active live generation, enqueue the turn and let the bridge claim it.
-2. **Restore path**: if the session is `checkpointed`, claim the checkpointed generation for restore, recreate compatible resources, validate checkpoint metadata, run `runsc restore`, and require the bridge probe before claim.
-3. **Cold path**: allocate a new runtime generation, render per-generation resources, run the host-side proxy probe, start `runsc`, require the in-sandbox bridge probe, then let the bridge claim turns.
+Turns are stored before execution. The bridge claims queued turns, acks start,
+emits output, and acks completion with CAS fencing so bridge clients, turn
+runners, and sandboxes can restart at turn boundaries.
 
-The active Go runtime now drives `runsc` directly. `bundle/bake-bundle.sh` and
-`bundle/restore-sandbox.sh` are quarantined legacy Phase 2 smoke tools: they
-fail closed and are not Phase 8 release evidence.
+Claude Code runs with stream-json input. The parser completes a Claude turn on
+`result`, `error`, or non-success result frames. The shell shim emits
+`harness.shell_output` and `harness.turn_done`; shell sessions support
+`POST /api/sessions/{id}/interrupt`.
 
-The bridge is the lower-level turn transport. It uses a file-backed queue so reconnect and checkpoint/restore do not depend on a live host pipe.
+Claude logical sessions are stored in `/agent-home`. Once a Claude UUID exists,
+later turns must use Claude Code `--resume`; correctness cannot depend only on
+an in-memory "first turn" flag.
 
-## Output Routing
+## Events And Output
 
-Each container has its own pub/sub hub:
+Runtime stdout/stderr is fanned out through a per-container `OutputHub`; the
+current turn subscriber receives only its own output. Publishing is
+non-blocking, so slow UI subscribers may drop log lines.
 
-```go
-type OutputEvent struct {
-    Stream string // stdout, stderr, runtime
-    Line   string
-}
+Durable events are written before in-memory publish. Important event names:
 
-type Container struct {
-    SessionID string
-    RestoreID string
-    Agent     string
-    Stdin     io.WriteCloser
-    OutputHub *OutputHub
-}
-```
+- `session.created`
+- `session.running_active`
+- `session.running_idle`
+- `session.checkpointing`
+- `session.checkpointed`
+- `session.failed`
+- `session.destroyed`
+- `agent.delta`
+- `agent.message`
+- `agent.output`
+- `system.status`
+- `artifact.updated`
+- `artifact.deleted`
 
-Scanner goroutines publish container stdout and stderr lines into `OutputHub`. A `runSession()` call subscribes only for its current turn. This is the key change that fixed the old multi-turn callback bug.
-
-Publishing is non-blocking. A slow subscriber may drop output lines instead of blocking the container scanner.
-
-## Turn Completion
-
-For Claude Code, user turns are written as one JSONL frame because the sandbox entrypoint launches Claude with `--input-format stream-json`:
-
-```json
-{"type":"user","message":{"role":"user","content":"..."}}
-```
-
-The stream parser marks a turn complete when it sees:
-
-- `{"type":"result","subtype":"success",...}`
-- `{"type":"error",...}`
-- a non-success result subtype, which is reported as turn output while the session returns to `running_idle`
-
-For shell sessions, the `harness-shell-agent` shim runs a PTY-backed shell and emits `harness.shell_output` frames for command output plus `harness.turn_done` when the prompt returns. The orchestrator persists shell output as assistant text, publishes it as `agent.output`, and exposes `POST /api/sessions/{id}/interrupt` for the running turn.
-
-For future agent adapters, the bridge remains the session-level transport. Each adapter still needs its own completion/output contract before it is a first-class multi-turn citizen.
-
-## Event Model
-
-Runtime output becomes higher-level events:
-
-| Source | Parser behavior | Event |
-| --- | --- | --- |
-| `runtime` stream | lifecycle/status line | `system.status` |
-| `stderr` | debug/log output | `agent.output` |
-| Claude `stream_event` text delta | append to pending assistant text | `agent.delta` |
-| Claude `assistant` message | persist final assistant text | `agent.message` |
-| Claude `result` with text | persist result if not duplicate | `agent.message` |
-| Shell `harness.shell_output` | publish shell output and persist assistant text | `agent.output` / `agent.message` |
-| Shell `harness.turn_done` | mark the shell turn complete | completion |
-| Plain stdout | persist as assistant text | `agent.message` |
-| Artifact watcher | file create/write metadata | `artifact.updated` |
-| Artifact watcher | file/directory remove or rename metadata cleanup | `artifact.deleted` |
-
-The frontend keeps an SSE connection open and also polls session/messages/artifacts after sending a message to recover from transient stream issues.
+The frontend keeps an SSE connection open and also refetches session, messages,
+and artifacts after message submission so missed frames do not permanently
+desynchronize the UI.
 
 ## API Surface
 
-HTTP:
+HTTP routes:
 
 - `GET /healthz`
 - `POST /api/login`
+- `GET /api/quota`
 - `GET /api/sessions`
 - `POST /api/sessions`
 - `GET /api/sessions/{id}`
@@ -188,210 +165,110 @@ HTTP:
 - `GET /api/sessions/{id}/artifacts`
 - `GET /artifacts/{session_id}/{path}`
 
-Phase 7 adds:
-
-- `GET /api/quota`
-- JSON envelope `{"error_class":"...","error":"..."}` for typed runtime/control-plane failures such as pool exhaustion or probe failure. Generic validation and not-found handlers may still return `{"error":"..."}`.
-
-Events:
+Event routes:
 
 - `GET /api/events/stream?session_id=<id>` - SSE
 - `GET /api/events?session_id=<id>` - WebSocket compatibility
 
-Session lifecycle event names use the canonical status values:
+Typed runtime/control-plane failures generally return:
 
-- `session.created`
-- `session.running_active`
-- `session.running_idle`
-- `session.checkpointing`
-- `session.checkpointed`
-- `session.failed`
-- `session.destroyed`
-- `artifact.updated`
-- `artifact.deleted`
-
-## Artifact Browser
-
-Artifact metadata is still persisted as a flat SQLite list keyed by session and path. The frontend derives a live file tree from that list, so the API stays simple while users get a folder-oriented browser with search, tabs, file sizes, update times, and per-file download actions.
-
-Artifact serving is intentionally read-only and constrained to regular files under the session workspace. Download requests reject path traversal, symlink components, symlink escape, directories, and non-regular files. The watcher also skips symlink artifacts during scans.
-
-The artifact watcher publishes:
-
-- `artifact.updated` for create/write metadata upserts.
-- `artifact.deleted` for remove/rename cleanup, including directory-prefix metadata deletion.
-
-The current preview set covers Markdown, code, text, images, JSON, CSV/TSV, and PDF. Unknown binary files remain downloadable but are not rendered inline.
-
-## Configuration
-
-Orchestrator:
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `HARNESS_ORCHESTRATOR_ADDR` | `:8090` | HTTP bind address |
-| `HARNESS_LAB_PASSWORD` | empty | Enables shared-password auth when set |
-| `HARNESS_COOKIE_NAME` | `harness_auth` | Auth cookie name |
-| `HARNESS_SESSION_RETENTION` | `harness.session_retention` (`0s`) | Session/history retention horizon; `0s` disables automatic expiry |
-| `HARNESS_REPO_ROOT` | repo root | Repository root used to derive bundle paths |
-| `HARNESS_SESSIONS_ROOT` | `/var/lib/harness/sessions` | Host workspace root |
-| `HARNESS_AGENT_HOMES_ROOT` | `/var/lib/harness/agent-homes` | Host root for per-session agent HOME state, mounted outside `/workspace` |
-| `HARNESS_CHECKPOINTS_ROOT` | `/var/lib/harness/checkpoints` | Checkpoint image root |
-| `HARNESS_BUNDLE_ROOT` | `<repo>/bundle/out` | OCI bundle root |
-| `HARNESS_DB_PATH` | `/var/lib/harness/state/orchestrator.db` | SQLite DB path, outside sandbox-bindable roots |
-| `HARNESS_DEFAULT_AGENT` | `claude` | Default session agent |
-| `HARNESS_MAX_SESSIONS` | `harness.max_sessions` (`30`) | Non-terminal session ceiling; independent of live `/30` capacity |
-| `RUNSC_ROOT` | `/var/lib/harness/runsc` | runsc state root |
-
-`HARNESS_RESTORE_SCRIPT` is still parsed by config for compatibility, but the current direct `runsc` path does not execute the script.
-
-Project config:
-
-| File | Purpose |
-| --- | --- |
-| `config/harness.yaml` | Phase 7 typed control-plane schema and explicit lab runtime profile. |
-
-The config loader reads `config/harness.yaml` through a strict `gopkg.in/yaml.v3` decoder. The primary shape is the Phase 7 `harness:` schema: `run_dir`, `session_retention`, `max_sessions`, nested network egress, event retention, probe status, bridge lease, and reaper settings are decoded into typed config and validated before startup. Legacy sandbox secret keys are rejected. Legacy files containing only top-level `runtime:` / `claude:` sections still load for compatibility, but mixing legacy sections with `harness:` is rejected.
-
-General orchestrator paths such as session roots and DB path still use the environment variables above. `HARNESS_SESSION_RETENTION` and `HARNESS_MAX_SESSIONS` override their `harness:` values and are revalidated against the Phase 7 schema. `HARNESS_SESSION_TTL` is obsolete and fails startup if present so deployments do not silently switch to no-expiry retention.
-
-With `session_retention: 0s`, sessions, messages, artifacts, workspaces, and agent-home paths do not expire automatically. `harness.max_sessions` still counts non-terminal sessions (`created`, `running_active`, `running_idle`, `checkpointing`, `checkpointed`) rather than live gVisor resources, so it is not validated against the configured `/30` pool. `GET /api/quota` reports `soft_session_ceiling` and `live_pool_ceiling` separately. Operators should close sessions explicitly with `DELETE /api/sessions/{id}` to free session quota; close preserves history and workspace state while reclaiming runtime resources.
-
-Current `config/harness.yaml` values:
-
-```yaml
-harness:
-  run_dir: /var/lib/harness/run
-  session_retention: 0s
-  max_sessions: 30
-  network:
-    cidr_pool: 10.200.0.0/16
-    egress:
-      doris_fe_hosts: [172.16.0.138]
-      doris_be_hosts: [172.16.0.138]
-      doris_ports: [9030]
-      dns_policy: hostnames_only
-  events:
-    retention_window: 24h
-    retention_rows: 1000000
-    emit_output_batch_max_rows: 64
-    emit_output_batch_max_age: 100ms
-  probe:
-    accept_status:
-      get_healthz: [200]
-      post_v1_messages:
-        unauthorized: [401]
-        malformed_authenticated: [400]
-    pre_start_attempts: 3
-    pre_start_interval: 500ms
-    post_start_attempts: 5
-    post_start_interval: 1s
-  bridge:
-    lease_ttl: 60s
-    heartbeat_interval: 30s
-    poll_interval: 5ms
-    ack_started_grace: 90s
-    reconnect_grace: 30s
-  checkpoint:
-    auto_enabled: false
-    idle_threshold: 30m
-    monitor_interval: 5m
-  reaper:
-    failed_retention: 10m
-    checkpoint_image_retention: 720h
+```json
+{"error_class":"...","error":"..."}
 ```
 
-Claude control manifest:
+Generic validation and not-found handlers may still return `{"error":"..."}`.
 
-| Field | Purpose |
-| --- | --- |
-| `proxy_bind_url` | Explicit host bind URL for the local proxy, `http://0.0.0.0:8082` |
-| `anthropic_base_url` | Sandbox-visible stable proxy alias, `http://harness-model-proxy.internal:8082` |
-| provider credentials | Absent from sandbox control files; upstream credentials stay host/proxy-side and model requests are authorized through source-IP/generation/turn context plus driver entitlement |
-| `claude_model` | Claude model alias, default `sonnet` |
-| `claude_code_disable_nonessential_traffic` | Keep Claude Code from making nonessential traffic during sandbox turns |
-| `session_workspace` | In-container workspace mount, `/workspace` |
-| `harness_agent_home` | In-container agent home mount, `/agent-home` |
+## Persistence And Config
 
-Frontend:
+SQLite stores sessions, messages, turns, durable events, proxy request context,
+runtime generations, runtime resource instances, network profiles, sandbox
+contracts, DataVolume rows, and artifact metadata.
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `HARNESS_API_BASE_URL` | `http://127.0.0.1:8090` | Server-side proxy target |
-| `ORCHESTRATOR_URL` | fallback alias | Server-side proxy target |
-| `PORT` | Next.js default unless set | Local frontend port; use `8000` in docs |
+Primary project config is `config/harness.yaml` under the `harness:` schema.
+The checked-in lab profile currently sets:
 
-## Network Model
+- `run_dir: /var/lib/harness/run`
+- `session_retention: 0s`
+- `max_sessions: 30`
+- `sandbox_identity: 65534:65534`
+- `network.cidr_pool: 10.200.0.0/16`
+- Doris egress allow-list: `172.16.0.138:9030`
+- bridge poll interval: `5ms`
+- automatic checkpointing: `false`
+- failed resource retention: `10m`
+- checkpoint image retention: `720h`
 
-The target security model remains gVisor sandbox networking plus host-side egress controls for Doris and the local LLM proxy.
+Important environment overrides:
 
-The current Go runtime launches `runsc` with `-network sandbox -overlay2 none`. The allocator persists a generation-specific netns/veth pair, `/30`, gateway, proxy URL, and egress policy; the runtime recreates those host resources before start/restore, runs a host-side netns probe against the local proxy, and renders the generation's netns path into the OCI spec. The host proxy bind URL remains `http://0.0.0.0:8082`, and the lab proxy key remains `123`.
+- `HARNESS_ORCHESTRATOR_ADDR`
+- `HARNESS_LAB_PASSWORD`
+- `HARNESS_SESSION_RETENTION`
+- `HARNESS_MAX_SESSIONS`
+- `HARNESS_SESSIONS_ROOT`
+- `HARNESS_AGENT_HOMES_ROOT`
+- `HARNESS_CHECKPOINTS_ROOT`
+- `HARNESS_ROOTFS_PATH`
+- `HARNESS_DB_PATH`
+- `RUNSC_ROOT`
 
-## Checkpointing
+`HARNESS_SESSION_TTL` is obsolete and fails startup if present. Legacy top-level
+`runtime:` / `claude:` config can still load for compatibility, but it cannot be
+mixed with the `harness:` schema. Legacy sandbox secret keys are rejected.
 
-`MonitorIdleSessions()` performs startup reconciliation and then obeys the checkpoint policy. The checked-in lab config has `harness.checkpoint.auto_enabled: false`, so automatic checkpointing is disabled by policy, not because the turn transport is still stdin-coupled.
+With `session_retention: 0s`, sessions, messages, artifacts, workspaces, and
+agent homes do not expire automatically. `harness.max_sessions` counts
+non-terminal sessions, not live gVisor resources; `/api/quota` reports session
+and live-pool ceilings separately.
 
-The checkpoint code still exists for experiments:
+## Network And Checkpointing
+
+Each generation owns a persisted `/30`, netns/veth pair, host gateway,
+sandbox IP, and static lab egress policy. The runtime recreates those host
+resources before start/restore, runs a host-side proxy probe, and renders the
+generation's network namespace into the OCI spec.
+
+Checkpoint/restore remains policy-gated. The checked-in lab config disables
+automatic idle checkpointing, but the restore path is still available for
+validated `checkpointed` generations:
 
 ```text
-running_idle -> checkpointing -> checkpointed
+running_idle -> checkpointing -> checkpointed -> restore -> running_idle
 ```
 
-`Runtime.Checkpoint()` writes a checkpoint image manifest and persists the runtime artifact digests needed for restore validation. On failure the generation returns to `running_idle`, so a later idle pass can retry if policy permits it.
+Operators should enable automatic checkpointing only after restore behavior,
+resource retention, and SLOs are acceptable for the deployment.
 
-The Phase 7 path is:
+## Artifacts
 
-```text
-durable turn ledger
-  -> runtime generation idle
-  -> checkpoint generation
-  -> restore generation
-  -> reconnect agent bridge
-  -> claim next turn
-```
+Artifacts are metadata-backed records for files under the verified session
+workspace. Downloads reject traversal, symlink components, symlink escape,
+directories, and non-regular files. The watcher records create/write metadata
+as `artifact.updated` and remove/rename cleanup as `artifact.deleted`.
 
-Checkpoint/restore remains policy-gated. Operators should enable automatic checkpointing only after restore behavior, resource retention, and SLOs are acceptable for the target deployment.
+The UI presents a read-only live file tree. File creation, deletion, and rename
+operations happen through the agent or shell path, then the UI reflects the
+metadata events.
 
 ## Current Limitations
 
-- Phase 8 is still not release-complete until destructive cutover, proxy
-  contract re-pin evidence, host reconciliation evidence, and all adversarial
-  gates pass on the target lab host.
-- Legacy session `workspace`, `agent_home_path`, and `restore_id` columns remain
-  internal compatibility storage. Public DTOs omit them, and runtime launch uses
-  verified DataVolume rows instead.
-- Additional agent adapters beyond Claude Code and the shell shim need their own completion contract before they are first-class multi-turn citizens.
-- Artifact browsing is read-only. File creation, renaming, and deletion should still happen through the sandbox agent or shell session, with the UI reflecting those changes through metadata events.
-- Tenant-level resource limits and production egress policy management are Phase 10 work.
-- The current output hub intentionally drops lines for slow subscribers; that is acceptable for UI logs but should be revisited before using the stream as an audit log.
-- Automatic checkpoint/restore is not enabled by default in the lab config; it is a policy decision on top of the Phase 7 control plane.
+- Supported agent paths are Claude Code and the shell shim. Other adapters need
+  their own completion/output contract.
+- The artifact UI is read-only.
+- The output hub is appropriate for UI streaming but not an audit log.
+- Automatic checkpointing is disabled by default.
+- Legacy `workspace`, `agent_home_path`, and `restore_id` columns remain
+  internal compatibility storage; public DTOs omit them.
+- Tenant authz, credential storage/rotation/GC, tenant egress policy, resource
+  limits, observability, and multi-orchestrator HA are Phase 10 work.
 
-## File Map
+## Source Map
 
-```text
-orchestrator/
-├── cmd/orchestrator/main.go
-├── internal/agents/agents.go
-├── internal/artifacts/watcher.go
-├── internal/events/hub.go
-├── internal/runtime/runtime.go
-├── internal/runtime/output_hub.go
-├── internal/server/server.go
-├── internal/server/stream_parser.go
-├── internal/sessionstate/state.go
-└── internal/store/store.go
-
-frontend/
-├── app/api/[...path]/route.ts
-├── components/harness-provider.tsx
-├── components/workbench/
-├── lib/artifact-tree.ts
-└── lib/
-
-sandbox-image/files/usr/local/bin/
-├── harness-shell-agent
-└── harness-agent-entrypoint
-
-config/
-└── harness.yaml
-```
+- `orchestrator/internal/server/`: HTTP API, auth, turn orchestration.
+- `orchestrator/internal/runtime/`: runsc rendering and lifecycle.
+- `orchestrator/internal/bridge/`: bridge claim/ack processing.
+- `orchestrator/internal/store/`: SQLite schema and control-plane mutations.
+- `orchestrator/internal/artifacts/`: host-side artifact scanning.
+- `frontend/`: Next.js workbench and same-origin proxy routes.
+- `sandbox-image/files/usr/local/bin/`: sandbox entrypoint, bridge client, and
+  shell agent.
+- `config/harness.yaml`: checked-in lab profile.
