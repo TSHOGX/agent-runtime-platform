@@ -27,6 +27,11 @@ const (
 	PiModelsSandboxPath    = PiCodingAgentDir + "/models.json"
 	PiSettingsSandboxPath  = PiCodingAgentDir + "/settings.json"
 	PiHarnessProxyProvider = "harness_anthropic_proxy"
+	PiPackageName          = "@earendil-works/pi-coding-agent"
+	PiPackageVersion       = "0.77.0"
+	PiPackageShasum        = "627664c042507babf8a134a3770285272ccae5d8"
+	PiPackageIntegrity     = "sha512-huS+k+dhQRR9PlTK7crLfeSRUw3a96V6JYfP0ZH3Zkko/m10gsYk8dKQmwScSy5Dll516pXorz19BURfD6S2qQ=="
+	PiEventSchemaVersion   = "pi_rpc_events_v1.0"
 )
 
 type Protocol string
@@ -126,7 +131,7 @@ var driverSpecs = map[ID]DriverSpec{
 		BridgeProtocol:        "harness_bridge_v2",
 		BridgeProtocolVersion: 2,
 		TurnInputSchema:       "RunTurn",
-		OutputSchema:          "pi_rpc_events_v1.0",
+		OutputSchema:          PiEventSchemaVersion,
 		RequiredRuntimeCapabilities: []string{
 			"exec_stream",
 			"filesystem_rw",
@@ -137,7 +142,7 @@ var driverSpecs = map[ID]DriverSpec{
 			"stdin",
 		},
 		ModelAccess:        true,
-		OutputFormat:       "pi_rpc_events_v1.0",
+		OutputFormat:       PiEventSchemaVersion,
 		SupportsInterrupt:  false,
 		SupportsCompaction: false,
 		Phase10Support: []string{

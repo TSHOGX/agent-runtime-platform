@@ -1,0 +1,5 @@
+{"argv":["pi","--mode","rpc","--session-dir","/agent-home/.pi/agent/sessions"],"stdin":{"id":"restore-1","type":"switch_session","sessionFile":"/agent-home/.pi/agent/sessions/session-1.jsonl"}}
+{"stdout":{"id":"restore-1","type":"response","command":"switch_session","success":true,"data":{"sessionFile":"/agent-home/.pi/agent/sessions/session-1.jsonl","sessionId":"pi-session-1"}}}
+{"stdin":{"id":"restore-2","type":"get_session_stats"}}
+{"stdout":{"id":"restore-2","type":"response","command":"get_session_stats","success":true,"data":{"sessionFile":"/agent-home/.pi/agent/sessions/session-1.jsonl","sessionId":"pi-session-1"}}}
+

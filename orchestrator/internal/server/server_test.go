@@ -2571,6 +2571,9 @@ func TestSandboxContractPayloadRecordsPiMaterializedConfig(t *testing.T) {
 		RootFSPath:         filepath.Join(dir, "rootfs"),
 		BridgeHeartbeat:    20 * time.Second,
 		BridgePollInterval: 5 * time.Millisecond,
+		CommandRunner: serverCommandRunner{outputs: map[string][]byte{
+			"ip netns exec " + details.NetnsName + " curl -sS --max-time 2 -o /dev/null -w %{http_code} " + strings.TrimRight(details.ProbeURL, "/") + "/healthz": []byte("200"),
+		}},
 	})
 	workspaceHostPath := filepath.Join(dir, "volumes", "workspaces", session.ID)
 	agentHomeHostPath := filepath.Join(dir, "volumes", "driver-homes", session.ID, "pi")

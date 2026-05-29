@@ -1,0 +1,35 @@
+{
+  "schema": "pi_rpc_events_v1.0",
+  "completion_events": [
+    "agent_end",
+    "turn_end"
+  ],
+  "command_response_events": [
+    "response"
+  ],
+  "event_types": [
+    "agent_end",
+    "agent_start",
+    "auto_retry",
+    "compaction_end",
+    "compaction_start",
+    "error",
+    "message_end",
+    "message_update",
+    "queue_update",
+    "response",
+    "tool_execution_end",
+    "tool_execution_start",
+    "tool_execution_update",
+    "turn_end",
+    "turn_start"
+  ],
+  "message_update_assistant_event_types": [
+    "text_delta"
+  ],
+  "session_stats_fields": [
+    "sessionFile",
+    "sessionId"
+  ]
+}
+

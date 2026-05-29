@@ -11,9 +11,15 @@ func TestPiDriverSpecIsRegistered(t *testing.T) {
 		spec.Kind != DriverKindAgent ||
 		spec.BridgeProtocolVersion != 2 ||
 		spec.TurnInputSchema != "RunTurn" ||
-		spec.OutputSchema != "pi_rpc_events_v1.0" ||
+		spec.OutputSchema != PiEventSchemaVersion ||
 		!spec.ModelAccess {
 		t.Fatalf("unexpected pi spec: %+v", spec)
+	}
+	if PiPackageName != "@earendil-works/pi-coding-agent" ||
+		PiPackageVersion != "0.77.0" ||
+		PiPackageShasum == "" ||
+		PiPackageIntegrity == "" {
+		t.Fatalf("unexpected pi release pin: %s %s %s %s", PiPackageName, PiPackageVersion, PiPackageShasum, PiPackageIntegrity)
 	}
 	if _, err := CanonicalDriverID("pi"); err != nil {
 		t.Fatalf("canonical pi driver rejected: %v", err)

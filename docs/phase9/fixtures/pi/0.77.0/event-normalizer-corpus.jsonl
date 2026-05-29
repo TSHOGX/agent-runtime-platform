@@ -1,0 +1,9 @@
+{"type":"response","id":"prompt-1","command":"prompt","success":true}
+{"type":"turn_start","turnId":"turn-1"}
+{"type":"message_update","messageId":"msg-1","assistantMessageEvent":{"type":"text_delta","delta":"Hello"}}
+{"type":"message_update","messageId":"msg-1","assistantMessageEvent":{"type":"text_delta","delta":" world"}}
+{"type":"tool_execution_start","id":"tool-1","name":"read_file","input":{"path":"README.md"}}
+{"type":"tool_execution_end","id":"tool-1","name":"read_file","success":true,"output":"read README.md"}
+{"type":"message_end","messageId":"msg-1","message":{"role":"assistant","content":[{"type":"text","text":"Hello world"}]}}
+{"type":"turn_end","turnId":"turn-1","status":"completed"}
+

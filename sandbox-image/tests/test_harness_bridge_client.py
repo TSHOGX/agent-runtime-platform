@@ -2,6 +2,7 @@ import importlib.util
 from importlib.machinery import SourceFileLoader
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +10,7 @@ from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "files" / "usr" / "local" / "bin" / "harness-bridge-client"
+BUILD_ROOTFS = Path(__file__).resolve().parents[1] / "build-rootfs.sh"
 spec = importlib.util.spec_from_loader("harness_bridge_client", SourceFileLoader("harness_bridge_client", str(SCRIPT)))
 bridge = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bridge)
@@ -20,6 +22,37 @@ manifest_spec.loader.exec_module(manifest)
 
 
 class BridgeClientTest(unittest.TestCase):
+    def test_build_rootfs_reuse_generates_pi_agent_manifest(self):
+        with tempfile.TemporaryDirectory() as root:
+            rootfs = Path(root)
+            bin_dir = rootfs / "usr" / "local" / "bin"
+            bin_dir.mkdir(parents=True)
+            pi = bin_dir / "pi"
+            pi.write_text("#!/bin/sh\n", encoding="utf-8")
+            pi.chmod(0o755)
+
+            env = os.environ.copy()
+            env.update(
+                {
+                    "ROOTFS_DIR": str(rootfs),
+                    "SANDBOX_AGENT_DRIVERS": "pi",
+                    "FORCE": "0",
+                }
+            )
+            subprocess.run(["bash", str(BUILD_ROOTFS)], check=True, env=env, capture_output=True, text=True)
+
+            manifest = json.loads((rootfs / "etc" / "harness-image" / "agents.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["build_input"]["sandbox_agent_drivers"], ["pi"])
+            self.assertEqual(len(manifest["drivers"]), 1)
+            pi_entry = manifest["drivers"][0]
+            self.assertEqual(pi_entry["driver_id"], "pi")
+            self.assertEqual(pi_entry["package_name"], "@earendil-works/pi-coding-agent")
+            self.assertEqual(pi_entry["package_version"], "0.77.0")
+            self.assertEqual(pi_entry["event_schema_version"], "pi_rpc_events_v1.0")
+            self.assertEqual(pi_entry["binary_path"], "/usr/local/bin/pi")
+            self.assertTrue(pi_entry["installed_binary_digest"].startswith("sha256:"))
+            self.assertIn("/agent-home/.pi/agent/models.json", pi_entry["installed_config_paths"])
+
     def test_queue_write_orders_numeric_sequence(self):
         with tempfile.TemporaryDirectory() as root:
             queue = bridge.Queue(root, bridge.OUTBOX)

@@ -1801,9 +1801,13 @@ func driverInstallDigest(driverID agents.ID) string {
 	switch driverID {
 	case agents.Pi:
 		return phase9ContractDigest(map[string]any{
-			"driver_id": string(driverID),
-			"path":      "/usr/local/bin/pi",
-			"package":   "pi",
+			"driver_id":         string(driverID),
+			"path":              "/usr/local/bin/pi",
+			"package":           agents.PiPackageName,
+			"package_version":   agents.PiPackageVersion,
+			"package_shasum":    agents.PiPackageShasum,
+			"package_integrity": agents.PiPackageIntegrity,
+			"event_schema":      agents.PiEventSchemaVersion,
 		})
 	case agents.Shell:
 		return phase9ContractDigest(map[string]any{

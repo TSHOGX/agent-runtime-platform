@@ -1,0 +1,3 @@
+{"argv":["pi","--mode","rpc","--no-session"],"stdin":{"id":"smoke-1","type":"get_state"}}
+{"stdout":{"id":"smoke-1","type":"response","command":"get_state","success":true,"data":{"isStreaming":false,"isCompacting":false,"sessionFile":null,"sessionId":null}}}
+
