@@ -1,4 +1,34 @@
 harness:
+  default_agent: claude_code
+  agents:
+    claude_code:
+      enabled: true
+      driver_id: claude_code
+      model_profile: anthropic_default
+      runtime_provider: local_runsc
+      disable_nonessential_traffic: true
+    sh:
+      enabled: true
+      driver_id: sh
+      runtime_provider: local_runsc
+    pi:
+      enabled: false
+      driver_id: pi
+      model_profile: anthropic_default
+      runtime_provider: local_runsc
+      disable_nonessential_traffic: true
+  model_profiles:
+    anthropic_default:
+      enabled: true
+      provider: anthropic_messages
+      model: sonnet
+      proxy_ref: model_proxy
+  runtime_providers:
+    local_runsc:
+      enabled: true
+      provider_id: local_runsc
+      profile_id: local_runsc_default
+
   run_dir: /var/lib/harness/run
   session_retention: 0s
   max_sessions: 30

@@ -21,27 +21,32 @@ import (
 )
 
 type Config struct {
-	Addr             string
-	SharedSecret     string
-	CookieName       string
-	SessionRetention time.Duration
-	RepoRoot         string
-	RestoreScript    string
-	RunscRoot        string
-	SessionsRoot     string
-	AgentHomesRoot   string
-	CheckpointsRoot  string
-	BundleRoot       string
-	RootFSPath       string
-	DBPath           string
-	DefaultAgent     string
-	MaxSessions      int
-	RunscNetwork     string
-	RunscOverlay2    string
-	Claude           ClaudeConfig
-	ModelProxy       ModelProxyConfig
-	Phase7           Phase7Config
-	Warnings         []string
+	Addr                 string
+	SharedSecret         string
+	CookieName           string
+	SessionRetention     time.Duration
+	RepoRoot             string
+	RestoreScript        string
+	RunscRoot            string
+	SessionsRoot         string
+	AgentHomesRoot       string
+	CheckpointsRoot      string
+	BundleRoot           string
+	RootFSPath           string
+	AgentManifestPath    string
+	RequireAgentManifest bool
+	DBPath               string
+	DefaultAgent         string
+	MaxSessions          int
+	RunscNetwork         string
+	RunscOverlay2        string
+	Agents               map[string]AgentConfig
+	ModelProfiles        map[string]ModelProfileConfig
+	RuntimeProviders     map[string]RuntimeProviderConfig
+	Claude               ClaudeConfig
+	ModelProxy           ModelProxyConfig
+	Phase7               Phase7Config
+	Warnings             []string
 }
 
 type ClaudeConfig struct {
@@ -60,24 +65,49 @@ type ModelProxyConfig struct {
 	BindPort       int    `yaml:"-"`
 }
 
+type AgentConfig struct {
+	Enabled                    *bool  `yaml:"enabled" json:"enabled,omitempty"`
+	DriverID                   string `yaml:"driver_id" json:"driver_id,omitempty"`
+	ModelProfile               string `yaml:"model_profile" json:"model_profile,omitempty"`
+	RuntimeProvider            string `yaml:"runtime_provider" json:"runtime_provider,omitempty"`
+	DisableNonessentialTraffic *bool  `yaml:"disable_nonessential_traffic" json:"disable_nonessential_traffic,omitempty"`
+}
+
+type ModelProfileConfig struct {
+	Enabled  *bool  `yaml:"enabled" json:"enabled,omitempty"`
+	Provider string `yaml:"provider" json:"provider,omitempty"`
+	Model    string `yaml:"model" json:"model,omitempty"`
+	ProxyRef string `yaml:"proxy_ref" json:"proxy_ref,omitempty"`
+}
+
+type RuntimeProviderConfig struct {
+	Enabled    *bool  `yaml:"enabled" json:"enabled,omitempty"`
+	ProviderID string `yaml:"provider_id" json:"provider_id,omitempty"`
+	ProfileID  string `yaml:"profile_id" json:"profile_id,omitempty"`
+}
+
 const defaultModelProxyBindPort = 8082
 const defaultModelProxyBindURL = "http://0.0.0.0:8082"
 const defaultSandboxModelProxyHost = "harness-model-proxy.internal"
 const defaultSandboxModelProxyBaseURL = "http://harness-model-proxy.internal:8082"
 
 type Phase7Config struct {
-	RunDir               string               `yaml:"run_dir"`
-	SessionRetention     Duration             `yaml:"session_retention"`
-	MaxSessions          int                  `yaml:"max_sessions"`
-	Network              NetworkConfig        `yaml:"network"`
-	Events               EventsConfig         `yaml:"events"`
-	Probe                ProbeConfig          `yaml:"probe"`
-	Bridge               BridgeConfig         `yaml:"bridge"`
-	Checkpoint           CheckpointConfig     `yaml:"checkpoint"`
-	Reaper               ReaperConfig         `yaml:"reaper"`
-	SandboxIdentity      SandboxIdentity      `yaml:"sandbox_identity"`
-	ProxyServiceIdentity ProxyServiceIdentity `yaml:"proxy_service_identity"`
-	ModelProxy           ModelProxyConfig     `yaml:"model_proxy"`
+	DefaultAgent         string                           `yaml:"default_agent"`
+	Agents               map[string]AgentConfig           `yaml:"agents"`
+	ModelProfiles        map[string]ModelProfileConfig    `yaml:"model_profiles"`
+	RuntimeProviders     map[string]RuntimeProviderConfig `yaml:"runtime_providers"`
+	RunDir               string                           `yaml:"run_dir"`
+	SessionRetention     Duration                         `yaml:"session_retention"`
+	MaxSessions          int                              `yaml:"max_sessions"`
+	Network              NetworkConfig                    `yaml:"network"`
+	Events               EventsConfig                     `yaml:"events"`
+	Probe                ProbeConfig                      `yaml:"probe"`
+	Bridge               BridgeConfig                     `yaml:"bridge"`
+	Checkpoint           CheckpointConfig                 `yaml:"checkpoint"`
+	Reaper               ReaperConfig                     `yaml:"reaper"`
+	SandboxIdentity      SandboxIdentity                  `yaml:"sandbox_identity"`
+	ProxyServiceIdentity ProxyServiceIdentity             `yaml:"proxy_service_identity"`
+	ModelProxy           ModelProxyConfig                 `yaml:"model_proxy"`
 }
 
 func (c Phase7Config) ControlRoot() string {
@@ -270,39 +300,48 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	defaultDriver, err := agents.CanonicalDriverID(getenv("HARNESS_DEFAULT_AGENT", agents.LegacyClaudeToken))
+	defaultDriver, err := agents.CanonicalDriverID(getenv("HARNESS_DEFAULT_AGENT", projectConfig.Phase7.DefaultAgent))
 	if err != nil {
 		return Config{}, fmt.Errorf("HARNESS_DEFAULT_AGENT: %w", err)
 	}
-	if err := validateDefaultAgentDriver(defaultDriver); err != nil {
+	if err := validateDefaultAgentDriver(defaultDriver, projectConfig.Phase7.Agents); err != nil {
 		return Config{}, fmt.Errorf("HARNESS_DEFAULT_AGENT: %w", err)
 	}
 	maxSessions := intEnv("HARNESS_MAX_SESSIONS", projectConfig.Phase7.MaxSessions)
 	cfg := Config{
-		Addr:             getenv("HARNESS_ORCHESTRATOR_ADDR", ":8090"),
-		SharedSecret:     os.Getenv("HARNESS_LAB_PASSWORD"),
-		CookieName:       getenv("HARNESS_COOKIE_NAME", "harness_auth"),
-		SessionRetention: sessionRetention,
-		RepoRoot:         getenv("HARNESS_REPO_ROOT", repoRoot),
-		RestoreScript:    getenv("HARNESS_RESTORE_SCRIPT", filepath.Join(repoRoot, "bundle", "restore-sandbox.sh")),
-		RunscRoot:        getenv("RUNSC_ROOT", "/var/lib/harness/runsc"),
-		SessionsRoot:     sessionsRoot,
-		AgentHomesRoot:   getenv("HARNESS_AGENT_HOMES_ROOT", "/var/lib/harness/agent-homes"),
-		CheckpointsRoot:  getenv("HARNESS_CHECKPOINTS_ROOT", "/var/lib/harness/checkpoints"),
-		BundleRoot:       getenv("HARNESS_BUNDLE_ROOT", filepath.Join(repoRoot, "bundle", "out")),
-		RootFSPath:       getenv("HARNESS_ROOTFS_PATH", filepath.Join(repoRoot, "sandbox-image", "rootfs")),
-		DBPath:           getenv("HARNESS_DB_PATH", "/var/lib/harness/state/orchestrator.db"),
-		DefaultAgent:     string(defaultDriver),
-		MaxSessions:      maxSessions,
-		RunscNetwork:     defaultString(projectConfig.Runtime.RunscNetwork, "sandbox"),
-		RunscOverlay2:    defaultString(projectConfig.Runtime.RunscOverlay2, "none"),
-		Claude:           projectConfig.Claude,
-		ModelProxy:       projectConfig.Phase7.ModelProxy,
-		Phase7:           projectConfig.Phase7,
+		Addr:                 getenv("HARNESS_ORCHESTRATOR_ADDR", ":8090"),
+		SharedSecret:         os.Getenv("HARNESS_LAB_PASSWORD"),
+		CookieName:           getenv("HARNESS_COOKIE_NAME", "harness_auth"),
+		SessionRetention:     sessionRetention,
+		RepoRoot:             getenv("HARNESS_REPO_ROOT", repoRoot),
+		RestoreScript:        getenv("HARNESS_RESTORE_SCRIPT", filepath.Join(repoRoot, "bundle", "restore-sandbox.sh")),
+		RunscRoot:            getenv("RUNSC_ROOT", "/var/lib/harness/runsc"),
+		SessionsRoot:         sessionsRoot,
+		AgentHomesRoot:       getenv("HARNESS_AGENT_HOMES_ROOT", "/var/lib/harness/agent-homes"),
+		CheckpointsRoot:      getenv("HARNESS_CHECKPOINTS_ROOT", "/var/lib/harness/checkpoints"),
+		BundleRoot:           getenv("HARNESS_BUNDLE_ROOT", filepath.Join(repoRoot, "bundle", "out")),
+		RootFSPath:           getenv("HARNESS_ROOTFS_PATH", filepath.Join(repoRoot, "sandbox-image", "rootfs")),
+		AgentManifestPath:    os.Getenv("HARNESS_AGENT_IMAGE_MANIFEST_PATH"),
+		RequireAgentManifest: true,
+		DBPath:               getenv("HARNESS_DB_PATH", "/var/lib/harness/state/orchestrator.db"),
+		DefaultAgent:         string(defaultDriver),
+		MaxSessions:          maxSessions,
+		RunscNetwork:         defaultString(projectConfig.Runtime.RunscNetwork, "sandbox"),
+		RunscOverlay2:        defaultString(projectConfig.Runtime.RunscOverlay2, "none"),
+		Agents:               cloneAgentConfigs(projectConfig.Phase7.Agents),
+		ModelProfiles:        cloneModelProfileConfigs(projectConfig.Phase7.ModelProfiles),
+		RuntimeProviders:     cloneRuntimeProviderConfigs(projectConfig.Phase7.RuntimeProviders),
+		Claude:               projectConfig.Claude,
+		ModelProxy:           projectConfig.Phase7.ModelProxy,
+		Phase7:               projectConfig.Phase7,
 	}
 	cfg.Phase7.SessionRetention = Duration{Duration: sessionRetention}
 	cfg.Phase7.MaxSessions = maxSessions
+	cfg.Phase7.DefaultAgent = string(defaultDriver)
 	cfg.Phase7 = normalizePhase7Config(cfg.Phase7)
+	cfg.Agents = cloneAgentConfigs(cfg.Phase7.Agents)
+	cfg.ModelProfiles = cloneModelProfileConfigs(cfg.Phase7.ModelProfiles)
+	cfg.RuntimeProviders = cloneRuntimeProviderConfigs(cfg.Phase7.RuntimeProviders)
 	if value, ok := boolEnv("HARNESS_AUTO_CHECKPOINT_ENABLED"); ok {
 		cfg.Phase7.Checkpoint.AutoEnabled = value
 	}
@@ -312,17 +351,21 @@ func Load() (Config, error) {
 	cfg.ModelProxy = cfg.Phase7.ModelProxy
 	cfg.Claude = normalizeClaudeConfig(cfg.Claude)
 	cfg.Claude = syncClaudeModelProxy(cfg.Claude, cfg.ModelProxy)
+	cfg.Claude = syncClaudeDeploymentConfig(cfg.Claude, cfg.Phase7)
 	cfg.Warnings = phase7ConfigWarnings(cfg.Phase7)
 	return cfg, nil
 }
 
-func validateDefaultAgentDriver(driverID agents.ID) error {
+func validateDefaultAgentDriver(driverID agents.ID, agentConfigs map[string]AgentConfig) error {
 	spec, ok := agents.DriverSpecFor(string(driverID))
 	if !ok {
 		return fmt.Errorf("unsupported driver %q", driverID)
 	}
 	if spec.Kind != agents.DriverKindAgent {
 		return fmt.Errorf("default agent must be an agent-capable driver, got %q", driverID)
+	}
+	if _, _, ok := enabledAgentConfigForDriver(agentConfigs, string(driverID)); !ok {
+		return fmt.Errorf("default agent %q is not enabled in harness.agents", driverID)
 	}
 	return nil
 }
@@ -340,15 +383,7 @@ func loadProjectConfig(path string) (projectConfig, error) {
 			RunscNetwork:  "sandbox",
 			RunscOverlay2: "none",
 		},
-		Claude: ClaudeConfig{
-			ProxyBindURL:               defaultModelProxyBindURL,
-			SandboxBaseURL:             defaultSandboxModelProxyBaseURL,
-			APIKey:                     "123",
-			AuthToken:                  "123",
-			Model:                      "sonnet",
-			OutputFormat:               "stream-json",
-			DisableNonessentialTraffic: true,
-		},
+		Claude: defaultClaudeConfig(),
 	}
 
 	data, err := os.ReadFile(path)
@@ -407,12 +442,17 @@ func finalizeProjectConfig(path string, cfg projectConfig, legacy bool) (project
 			BindURL:        cfg.Claude.ProxyBindURL,
 			SandboxBaseURL: cfg.Claude.SandboxBaseURL,
 		}
+		cfg.Phase7 = syncDeploymentConfigFromClaude(cfg.Phase7, cfg.Claude)
 	}
 	cfg.Phase7 = normalizePhase7Config(cfg.Phase7)
+	if err := validateDeploymentConfig(cfg.Phase7); err != nil {
+		return cfg, fmt.Errorf("load %s: %w", path, err)
+	}
 	if err := validateModelProxyConfig(cfg.Phase7.ModelProxy); err != nil {
 		return cfg, fmt.Errorf("load %s: %w", path, err)
 	}
 	cfg.Claude = syncClaudeModelProxy(cfg.Claude, cfg.Phase7.ModelProxy)
+	cfg.Claude = syncClaudeDeploymentConfig(cfg.Claude, cfg.Phase7)
 	return cfg, nil
 }
 
@@ -444,6 +484,10 @@ func inspectProjectConfigTopLevel(data []byte) (hasHarness bool, hasLegacy bool,
 
 func defaultPhase7Config() Phase7Config {
 	return Phase7Config{
+		DefaultAgent:     string(agents.ClaudeCode),
+		Agents:           defaultAgentConfigs(defaultClaudeConfig()),
+		ModelProfiles:    defaultModelProfileConfigs(defaultClaudeConfig()),
+		RuntimeProviders: defaultRuntimeProviderConfigs(),
 		RunDir:           "/var/lib/harness/run",
 		SessionRetention: Duration{Duration: 0},
 		MaxSessions:      30,
@@ -508,6 +552,13 @@ func defaultPhase7Config() Phase7Config {
 }
 
 func normalizePhase7Config(cfg Phase7Config) Phase7Config {
+	cfg.DefaultAgent = defaultString(cfg.DefaultAgent, string(agents.ClaudeCode))
+	if canonical, err := agents.CanonicalDriverID(cfg.DefaultAgent); err == nil {
+		cfg.DefaultAgent = string(canonical)
+	}
+	cfg.Agents = normalizeAgentConfigs(cfg.Agents, defaultClaudeConfig())
+	cfg.ModelProfiles = normalizeModelProfileConfigs(cfg.ModelProfiles, defaultClaudeConfig())
+	cfg.RuntimeProviders = normalizeRuntimeProviderConfigs(cfg.RuntimeProviders)
 	cfg.SandboxIdentity = NormalizeSandboxIdentity(cfg.SandboxIdentity)
 	cfg.ModelProxy = normalizeModelProxyConfig(cfg.ModelProxy)
 	return cfg
@@ -916,6 +967,357 @@ func validateHosts(field string, values []string) error {
 		}
 	}
 	return nil
+}
+
+func defaultClaudeConfig() ClaudeConfig {
+	return ClaudeConfig{
+		ProxyBindURL:               defaultModelProxyBindURL,
+		SandboxBaseURL:             defaultSandboxModelProxyBaseURL,
+		APIKey:                     "123",
+		AuthToken:                  "123",
+		Model:                      "sonnet",
+		OutputFormat:               "stream-json",
+		DisableNonessentialTraffic: true,
+	}
+}
+
+func defaultAgentConfigs(claude ClaudeConfig) map[string]AgentConfig {
+	claude = normalizeClaudeConfig(claude)
+	return map[string]AgentConfig{
+		string(agents.ClaudeCode): {
+			Enabled:                    boolPtr(true),
+			DriverID:                   string(agents.ClaudeCode),
+			ModelProfile:               "anthropic_default",
+			RuntimeProvider:            "local_runsc",
+			DisableNonessentialTraffic: boolPtr(claude.DisableNonessentialTraffic),
+		},
+		string(agents.Shell): {
+			Enabled:         boolPtr(true),
+			DriverID:        string(agents.Shell),
+			RuntimeProvider: "local_runsc",
+		},
+		string(agents.Pi): {
+			Enabled:                    boolPtr(true),
+			DriverID:                   string(agents.Pi),
+			ModelProfile:               "anthropic_default",
+			RuntimeProvider:            "local_runsc",
+			DisableNonessentialTraffic: boolPtr(claude.DisableNonessentialTraffic),
+		},
+	}
+}
+
+func defaultModelProfileConfigs(claude ClaudeConfig) map[string]ModelProfileConfig {
+	claude = normalizeClaudeConfig(claude)
+	return map[string]ModelProfileConfig{
+		"anthropic_default": {
+			Enabled:  boolPtr(true),
+			Provider: "anthropic_messages",
+			Model:    claude.Model,
+			ProxyRef: "model_proxy",
+		},
+	}
+}
+
+func defaultRuntimeProviderConfigs() map[string]RuntimeProviderConfig {
+	return map[string]RuntimeProviderConfig{
+		"local_runsc": {
+			Enabled:    boolPtr(true),
+			ProviderID: "local_runsc",
+			ProfileID:  "local_runsc_default",
+		},
+	}
+}
+
+func normalizeAgentConfigs(raw map[string]AgentConfig, claude ClaudeConfig) map[string]AgentConfig {
+	defaults := defaultAgentConfigs(claude)
+	if len(raw) == 0 {
+		return cloneAgentConfigs(defaults)
+	}
+	normalized := cloneAgentConfigs(defaults)
+	for id, cfg := range raw {
+		key := strings.TrimSpace(id)
+		if key == "" {
+			continue
+		}
+		base, ok := normalized[key]
+		if !ok {
+			base = AgentConfig{}
+		}
+		if cfg.Enabled != nil {
+			base.Enabled = boolPtr(*cfg.Enabled)
+		}
+		if strings.TrimSpace(cfg.DriverID) != "" {
+			base.DriverID = strings.TrimSpace(cfg.DriverID)
+		} else if strings.TrimSpace(base.DriverID) == "" {
+			base.DriverID = key
+		}
+		if canonical, err := agents.CanonicalDriverID(base.DriverID); err == nil {
+			base.DriverID = string(canonical)
+		}
+		if strings.TrimSpace(cfg.ModelProfile) != "" {
+			base.ModelProfile = strings.TrimSpace(cfg.ModelProfile)
+		}
+		if strings.TrimSpace(cfg.RuntimeProvider) != "" {
+			base.RuntimeProvider = strings.TrimSpace(cfg.RuntimeProvider)
+		}
+		if cfg.DisableNonessentialTraffic != nil {
+			base.DisableNonessentialTraffic = boolPtr(*cfg.DisableNonessentialTraffic)
+		}
+		if base.Enabled == nil {
+			base.Enabled = boolPtr(false)
+		}
+		normalized[key] = base
+	}
+	return normalized
+}
+
+func normalizeModelProfileConfigs(raw map[string]ModelProfileConfig, claude ClaudeConfig) map[string]ModelProfileConfig {
+	defaults := defaultModelProfileConfigs(claude)
+	if len(raw) == 0 {
+		return cloneModelProfileConfigs(defaults)
+	}
+	normalized := cloneModelProfileConfigs(defaults)
+	for id, cfg := range raw {
+		key := strings.TrimSpace(id)
+		if key == "" {
+			continue
+		}
+		base, ok := normalized[key]
+		if !ok {
+			base = ModelProfileConfig{}
+		}
+		if cfg.Enabled != nil {
+			base.Enabled = boolPtr(*cfg.Enabled)
+		}
+		if strings.TrimSpace(cfg.Provider) != "" {
+			base.Provider = strings.TrimSpace(cfg.Provider)
+		}
+		if strings.TrimSpace(cfg.Model) != "" {
+			base.Model = strings.TrimSpace(cfg.Model)
+		}
+		if strings.TrimSpace(cfg.ProxyRef) != "" {
+			base.ProxyRef = strings.TrimSpace(cfg.ProxyRef)
+		}
+		if base.Enabled == nil {
+			base.Enabled = boolPtr(false)
+		}
+		normalized[key] = base
+	}
+	return normalized
+}
+
+func normalizeRuntimeProviderConfigs(raw map[string]RuntimeProviderConfig) map[string]RuntimeProviderConfig {
+	defaults := defaultRuntimeProviderConfigs()
+	if len(raw) == 0 {
+		return cloneRuntimeProviderConfigs(defaults)
+	}
+	normalized := cloneRuntimeProviderConfigs(defaults)
+	for id, cfg := range raw {
+		key := strings.TrimSpace(id)
+		if key == "" {
+			continue
+		}
+		base, ok := normalized[key]
+		if !ok {
+			base = RuntimeProviderConfig{}
+		}
+		if cfg.Enabled != nil {
+			base.Enabled = boolPtr(*cfg.Enabled)
+		}
+		if strings.TrimSpace(cfg.ProviderID) != "" {
+			base.ProviderID = strings.TrimSpace(cfg.ProviderID)
+		} else if strings.TrimSpace(base.ProviderID) == "" {
+			base.ProviderID = key
+		}
+		if strings.TrimSpace(cfg.ProfileID) != "" {
+			base.ProfileID = strings.TrimSpace(cfg.ProfileID)
+		}
+		if base.Enabled == nil {
+			base.Enabled = boolPtr(false)
+		}
+		normalized[key] = base
+	}
+	return normalized
+}
+
+func validateDeploymentConfig(cfg Phase7Config) error {
+	defaultDriver, err := agents.CanonicalDriverID(cfg.DefaultAgent)
+	if err != nil {
+		return fmt.Errorf("harness.default_agent: %w", err)
+	}
+	if err := validateDefaultAgentDriver(defaultDriver, cfg.Agents); err != nil {
+		return fmt.Errorf("harness.default_agent: %w", err)
+	}
+	if len(cfg.Agents) == 0 {
+		return fmt.Errorf("harness.agents must be non-empty")
+	}
+	for id, agentCfg := range cfg.Agents {
+		driverID, err := agents.CanonicalDriverID(defaultString(agentCfg.DriverID, id))
+		if err != nil {
+			return fmt.Errorf("harness.agents.%s.driver_id: %w", id, err)
+		}
+		spec, ok := agents.DriverSpecFor(string(driverID))
+		if !ok {
+			return fmt.Errorf("harness.agents.%s.driver_id has no registered driver spec", id)
+		}
+		if strings.TrimSpace(agentCfg.RuntimeProvider) == "" {
+			return fmt.Errorf("harness.agents.%s.runtime_provider is required", id)
+		}
+		runtimeCfg, ok := cfg.RuntimeProviders[agentCfg.RuntimeProvider]
+		if !ok {
+			return fmt.Errorf("harness.agents.%s.runtime_provider %q is not defined", id, agentCfg.RuntimeProvider)
+		}
+		if enabled(agentCfg.Enabled) && !enabled(runtimeCfg.Enabled) {
+			return fmt.Errorf("harness.agents.%s.runtime_provider %q is disabled", id, agentCfg.RuntimeProvider)
+		}
+		providerID := defaultString(runtimeCfg.ProviderID, agentCfg.RuntimeProvider)
+		if err := agents.EnsureDriverSupportedByProvider(string(driverID), providerID); err != nil {
+			return fmt.Errorf("harness.agents.%s.runtime_provider: %w", id, err)
+		}
+		if spec.ModelAccess {
+			if strings.TrimSpace(agentCfg.ModelProfile) == "" {
+				return fmt.Errorf("harness.agents.%s.model_profile is required for model-access drivers", id)
+			}
+			profile, ok := cfg.ModelProfiles[agentCfg.ModelProfile]
+			if !ok {
+				return fmt.Errorf("harness.agents.%s.model_profile %q is not defined", id, agentCfg.ModelProfile)
+			}
+			if enabled(agentCfg.Enabled) && !enabled(profile.Enabled) {
+				return fmt.Errorf("harness.agents.%s.model_profile %q is disabled", id, agentCfg.ModelProfile)
+			}
+			if strings.TrimSpace(profile.Model) == "" {
+				return fmt.Errorf("harness.model_profiles.%s.model is required", agentCfg.ModelProfile)
+			}
+			if strings.TrimSpace(profile.ProxyRef) != "model_proxy" {
+				return fmt.Errorf("harness.model_profiles.%s.proxy_ref must be model_proxy", agentCfg.ModelProfile)
+			}
+		}
+	}
+	return nil
+}
+
+func syncDeploymentConfigFromClaude(phase7 Phase7Config, claude ClaudeConfig) Phase7Config {
+	phase7.Agents = normalizeAgentConfigs(phase7.Agents, claude)
+	phase7.ModelProfiles = normalizeModelProfileConfigs(phase7.ModelProfiles, claude)
+	claudeAgent := phase7.Agents[string(agents.ClaudeCode)]
+	claudeAgent.DisableNonessentialTraffic = boolPtr(claude.DisableNonessentialTraffic)
+	phase7.Agents[string(agents.ClaudeCode)] = claudeAgent
+	profileID := defaultString(claudeAgent.ModelProfile, "anthropic_default")
+	profile := phase7.ModelProfiles[profileID]
+	profile.Model = defaultString(claude.Model, "sonnet")
+	profile.ProxyRef = "model_proxy"
+	if strings.TrimSpace(profile.Provider) == "" {
+		profile.Provider = "anthropic_messages"
+	}
+	if profile.Enabled == nil {
+		profile.Enabled = boolPtr(true)
+	}
+	phase7.ModelProfiles[profileID] = profile
+	return phase7
+}
+
+func syncClaudeDeploymentConfig(claude ClaudeConfig, phase7 Phase7Config) ClaudeConfig {
+	if _, agentCfg, ok := enabledAgentConfigForDriver(phase7.Agents, string(agents.ClaudeCode)); ok {
+		if agentCfg.DisableNonessentialTraffic != nil {
+			claude.DisableNonessentialTraffic = *agentCfg.DisableNonessentialTraffic
+		}
+		if profile, ok := phase7.ModelProfiles[agentCfg.ModelProfile]; ok && strings.TrimSpace(profile.Model) != "" {
+			claude.Model = strings.TrimSpace(profile.Model)
+		}
+	}
+	return claude
+}
+
+func enabledAgentConfigForDriver(agentConfigs map[string]AgentConfig, driverID string) (string, AgentConfig, bool) {
+	canonical, err := agents.CanonicalDriverID(driverID)
+	if err != nil {
+		return "", AgentConfig{}, false
+	}
+	keys := make([]string, 0, len(agentConfigs))
+	for key := range agentConfigs {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		cfg := agentConfigs[key]
+		if !enabled(cfg.Enabled) {
+			continue
+		}
+		candidate, err := agents.CanonicalDriverID(defaultString(cfg.DriverID, key))
+		if err == nil && candidate == canonical {
+			return key, cfg, true
+		}
+	}
+	return "", AgentConfig{}, false
+}
+
+func (c Config) DeploymentAgents() map[string]AgentConfig {
+	return normalizeAgentConfigs(c.Agents, c.Claude)
+}
+
+func (c Config) DeploymentModelProfiles() map[string]ModelProfileConfig {
+	return normalizeModelProfileConfigs(c.ModelProfiles, c.Claude)
+}
+
+func (c Config) DeploymentRuntimeProviders() map[string]RuntimeProviderConfig {
+	return normalizeRuntimeProviderConfigs(c.RuntimeProviders)
+}
+
+func cloneAgentConfigs(input map[string]AgentConfig) map[string]AgentConfig {
+	if input == nil {
+		return nil
+	}
+	output := make(map[string]AgentConfig, len(input))
+	for key, value := range input {
+		output[key] = cloneAgentConfig(value)
+	}
+	return output
+}
+
+func cloneAgentConfig(value AgentConfig) AgentConfig {
+	if value.Enabled != nil {
+		value.Enabled = boolPtr(*value.Enabled)
+	}
+	if value.DisableNonessentialTraffic != nil {
+		value.DisableNonessentialTraffic = boolPtr(*value.DisableNonessentialTraffic)
+	}
+	return value
+}
+
+func cloneModelProfileConfigs(input map[string]ModelProfileConfig) map[string]ModelProfileConfig {
+	if input == nil {
+		return nil
+	}
+	output := make(map[string]ModelProfileConfig, len(input))
+	for key, value := range input {
+		if value.Enabled != nil {
+			value.Enabled = boolPtr(*value.Enabled)
+		}
+		output[key] = value
+	}
+	return output
+}
+
+func cloneRuntimeProviderConfigs(input map[string]RuntimeProviderConfig) map[string]RuntimeProviderConfig {
+	if input == nil {
+		return nil
+	}
+	output := make(map[string]RuntimeProviderConfig, len(input))
+	for key, value := range input {
+		if value.Enabled != nil {
+			value.Enabled = boolPtr(*value.Enabled)
+		}
+		output[key] = value
+	}
+	return output
+}
+
+func enabled(value *bool) bool {
+	return value != nil && *value
+}
+
+func boolPtr(value bool) *bool {
+	return &value
 }
 
 func normalizeClaudeConfig(cfg ClaudeConfig) ClaudeConfig {

@@ -276,6 +276,170 @@ func TestDeploymentCapabilitiesAreProductSafe(t *testing.T) {
 	}
 }
 
+func TestDeploymentCapabilitiesUseImageManifestGate(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	rootfs := filepath.Join(dir, "rootfs")
+	writeServerTestAgentImageManifest(t, rootfs, agents.ClaudeCode)
+	st, err := store.Open(ctx, filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	srv := &Server{
+		cfg: config.Config{
+			SessionsRoot:         dir,
+			SessionRetention:     time.Hour,
+			MaxSessions:          10,
+			DefaultAgent:         "claude_code",
+			RootFSPath:           rootfs,
+			RequireAgentManifest: true,
+		},
+		store:   st,
+		runtime: runtime.New(runtime.Config{}),
+		watcher: newServerTestWatcher(t, dir, st, events.NewHub()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/deployment-capabilities", nil)
+	rec := httptest.NewRecorder()
+	srv.deploymentCapabilities(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var capabilities struct {
+		SessionModes []struct {
+			Mode           string  `json:"mode"`
+			Visible        bool    `json:"visible"`
+			CreateEnabled  bool    `json:"create_enabled"`
+			DisabledReason *string `json:"disabled_reason"`
+		} `json:"session_modes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &capabilities); err != nil {
+		t.Fatalf("decode capabilities: %v", err)
+	}
+	var sawAgent, sawShell bool
+	for _, mode := range capabilities.SessionModes {
+		switch mode.Mode {
+		case "agent":
+			sawAgent = true
+			if !mode.Visible || !mode.CreateEnabled || mode.DisabledReason != nil {
+				t.Fatalf("agent should remain available without sh in image: %+v", mode)
+			}
+		case "shell":
+			sawShell = true
+			if mode.Visible || mode.CreateEnabled || mode.DisabledReason == nil || *mode.DisabledReason != "missing_from_image" {
+				t.Fatalf("shell should be hidden when sh is absent from image: %+v", mode)
+			}
+		}
+	}
+	if !sawAgent || !sawShell {
+		t.Fatalf("expected agent and shell modes: %+v", capabilities.SessionModes)
+	}
+
+	shellReq := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(`{"mode":"shell"}`))
+	shellRec := httptest.NewRecorder()
+	srv.createSession(shellRec, shellReq)
+	if shellRec.Code != http.StatusBadRequest || !strings.Contains(shellRec.Body.String(), "shell mode unavailable") {
+		t.Fatalf("expected shell rejection before persistence, got status=%d body=%s", shellRec.Code, shellRec.Body.String())
+	}
+	var count int
+	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions`).Scan(&count); err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("shell rejection should not persist a session, got %d", count)
+	}
+
+	agentReq := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(`{"mode":"agent"}`))
+	agentRec := httptest.NewRecorder()
+	srv.createSession(agentRec, agentReq)
+	if agentRec.Code != http.StatusCreated {
+		t.Fatalf("expected agent session creation, got status=%d body=%s", agentRec.Code, agentRec.Body.String())
+	}
+}
+
+func TestCreateSessionFailsClosedWhenRequiredManifestMissing(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	srv := &Server{
+		cfg: config.Config{
+			SessionsRoot:         dir,
+			SessionRetention:     time.Hour,
+			MaxSessions:          10,
+			DefaultAgent:         "claude_code",
+			RootFSPath:           filepath.Join(dir, "missing-rootfs"),
+			RequireAgentManifest: true,
+		},
+		store:   st,
+		runtime: runtime.New(runtime.Config{}),
+		watcher: newServerTestWatcher(t, dir, st, events.NewHub()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(`{"mode":"agent"}`))
+	rec := httptest.NewRecorder()
+	srv.createSession(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "agent mode unavailable") {
+		t.Fatalf("expected fail-closed agent rejection, got status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var count int
+	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions`).Scan(&count); err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("manifest rejection should not persist a session, got %d", count)
+	}
+}
+
+func TestPhase9CInputDigestsUseSourceConfigAndImageManifest(t *testing.T) {
+	dir := t.TempDir()
+	rootfs := filepath.Join(dir, "rootfs")
+	writeServerTestAgentImageManifest(t, rootfs, agents.ClaudeCode, agents.Shell)
+	cfg := config.Config{
+		DefaultAgent:         "claude_code",
+		RootFSPath:           rootfs,
+		RequireAgentManifest: true,
+	}
+	srv := &Server{cfg: cfg}
+	deployment, capabilityErr := srv.resolveModeDeployment("shell")
+	if capabilityErr != nil {
+		t.Fatalf("resolve shell deployment: %v", capabilityErr)
+	}
+	manifest, err := srv.loadAgentImageManifest()
+	if err != nil {
+		t.Fatalf("load manifest: %v", err)
+	}
+	digests := srv.phase9CInputDigests(deployment)
+	if digests.AgentManifestDigest != manifest.Digest {
+		t.Fatalf("agent manifest digest = %s want %s", digests.AgentManifestDigest, manifest.Digest)
+	}
+	if want := runtimeConfigDigest(deployment.runtimeConfigPreimage("claude_code")); digests.RuntimeConfigDigest != want {
+		t.Fatalf("runtime config digest = %s want %s", digests.RuntimeConfigDigest, want)
+	}
+
+	cfg.DefaultAgent = "pi"
+	srv = &Server{cfg: cfg}
+	deploymentWithPiDefault, capabilityErr := srv.resolveModeDeployment("shell")
+	if capabilityErr != nil {
+		t.Fatalf("resolve shell deployment with pi default: %v", capabilityErr)
+	}
+	changed := srv.phase9CInputDigests(deploymentWithPiDefault)
+	if changed.RuntimeConfigDigest == digests.RuntimeConfigDigest {
+		t.Fatalf("shell runtime config digest should change when deployment default agent changes")
+	}
+	if changed.AgentManifestDigest != digests.AgentManifestDigest {
+		t.Fatalf("agent manifest digest should not change when manifest is unchanged: %s vs %s", changed.AgentManifestDigest, digests.AgentManifestDigest)
+	}
+}
+
 func TestAgentsCatalogIsOperatorOnly(t *testing.T) {
 	srv := &Server{cfg: config.Config{CookieName: "sid"}, runtime: runtime.New(runtime.Config{})}
 	productReq := httptest.NewRequest(http.MethodGet, "/api/agents", nil)
@@ -1664,10 +1828,11 @@ func TestSendMessageFallsBackWhenCheckpointImageManifestInvalid(t *testing.T) {
 	dir := t.TempDir()
 	st, owner := openServerOwnedStore(t, ctx, dir)
 	session := createServerTestSession(t, ctx, st, dir, "sess_restore_manifest_fallback", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
-	if _, err := st.DBForTest().ExecContext(ctx, `UPDATE sessions SET driver_id = 'sh' WHERE id = ?`, session.ID); err != nil {
+	if _, err := st.DBForTest().ExecContext(ctx, `UPDATE sessions SET driver_id = 'sh', mode = 'shell' WHERE id = ?`, session.ID); err != nil {
 		t.Fatalf("set shell session agent: %v", err)
 	}
 	session.Agent = "sh"
+	session.Mode = "shell"
 	cfg := testServerConfig(dir)
 	cfg.Phase7.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
 	leaseOwner := store.GenerationLeaseOwner(owner.UUID)
@@ -3531,9 +3696,11 @@ func TestRunPhase7MaintenancePublishesBridgeOutputAndCompletion(t *testing.T) {
 	dir := t.TempDir()
 	st, owner := openServerOwnedStore(t, ctx, dir)
 	session := createServerTestSession(t, ctx, st, dir, "sess_bridge_events", string(sessionstate.RunningActive), time.Now().UTC(), nil)
-	if _, err := st.DBForTest().ExecContext(ctx, `UPDATE sessions SET driver_id = 'sh' WHERE id = ?`, session.ID); err != nil {
+	if _, err := st.DBForTest().ExecContext(ctx, `UPDATE sessions SET driver_id = 'sh', mode = 'shell' WHERE id = ?`, session.ID); err != nil {
 		t.Fatalf("set shell agent: %v", err)
 	}
+	session.Agent = "sh"
+	session.Mode = "shell"
 	cfg := testServerConfig(dir)
 	cfg.Phase7.Bridge.PollInterval = config.Duration{Duration: 10 * time.Millisecond}
 	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
@@ -4816,6 +4983,52 @@ func currentRunscBinaryMetadataForServerTest() (string, string) {
 	return canonical, fmt.Sprintf("sha256:%x", sum[:])
 }
 
+func writeServerTestAgentImageManifest(t *testing.T, rootfs string, drivers ...agents.ID) string {
+	t.Helper()
+	entries := make([]imageManifestDriver, 0, len(drivers))
+	buildDrivers := make([]string, 0, len(drivers))
+	for _, driverID := range drivers {
+		spec, ok := agents.DriverSpecFor(string(driverID))
+		if !ok {
+			t.Fatalf("missing driver spec for %s", driverID)
+		}
+		binaryPath := expectedDriverBinaryPath(driverID)
+		hostPath := filepath.Join(rootfs, strings.TrimPrefix(binaryPath, "/"))
+		if err := os.MkdirAll(filepath.Dir(hostPath), 0o755); err != nil {
+			t.Fatalf("mkdir driver binary parent: %v", err)
+		}
+		content := []byte("test binary for " + string(driverID) + "\n")
+		if err := os.WriteFile(hostPath, content, 0o755); err != nil {
+			t.Fatalf("write driver binary: %v", err)
+		}
+		sum := sha256.Sum256(content)
+		entry := syntheticManifestDriver(spec)
+		entry.InstalledBinaryDigest = fmt.Sprintf("sha256:%x", sum[:])
+		entries = append(entries, entry)
+		buildDrivers = append(buildDrivers, string(driverID))
+	}
+	manifest := map[string]any{
+		"schema_version": 1,
+		"build_input": map[string]any{
+			"sandbox_agent_drivers": buildDrivers,
+		},
+		"drivers": entries,
+	}
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	data = append(data, '\n')
+	manifestPath := filepath.Join(rootfs, "etc", "harness-image", "agents.json")
+	if err := os.MkdirAll(filepath.Dir(manifestPath), 0o755); err != nil {
+		t.Fatalf("mkdir manifest parent: %v", err)
+	}
+	if err := os.WriteFile(manifestPath, data, 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	return manifestPath
+}
+
 func createServerRuntimeResourceLive(t *testing.T, ctx context.Context, st *store.Store, sessionID string, allocation store.GenerationAllocation, ownerUUID, hostID string, now time.Time) store.RuntimeResourceInstance {
 	t.Helper()
 	contractID := sandboxContractID(allocation.GenerationID)
@@ -5372,8 +5585,10 @@ func TestResourceAllocatorConfigUsesModelProxyPort(t *testing.T) {
 
 func serverTestAllocatorConfig(cfg config.Config, agent string) store.ResourceAllocatorConfig {
 	outputFormat := cfg.Claude.OutputFormat
-	if agent == "sh" {
-		outputFormat = "shell_pty"
+	modelAccess := agent == "claude_code"
+	if spec, ok := agents.DriverSpecFor(agent); ok {
+		outputFormat = spec.OutputFormat
+		modelAccess = spec.ModelAccess
 	}
 	return store.ResourceAllocatorConfig{
 		RunDir:                      cfg.Phase7.RunDir,
@@ -5391,7 +5606,7 @@ func serverTestAllocatorConfig(cfg config.Config, agent string) store.ResourceAl
 		SandboxUID:                  cfg.Phase7.SandboxIdentity.UID,
 		SandboxGID:                  cfg.Phase7.SandboxIdentity.GID,
 		SandboxSupplementalGIDs:     cfg.Phase7.SandboxIdentity.SupplementalGIDs,
-		ProviderCredentialsHostOnly: agent == "claude_code",
+		ProviderCredentialsHostOnly: modelAccess,
 		SandboxModelProxyBaseURL:    cfg.ModelProxy.SandboxBaseURL,
 	}
 }

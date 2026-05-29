@@ -155,6 +155,87 @@ func TestLoadProjectConfigDerivesModelProxySandboxBaseURLPort(t *testing.T) {
 	}
 }
 
+func TestLoadProjectConfigUsesGenericDeploymentConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "harness.yaml")
+	if err := os.WriteFile(path, []byte(`harness:
+  default_agent: pi
+  agents:
+    claude_code:
+      enabled: true
+      driver_id: claude_code
+      model_profile: anthropic_default
+      runtime_provider: local_runsc
+      disable_nonessential_traffic: false
+    pi:
+      enabled: true
+      driver_id: pi
+      model_profile: anthropic_default
+      runtime_provider: local_runsc
+      disable_nonessential_traffic: true
+    sh:
+      enabled: false
+      driver_id: sh
+      runtime_provider: local_runsc
+  model_profiles:
+    anthropic_default:
+      enabled: true
+      provider: anthropic_messages
+      model: opus
+      proxy_ref: model_proxy
+  runtime_providers:
+    local_runsc:
+      enabled: true
+      provider_id: local_runsc
+      profile_id: local_runsc_default
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := loadProjectConfig(path)
+	if err != nil {
+		t.Fatalf("load project config: %v", err)
+	}
+	if cfg.Phase7.DefaultAgent != "pi" {
+		t.Fatalf("default agent = %q", cfg.Phase7.DefaultAgent)
+	}
+	if agent := cfg.Phase7.Agents["pi"]; agent.DriverID != "pi" ||
+		agent.ModelProfile != "anthropic_default" ||
+		agent.RuntimeProvider != "local_runsc" ||
+		agent.Enabled == nil || !*agent.Enabled {
+		t.Fatalf("unexpected pi agent config: %+v", agent)
+	}
+	if profile := cfg.Phase7.ModelProfiles["anthropic_default"]; profile.Model != "opus" ||
+		profile.ProxyRef != "model_proxy" ||
+		profile.Enabled == nil || !*profile.Enabled {
+		t.Fatalf("unexpected model profile: %+v", profile)
+	}
+	if cfg.Claude.Model != "opus" || cfg.Claude.DisableNonessentialTraffic {
+		t.Fatalf("legacy Claude projection did not mirror generic config: %+v", cfg.Claude)
+	}
+}
+
+func TestLoadProjectConfigRejectsDisabledDefaultAgent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "harness.yaml")
+	if err := os.WriteFile(path, []byte(`harness:
+  default_agent: pi
+  agents:
+    pi:
+      enabled: false
+      driver_id: pi
+      model_profile: anthropic_default
+      runtime_provider: local_runsc
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := loadProjectConfig(path)
+	if err == nil || !strings.Contains(err.Error(), `default agent "pi" is not enabled`) {
+		t.Fatalf("expected disabled default agent error, got %v", err)
+	}
+}
+
 func TestLoadProjectConfigUsesLegacyHarnessProxyConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "harness.yaml")

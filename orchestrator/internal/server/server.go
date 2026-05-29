@@ -381,15 +381,15 @@ func (s *Server) deploymentCapabilities(w http.ResponseWriter, r *http.Request) 
 	disabled := func(reason string) *string { return &reason }
 	agentReason := (*string)(nil)
 	agentEnabled := true
-	if _, err := s.driverForMode("agent"); err != nil {
+	if _, err := s.resolveModeDeployment("agent"); err != nil {
 		agentEnabled = false
-		agentReason = disabled("default_unavailable")
+		agentReason = disabled(err.code)
 	}
 	shellReason := (*string)(nil)
 	shellEnabled := true
-	if _, err := s.driverForMode("shell"); err != nil {
+	if _, err := s.resolveModeDeployment("shell"); err != nil {
 		shellEnabled = false
-		shellReason = disabled("disabled")
+		shellReason = disabled(err.code)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"schema_version": 1,
@@ -466,25 +466,11 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) driverForMode(mode string) (agents.ID, error) {
-	switch mode {
-	case "", "agent":
-		driverID, err := agents.CanonicalDriverID(s.cfg.DefaultAgent)
-		if err != nil {
-			return "", fmt.Errorf("agent mode unavailable")
-		}
-		spec, ok := agents.DriverSpecFor(string(driverID))
-		if !ok || spec.Kind != agents.DriverKindAgent {
-			return "", fmt.Errorf("agent mode unavailable")
-		}
-		return driverID, nil
-	case "shell":
-		if _, ok := agents.DriverSpecFor(string(agents.Shell)); !ok {
-			return "", fmt.Errorf("shell mode unavailable")
-		}
-		return agents.Shell, nil
-	default:
-		return "", fmt.Errorf("unsupported mode")
+	resolution, capabilityErr := s.resolveModeDeployment(mode)
+	if capabilityErr != nil {
+		return "", fmt.Errorf("%s", capabilityErr.message)
 	}
+	return resolution.DriverID, nil
 }
 
 func (s *Server) getSession(w http.ResponseWriter, r *http.Request, sessionID string) {
@@ -1258,6 +1244,9 @@ func (s *Server) ensureActiveGenerationWithRestoreRefetch(ctx context.Context, s
 				IsNew: false,
 			}, nil
 		}
+		if _, capabilityErr := s.resolveDriverDeployment(store.ModeForDriver(session.Agent), agents.ID(session.Agent)); capabilityErr != nil {
+			return ensuredGeneration{}, capabilityErr
+		}
 		allocation, err := s.store.AllocateGeneration(ctx, store.AllocateGenerationParams{
 			SessionID:            session.ID,
 			ExpectedGenerationID: sql.NullString{String: activeGenerationID, Valid: true},
@@ -1270,6 +1259,9 @@ func (s *Server) ensureActiveGenerationWithRestoreRefetch(ctx context.Context, s
 			return ensuredGeneration{}, err
 		}
 		return ensuredGeneration{Allocation: allocation, IsNew: true}, nil
+	}
+	if _, capabilityErr := s.resolveDriverDeployment(store.ModeForDriver(session.Agent), agents.ID(session.Agent)); capabilityErr != nil {
+		return ensuredGeneration{}, capabilityErr
 	}
 	allocation, err := s.store.AllocateGeneration(ctx, store.AllocateGenerationParams{
 		SessionID: session.ID,
@@ -1297,14 +1289,21 @@ func (s *Server) resourceAllocatorConfig(agent string) store.ResourceAllocatorCo
 	if driverID, err := agents.CanonicalDriverID(agent); err == nil {
 		agent = string(driverID)
 	}
-	outputFormat := s.cfg.Claude.OutputFormat
-	switch agent {
-	case string(agents.Pi):
-		if spec, ok := agents.DriverSpecFor(agent); ok {
-			outputFormat = spec.OutputFormat
+	driverSpec, ok := agents.DriverSpecFor(agent)
+	if !ok {
+		driverSpec = agents.DriverSpec{ID: agents.ID(agent), OutputFormat: s.cfg.Claude.OutputFormat}
+	}
+	model := s.cfg.Claude.Model
+	disableNonessentialTraffic := s.cfg.Claude.DisableNonessentialTraffic
+	if _, agentCfg, ok := s.enabledAgentConfigForDriver(agents.ID(agent)); ok {
+		if agentCfg.DisableNonessentialTraffic != nil {
+			disableNonessentialTraffic = *agentCfg.DisableNonessentialTraffic
 		}
-	case string(agents.Shell):
-		outputFormat = "shell_pty"
+		if strings.TrimSpace(agentCfg.ModelProfile) != "" {
+			if profile, ok := s.cfg.DeploymentModelProfiles()[agentCfg.ModelProfile]; ok && strings.TrimSpace(profile.Model) != "" {
+				model = strings.TrimSpace(profile.Model)
+			}
+		}
 	}
 	return store.ResourceAllocatorConfig{
 		RunDir:                      s.cfg.Phase7.RunDir,
@@ -1316,13 +1315,13 @@ func (s *Server) resourceAllocatorConfig(agent string) store.ResourceAllocatorCo
 		HostProxyBindURL:            s.cfg.ModelProxy.BindURL,
 		ProxyPort:                   s.cfg.ModelProxy.BindPort,
 		Agent:                       agent,
-		AgentModel:                  s.cfg.Claude.Model,
-		AgentOutputFormat:           outputFormat,
-		DisableNonessentialTraffic:  s.cfg.Claude.DisableNonessentialTraffic,
+		AgentModel:                  model,
+		AgentOutputFormat:           driverSpec.OutputFormat,
+		DisableNonessentialTraffic:  disableNonessentialTraffic,
 		SandboxUID:                  s.cfg.Phase7.SandboxIdentity.UID,
 		SandboxGID:                  s.cfg.Phase7.SandboxIdentity.GID,
 		SandboxSupplementalGIDs:     s.cfg.Phase7.SandboxIdentity.SupplementalGIDs,
-		ProviderCredentialsHostOnly: agent == string(agents.ClaudeCode),
+		ProviderCredentialsHostOnly: driverSpec.ModelAccess,
 		SandboxModelProxyBaseURL:    s.cfg.ModelProxy.SandboxBaseURL,
 	}
 }
@@ -1505,13 +1504,16 @@ func (s *Server) sandboxContractPayload(session store.Session, details store.Run
 	if !ok {
 		return nil, fmt.Errorf("unsupported driver %q", driverID)
 	}
-	providerSpec, ok := agents.RuntimeProviderSpecFor("local_runsc")
-	if !ok {
-		return nil, fmt.Errorf("unsupported runtime provider local_runsc")
+	mode := strings.TrimSpace(session.Mode)
+	if mode == "" {
+		mode = store.ModeForDriver(driverID)
 	}
-	if err := agents.EnsureDriverSupportedByProvider(driverID, providerSpec.ID); err != nil {
-		return nil, err
+	deployment, capabilityErr := s.resolveDriverDeployment(mode, agents.ID(driverID))
+	if capabilityErr != nil {
+		return nil, capabilityErr
 	}
+	driverSpec = deployment.DriverSpec
+	providerSpec := deployment.ProviderSpec
 	initialDriverStateDigest := strings.TrimSpace(details.DriverStateDigest)
 	if initialDriverStateDigest == "" {
 		initialDriverStateDigest = phase9ContractDigest(map[string]any{
@@ -1593,7 +1595,7 @@ func (s *Server) sandboxContractPayload(session store.Session, details store.Run
 	if err != nil {
 		return nil, err
 	}
-	inputDigests := s.phase9CInputDigests(session, details, artifacts, driverSpec, providerSpec)
+	inputDigests := s.phase9CInputDigests(deployment)
 	payload := map[string]any{
 		"sandbox_contract_version": store.SandboxContractVersion,
 		"contract_schema_version":  store.SandboxContractSchemaVersion,
@@ -1755,62 +1757,18 @@ type phase9CInputDigests struct {
 	AgentManifestDigest string
 }
 
-func (s *Server) phase9CInputDigests(session store.Session, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, driverSpec agents.DriverSpec, providerSpec agents.RuntimeProviderSpec) phase9CInputDigests {
-	mode := strings.TrimSpace(session.Mode)
-	if mode == "" {
-		mode = store.ModeForDriver(details.Agent)
+func (s *Server) phase9CInputDigests(deployment deploymentResolution) phase9CInputDigests {
+	defaultAgent := strings.TrimSpace(s.cfg.DefaultAgent)
+	if defaultAgent == "" {
+		defaultAgent = string(agents.ClaudeCode)
 	}
-	runtimeConfigDigest := phase9ContractDigest(map[string]any{
-		"schema_version": 1,
-		"deployment_defaults": map[string]any{
-			"default_agent": strings.TrimSpace(s.cfg.DefaultAgent),
-		},
-		"selected": map[string]any{
-			"mode":                         mode,
-			"driver_id":                    details.Agent,
-			"model":                        details.Model,
-			"output_format":                details.OutputFormat,
-			"disable_nonessential_traffic": details.DisableNonessentialTraffic,
-			"sandbox_uid":                  details.SandboxUID,
-			"sandbox_gid":                  details.SandboxGID,
-			"sandbox_supplemental_gids":    append([]int(nil), details.SandboxSupplementalGIDs...),
-			"model_access_allowed":         details.ModelAccessAllowed,
-		},
-		"model_proxy": map[string]any{
-			"sandbox_base_url": details.ManifestAnthropicBaseURL,
-			"bind_port":        details.ProxyPort,
-		},
-		"runtime_provider": map[string]any{
-			"provider_id":           providerSpec.ID,
-			"provider_profile_id":   providerSpec.ProviderProfileID,
-			"capability_digest":     agents.CapabilityDigest(providerSpec),
-			"runsc_platform":        effectiveString(details.RunscPlatform, "systrap"),
-			"runsc_overlay2":        details.RunscOverlay2,
-			"runsc_version":         artifacts.RunscVersion,
-			"runsc_binary_digest":   artifacts.RunscBinaryDigest,
-			"runtime_config_digest": artifacts.RuntimeConfigDigest,
-		},
-	})
-	agentManifestDigest := phase9ContractDigest(map[string]any{
-		"schema_version": 1,
-		"drivers": []map[string]any{{
-			"driver_id":               driverSpec.ID,
-			"label":                   driverSpec.Label,
-			"kind":                    driverSpec.Kind,
-			"bridge_protocol":         driverSpec.BridgeProtocol,
-			"bridge_protocol_version": driverSpec.BridgeProtocolVersion,
-			"turn_input_schema":       driverSpec.TurnInputSchema,
-			"output_schema":           driverSpec.OutputSchema,
-			"required_capabilities":   append([]string(nil), driverSpec.RequiredRuntimeCapabilities...),
-			"model_access":            driverSpec.ModelAccess,
-			"supports_interrupt":      driverSpec.SupportsInterrupt,
-			"supports_compaction":     driverSpec.SupportsCompaction,
-			"installed_binary_digest": driverInstallDigest(driverSpec.ID),
-		}},
-	})
+	if canonical, err := agents.CanonicalDriverID(defaultAgent); err == nil {
+		defaultAgent = string(canonical)
+	}
+	runtimeConfigDigest := runtimeConfigDigest(deployment.runtimeConfigPreimage(defaultAgent))
 	return phase9CInputDigests{
 		RuntimeConfigDigest: runtimeConfigDigest,
-		AgentManifestDigest: agentManifestDigest,
+		AgentManifestDigest: deployment.AgentManifest.Digest,
 	}
 }
 
