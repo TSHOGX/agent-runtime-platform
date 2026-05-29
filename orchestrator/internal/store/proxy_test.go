@@ -324,6 +324,13 @@ func TestProxyRequestStartRequiresContractAuthorizationFields(t *testing.T) {
 				payload["credential_policy"].(map[string]any)["proxy_token"] = "present"
 			},
 		},
+		{
+			name: "model grant excludes selected driver",
+			tamper: func(payload map[string]any) {
+				firstSecretGrantForTest(payload)["allowed_drivers"] = []string{"sh"}
+				refreshCredentialPolicyDigestForTest(t, payload)
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()

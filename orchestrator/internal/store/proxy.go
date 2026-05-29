@@ -211,6 +211,9 @@ WHERE sandbox_source_ip = ?
 }
 
 func validateProxyAuthorizationContract(record SandboxContractRecord, snapshot proxyAuthorizationSnapshot) error {
+	if err := validateLoadedSandboxContract(record); err != nil {
+		return fmt.Errorf("sandbox contract validation failed: %w", err)
+	}
 	var payload struct {
 		RuntimeProfileID string `json:"runtime_profile_id"`
 		Identity         struct {

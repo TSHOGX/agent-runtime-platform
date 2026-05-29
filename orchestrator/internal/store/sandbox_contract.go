@@ -552,7 +552,8 @@ func validateSandboxContractV2Semantics(object map[string]any, gateVersion strin
 		return fmt.Errorf("sandbox contract missing driver object")
 	}
 	driverID, _ := driver["driver_id"].(string)
-	if _, ok := agents.Lookup(driverID); !ok {
+	driverSpec, ok := agents.DriverSpecFor(driverID)
+	if !ok {
 		return fmt.Errorf("unsupported sandbox contract driver_id %q", driverID)
 	}
 	runtimeProvider, ok := object["runtime_provider"].(map[string]any)
@@ -560,7 +561,8 @@ func validateSandboxContractV2Semantics(object map[string]any, gateVersion strin
 		return fmt.Errorf("sandbox contract missing runtime_provider object")
 	}
 	providerID, _ := runtimeProvider["provider_id"].(string)
-	if providerID != "local_runsc" {
+	providerSpec, ok := agents.RuntimeProviderSpecFor(providerID)
+	if !ok {
 		return fmt.Errorf("unsupported runtime provider %q", providerID)
 	}
 	driverRuntime, ok := object["driver_runtime"].(map[string]any)
@@ -608,22 +610,42 @@ func validateSandboxContractV2Semantics(object map[string]any, gateVersion strin
 	identityModelAccess := boolFromObjectPath(object, "identity", "model_access_allowed")
 	modelAccess := boolFromObjectPath(object, "model_access", "model_access_allowed")
 	modelAccessEnabled := identityModelAccess && modelAccess
+	return validateCredentialPolicyGrantSemantics(policy, driverSpec, providerSpec, modelAccessEnabled)
+}
+
+func validateCredentialPolicyGrantSemantics(policy normalizedCredentialPolicy, driverSpec agents.DriverSpec, providerSpec agents.RuntimeProviderSpec, modelAccessEnabled bool) error {
+	if modelAccessEnabled && !driverSpec.ModelAccess {
+		return fmt.Errorf("driver %s does not support model access grants", driverSpec.ID)
+	}
 	modelGrant := false
 	for _, grant := range policy.SecretGrants {
-		if grant.Domain != "model_provider" {
-			return fmt.Errorf("unsupported credential grant domain %q", grant.Domain)
+		spec, ok := agents.SecretGrantSpecFor(grant.Domain, grant.Scope)
+		if !ok {
+			if grant.Domain != "model_provider" {
+				return fmt.Errorf("unsupported credential grant domain %q", grant.Domain)
+			}
+			return fmt.Errorf("unsupported model provider grant scope %q", grant.Scope)
 		}
-		if grant.ExposureMode != "proxy_only" {
+		if grant.GrantID != spec.GrantID {
+			return fmt.Errorf("credential grant_id %q does not match registry grant %q", grant.GrantID, spec.GrantID)
+		}
+		if grant.ExposureMode != spec.ExposureMode {
 			return fmt.Errorf("unsupported credential exposure mode %q", grant.ExposureMode)
 		}
-		if grant.Domain == "model_provider" {
+		if ttl, ok := credentialGrantTTLSeconds(grant.TTLSeconds); ok && spec.TTLMaxSeconds > 0 && ttl > spec.TTLMaxSeconds {
+			return fmt.Errorf("credential grant ttl_seconds %d exceeds maximum %d", ttl, spec.TTLMaxSeconds)
+		}
+		switch spec.Domain {
+		case "model_provider":
 			modelGrant = true
-			if !stringSliceContains(grant.AllowedDrivers, driverID) {
-				return fmt.Errorf("model provider grant does not allow driver %s", driverID)
+			if !stringSliceContains(grant.AllowedDrivers, string(driverSpec.ID)) {
+				return fmt.Errorf("model provider grant does not allow driver %s", driverSpec.ID)
 			}
-			if !stringSliceContains(grant.AllowedRuntimeProviders, providerID) {
-				return fmt.Errorf("model provider grant does not allow runtime provider %s", providerID)
+			if !stringSliceContains(grant.AllowedRuntimeProviders, providerSpec.ID) {
+				return fmt.Errorf("model provider grant does not allow runtime provider %s", providerSpec.ID)
 			}
+		default:
+			return fmt.Errorf("unsupported credential grant domain %q", grant.Domain)
 		}
 	}
 	if modelAccessEnabled && !modelGrant {
@@ -687,7 +709,7 @@ func normalizeCredentialPolicy(value any) (normalizedCredentialPolicy, error) {
 			}
 		}
 		for _, providerID := range grant.AllowedRuntimeProviders {
-			if providerID != "local_runsc" {
+			if _, ok := agents.RuntimeProviderSpecFor(providerID); !ok {
 				return normalizedCredentialPolicy{}, fmt.Errorf("unsupported credential grant runtime provider %q", providerID)
 			}
 		}
@@ -699,6 +721,24 @@ func normalizeCredentialPolicy(value any) (normalizedCredentialPolicy, error) {
 		return left < right
 	})
 	return policy, nil
+}
+
+func credentialGrantTTLSeconds(value any) (int64, bool) {
+	switch v := value.(type) {
+	case int64:
+		return v, true
+	case int:
+		return int64(v), true
+	case json.Number:
+		i, err := v.Int64()
+		return i, err == nil
+	case float64:
+		i := int64(v)
+		if float64(i) == v {
+			return i, true
+		}
+	}
+	return 0, false
 }
 
 func normalizedTTLSeconds(value any) any {

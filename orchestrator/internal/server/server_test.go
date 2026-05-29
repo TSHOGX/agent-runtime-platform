@@ -4648,6 +4648,7 @@ func createServerRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 		t.Fatalf("parse sandbox cidr: %v", err)
 	}
 	credentialPolicy := serverCredentialPolicyForTest(t, allocation.DriverState.DriverID)
+	modelAccessAllowed := allocation.DriverState.DriverID == "claude_code"
 	if _, err := st.StoreSandboxContract(ctx, store.StoreSandboxContractParams{
 		ContractID:   contractID,
 		SessionID:    sessionID,
@@ -4684,7 +4685,7 @@ func createServerRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 				"capability_digest":        "sha256:provider-capabilities",
 			},
 			"identity": map[string]any{
-				"model_access_allowed": true,
+				"model_access_allowed": modelAccessAllowed,
 			},
 			"network_identity": map[string]any{
 				"runsc_network": details.RunscNetwork,
@@ -4692,7 +4693,7 @@ func createServerRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 			},
 			"credential_policy": credentialPolicy,
 			"model_access": map[string]any{
-				"model_access_allowed": true,
+				"model_access_allowed": modelAccessAllowed,
 			},
 			"driver_runtime": map[string]any{
 				"driver_home_mount":             "/agent-home",
@@ -4787,11 +4788,9 @@ func createServerRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 
 func serverCredentialPolicyForTest(t *testing.T, driverID string) map[string]any {
 	t.Helper()
-	policy := map[string]any{
-		"provider_credentials": "host-only",
-		"sandbox_secret_mount": "absent",
-		"proxy_token":          "absent",
-		"secret_grants": []map[string]any{{
+	secretGrants := []map[string]any{}
+	if driverID == "claude_code" {
+		secretGrants = append(secretGrants, map[string]any{
 			"grant_id":                  "model_provider:anthropic_proxy",
 			"domain":                    "model_provider",
 			"scope":                     "anthropic_messages",
@@ -4799,7 +4798,13 @@ func serverCredentialPolicyForTest(t *testing.T, driverID string) map[string]any
 			"ttl_seconds":               nil,
 			"allowed_drivers":           []string{driverID},
 			"allowed_runtime_providers": []string{"local_runsc"},
-		}},
+		})
+	}
+	policy := map[string]any{
+		"provider_credentials": "host-only",
+		"sandbox_secret_mount": "absent",
+		"proxy_token":          "absent",
+		"secret_grants":        secretGrants,
 	}
 	digest, err := store.CredentialPolicyDigest(policy)
 	if err != nil {

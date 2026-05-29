@@ -74,6 +74,14 @@ type RuntimeProviderSpec struct {
 	SnapshotPolicy       SnapshotPolicySpec
 }
 
+type SecretGrantSpec struct {
+	Domain        string
+	GrantID       string
+	Scope         string
+	ExposureMode  string
+	TTLMaxSeconds int64
+}
+
 var driverSpecs = map[ID]DriverSpec{
 	ClaudeCode: normalizeDriverSpec(DriverSpec{
 		ID:                    ClaudeCode,
@@ -152,6 +160,16 @@ var runtimeProviderSpecs = map[string]RuntimeProviderSpec{
 	}),
 }
 
+var secretGrantSpecs = map[string]SecretGrantSpec{
+	secretGrantSpecKey("model_provider", "anthropic_messages"): {
+		Domain:        "model_provider",
+		GrantID:       "model_provider:anthropic_proxy",
+		Scope:         "anthropic_messages",
+		ExposureMode:  "proxy_only",
+		TTLMaxSeconds: 86400,
+	},
+}
+
 func Lookup(value string) (Definition, bool) {
 	spec, ok := DriverSpecFor(value)
 	if !ok {
@@ -191,6 +209,14 @@ func RuntimeProviderSpecFor(value string) (RuntimeProviderSpec, bool) {
 		return RuntimeProviderSpec{}, false
 	}
 	return cloneRuntimeProviderSpec(spec), true
+}
+
+func SecretGrantSpecFor(domain, scope string) (SecretGrantSpec, bool) {
+	spec, ok := secretGrantSpecs[secretGrantSpecKey(domain, scope)]
+	if !ok {
+		return SecretGrantSpec{}, false
+	}
+	return spec, true
 }
 
 func EnsureDriverSupportedByProvider(driverID, providerID string) error {
@@ -261,6 +287,10 @@ func normalizeDriverSpec(spec DriverSpec) DriverSpec {
 func normalizeRuntimeProviderSpec(spec RuntimeProviderSpec) RuntimeProviderSpec {
 	sort.Strings(spec.Capabilities)
 	return spec
+}
+
+func secretGrantSpecKey(domain, scope string) string {
+	return strings.TrimSpace(domain) + "\x00" + strings.TrimSpace(scope)
 }
 
 func cloneDriverSpec(spec DriverSpec) DriverSpec {

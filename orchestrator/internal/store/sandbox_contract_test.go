@@ -85,6 +85,129 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(
 	}
 }
 
+func TestCredentialPolicyDigestV1StableForModelProviderGrant(t *testing.T) {
+	policy := map[string]any{
+		"provider_credentials": "host-only",
+		"sandbox_secret_mount": "absent",
+		"proxy_token":          "absent",
+		"secret_grants": []map[string]any{{
+			"grant_id":                  "model_provider:anthropic_proxy",
+			"domain":                    "model_provider",
+			"scope":                     "anthropic_messages",
+			"exposure_mode":             "proxy_only",
+			"ttl_seconds":               nil,
+			"allowed_drivers":           []string{"claude_code"},
+			"allowed_runtime_providers": []string{"local_runsc"},
+		}},
+	}
+	digest, err := CredentialPolicyDigest(policy)
+	if err != nil {
+		t.Fatalf("credential policy digest: %v", err)
+	}
+	if digest != "sha256:d016de1bb099d7b6c778c1e0328c0ce69c093b022dd1251f65d3db53cb526529" {
+		t.Fatalf("credential_policy_digest_v1 changed: %s", digest)
+	}
+}
+
+func TestStoreSandboxContractRejectsInvalidSecretGrantSemantics(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		tamper func(map[string]any)
+		want   string
+	}{
+		{
+			name: "reserved non model domain",
+			tamper: func(payload map[string]any) {
+				grant := firstSecretGrantForTest(payload)
+				grant["grant_id"] = "git:repo"
+				grant["domain"] = "git"
+				grant["scope"] = "repo"
+			},
+			want: `unsupported credential grant domain "git"`,
+		},
+		{
+			name: "wrong model grant id",
+			tamper: func(payload map[string]any) {
+				firstSecretGrantForTest(payload)["grant_id"] = "model_provider:other"
+			},
+			want: `credential grant_id "model_provider:other" does not match registry grant "model_provider:anthropic_proxy"`,
+		},
+		{
+			name: "unsupported model scope",
+			tamper: func(payload map[string]any) {
+				firstSecretGrantForTest(payload)["scope"] = "openai_responses"
+			},
+			want: `unsupported model provider grant scope "openai_responses"`,
+		},
+		{
+			name: "unsupported exposure mode",
+			tamper: func(payload map[string]any) {
+				firstSecretGrantForTest(payload)["exposure_mode"] = "gateway_url"
+			},
+			want: `unsupported credential exposure mode "gateway_url"`,
+		},
+		{
+			name: "ttl exceeds registry bound",
+			tamper: func(payload map[string]any) {
+				firstSecretGrantForTest(payload)["ttl_seconds"] = 86401
+			},
+			want: "credential grant ttl_seconds 86401 exceeds maximum 86400",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			st, owner := openOwnedStore(t, ctx)
+			sessionID := "sess_secret_grant_" + strings.ReplaceAll(tc.name, " ", "_")
+			createStoreSession(t, ctx, st, sessionID)
+			now := time.Now().UTC()
+			allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+				SessionID: sessionID,
+				Owner:     GenerationLeaseOwner(owner.UUID),
+				LeaseTTL:  time.Minute,
+				Now:       now,
+				Config:    testAllocatorConfig(t),
+			})
+			if err != nil {
+				t.Fatalf("allocate generation: %v", err)
+			}
+			payload := testSandboxContractPayload(t, sessionID, allocation)
+			tc.tamper(payload)
+			refreshCredentialPolicyDigestForTest(t, payload)
+			_, err = st.StoreSandboxContract(ctx, StoreSandboxContractParams{
+				ContractID:   "contract_" + allocation.GenerationID,
+				SessionID:    sessionID,
+				GenerationID: allocation.GenerationID,
+				Payload:      payload,
+				Now:          now.Add(time.Second),
+			})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("StoreSandboxContract err=%v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestCredentialPolicyDigestRejectsUnknownGrantRegistryReferences(t *testing.T) {
+	policy := map[string]any{
+		"provider_credentials": "host-only",
+		"sandbox_secret_mount": "absent",
+		"proxy_token":          "absent",
+		"secret_grants": []map[string]any{{
+			"grant_id":                  "model_provider:anthropic_proxy",
+			"domain":                    "model_provider",
+			"scope":                     "anthropic_messages",
+			"exposure_mode":             "proxy_only",
+			"ttl_seconds":               nil,
+			"allowed_drivers":           []string{"claude_code"},
+			"allowed_runtime_providers": []string{"unknown_runsc"},
+		}},
+	}
+	_, err := CredentialPolicyDigest(policy)
+	if err == nil || !strings.Contains(err.Error(), `unsupported credential grant runtime provider "unknown_runsc"`) {
+		t.Fatalf("CredentialPolicyDigest err=%v, want unknown runtime provider", err)
+	}
+}
+
 func TestGetSandboxContractForGenerationRejectsPayloadDigestMismatch(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
@@ -405,4 +528,27 @@ func testSandboxContractPayload(t *testing.T, sessionID string, allocation Gener
 			"agent_manifest_digest": nil,
 		},
 	}
+}
+
+func firstSecretGrantForTest(payload map[string]any) map[string]any {
+	policy := payload["credential_policy"].(map[string]any)
+	switch grants := policy["secret_grants"].(type) {
+	case []map[string]any:
+		return grants[0]
+	case []any:
+		return grants[0].(map[string]any)
+	default:
+		panic("unexpected secret_grants test shape")
+	}
+}
+
+func refreshCredentialPolicyDigestForTest(t *testing.T, payload map[string]any) {
+	t.Helper()
+	policy := payload["credential_policy"].(map[string]any)
+	delete(policy, "digest")
+	digest, err := CredentialPolicyDigest(policy)
+	if err != nil {
+		t.Fatalf("credential digest: %v", err)
+	}
+	policy["digest"] = digest
 }
