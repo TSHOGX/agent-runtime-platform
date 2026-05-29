@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"harness-platform/orchestrator/internal/agents"
 )
 
 func TestStoreSandboxContractPersistsCanonicalDigestAndMirrors(t *testing.T) {
@@ -205,6 +207,77 @@ func TestCredentialPolicyDigestRejectsUnknownGrantRegistryReferences(t *testing.
 	_, err := CredentialPolicyDigest(policy)
 	if err == nil || !strings.Contains(err.Error(), `unsupported credential grant runtime provider "unknown_runsc"`) {
 		t.Fatalf("CredentialPolicyDigest err=%v, want unknown runtime provider", err)
+	}
+}
+
+func TestSandboxContractPiMaterializedConfigSemantics(t *testing.T) {
+	payload := testSandboxContractPayload(t, "sess_pi_contract", GenerationAllocation{
+		GenerationID:          "gen_pi_contract",
+		NetworkProfileID:      "net_pi_contract",
+		AgentRuntimeProfileID: "arp_pi_contract",
+		DriverState: DriverStateToken{
+			DriverID:    "pi",
+			StateDigest: "sha256:pi-state",
+		},
+	})
+	addPiMaterializedConfigForTest(payload)
+	assertSandboxContractSemanticsForTest(t, payload)
+
+	tests := []struct {
+		name   string
+		mutate func(map[string]any)
+		want   string
+	}{
+		{
+			name: "missing mount evidence",
+			mutate: func(payload map[string]any) {
+				delete(payload["mount_plan"].(map[string]any), "driver_config_materializations")
+			},
+			want: "driver_config_materializations",
+		},
+		{
+			name: "writable runtime destination",
+			mutate: func(payload map[string]any) {
+				materialized := payload["driver_runtime"].(map[string]any)["materialized_driver_config"].(map[string]any)
+				materialized["models"].(map[string]any)["destination_mutable_by_sandbox"] = true
+			},
+			want: "destination must be immutable",
+		},
+		{
+			name: "copied destination",
+			mutate: func(payload map[string]any) {
+				mounts := payload["mount_plan"].(map[string]any)["driver_config_materializations"].(map[string]any)
+				mounts["settings"].(map[string]any)["type"] = "copy"
+			},
+			want: "type",
+		},
+		{
+			name: "source mismatch",
+			mutate: func(payload map[string]any) {
+				materialized := payload["driver_runtime"].(map[string]any)["materialized_driver_config"].(map[string]any)
+				materialized["models"].(map[string]any)["source_projection_path"] = "/agent-home/.pi/agent/models.json"
+			},
+			want: "source_projection_path",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			candidate := testSandboxContractPayload(t, "sess_pi_contract", GenerationAllocation{
+				GenerationID:          "gen_pi_contract",
+				NetworkProfileID:      "net_pi_contract",
+				AgentRuntimeProfileID: "arp_pi_contract",
+				DriverState: DriverStateToken{
+					DriverID:    "pi",
+					StateDigest: "sha256:pi-state",
+				},
+			})
+			addPiMaterializedConfigForTest(candidate)
+			tt.mutate(candidate)
+			err := sandboxContractSemanticsErrorForTest(candidate)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err=%v want %q", err, tt.want)
+			}
+		})
 	}
 }
 
@@ -528,6 +601,63 @@ func testSandboxContractPayload(t *testing.T, sessionID string, allocation Gener
 			"agent_manifest_digest": nil,
 		},
 	}
+}
+
+func addPiMaterializedConfigForTest(payload map[string]any) {
+	runtimeEntries := map[string]any{
+		"models": map[string]any{
+			"source_projection_path":         agents.PiModelsConfigPath,
+			"source_digest":                  "sha256:models",
+			"sandbox_destination":            agents.PiModelsSandboxPath,
+			"destination_mutable_by_sandbox": false,
+		},
+		"settings": map[string]any{
+			"source_projection_path":         agents.PiSettingsConfigPath,
+			"source_digest":                  "sha256:settings",
+			"sandbox_destination":            agents.PiSettingsSandboxPath,
+			"destination_mutable_by_sandbox": false,
+		},
+	}
+	mountEntries := map[string]any{
+		"models": map[string]any{
+			"type":                           "bind",
+			"mode":                           "ro",
+			"exact":                          true,
+			"source_projection_path":         agents.PiModelsConfigPath,
+			"sandbox_destination":            agents.PiModelsSandboxPath,
+			"destination_mutable_by_sandbox": false,
+		},
+		"settings": map[string]any{
+			"type":                           "bind",
+			"mode":                           "ro",
+			"exact":                          true,
+			"source_projection_path":         agents.PiSettingsConfigPath,
+			"sandbox_destination":            agents.PiSettingsSandboxPath,
+			"destination_mutable_by_sandbox": false,
+		},
+	}
+	payload["driver_runtime"].(map[string]any)["materialized_driver_config"] = runtimeEntries
+	payload["mount_plan"].(map[string]any)["driver_config_materializations"] = mountEntries
+}
+
+func assertSandboxContractSemanticsForTest(t *testing.T, payload map[string]any) {
+	t.Helper()
+	if err := sandboxContractSemanticsErrorForTest(payload); err != nil {
+		t.Fatalf("sandbox contract semantics rejected payload: %v", err)
+	}
+}
+
+func sandboxContractSemanticsErrorForTest(payload map[string]any) error {
+	canonical, err := CanonicalSandboxContractPayload(payload)
+	if err != nil {
+		return err
+	}
+	object, err := decodeSandboxContractObject(canonical)
+	if err != nil {
+		return err
+	}
+	gateVersion, _ := payload["contract_gate_version"].(string)
+	return validateSandboxContractV2Semantics(object, gateVersion)
 }
 
 func firstSecretGrantForTest(payload map[string]any) map[string]any {

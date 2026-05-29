@@ -572,6 +572,11 @@ func validateSandboxContractV2Semantics(object map[string]any, gateVersion strin
 	if digest, _ := driverRuntime["initial_driver_state_digest"].(string); !strings.HasPrefix(digest, "sha256:") {
 		return fmt.Errorf("driver runtime initial_driver_state_digest is required")
 	}
+	if driverSpec.ID == agents.Pi {
+		if err := validatePiDriverConfigMaterialization(object, driverRuntime); err != nil {
+			return err
+		}
+	}
 	inputDigests, ok := object["input_digests"].(map[string]any)
 	if !ok {
 		return fmt.Errorf("sandbox contract missing input_digests object")
@@ -611,6 +616,72 @@ func validateSandboxContractV2Semantics(object map[string]any, gateVersion strin
 	modelAccess := boolFromObjectPath(object, "model_access", "model_access_allowed")
 	modelAccessEnabled := identityModelAccess && modelAccess
 	return validateCredentialPolicyGrantSemantics(policy, driverSpec, providerSpec, modelAccessEnabled)
+}
+
+func validatePiDriverConfigMaterialization(contract map[string]any, driverRuntime map[string]any) error {
+	materialized, ok := driverRuntime["materialized_driver_config"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("pi driver runtime missing materialized_driver_config")
+	}
+	mountPlan, ok := contract["mount_plan"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("pi sandbox contract missing mount_plan")
+	}
+	mountMaterialized, ok := mountPlan["driver_config_materializations"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("pi mount plan missing driver_config_materializations")
+	}
+	expected := map[string]struct {
+		source      string
+		destination string
+	}{
+		"models":   {source: agents.PiModelsConfigPath, destination: agents.PiModelsSandboxPath},
+		"settings": {source: agents.PiSettingsConfigPath, destination: agents.PiSettingsSandboxPath},
+	}
+	if len(materialized) != len(expected) || len(mountMaterialized) != len(expected) {
+		return fmt.Errorf("pi driver config materialization must contain exactly models and settings")
+	}
+	for name, want := range expected {
+		runtimeEntry, ok := materialized[name].(map[string]any)
+		if !ok {
+			return fmt.Errorf("pi driver runtime missing %s materialization", name)
+		}
+		mountEntry, ok := mountMaterialized[name].(map[string]any)
+		if !ok {
+			return fmt.Errorf("pi mount plan missing %s materialization", name)
+		}
+		if source, _ := runtimeEntry["source_projection_path"].(string); source != want.source {
+			return fmt.Errorf("pi runtime %s source_projection_path = %q", name, source)
+		}
+		if digest, _ := runtimeEntry["source_digest"].(string); !strings.HasPrefix(digest, "sha256:") {
+			return fmt.Errorf("pi runtime %s source_digest is required", name)
+		}
+		if destination, _ := runtimeEntry["sandbox_destination"].(string); destination != want.destination {
+			return fmt.Errorf("pi runtime %s sandbox_destination = %q", name, destination)
+		}
+		if mutable, _ := runtimeEntry["destination_mutable_by_sandbox"].(bool); mutable {
+			return fmt.Errorf("pi runtime %s destination must be immutable", name)
+		}
+		if typ, _ := mountEntry["type"].(string); typ != "bind" {
+			return fmt.Errorf("pi mount %s type = %q", name, typ)
+		}
+		if mode, _ := mountEntry["mode"].(string); mode != "ro" {
+			return fmt.Errorf("pi mount %s mode = %q", name, mode)
+		}
+		if exact, _ := mountEntry["exact"].(bool); !exact {
+			return fmt.Errorf("pi mount %s must be exact", name)
+		}
+		if source, _ := mountEntry["source_projection_path"].(string); source != want.source {
+			return fmt.Errorf("pi mount %s source_projection_path = %q", name, source)
+		}
+		if destination, _ := mountEntry["sandbox_destination"].(string); destination != want.destination {
+			return fmt.Errorf("pi mount %s sandbox_destination = %q", name, destination)
+		}
+		if mutable, _ := mountEntry["destination_mutable_by_sandbox"].(bool); mutable {
+			return fmt.Errorf("pi mount %s destination must be immutable", name)
+		}
+	}
+	return nil
 }
 
 func validateCredentialPolicyGrantSemantics(policy normalizedCredentialPolicy, driverSpec agents.DriverSpec, providerSpec agents.RuntimeProviderSpec, modelAccessEnabled bool) error {

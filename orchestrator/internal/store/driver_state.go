@@ -21,7 +21,6 @@ const (
 	emptyDriverStateKind               = "empty"
 	piDriverStateKindUninitialized     = "pi_uninitialized"
 	piDriverStateKindSession           = "pi_session"
-	piSessionDir                       = "/agent-home/.pi/agent/sessions"
 )
 
 type DriverStateToken struct {
@@ -122,7 +121,7 @@ func canonicalBootstrapDriverState(driverID, claudeSessionUUID string) ([]byte, 
 			"schema_version": 1,
 			"driver_id":      string(agents.Pi),
 			"state_kind":     piDriverStateKindUninitialized,
-			"session_dir":    piSessionDir,
+			"session_dir":    agents.PiSessionDir,
 		}, string(agents.Pi))
 	default:
 		return nil, "", fmt.Errorf("unsupported driver %q", driverID)
@@ -190,7 +189,7 @@ func validateDriverStatePayload(canonicalPayload []byte, driverID string) error 
 }
 
 func validatePiDriverStatePayload(object map[string]any) error {
-	if sessionDir, _ := object["session_dir"].(string); sessionDir != piSessionDir {
+	if sessionDir, _ := object["session_dir"].(string); sessionDir != agents.PiSessionDir {
 		return fmt.Errorf("pi driver state session_dir = %q", sessionDir)
 	}
 	switch got, _ := object["state_kind"].(string); got {
@@ -214,8 +213,8 @@ func validatePiDriverStatePayload(object map[string]any) error {
 			}
 		}
 		selectedFile, _ := object["selected_session_file"].(string)
-		if selectedFile != piSessionDir+"/"+rel {
-			return fmt.Errorf("pi driver state selected_session_file = %q, want %q", selectedFile, piSessionDir+"/"+rel)
+		if selectedFile != agents.PiSessionDir+"/"+rel {
+			return fmt.Errorf("pi driver state selected_session_file = %q, want %q", selectedFile, agents.PiSessionDir+"/"+rel)
 		}
 		if strings.TrimSpace(stringValue(object["selected_session_id"])) == "" {
 			return fmt.Errorf("pi driver state selected_session_id is required")

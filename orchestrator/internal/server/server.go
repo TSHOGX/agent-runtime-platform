@@ -1286,7 +1286,12 @@ func (s *Server) resourceAllocatorConfig(agent string) store.ResourceAllocatorCo
 		agent = string(driverID)
 	}
 	outputFormat := s.cfg.Claude.OutputFormat
-	if agent == string(agents.Shell) {
+	switch agent {
+	case string(agents.Pi):
+		if spec, ok := agents.DriverSpecFor(agent); ok {
+			outputFormat = spec.OutputFormat
+		}
+	case string(agents.Shell):
 		outputFormat = "shell_pty"
 	}
 	return store.ResourceAllocatorConfig{
@@ -1404,6 +1409,67 @@ func sandboxContractID(generationID string) string {
 	return "contract_" + strings.TrimSpace(generationID)
 }
 
+func driverConfigMaterializationPayload(driverID string, entries []runtime.DriverConfigMaterialization) (map[string]any, map[string]any, error) {
+	driverID = strings.TrimSpace(driverID)
+	if driverID != string(agents.Pi) {
+		if len(entries) != 0 {
+			return nil, nil, fmt.Errorf("driver config materialization is only supported for pi")
+		}
+		return map[string]any{}, nil, nil
+	}
+	if len(entries) != 2 {
+		return nil, nil, fmt.Errorf("pi driver config materialization requires models and settings projections")
+	}
+	runtimePayload := map[string]any{}
+	mountPayload := map[string]any{}
+	expected := map[string]struct {
+		source      string
+		destination string
+	}{
+		"models":   {source: agents.PiModelsConfigPath, destination: agents.PiModelsSandboxPath},
+		"settings": {source: agents.PiSettingsConfigPath, destination: agents.PiSettingsSandboxPath},
+	}
+	seen := map[string]struct{}{}
+	for _, entry := range entries {
+		name := strings.TrimSpace(entry.Name)
+		want, ok := expected[name]
+		if !ok {
+			return nil, nil, fmt.Errorf("unsupported pi driver config materialization %q", entry.Name)
+		}
+		if _, ok := seen[name]; ok {
+			return nil, nil, fmt.Errorf("duplicate pi driver config materialization %q", name)
+		}
+		seen[name] = struct{}{}
+		if entry.SourceProjectionPath != want.source || entry.SandboxDestination != want.destination {
+			return nil, nil, fmt.Errorf("pi driver config materialization %s path mismatch", name)
+		}
+		if !strings.HasPrefix(strings.TrimSpace(entry.SourceDigest), "sha256:") {
+			return nil, nil, fmt.Errorf("pi driver config materialization %s digest is required", name)
+		}
+		if entry.DestinationMutableBySandbox {
+			return nil, nil, fmt.Errorf("pi driver config materialization %s must be read-only", name)
+		}
+		runtimePayload[name] = map[string]any{
+			"source_projection_path":         entry.SourceProjectionPath,
+			"source_digest":                  entry.SourceDigest,
+			"sandbox_destination":            entry.SandboxDestination,
+			"destination_mutable_by_sandbox": entry.DestinationMutableBySandbox,
+		}
+		mountPayload[name] = map[string]any{
+			"type":                           "bind",
+			"mode":                           "ro",
+			"exact":                          true,
+			"source_projection_path":         entry.SourceProjectionPath,
+			"sandbox_destination":            entry.SandboxDestination,
+			"destination_mutable_by_sandbox": entry.DestinationMutableBySandbox,
+		}
+	}
+	if len(seen) != len(expected) {
+		return nil, nil, fmt.Errorf("pi driver config materialization missing required projections")
+	}
+	return runtimePayload, mountPayload, nil
+}
+
 func (s *Server) sandboxContractPayload(session store.Session, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, resourceIdentityDigest string, volumes sessionRuntimeDataVolumes) (map[string]any, error) {
 	runscPlatform := strings.TrimSpace(details.RunscPlatform)
 	if runscPlatform == "" {
@@ -1446,11 +1512,22 @@ func (s *Server) sandboxContractPayload(session store.Session, details store.Run
 	if strings.TrimSpace(details.NetworkHostsPath) != "" {
 		mountPlan["network_hosts"] = map[string]any{"source": details.NetworkHostsPath, "destination": "/etc/hosts", "mode": "ro"}
 	}
-	driverConfigDigest := phase9ContractDigest(map[string]any{
+	materializedDriverConfig, mountMaterializations, err := driverConfigMaterializationPayload(driverID, artifacts.MaterializedDriverConfig)
+	if err != nil {
+		return nil, err
+	}
+	if len(mountMaterializations) > 0 {
+		mountPlan["driver_config_materializations"] = mountMaterializations
+	}
+	driverConfigPreimage := map[string]any{
 		"driver_id":     driverID,
 		"model":         details.Model,
 		"output_format": details.OutputFormat,
-	})
+	}
+	if len(materializedDriverConfig) > 0 {
+		driverConfigPreimage["materialized_driver_config"] = materializedDriverConfig
+	}
+	driverConfigDigest := phase9ContractDigest(driverConfigPreimage)
 	commandDigest := phase9ContractDigest(map[string]any{
 		"driver_id":    driverID,
 		"protocol":     details.OutputFormat,
@@ -1636,7 +1713,7 @@ func (s *Server) sandboxContractPayload(session store.Session, details store.Run
 		"driver_runtime": map[string]any{
 			"driver_home_mount":             "/agent-home",
 			"generated_driver_config_mount": "/harness-control/driver/" + driverID,
-			"materialized_driver_config":    map[string]any{},
+			"materialized_driver_config":    materializedDriverConfig,
 			"initial_driver_state_digest":   initialDriverStateDigest,
 		},
 		"input_digests": map[string]any{
@@ -1722,6 +1799,12 @@ func effectiveString(value, fallback string) string {
 
 func driverInstallDigest(driverID agents.ID) string {
 	switch driverID {
+	case agents.Pi:
+		return phase9ContractDigest(map[string]any{
+			"driver_id": string(driverID),
+			"path":      "/usr/local/bin/pi",
+			"package":   "pi",
+		})
 	case agents.Shell:
 		return phase9ContractDigest(map[string]any{
 			"driver_id": string(driverID),

@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"harness-platform/orchestrator/internal/agents"
 	"harness-platform/orchestrator/internal/bridge"
 	"harness-platform/orchestrator/internal/store"
 )
@@ -1868,6 +1869,118 @@ func TestPrepareClaudeHostOnlyGenerationHasNoSecretMount(t *testing.T) {
 	hostsData := mustReadFile(t, details.NetworkHostsPath)
 	if string(hostsData) != "127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n10.200.1.1 harness-model-proxy.internal\n" {
 		t.Fatalf("unexpected network hosts projection: %s", hostsData)
+	}
+}
+
+func TestPreparePiGenerationMaterializesReadOnlyConfig(t *testing.T) {
+	dir := t.TempDir()
+	rt := New(Config{
+		SessionsRoot:       filepath.Join(dir, "sessions"),
+		AgentHomesRoot:     filepath.Join(dir, "agent-homes"),
+		BundleRoot:         filepath.Join(dir, "bundle", "out"),
+		RootFSPath:         filepath.Join(dir, "rootfs"),
+		BridgeHeartbeat:    20 * time.Second,
+		BridgePollInterval: 5 * time.Millisecond,
+		Claude: ClaudeConfig{
+			ProxyBindURL:               "http://0.0.0.0:8082",
+			Model:                      "sonnet",
+			OutputFormat:               "stream-json",
+			DisableNonessentialTraffic: true,
+		},
+	})
+	details := testGenerationDetails(dir, "gen_pi_config")
+	details.SessionID = "sess_pi"
+	details.Agent = "pi"
+	details.OutputFormat = "pi_rpc_events_v1.0"
+	details.Model = "sonnet"
+	details.ManifestAnthropicBaseURL = "http://harness-model-proxy.internal:8082"
+
+	artifacts, err := rt.PrepareGeneration(context.Background(), withDataVolumePathsForTest(dir, StartRequest{
+		SessionID:    "sess_pi",
+		GenerationID: details.GenerationID,
+		Agent:        "pi",
+		Generation:   details,
+	}))
+	if err != nil {
+		t.Fatalf("prepare pi generation: %v", err)
+	}
+	if len(artifacts.MaterializedDriverConfig) != 2 {
+		t.Fatalf("materialized pi config = %+v", artifacts.MaterializedDriverConfig)
+	}
+	entries := map[string]DriverConfigMaterialization{}
+	for _, entry := range artifacts.MaterializedDriverConfig {
+		entries[entry.Name] = entry
+		data := mustReadFile(t, entry.HostSourcePath)
+		if prefixedSHA256(data) != entry.SourceDigest {
+			t.Fatalf("%s digest mismatch: entry=%s data=%s", entry.Name, entry.SourceDigest, data)
+		}
+		if entry.DestinationMutableBySandbox {
+			t.Fatalf("%s config destination must be immutable: %+v", entry.Name, entry)
+		}
+	}
+	if entries["models"].SourceProjectionPath != agents.PiModelsConfigPath ||
+		entries["models"].SandboxDestination != agents.PiModelsSandboxPath ||
+		entries["settings"].SourceProjectionPath != agents.PiSettingsConfigPath ||
+		entries["settings"].SandboxDestination != agents.PiSettingsSandboxPath {
+		t.Fatalf("unexpected pi materialization entries: %+v", entries)
+	}
+
+	var models map[string]any
+	if err := json.Unmarshal(mustReadFile(t, entries["models"].HostSourcePath), &models); err != nil {
+		t.Fatalf("parse pi models config: %v", err)
+	}
+	modelsJSON := string(mustJSONForTest(t, models))
+	if !strings.Contains(modelsJSON, agents.PiHarnessProxyProvider) ||
+		!strings.Contains(modelsJSON, "http://harness-model-proxy.internal:8082") ||
+		strings.Contains(modelsJSON, `"anthropic"`) {
+		t.Fatalf("pi models config does not force harness proxy provider: %s", modelsJSON)
+	}
+	if strings.Contains(modelsJSON, "sk-ant-") || strings.Contains(modelsJSON, "ANTHROPIC_API_KEY") {
+		t.Fatalf("pi models config leaked provider credentials: %s", modelsJSON)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(mustReadFile(t, entries["settings"].HostSourcePath), &settings); err != nil {
+		t.Fatalf("parse pi settings config: %v", err)
+	}
+	if settings["coding_agent_dir"] != agents.PiCodingAgentDir ||
+		settings["session_dir"] != agents.PiSessionDir ||
+		settings["offline"] != true ||
+		settings["skip_version_check"] != true ||
+		settings["telemetry"] != false {
+		t.Fatalf("unexpected pi settings config: %+v", settings)
+	}
+
+	var spec runtimeSpec
+	if err := json.Unmarshal(mustReadFile(t, details.SpecPath), &spec); err != nil {
+		t.Fatalf("parse pi runtime spec: %v", err)
+	}
+	modelsMount := mountByDestination(spec.Mounts, agents.PiModelsSandboxPath)
+	settingsMount := mountByDestination(spec.Mounts, agents.PiSettingsSandboxPath)
+	if modelsMount == nil || modelsMount.Source != entries["models"].HostSourcePath || strings.Join(modelsMount.Options, ",") != "bind,ro,nosuid,nodev,noexec" {
+		t.Fatalf("unexpected pi models mount: %+v", modelsMount)
+	}
+	if settingsMount == nil || settingsMount.Source != entries["settings"].HostSourcePath || strings.Join(settingsMount.Options, ",") != "bind,ro,nosuid,nodev,noexec" {
+		t.Fatalf("unexpected pi settings mount: %+v", settingsMount)
+	}
+	env := specEnv(spec.Process.Env)
+	if env["PI_CODING_AGENT_DIR"] != agents.PiCodingAgentDir ||
+		env["PI_CODING_AGENT_SESSION_DIR"] != agents.PiSessionDir ||
+		env["PI_OFFLINE"] != "1" ||
+		env["PI_SKIP_VERSION_CHECK"] != "1" ||
+		env["PI_TELEMETRY"] != "0" {
+		t.Fatalf("runtime spec missing pi env: %+v", env)
+	}
+
+	var manifestFile controlManifestFile
+	if err := json.Unmarshal(mustReadFile(t, details.ControlManifestPath), &manifestFile); err != nil {
+		t.Fatalf("parse pi control manifest: %v", err)
+	}
+	if manifestFile.Payload.PiCodingAgentDir != agents.PiCodingAgentDir ||
+		manifestFile.Payload.PiCodingAgentSessionDir != agents.PiSessionDir ||
+		!manifestFile.Payload.PiOffline ||
+		!manifestFile.Payload.PiSkipVersionCheck ||
+		!manifestFile.Payload.PiTelemetryDisabled {
+		t.Fatalf("control manifest missing pi startup gates: %+v", manifestFile.Payload)
 	}
 }
 

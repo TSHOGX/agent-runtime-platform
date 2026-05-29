@@ -174,6 +174,11 @@ type controlManifest struct {
 	EgressPolicyDigest                   string `json:"egress_policy_digest"`
 	ManifestVersion                      int    `json:"manifest_version"`
 	ClaudeCodeDisableNonessentialTraffic bool   `json:"claude_code_disable_nonessential_traffic"`
+	PiCodingAgentDir                     string `json:"pi_coding_agent_dir,omitempty"`
+	PiCodingAgentSessionDir              string `json:"pi_coding_agent_session_dir,omitempty"`
+	PiOffline                            bool   `json:"pi_offline,omitempty"`
+	PiSkipVersionCheck                   bool   `json:"pi_skip_version_check,omitempty"`
+	PiTelemetryDisabled                  bool   `json:"pi_telemetry_disabled,omitempty"`
 }
 
 type controlManifestFile struct {
@@ -219,18 +224,28 @@ type specMount struct {
 }
 
 type GenerationArtifacts struct {
-	BundleDir               string
-	SpecPath                string
-	ManifestPath            string
-	ManifestDigest          string
-	ProjectedManifestDigest string
-	BundleDigest            string
-	RuntimeConfigDigest     string
-	SpecDigest              string
-	RunscVersion            string
-	RunscBinaryPath         string
-	RunscBinaryDigest       string
-	NetworkPrepared         bool
+	BundleDir                string
+	SpecPath                 string
+	ManifestPath             string
+	ManifestDigest           string
+	ProjectedManifestDigest  string
+	BundleDigest             string
+	RuntimeConfigDigest      string
+	SpecDigest               string
+	RunscVersion             string
+	RunscBinaryPath          string
+	RunscBinaryDigest        string
+	NetworkPrepared          bool
+	MaterializedDriverConfig []DriverConfigMaterialization
+}
+
+type DriverConfigMaterialization struct {
+	Name                        string
+	SourceProjectionPath        string
+	HostSourcePath              string
+	SourceDigest                string
+	SandboxDestination          string
+	DestinationMutableBySandbox bool
 }
 
 type runscPin struct {
@@ -1164,6 +1179,10 @@ func (r *Runtime) renderGenerationArtifacts(ctx context.Context, req StartReques
 	if err := r.writeNetworkHostsProjection(details); err != nil {
 		return GenerationArtifacts{}, err
 	}
+	materializedDriverConfig, err := r.writeDriverConfigProjection(req)
+	if err != nil {
+		return GenerationArtifacts{}, err
+	}
 	spec, specDigest, err := r.renderRuntimeSpec(req)
 	if err != nil {
 		return GenerationArtifacts{}, err
@@ -1201,17 +1220,18 @@ func (r *Runtime) renderGenerationArtifacts(ctx context.Context, req StartReques
 		return GenerationArtifacts{}, err
 	}
 	return GenerationArtifacts{
-		BundleDir:               details.BundleDirPath,
-		SpecPath:                details.SpecPath,
-		ManifestPath:            details.ControlManifestPath,
-		ManifestDigest:          manifestDigest,
-		ProjectedManifestDigest: projectedManifestDigest,
-		BundleDigest:            bundleDigest,
-		RuntimeConfigDigest:     runtimeConfigDigest,
-		SpecDigest:              specDigest,
-		RunscVersion:            currentRunsc.Version,
-		RunscBinaryPath:         currentRunsc.BinaryPath,
-		RunscBinaryDigest:       currentRunsc.BinaryDigest,
+		BundleDir:                details.BundleDirPath,
+		SpecPath:                 details.SpecPath,
+		ManifestPath:             details.ControlManifestPath,
+		ManifestDigest:           manifestDigest,
+		ProjectedManifestDigest:  projectedManifestDigest,
+		BundleDigest:             bundleDigest,
+		RuntimeConfigDigest:      runtimeConfigDigest,
+		SpecDigest:               specDigest,
+		RunscVersion:             currentRunsc.Version,
+		RunscBinaryPath:          currentRunsc.BinaryPath,
+		RunscBinaryDigest:        currentRunsc.BinaryDigest,
+		MaterializedDriverConfig: materializedDriverConfig,
 	}, nil
 }
 
@@ -1250,6 +1270,97 @@ func (r *Runtime) writeNetworkHostsProjection(details store.RuntimeGenerationDet
 		return fmt.Errorf("write network hosts projection: %w", err)
 	}
 	return nil
+}
+
+func (r *Runtime) writeDriverConfigProjection(req StartRequest) ([]DriverConfigMaterialization, error) {
+	if driverID(req) != string(agents.Pi) {
+		return nil, nil
+	}
+	details := req.Generation
+	projection, err := buildPiDriverConfigProjection(details)
+	if err != nil {
+		return nil, err
+	}
+	entries := []DriverConfigMaterialization{
+		{
+			Name:                        "models",
+			SourceProjectionPath:        agents.PiModelsConfigPath,
+			HostSourcePath:              filepath.Join(details.ControlDirPath, "driver", "pi", "models.json"),
+			SandboxDestination:          agents.PiModelsSandboxPath,
+			DestinationMutableBySandbox: false,
+		},
+		{
+			Name:                        "settings",
+			SourceProjectionPath:        agents.PiSettingsConfigPath,
+			HostSourcePath:              filepath.Join(details.ControlDirPath, "driver", "pi", "settings.json"),
+			SandboxDestination:          agents.PiSettingsSandboxPath,
+			DestinationMutableBySandbox: false,
+		},
+	}
+	payloads := map[string]any{
+		"models":   projection.Models,
+		"settings": projection.Settings,
+	}
+	for i := range entries {
+		payload, err := canonicalJSON(payloads[entries[i].Name])
+		if err != nil {
+			return nil, fmt.Errorf("render pi %s config: %w", entries[i].Name, err)
+		}
+		if err := writeFileAtomic(entries[i].HostSourcePath, payload, 0o644); err != nil {
+			return nil, fmt.Errorf("write pi %s config: %w", entries[i].Name, err)
+		}
+		entries[i].SourceDigest = prefixedSHA256(payload)
+	}
+	return entries, nil
+}
+
+type piDriverConfigProjection struct {
+	Models   map[string]any
+	Settings map[string]any
+}
+
+func buildPiDriverConfigProjection(details store.RuntimeGenerationDetails) (piDriverConfigProjection, error) {
+	model := strings.TrimSpace(details.Model)
+	if model == "" {
+		return piDriverConfigProjection{}, fmt.Errorf("pi model is required")
+	}
+	baseURL := strings.TrimSpace(details.ManifestAnthropicBaseURL)
+	if baseURL == "" {
+		return piDriverConfigProjection{}, fmt.Errorf("pi sandbox model proxy base url is required")
+	}
+	return piDriverConfigProjection{
+		Models: map[string]any{
+			"schema_version": 1,
+			"providers": []map[string]any{
+				{
+					"id":                  agents.PiHarnessProxyProvider,
+					"protocol":            "anthropic_messages",
+					"base_url":            baseURL,
+					"api_key":             "harness-model-proxy-dummy-key",
+					"credential_source":   "harness_active_turn_proxy",
+					"provider_is_builtin": false,
+				},
+			},
+			"models": []map[string]any{
+				{
+					"id":       model,
+					"provider": agents.PiHarnessProxyProvider,
+					"protocol": "anthropic_messages",
+				},
+			},
+		},
+		Settings: map[string]any{
+			"schema_version":      1,
+			"coding_agent_dir":    agents.PiCodingAgentDir,
+			"session_dir":         agents.PiSessionDir,
+			"offline":             true,
+			"skip_version_check":  true,
+			"telemetry":           false,
+			"provider":            agents.PiHarnessProxyProvider,
+			"model":               model,
+			"production_sessions": true,
+		},
+	}, nil
 }
 
 func renderNetworkHostsProjection(details store.RuntimeGenerationDetails) ([]byte, error) {
@@ -1329,7 +1440,7 @@ func (r *Runtime) buildGenerationManifest(req StartRequest, runscVersion, bundle
 	}
 	selectedDriver := driverID(req)
 	agent, _ := agents.SandboxAgentForDriver(selectedDriver)
-	return controlManifest{
+	manifest := controlManifest{
 		SessionID:                            req.SessionID,
 		GenerationID:                         details.GenerationID,
 		SandboxContractVersion:               defaultString(details.SandboxContractVersion, store.SandboxContractVersion),
@@ -1356,7 +1467,15 @@ func (r *Runtime) buildGenerationManifest(req StartRequest, runscVersion, bundle
 		EgressPolicyDigest:                   details.EgressPolicyDigest,
 		ManifestVersion:                      1,
 		ClaudeCodeDisableNonessentialTraffic: details.DisableNonessentialTraffic,
-	}, nil
+	}
+	if selectedDriver == string(agents.Pi) {
+		manifest.PiCodingAgentDir = agents.PiCodingAgentDir
+		manifest.PiCodingAgentSessionDir = agents.PiSessionDir
+		manifest.PiOffline = true
+		manifest.PiSkipVersionCheck = true
+		manifest.PiTelemetryDisabled = true
+	}
+	return manifest, nil
 }
 
 func validateGenerationDetails(req StartRequest) error {
@@ -1459,6 +1578,11 @@ func controlManifestProjectionFields() (map[string]struct{}, map[string]struct{}
 		"egress_policy_digest":         {},
 		"manifest_version":             {},
 		"claude_code_disable_nonessential_traffic": {},
+		"pi_coding_agent_dir":                      {},
+		"pi_coding_agent_session_dir":              {},
+		"pi_offline":                               {},
+		"pi_skip_version_check":                    {},
+		"pi_telemetry_disabled":                    {},
 	}
 	regenerableFields := map[string]struct{}{
 		"created_at": {},
@@ -1470,7 +1594,7 @@ func controlManifestProjectionFields() (map[string]struct{}, map[string]struct{}
 func (r *Runtime) renderRuntimeSpec(req StartRequest) (runtimeSpec, string, error) {
 	selectedDriver := driverID(req)
 	switch selectedDriver {
-	case string(agents.ClaudeCode), string(agents.Shell):
+	case string(agents.ClaudeCode), string(agents.Pi), string(agents.Shell):
 		return r.renderSandboxIsolatedRuntimeSpec(req)
 	case "":
 		return runtimeSpec{}, "", fmt.Errorf("agent is required")
@@ -1482,9 +1606,10 @@ func (r *Runtime) renderRuntimeSpec(req StartRequest) (runtimeSpec, string, erro
 func (r *Runtime) renderSandboxIsolatedRuntimeSpec(req StartRequest) (runtimeSpec, string, error) {
 	var spec runtimeSpec
 	details := req.Generation
-	agent, ok := agents.SandboxAgentForDriver(driverID(req))
+	selectedDriver := driverID(req)
+	agent, ok := agents.SandboxAgentForDriver(selectedDriver)
 	if !ok {
-		return runtimeSpec{}, "", fmt.Errorf("unsupported agent %q", driverID(req))
+		return runtimeSpec{}, "", fmt.Errorf("unsupported agent %q", selectedDriver)
 	}
 	identity, err := r.requiredSandboxIdentity(details)
 	if err != nil {
@@ -1534,6 +1659,15 @@ func (r *Runtime) renderSandboxIsolatedRuntimeSpec(req StartRequest) (runtimeSpe
 		"HARNESS_BRIDGE_POLL_INTERVAL=" + formatSeconds(defaultDuration(r.cfg.BridgePollInterval, 5*time.Millisecond)),
 		"HARNESS_BRIDGE_IDLE_INTERVAL=" + formatSeconds(defaultDuration(r.cfg.BridgePollInterval, 5*time.Millisecond)),
 		"HARNESS_PROBE_HEALTHZ_STATUSES=" + joinInts(defaultIntSlice(r.cfg.ProbeHealthzStatuses, []int{200})),
+	}
+	if selectedDriver == string(agents.Pi) {
+		spec.Process.Env = append(spec.Process.Env,
+			"PI_CODING_AGENT_DIR="+agents.PiCodingAgentDir,
+			"PI_CODING_AGENT_SESSION_DIR="+agents.PiSessionDir,
+			"PI_OFFLINE=1",
+			"PI_SKIP_VERSION_CHECK=1",
+			"PI_TELEMETRY=0",
+		)
 	}
 	spec.Process.Cwd = "/"
 	spec.Process.Capabilities = emptyCapabilities()
@@ -1673,6 +1807,11 @@ func mustCanonicalJSON(value any) []byte {
 func digestHex(data []byte) string {
 	sum := sha256.Sum256(data)
 	return fmt.Sprintf("%x", sum[:])
+}
+
+func prefixedSHA256(data []byte) string {
+	sum := sha256.Sum256(data)
+	return "sha256:" + fmt.Sprintf("%x", sum[:])
 }
 
 func shortID(id string) string {
@@ -1996,7 +2135,7 @@ func driverID(req StartRequest) string {
 
 func isSandboxIsolatedRequest(req StartRequest) bool {
 	switch driverID(req) {
-	case string(agents.ClaudeCode), string(agents.Shell):
+	case string(agents.ClaudeCode), string(agents.Pi), string(agents.Shell):
 		return true
 	default:
 		return false

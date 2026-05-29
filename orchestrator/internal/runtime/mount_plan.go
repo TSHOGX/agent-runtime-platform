@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"harness-platform/orchestrator/internal/agents"
 	"harness-platform/orchestrator/internal/bridge"
 	"harness-platform/orchestrator/internal/store"
 )
@@ -40,13 +41,15 @@ type allowedMountPlanSurface struct {
 }
 
 var contentMountPlanAllowList = map[string]allowedMountPlanSurface{
-	"workspace":       {Destination: "/workspace", Type: "bind", Mode: "rw"},
-	"agent_home":      {Destination: "/agent-home", Type: "bind", Mode: "rw"},
-	"control":         {Destination: "/harness-control", Type: "bind", Mode: "ro"},
-	"bridge":          {Destination: bridge.BridgeMountDestination, Type: "bind", Mode: "rw"},
-	"bridge_inbox":    {Destination: filepath.Join(bridge.BridgeMountDestination, bridge.InboxDir), Type: "bind", Mode: "ro"},
-	"bridge_host_tmp": {Destination: filepath.Join(bridge.BridgeMountDestination, bridge.HostTmpDir), Type: "bind", Mode: "ro"},
-	"network_hosts":   {Destination: "/etc/hosts", Type: "bind", Mode: "ro"},
+	"workspace":          {Destination: "/workspace", Type: "bind", Mode: "rw"},
+	"agent_home":         {Destination: "/agent-home", Type: "bind", Mode: "rw"},
+	"control":            {Destination: "/harness-control", Type: "bind", Mode: "ro"},
+	"bridge":             {Destination: bridge.BridgeMountDestination, Type: "bind", Mode: "rw"},
+	"bridge_inbox":       {Destination: filepath.Join(bridge.BridgeMountDestination, bridge.InboxDir), Type: "bind", Mode: "ro"},
+	"bridge_host_tmp":    {Destination: filepath.Join(bridge.BridgeMountDestination, bridge.HostTmpDir), Type: "bind", Mode: "ro"},
+	"network_hosts":      {Destination: "/etc/hosts", Type: "bind", Mode: "ro"},
+	"pi_models_config":   {Destination: agents.PiModelsSandboxPath, Type: "bind", Mode: "ro"},
+	"pi_settings_config": {Destination: agents.PiSettingsSandboxPath, Type: "bind", Mode: "ro"},
 }
 
 var scratchMountPlanAllowList = map[string]allowedMountPlanSurface{
@@ -75,6 +78,12 @@ func BuildSandboxMountPlan(input SandboxMountPlanInputs) (MountPlan, error) {
 	}
 	if strings.TrimSpace(input.NetworkHostsPath) != "" {
 		plan.Content = append(plan.Content, exactBindMount("network_hosts", input.NetworkHostsPath, "/etc/hosts", "ro", []string{"bind", "ro", "nosuid", "nodev", "noexec"}, nil))
+	}
+	if strings.TrimSpace(details.Agent) == string(agents.Pi) {
+		plan.Content = append(plan.Content,
+			exactBindMount("pi_models_config", filepath.Join(details.ControlDirPath, "driver", "pi", "models.json"), agents.PiModelsSandboxPath, "ro", []string{"bind", "ro", "nosuid", "nodev", "noexec"}, nil),
+			exactBindMount("pi_settings_config", filepath.Join(details.ControlDirPath, "driver", "pi", "settings.json"), agents.PiSettingsSandboxPath, "ro", []string{"bind", "ro", "nosuid", "nodev", "noexec"}, nil),
+		)
 	}
 	if err := plan.Validate(); err != nil {
 		return MountPlan{}, err

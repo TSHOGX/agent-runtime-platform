@@ -18,6 +18,17 @@ const (
 
 const LegacyClaudeToken = "claude"
 
+const (
+	PiCodingAgentDir       = "/agent-home/.pi/agent"
+	PiSessionDir           = PiCodingAgentDir + "/sessions"
+	PiControlConfigDir     = "/harness-control/driver/pi"
+	PiModelsConfigPath     = PiControlConfigDir + "/models.json"
+	PiSettingsConfigPath   = PiControlConfigDir + "/settings.json"
+	PiModelsSandboxPath    = PiCodingAgentDir + "/models.json"
+	PiSettingsSandboxPath  = PiCodingAgentDir + "/settings.json"
+	PiHarnessProxyProvider = "harness_anthropic_proxy"
+)
+
 type Protocol string
 
 const (

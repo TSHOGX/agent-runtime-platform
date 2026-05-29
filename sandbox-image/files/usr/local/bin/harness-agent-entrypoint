@@ -63,6 +63,12 @@ emit("CLAUDE_MODEL", data.get("model", "sonnet"))
 emit("CLAUDE_OUTPUT_FORMAT", data.get("output_format", "stream-json"))
 emit("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", data.get("claude_code_disable_nonessential_traffic", True))
 emit("ANTHROPIC_BASE_URL", data.get("sandbox_model_proxy_base_url"))
+emit("PI_CODING_AGENT_DIR", data.get("pi_coding_agent_dir"))
+emit("PI_CODING_AGENT_SESSION_DIR", data.get("pi_coding_agent_session_dir"))
+emit("PI_OFFLINE", data.get("pi_offline"))
+emit("PI_SKIP_VERSION_CHECK", data.get("pi_skip_version_check"))
+if data.get("pi_telemetry_disabled") is not None:
+    emit("PI_TELEMETRY", "0" if data.get("pi_telemetry_disabled") else "1")
 PY
   )" || exit 65
   eval "$CONTROL_EXPORTS"

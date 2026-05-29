@@ -926,6 +926,15 @@ class EntrypointStaticTest(unittest.TestCase):
         self.assertNotIn("secret-backed claude agent", text)
         self.assertNotIn("--groups \"$HARNESS_SECRET_READERS_GID\"", text)
 
+    def test_entrypoint_exports_pi_startup_gates(self):
+        entrypoint = SCRIPT.with_name("harness-agent-entrypoint")
+        text = entrypoint.read_text(encoding="utf-8")
+        self.assertIn('emit("PI_CODING_AGENT_DIR", data.get("pi_coding_agent_dir"))', text)
+        self.assertIn('emit("PI_CODING_AGENT_SESSION_DIR", data.get("pi_coding_agent_session_dir"))', text)
+        self.assertIn('emit("PI_OFFLINE", data.get("pi_offline"))', text)
+        self.assertIn('emit("PI_SKIP_VERSION_CHECK", data.get("pi_skip_version_check"))', text)
+        self.assertIn('emit("PI_TELEMETRY", "0" if data.get("pi_telemetry_disabled") else "1")', text)
+
     def test_claim_loop_starts_after_workspace_and_agent_home_setup(self):
         entrypoint = SCRIPT.with_name("harness-agent-entrypoint")
         text = entrypoint.read_text(encoding="utf-8")
