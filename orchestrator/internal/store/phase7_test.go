@@ -38,7 +38,8 @@ func TestPhase9CutoverDeletesLegacySessionsAndRebuildsSchema(t *testing.T) {
 		"runtime_generations", "runtime_generation_resources", "turns", "events",
 		"active_model_request_contexts", "network_profiles", "agent_runtime_profiles",
 		"egress_policies", "orchestrator_owner", "sandbox_contracts",
-		"sandbox_contract_artifacts", "session_workspaces", "session_driver_homes",
+		"sandbox_contract_artifacts", "sandbox_contract_input_evidence",
+		"session_workspaces", "session_driver_homes",
 		"runtime_resource_instances", "phase9_cutover_state", "session_driver_states",
 		"runtime_resource_quarantine_tombstones",
 	} {

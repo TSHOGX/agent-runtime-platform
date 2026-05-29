@@ -21,6 +21,7 @@ const SandboxContractSchemaVersion = 2
 const SandboxContractGatePhase9A = "phase9a"
 const SandboxContractGatePhase9C = "phase9c"
 const credentialPolicyDigestPrefix = "credential_policy_digest_v1\n"
+const runtimeConfigDigestPrefix = "runtime_config_digest_v1\n"
 
 type SandboxContractRecord struct {
 	ContractID             string
@@ -44,6 +45,10 @@ type StoreSandboxContractParams struct {
 	ContractGateVersion    string
 	DriverState            DriverStateToken
 	Payload                any
+	RuntimeConfigDigest    string
+	RuntimeConfigPreimage  any
+	AgentManifestDigest    string
+	AgentManifestPayload   any
 	Now                    time.Time
 }
 
@@ -56,6 +61,15 @@ type SandboxContractArtifacts struct {
 	BundleDigest             string
 	CheckpointMetadataDigest string
 	CreatedAt                time.Time
+}
+
+type SandboxContractInputEvidence struct {
+	ContractID            string
+	RuntimeConfigDigest   string
+	RuntimeConfigPreimage []byte
+	AgentManifestDigest   string
+	AgentManifestPayload  []byte
+	CreatedAt             time.Time
 }
 
 type RecordSandboxContractArtifactsParams struct {
@@ -80,6 +94,26 @@ func CanonicalSandboxContractPayload(value any) ([]byte, error) {
 func SandboxContractDigest(canonicalPayload []byte) string {
 	sum := sha256.Sum256(canonicalPayload)
 	return "sha256:" + fmt.Sprintf("%x", sum[:])
+}
+
+func runtimeConfigInputDigest(canonicalPreimage []byte) string {
+	sum := sha256.Sum256(append([]byte(runtimeConfigDigestPrefix), canonicalPreimage...))
+	return "sha256:" + fmt.Sprintf("%x", sum[:])
+}
+
+func (s *Store) ensureSandboxContractInputEvidenceSchema(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS sandbox_contract_input_evidence (
+  contract_id TEXT PRIMARY KEY,
+  runtime_config_digest TEXT NOT NULL,
+  runtime_config_preimage TEXT NOT NULL,
+  agent_manifest_digest TEXT NOT NULL,
+  agent_manifest_payload TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(contract_id) REFERENCES sandbox_contracts(contract_id) ON DELETE CASCADE
+);
+`)
+	return err
 }
 
 func VerifySandboxContractDigest(canonicalPayload []byte, digest string) error {
@@ -170,6 +204,9 @@ ON CONFLICT(generation_id) DO NOTHING`,
 	if err := updateSandboxContractMirrorsTx(ctx, tx, record); err != nil {
 		return SandboxContractRecord{}, err
 	}
+	if err := recordSandboxContractInputEvidenceTx(ctx, tx, p, record.ContractID); err != nil {
+		return SandboxContractRecord{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return SandboxContractRecord{}, err
 	}
@@ -178,6 +215,64 @@ ON CONFLICT(generation_id) DO NOTHING`,
 
 func (s *Store) GetSandboxContractForGeneration(ctx context.Context, sessionID, generationID string) (SandboxContractRecord, error) {
 	return getSandboxContractForGenerationWithMirrors(ctx, s.db, sessionID, generationID)
+}
+
+func recordSandboxContractInputEvidenceTx(ctx context.Context, tx *sql.Tx, p StoreSandboxContractParams, contractID string) error {
+	hasEvidence := p.RuntimeConfigPreimage != nil || p.AgentManifestPayload != nil ||
+		strings.TrimSpace(p.RuntimeConfigDigest) != "" || strings.TrimSpace(p.AgentManifestDigest) != ""
+	if !hasEvidence {
+		return nil
+	}
+	if p.RuntimeConfigPreimage == nil || p.AgentManifestPayload == nil {
+		return fmt.Errorf("sandbox contract input evidence requires runtime config preimage and agent manifest payload")
+	}
+	runtimePreimage, err := CanonicalSandboxContractPayload(p.RuntimeConfigPreimage)
+	if err != nil {
+		return fmt.Errorf("canonicalize runtime config input evidence: %w", err)
+	}
+	runtimeDigest := strings.TrimSpace(p.RuntimeConfigDigest)
+	if runtimeDigest == "" {
+		runtimeDigest = runtimeConfigInputDigest(runtimePreimage)
+	}
+	if want := runtimeConfigInputDigest(runtimePreimage); runtimeDigest != want {
+		return fmt.Errorf("runtime config input evidence digest mismatch: got %s want %s", runtimeDigest, want)
+	}
+	agentManifestPayload, err := CanonicalSandboxContractPayload(p.AgentManifestPayload)
+	if err != nil {
+		return fmt.Errorf("canonicalize agent manifest input evidence: %w", err)
+	}
+	agentManifestDigest := strings.TrimSpace(p.AgentManifestDigest)
+	if agentManifestDigest == "" {
+		agentManifestDigest = SandboxContractDigest(agentManifestPayload)
+	}
+	if want := SandboxContractDigest(agentManifestPayload); agentManifestDigest != want {
+		return fmt.Errorf("agent manifest input evidence digest mismatch: got %s want %s", agentManifestDigest, want)
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO sandbox_contract_input_evidence (
+  contract_id, runtime_config_digest, runtime_config_preimage,
+  agent_manifest_digest, agent_manifest_payload, created_at
+) VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(contract_id) DO NOTHING`,
+		contractID, runtimeDigest, string(runtimePreimage),
+		agentManifestDigest, string(agentManifestPayload), formatTime(p.Now)); err != nil {
+		return err
+	}
+	evidence, err := getSandboxContractInputEvidenceTx(ctx, tx, contractID)
+	if err != nil {
+		return err
+	}
+	if evidence.RuntimeConfigDigest != runtimeDigest ||
+		!bytes.Equal(evidence.RuntimeConfigPreimage, runtimePreimage) ||
+		evidence.AgentManifestDigest != agentManifestDigest ||
+		!bytes.Equal(evidence.AgentManifestPayload, agentManifestPayload) {
+		return fmt.Errorf("sandbox contract input evidence already exists with different immutable payload")
+	}
+	return nil
+}
+
+func (s *Store) GetSandboxContractInputEvidence(ctx context.Context, contractID string) (SandboxContractInputEvidence, error) {
+	return getSandboxContractInputEvidenceTx(ctx, s.db, strings.TrimSpace(contractID))
 }
 
 func getSandboxContractForGenerationWithMirrors(ctx context.Context, db dbRunner, sessionID, generationID string) (SandboxContractRecord, error) {
@@ -982,4 +1077,33 @@ WHERE contract_id = ?`, contractID)
 	}
 	artifacts.CreatedAt = parseTime(createdAt)
 	return artifacts, nil
+}
+
+func getSandboxContractInputEvidenceTx(ctx context.Context, db dbRunner, contractID string) (SandboxContractInputEvidence, error) {
+	row := db.QueryRowContext(ctx, `
+SELECT
+  contract_id,
+  runtime_config_digest,
+  runtime_config_preimage,
+  agent_manifest_digest,
+  agent_manifest_payload,
+  created_at
+FROM sandbox_contract_input_evidence
+WHERE contract_id = ?`, strings.TrimSpace(contractID))
+	var evidence SandboxContractInputEvidence
+	var runtimePreimage, agentManifestPayload, createdAt string
+	if err := row.Scan(
+		&evidence.ContractID,
+		&evidence.RuntimeConfigDigest,
+		&runtimePreimage,
+		&evidence.AgentManifestDigest,
+		&agentManifestPayload,
+		&createdAt,
+	); err != nil {
+		return SandboxContractInputEvidence{}, err
+	}
+	evidence.RuntimeConfigPreimage = []byte(runtimePreimage)
+	evidence.AgentManifestPayload = []byte(agentManifestPayload)
+	evidence.CreatedAt = parseTime(createdAt)
+	return evidence, nil
 }

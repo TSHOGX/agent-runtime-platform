@@ -33,6 +33,13 @@ type deploymentResolution struct {
 	AgentManifestDriver     imageManifestDriver
 }
 
+type sandboxContractInputEvidence struct {
+	RuntimeConfigDigest   string
+	RuntimeConfigPreimage map[string]any
+	AgentManifestDigest   string
+	AgentManifestPayload  map[string]any
+}
+
 type deploymentCapabilityError struct {
 	code    string
 	message string
@@ -186,6 +193,7 @@ type imageAgentManifest struct {
 	SchemaVersion int                   `json:"schema_version"`
 	BuildInput    map[string]any        `json:"build_input"`
 	Drivers       []imageManifestDriver `json:"drivers"`
+	Payload       map[string]any        `json:"-"`
 	Path          string                `json:"-"`
 	Digest        string                `json:"-"`
 	Synthetic     bool                  `json:"-"`
@@ -272,6 +280,7 @@ func parseAgentImageManifest(data []byte) (imageAgentManifest, error) {
 		return imageAgentManifest{}, err
 	}
 	manifest.Digest = store.SandboxContractDigest(canonical)
+	manifest.Payload = canonicalSource
 	return manifest, nil
 }
 
@@ -340,6 +349,7 @@ func (s *Server) syntheticAgentImageManifest() (imageAgentManifest, error) {
 		return imageAgentManifest{}, err
 	}
 	manifest.Digest = store.SandboxContractDigest(canonical)
+	manifest.Payload = payload
 	return manifest, nil
 }
 
@@ -522,6 +532,31 @@ func (r deploymentResolution) runtimeConfigPreimage(defaultAgent string) map[str
 		"model_profile":                modelProfile,
 		"runtime_provider_config":      runtimeProviderConfigPreimage(r.RuntimeProviderConfig),
 	}
+}
+
+func (s *Server) sandboxContractInputEvidenceFor(session store.Session, driverID string) (sandboxContractInputEvidence, error) {
+	mode := strings.TrimSpace(session.Mode)
+	if mode == "" {
+		mode = store.ModeForDriver(driverID)
+	}
+	deployment, capabilityErr := s.resolveDriverDeployment(mode, agents.ID(driverID))
+	if capabilityErr != nil {
+		return sandboxContractInputEvidence{}, capabilityErr
+	}
+	defaultAgent := strings.TrimSpace(s.cfg.DefaultAgent)
+	if defaultAgent == "" {
+		defaultAgent = string(agents.ClaudeCode)
+	}
+	if canonical, err := agents.CanonicalDriverID(defaultAgent); err == nil {
+		defaultAgent = string(canonical)
+	}
+	preimage := deployment.runtimeConfigPreimage(defaultAgent)
+	return sandboxContractInputEvidence{
+		RuntimeConfigDigest:   runtimeConfigDigest(preimage),
+		RuntimeConfigPreimage: preimage,
+		AgentManifestDigest:   deployment.AgentManifest.Digest,
+		AgentManifestPayload:  deployment.AgentManifest.Payload,
+	}, nil
 }
 
 func agentConfigPreimage(cfg config.AgentConfig) map[string]any {

@@ -134,6 +134,9 @@ PRAGMA foreign_keys=ON;
 	if err := s.runPhase9Cutover(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureSandboxContractInputEvidenceSchema(ctx); err != nil {
+		return err
+	}
 	if err := s.ensurePhase9ModeSchema(ctx); err != nil {
 		return err
 	}

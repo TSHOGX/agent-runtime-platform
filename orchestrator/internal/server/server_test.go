@@ -2655,6 +2655,16 @@ func TestStartEnsuredGenerationRenewsLeaseDuringSlowPrepare(t *testing.T) {
 			t.Fatalf("sandbox contract missing %s: %s", key, contract.CanonicalPayload)
 		}
 	}
+	evidence, err := st.GetSandboxContractInputEvidence(ctx, contract.ContractID)
+	if err != nil {
+		t.Fatalf("get sandbox contract input evidence: %v", err)
+	}
+	if evidence.RuntimeConfigDigest != inputDigests["runtime_config_digest"] ||
+		evidence.AgentManifestDigest != inputDigests["agent_manifest_digest"] ||
+		!json.Valid(evidence.RuntimeConfigPreimage) ||
+		!json.Valid(evidence.AgentManifestPayload) {
+		t.Fatalf("sandbox contract input evidence mismatch: evidence=%+v input=%+v", evidence, inputDigests)
+	}
 	if inputDigests["rootfs_image_digest"] != nil {
 		t.Fatalf("rootfs digest should remain null until rootfs evidence is available: %s", contract.CanonicalPayload)
 	}

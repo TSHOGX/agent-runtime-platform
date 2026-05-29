@@ -663,6 +663,14 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 			return err
 		}
+		inputEvidence, err := s.sandboxContractInputEvidenceFor(session, generationDetails.Agent)
+		if err != nil {
+			if leaseErr := leaseKeeper.err(); leaseErr != nil {
+				return leaseErr
+			}
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+			return err
+		}
 		if _, err := s.store.StoreSandboxContract(ctx, store.StoreSandboxContractParams{
 			ContractID:             sandboxContractID(allocation.GenerationID),
 			SessionID:              session.ID,
@@ -672,6 +680,10 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			ContractGateVersion:    store.SandboxContractGatePhase9C,
 			DriverState:            allocation.DriverState,
 			Payload:                contractPayload,
+			RuntimeConfigDigest:    inputEvidence.RuntimeConfigDigest,
+			RuntimeConfigPreimage:  inputEvidence.RuntimeConfigPreimage,
+			AgentManifestDigest:    inputEvidence.AgentManifestDigest,
+			AgentManifestPayload:   inputEvidence.AgentManifestPayload,
 			Now:                    time.Now().UTC(),
 		}); err != nil {
 			if leaseErr := leaseKeeper.err(); leaseErr != nil {
