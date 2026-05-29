@@ -274,6 +274,9 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("HARNESS_DEFAULT_AGENT: %w", err)
 	}
+	if err := validateDefaultAgentDriver(defaultDriver); err != nil {
+		return Config{}, fmt.Errorf("HARNESS_DEFAULT_AGENT: %w", err)
+	}
 	maxSessions := intEnv("HARNESS_MAX_SESSIONS", projectConfig.Phase7.MaxSessions)
 	cfg := Config{
 		Addr:             getenv("HARNESS_ORCHESTRATOR_ADDR", ":8090"),
@@ -311,6 +314,17 @@ func Load() (Config, error) {
 	cfg.Claude = syncClaudeModelProxy(cfg.Claude, cfg.ModelProxy)
 	cfg.Warnings = phase7ConfigWarnings(cfg.Phase7)
 	return cfg, nil
+}
+
+func validateDefaultAgentDriver(driverID agents.ID) error {
+	spec, ok := agents.DriverSpecFor(string(driverID))
+	if !ok {
+		return fmt.Errorf("unsupported driver %q", driverID)
+	}
+	if spec.Kind != agents.DriverKindAgent {
+		return fmt.Errorf("default agent must be an agent-capable driver, got %q", driverID)
+	}
+	return nil
 }
 
 type projectConfig struct {

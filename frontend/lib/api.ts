@@ -1,5 +1,4 @@
-import type { RuntimeAgent } from "./agents";
-import type { ApiArtifact, ApiMessage, ApiSession, SessionStatus } from "./types";
+import type { ApiArtifact, ApiMessage, ApiSession, DeploymentCapabilities, SessionMode, SessionStatus } from "./types";
 
 export type RequestResult<T> =
   | { ok: true; data: T; response: Response }
@@ -43,11 +42,15 @@ export async function fetchSession(sessionId: string) {
   return request<ApiSession>(`/api/sessions/${encodeURIComponent(sessionId)}`);
 }
 
-export async function createSession(agent: RuntimeAgent) {
+export async function fetchDeploymentCapabilities() {
+  return request<DeploymentCapabilities>("/api/deployment-capabilities");
+}
+
+export async function createSession(mode: SessionMode) {
   return request<ApiSession>("/api/sessions", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ agent })
+    body: JSON.stringify({ mode })
   });
 }
 

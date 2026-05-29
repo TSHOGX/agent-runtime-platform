@@ -32,7 +32,7 @@ import (
 	"harness-platform/orchestrator/internal/store"
 )
 
-func TestCreateSessionRejectsUnsupportedAgent(t *testing.T) {
+func TestCreateSessionRejectsLegacyAgentInput(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	st, err := store.Open(ctx, filepath.Join(dir, "test.db"))
@@ -63,8 +63,169 @@ func TestCreateSessionRejectsUnsupportedAgent(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected status 400, got %d", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "unsupported agent") {
-		t.Fatalf("expected unsupported agent error, got %s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "agent input is no longer supported") {
+		t.Fatalf("expected legacy agent error, got %s", rec.Body.String())
+	}
+}
+
+func TestCreateSessionModeMapping(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantStatus int
+		wantMode   string
+		wantDriver string
+		wantError  string
+	}{
+		{name: "omitted body", wantStatus: http.StatusCreated, wantMode: "agent", wantDriver: "claude_code"},
+		{name: "empty object", body: `{}`, wantStatus: http.StatusCreated, wantMode: "agent", wantDriver: "claude_code"},
+		{name: "agent mode", body: `{"mode":"agent"}`, wantStatus: http.StatusCreated, wantMode: "agent", wantDriver: "claude_code"},
+		{name: "shell mode", body: `{"mode":"shell"}`, wantStatus: http.StatusCreated, wantMode: "shell", wantDriver: "sh"},
+		{name: "unknown mode", body: `{"mode":"pi"}`, wantStatus: http.StatusBadRequest, wantError: "unsupported mode"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			dir := t.TempDir()
+			st, err := store.Open(ctx, filepath.Join(dir, "test.db"))
+			if err != nil {
+				t.Fatalf("open store: %v", err)
+			}
+			t.Cleanup(func() { _ = st.Close() })
+			srv := &Server{
+				cfg: config.Config{
+					SessionsRoot:     dir,
+					SessionRetention: time.Hour,
+					MaxSessions:      10,
+					DefaultAgent:     "claude_code",
+				},
+				store:   st,
+				runtime: runtime.New(runtime.Config{}),
+				watcher: newServerTestWatcher(t, dir, st, events.NewHub()),
+				hub:     events.NewHub(),
+				log:     slog.Default(),
+			}
+			var body io.Reader
+			if tc.body != "" {
+				body = strings.NewReader(tc.body)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/sessions", body)
+			rec := httptest.NewRecorder()
+			srv.createSession(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status=%d want %d body=%s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if tc.wantStatus != http.StatusCreated {
+				if !strings.Contains(rec.Body.String(), tc.wantError) {
+					t.Fatalf("expected error %q, got %s", tc.wantError, rec.Body.String())
+				}
+				var count int
+				if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions`).Scan(&count); err != nil {
+					t.Fatalf("count sessions: %v", err)
+				}
+				if count != 0 {
+					t.Fatalf("failed create should not persist sessions, got %d", count)
+				}
+				return
+			}
+			var created struct {
+				ID        string `json:"id"`
+				Mode      string `json:"mode"`
+				ModeLabel string `json:"mode_label"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if created.Mode != tc.wantMode || created.ModeLabel != modeLabel(tc.wantMode) {
+				t.Fatalf("public mode=%s label=%s want %s/%s", created.Mode, created.ModeLabel, tc.wantMode, modeLabel(tc.wantMode))
+			}
+			var driverID, storedMode string
+			if err := st.DBForTest().QueryRowContext(ctx, `SELECT driver_id, mode FROM sessions WHERE id = ?`, created.ID).Scan(&driverID, &storedMode); err != nil {
+				t.Fatalf("read stored session selector: %v", err)
+			}
+			if driverID != tc.wantDriver || storedMode != tc.wantMode {
+				t.Fatalf("stored driver/mode=%s/%s want %s/%s", driverID, storedMode, tc.wantDriver, tc.wantMode)
+			}
+		})
+	}
+}
+
+func TestCreateSessionAgentModeRejectsShellDefault(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	srv := &Server{
+		cfg: config.Config{
+			SessionsRoot:     dir,
+			SessionRetention: time.Hour,
+			MaxSessions:      10,
+			DefaultAgent:     "sh",
+		},
+		store:   st,
+		runtime: runtime.New(runtime.Config{}),
+		watcher: newServerTestWatcher(t, dir, st, events.NewHub()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(`{"mode":"agent"}`))
+	rec := httptest.NewRecorder()
+	srv.createSession(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "agent mode unavailable") {
+		t.Fatalf("expected unavailable agent mode, got status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var count int
+	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions`).Scan(&count); err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("failed create should not persist sessions, got %d", count)
+	}
+}
+
+func TestDeploymentCapabilitiesAreProductSafe(t *testing.T) {
+	srv := &Server{
+		cfg: config.Config{DefaultAgent: "claude_code"},
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/deployment-capabilities", nil)
+	rec := httptest.NewRecorder()
+	srv.deploymentCapabilities(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, forbidden := range []string{"driver_id", "claude_code", "provider_id", "local_runsc", "host_path", "agent_manifest_digest"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("capability response exposed %q: %s", forbidden, body)
+		}
+	}
+	var payload struct {
+		SchemaVersion int    `json:"schema_version"`
+		DefaultMode   string `json:"default_mode"`
+		SessionModes  []struct {
+			Mode           string  `json:"mode"`
+			Label          string  `json:"label"`
+			Visible        bool    `json:"visible"`
+			CreateEnabled  bool    `json:"create_enabled"`
+			DisabledReason *string `json:"disabled_reason"`
+		} `json:"session_modes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode capabilities: %v", err)
+	}
+	if payload.SchemaVersion != 1 || payload.DefaultMode != "agent" || len(payload.SessionModes) != 2 {
+		t.Fatalf("unexpected capabilities: %+v", payload)
+	}
+	for _, mode := range payload.SessionModes {
+		if mode.Mode != "agent" && mode.Mode != "shell" {
+			t.Fatalf("capabilities exposed non-product mode: %+v", mode)
+		}
+		if !mode.CreateEnabled || mode.DisabledReason != nil {
+			t.Fatalf("expected test deployment mode enabled, got %+v", mode)
+		}
 	}
 }
 
@@ -121,7 +282,7 @@ func TestCreateSessionSoftLimitUsesPoolExhaustedEnvelope(t *testing.T) {
 		log:     slog.Default(),
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(`{"agent":"claude"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(`{"mode":"agent"}`))
 	rec := httptest.NewRecorder()
 	srv.createSession(rec, req)
 
@@ -193,7 +354,7 @@ func TestCloseSessionReleasesSoftLimitWithoutDeletingHistory(t *testing.T) {
 		log:     slog.Default(),
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(`{"agent":"claude"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(`{"mode":"agent"}`))
 	rec := httptest.NewRecorder()
 	srv.createSession(rec, req)
 	if rec.Code != http.StatusServiceUnavailable {
@@ -207,7 +368,7 @@ func TestCloseSessionReleasesSoftLimitWithoutDeletingHistory(t *testing.T) {
 		t.Fatalf("expected close status 200, got %d body %s", deleteRec.Code, deleteRec.Body.String())
 	}
 
-	createReq := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(`{"agent":"claude"}`))
+	createReq := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(`{"mode":"agent"}`))
 	createRec := httptest.NewRecorder()
 	srv.createSession(createRec, createReq)
 	if createRec.Code != http.StatusCreated {
@@ -268,7 +429,7 @@ func TestCreateSessionUsesNullExpiryWhenSessionRetentionDisabled(t *testing.T) {
 		log:     slog.Default(),
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(`{"agent":"claude"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(`{"mode":"agent"}`))
 	rec := httptest.NewRecorder()
 	srv.createSession(rec, req)
 
@@ -324,7 +485,7 @@ func TestCreateSessionDefersWorkspaceProvisioning(t *testing.T) {
 		log:     slog.Default(),
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(`{"agent":"claude"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(`{"mode":"agent"}`))
 	rec := httptest.NewRecorder()
 	srv.createSession(rec, req)
 	if rec.Code != http.StatusCreated {
@@ -382,7 +543,7 @@ func TestCreateSessionUsesPublicSessionDTO(t *testing.T) {
 		log:     slog.Default(),
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(`{"agent":"claude"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(`{"mode":"agent"}`))
 	rec := httptest.NewRecorder()
 	srv.createSession(rec, req)
 
@@ -394,7 +555,7 @@ func TestCreateSessionUsesPublicSessionDTO(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
 		t.Fatalf("decode create response: %v", err)
 	}
-	if created["id"] == "" || created["agent"] != "claude" {
+	if created["id"] == "" || created["mode"] != "agent" || created["mode_label"] != "Agent" {
 		t.Fatalf("unexpected create response: %v", created)
 	}
 
@@ -457,6 +618,58 @@ WHERE id = ?`, filepath.Join(dir, "agent-homes", session.ID), filepath.Join(dir,
 	}
 	assertPublicSessionJSONOmitsHostFields(t, listRec.Body.Bytes())
 	assertContains(t, listRec.Body.String(), `"id":"sess_public"`)
+}
+
+func TestPublicEventSanitizerStripsRuntimePrivateFields(t *testing.T) {
+	event := publicEvent(events.Event{
+		EventID:      12,
+		Type:         "session.checkpoint_retired",
+		SessionID:    "sess_public_event",
+		GenerationID: "gen_private",
+		Payload: map[string]any{
+			"session_status":           "running_idle",
+			"session_updated_at":       "2026-05-26T01:02:00Z",
+			"session_last_activity_at": "2026-05-26T00:30:00Z",
+			"generation_id":            "gen_private",
+			"active_generation_id":     "gen_private",
+			"driver_id":                "claude_code",
+			"agent":                    "claude",
+			"restore_id":               "restore_private",
+			"host_path":                filepath.Join(t.TempDir(), "private"),
+			"driver_state": map[string]any{
+				"state_digest": "sha256:private",
+			},
+			"data_volumes": map[string]any{
+				"workspace": map[string]any{"host_path": "/host/workspace"},
+			},
+		},
+	})
+	data, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("marshal public event: %v", err)
+	}
+	body := string(data)
+	for _, forbidden := range []string{
+		`"generation_id"`,
+		`"active_generation_id"`,
+		`"driver_id"`,
+		`"agent"`,
+		`"restore_id"`,
+		`"host_path"`,
+		`"driver_state"`,
+		`"data_volumes"`,
+		"gen_private",
+		"claude_code",
+		"restore_private",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("public event exposed %q: %s", forbidden, body)
+		}
+	}
+	assertContains(t, body, `"event_id":12`)
+	assertContains(t, body, `"session_id":"sess_public_event"`)
+	assertContains(t, body, `"session_status":"running_idle"`)
+	assertContains(t, body, `"session_updated_at":"2026-05-26T01:02:00Z"`)
 }
 
 func TestMonitorIdleSessionsSkipsHostNetwork(t *testing.T) {
@@ -2206,12 +2419,29 @@ func TestStartEnsuredGenerationRenewsLeaseDuringSlowPrepare(t *testing.T) {
 		t.Fatalf("get sandbox contract: %v", err)
 	}
 	if contract.SandboxContractVersion != store.SandboxContractVersion ||
-		contract.ContractID != sandboxContractID(allocation.GenerationID) {
+		contract.ContractID != sandboxContractID(allocation.GenerationID) ||
+		contract.ContractGateVersion != store.SandboxContractGatePhase9C {
 		t.Fatalf("unexpected sandbox contract: %+v", contract)
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(contract.CanonicalPayload, &payload); err != nil {
 		t.Fatalf("decode sandbox contract payload: %v", err)
+	}
+	if payload["contract_gate_version"] != store.SandboxContractGatePhase9C {
+		t.Fatalf("sandbox contract gate version should be phase9c: %s", contract.CanonicalPayload)
+	}
+	inputDigests, ok := payload["input_digests"].(map[string]any)
+	if !ok {
+		t.Fatalf("sandbox contract missing input digests: %s", contract.CanonicalPayload)
+	}
+	for _, key := range []string{"runtime_config_digest", "agent_manifest_digest"} {
+		value, _ := inputDigests[key].(string)
+		if !strings.HasPrefix(value, "sha256:") {
+			t.Fatalf("sandbox contract missing %s: %s", key, contract.CanonicalPayload)
+		}
+	}
+	if inputDigests["rootfs_image_digest"] != nil {
+		t.Fatalf("rootfs digest should remain null until rootfs evidence is available: %s", contract.CanonicalPayload)
 	}
 	adapter, ok := payload["runtime_adapter"].(map[string]any)
 	if !ok || adapter["runsc_container_id"] != serverRunscContainerID(t, ctx, st, session.ID, allocation.GenerationID) {
@@ -5248,6 +5478,8 @@ func assertPublicSessionJSONOmitsHostFields(t *testing.T, payload []byte) {
 	for _, field := range []string{
 		`"workspace"`,
 		`"agent_home_path"`,
+		`"agent":`,
+		`"active_generation_id":`,
 		`"restore_id"`,
 		`"checkpoint_path"`,
 		`"claude_session_uuid"`,

@@ -11,8 +11,8 @@ export type ApiSession = {
   id: string;
   user_id: string;
   status: SessionStatus;
-  agent: string;
-  active_generation_id?: string;
+  mode: SessionMode;
+  mode_label: string;
   restore_ms?: number | null;
   created_at: string;
   updated_at: string;
@@ -22,6 +22,22 @@ export type ApiSession = {
   auto_checkpoint_enabled?: boolean;
   failure_reason?: string;
   error_class?: string;
+};
+
+export type SessionMode = "agent" | "shell";
+
+export type DeploymentSessionMode = {
+  mode: SessionMode;
+  label: string;
+  visible: boolean;
+  create_enabled: boolean;
+  disabled_reason: string | null;
+};
+
+export type DeploymentCapabilities = {
+  schema_version: 1;
+  default_mode: SessionMode;
+  session_modes: DeploymentSessionMode[];
 };
 
 export type ApiArtifact = {
@@ -63,7 +79,6 @@ export type HarnessEvent = {
   type: string;
   session_id?: string;
   turn_id?: number;
-  generation_id?: string;
   output_sequence?: number;
   proxy_request_id?: string;
   stream?: string;

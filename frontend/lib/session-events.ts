@@ -134,8 +134,6 @@ export function reduceSessionEvent<TConversation extends SessionEventConversatio
       const sessionStatus = readSessionStatus(event.payload.session_status) ?? "running_idle";
       const updatedAt =
         typeof event.payload.session_updated_at === "string" ? event.payload.session_updated_at : time;
-      const activeGenerationId =
-        typeof event.payload.active_generation_id === "string" ? event.payload.active_generation_id : undefined;
       const lastActivityAt =
         typeof event.payload.session_last_activity_at === "string" ? event.payload.session_last_activity_at : null;
       return {
@@ -143,7 +141,6 @@ export function reduceSessionEvent<TConversation extends SessionEventConversatio
           ...session,
           status: sessionStatus,
           updated_at: updatedAt,
-          active_generation_id: activeGenerationId ?? session.active_generation_id,
           last_activity_at: lastActivityAt,
           restore_ms: null
         })),

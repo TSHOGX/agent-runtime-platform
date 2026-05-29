@@ -956,6 +956,18 @@ func TestLoadExposesModelProxyConfig(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsShellDefaultAgent(t *testing.T) {
+	repo := writeMinimalLoadConfig(t)
+	chdirForLoadTest(t, repo)
+	unsetEnvForTest(t, "HARNESS_SESSION_TTL")
+	t.Setenv("HARNESS_DEFAULT_AGENT", "sh")
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "default agent must be an agent-capable driver") {
+		t.Fatalf("expected default agent validation error, got %v", err)
+	}
+}
+
 func TestLoadDefaultDBPathIsOutsideSessionsRoot(t *testing.T) {
 	repo := writeMinimalLoadConfig(t)
 	chdirForLoadTest(t, repo)

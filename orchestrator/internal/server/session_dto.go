@@ -3,7 +3,6 @@ package server
 import (
 	"time"
 
-	"harness-platform/orchestrator/internal/agents"
 	"harness-platform/orchestrator/internal/store"
 )
 
@@ -11,8 +10,8 @@ type apiSession struct {
 	ID                    string     `json:"id"`
 	UserID                string     `json:"user_id"`
 	Status                string     `json:"status"`
-	Agent                 string     `json:"agent"`
-	ActiveGenerationID    string     `json:"active_generation_id,omitempty"`
+	Mode                  string     `json:"mode"`
+	ModeLabel             string     `json:"mode_label"`
 	RestoreMS             *int64     `json:"restore_ms,omitempty"`
 	CreatedAt             time.Time  `json:"created_at"`
 	UpdatedAt             time.Time  `json:"updated_at"`
@@ -25,16 +24,16 @@ type apiSession struct {
 }
 
 func publicSession(session store.Session) apiSession {
-	publicAgent, ok := agents.PublicAgentForDriver(session.Agent)
-	if !ok {
-		publicAgent = session.Agent
+	mode := session.Mode
+	if mode == "" {
+		mode = store.ModeForDriver(session.Agent)
 	}
 	return apiSession{
 		ID:                    session.ID,
 		UserID:                session.UserID,
 		Status:                session.Status,
-		Agent:                 publicAgent,
-		ActiveGenerationID:    session.ActiveGenerationID,
+		Mode:                  mode,
+		ModeLabel:             modeLabel(mode),
 		RestoreMS:             session.RestoreMS,
 		CreatedAt:             session.CreatedAt,
 		UpdatedAt:             session.UpdatedAt,
@@ -44,6 +43,15 @@ func publicSession(session store.Session) apiSession {
 		AutoCheckpointEnabled: session.AutoCheckpointEnabled,
 		FailureReason:         session.FailureReason,
 		ErrorClass:            session.ErrorClass,
+	}
+}
+
+func modeLabel(mode string) string {
+	switch mode {
+	case "shell":
+		return "Shell"
+	default:
+		return "Agent"
 	}
 }
 

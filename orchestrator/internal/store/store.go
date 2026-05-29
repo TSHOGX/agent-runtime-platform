@@ -21,6 +21,7 @@ type Session struct {
 	UserID                string     `json:"user_id"`
 	Status                string     `json:"status"`
 	Agent                 string     `json:"agent"`
+	Mode                  string     `json:"mode"`
 	Workspace             string     `json:"workspace"`
 	AgentHomePath         string     `json:"agent_home_path,omitempty"`
 	ActiveGenerationID    string     `json:"active_generation_id,omitempty"`
@@ -130,7 +131,10 @@ PRAGMA foreign_keys=ON;
 	if err := s.runMigrations(ctx, defaultMigrations(s.options)); err != nil {
 		return err
 	}
-	return s.runPhase9Cutover(ctx)
+	if err := s.runPhase9Cutover(ctx); err != nil {
+		return err
+	}
+	return s.ensurePhase9ModeSchema(ctx)
 }
 
 func (s *Store) EnsureUser(ctx context.Context, id, name string) error {
@@ -149,15 +153,22 @@ func (s *Store) CreateSession(ctx context.Context, session Session) error {
 	if _, ok := agents.Lookup(session.Agent); !ok {
 		return fmt.Errorf("unsupported driver %q", session.Agent)
 	}
+	session.Mode = strings.TrimSpace(session.Mode)
+	if session.Mode == "" {
+		session.Mode = ModeForDriver(session.Agent)
+	}
+	if session.Mode == "" {
+		return fmt.Errorf("unsupported session mode for driver %q", session.Agent)
+	}
 	if strings.TrimSpace(session.AgentHomePath) == "" {
 		session.AgentHomePath = filepath.Join(s.options.AgentHomesRoot, session.ID)
 	}
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO sessions (
-  id, user_id, status, driver_id, workspace, agent_home_path, restore_id, claude_session_uuid,
+  id, user_id, status, driver_id, mode, workspace, agent_home_path, restore_id, claude_session_uuid,
   created_at, updated_at, expires_at, auto_checkpoint_enabled
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		session.ID, session.UserID, session.Status, session.Agent, session.Workspace, nullableString(session.AgentHomePath),
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		session.ID, session.UserID, session.Status, session.Agent, session.Mode, session.Workspace, nullableString(session.AgentHomePath),
 		session.RestoreID, nullableString(session.ClaudeSessionUUID),
 		formatTime(session.CreatedAt), formatTime(session.UpdatedAt), formatOptionalTime(session.ExpiresAt),
 		boolInt(session.AutoCheckpointEnabled),
@@ -167,14 +178,14 @@ INSERT INTO sessions (
 
 func (s *Store) GetSession(ctx context.Context, id string) (Session, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT id, user_id, status, driver_id, workspace, agent_home_path, active_generation_id, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path, auto_checkpoint_enabled, failure_reason, error_class
+SELECT id, user_id, status, driver_id, mode, workspace, agent_home_path, active_generation_id, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path, auto_checkpoint_enabled, failure_reason, error_class
 FROM sessions WHERE id = ?`, id)
 	return scanSession(row)
 }
 
 func (s *Store) ListSessions(ctx context.Context) ([]Session, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, user_id, status, driver_id, workspace, agent_home_path, active_generation_id, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path, auto_checkpoint_enabled, failure_reason, error_class
+SELECT id, user_id, status, driver_id, mode, workspace, agent_home_path, active_generation_id, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path, auto_checkpoint_enabled, failure_reason, error_class
 FROM sessions ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -563,7 +574,7 @@ func scanSession(row scanner) (Session, error) {
 	var checkpointPath, failureReason, errorClass sql.NullString
 	var autoCheckpointEnabled int
 	err := row.Scan(
-		&session.ID, &session.UserID, &session.Status, &session.Agent, &session.Workspace, &agentHomePath,
+		&session.ID, &session.UserID, &session.Status, &session.Agent, &session.Mode, &session.Workspace, &agentHomePath,
 		&activeGenerationID, &session.RestoreID, &restoreMS, &claudeUUID, &createdAt, &updatedAt,
 		&expiresAt, &endedAt, &lastActivityAt, &checkpointPath, &autoCheckpointEnabled, &failureReason, &errorClass,
 	)
@@ -609,7 +620,21 @@ func scanSession(row scanner) (Session, error) {
 	if errorClass.Valid {
 		session.ErrorClass = errorClass.String
 	}
+	if strings.TrimSpace(session.Mode) == "" {
+		session.Mode = ModeForDriver(session.Agent)
+	}
 	return session, nil
+}
+
+func ModeForDriver(driverID string) string {
+	switch strings.TrimSpace(driverID) {
+	case string(agents.Shell):
+		return "shell"
+	case string(agents.ClaudeCode):
+		return "agent"
+	default:
+		return ""
+	}
 }
 
 func nullableString(s string) any {
@@ -706,7 +731,7 @@ func (s *Store) ListSessionsByStatus(ctx context.Context, status string) ([]Sess
 		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, user_id, status, driver_id, workspace, agent_home_path, active_generation_id, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path, auto_checkpoint_enabled, failure_reason, error_class
+SELECT id, user_id, status, driver_id, mode, workspace, agent_home_path, active_generation_id, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path, auto_checkpoint_enabled, failure_reason, error_class
 FROM sessions WHERE status = ? ORDER BY last_activity_at ASC`, status)
 	if err != nil {
 		return nil, err

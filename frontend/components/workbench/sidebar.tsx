@@ -6,10 +6,10 @@ import { ChevronDown, Loader2, Plus, RotateCw, Trash2 } from "lucide-react";
 import { useHarness } from "@/components/harness-provider";
 import { Button } from "@/components/ui/button";
 import { StatusDot, statusTone } from "@/components/ui/badge";
-import { NEW_SESSION_OPTIONS, agentLabel, type RuntimeAgent } from "@/lib/agents";
+import { newSessionOptions, sessionModeLabel } from "@/lib/agents";
 import { formatRelative, isTerminal, statusLabel } from "@/lib/format";
 import { cn } from "@/lib/cn";
-import type { ApiSession } from "@/lib/types";
+import type { ApiSession, SessionMode } from "@/lib/types";
 
 type SessionRowProps = {
   session: ApiSession;
@@ -35,7 +35,7 @@ function SessionRow({ session, selected, closing, onSelect, onClose }: SessionRo
           <div className="min-w-0 flex-1">
             <div className="truncate text-sm leading-tight">{session.id}</div>
             <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-[var(--color-foreground-muted)]">
-              <span>{agentLabel(session.agent)}</span>
+              <span>{sessionModeLabel(session.mode, session.mode_label)}</span>
               <span aria-hidden>·</span>
               <span>{statusLabel(session.status)}</span>
               <span aria-hidden>·</span>
@@ -70,12 +70,13 @@ export function Sidebar() {
 
   const activeSessions = state.sessions.filter((session) => !isTerminal(session.status));
   const endedSessions = state.sessions.filter((session) => isTerminal(session.status));
+  const sessionOptions = newSessionOptions(state.capabilities);
 
-  const handleCreate = async (agent: RuntimeAgent) => {
+  const handleCreate = async (mode: SessionMode) => {
     setPickerOpen(false);
     setCreating(true);
     setCreateError(null);
-    const res = await createSession(agent);
+    const res = await createSession(mode);
     setCreating(false);
     if (!res.ok) setCreateError(res.error ?? "Failed to create session");
   };
@@ -122,11 +123,13 @@ export function Sidebar() {
         </Button>
         {pickerOpen ? (
           <div className="absolute left-3 right-3 top-[calc(100%-0.25rem)] z-10 rounded-[var(--radius)] border border-[var(--color-border-strong)] bg-[var(--color-background)] p-1 shadow-lg">
-            {NEW_SESSION_OPTIONS.map((opt) => (
+            {sessionOptions.map((opt) => (
               <button
                 key={opt.value}
-                className="flex w-full items-center gap-2 rounded-[var(--radius-sm)] px-3 py-2 text-left text-sm hover:bg-[var(--color-surface-muted)]"
-                onClick={() => void handleCreate(opt.agent)}
+                className="flex w-full items-center gap-2 rounded-[var(--radius-sm)] px-3 py-2 text-left text-sm hover:bg-[var(--color-surface-muted)] disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={() => void handleCreate(opt.value)}
+                disabled={!opt.createEnabled}
+                title={opt.disabledReason ?? undefined}
               >
                 <opt.icon className="h-4 w-4 shrink-0 text-[var(--color-foreground-muted)]" />
                 {opt.label}

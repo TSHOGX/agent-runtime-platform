@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -289,6 +290,8 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.createSession(w, r)
 	case r.URL.Path == "/api/quota" && r.Method == http.MethodGet:
 		s.getQuota(w, r)
+	case r.URL.Path == "/api/deployment-capabilities" && r.Method == http.MethodGet:
+		s.deploymentCapabilities(w, r)
 	case r.URL.Path == "/api/events" && r.Method == http.MethodGet:
 		s.events(w, r)
 	case r.URL.Path == "/api/events/stream" && r.Method == http.MethodGet:
@@ -367,23 +370,62 @@ func (s *Server) getQuota(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) deploymentCapabilities(w http.ResponseWriter, r *http.Request) {
+	type modeDTO struct {
+		Mode           string  `json:"mode"`
+		Label          string  `json:"label"`
+		Visible        bool    `json:"visible"`
+		CreateEnabled  bool    `json:"create_enabled"`
+		DisabledReason *string `json:"disabled_reason"`
+	}
+	disabled := func(reason string) *string { return &reason }
+	agentReason := (*string)(nil)
+	agentEnabled := true
+	if _, err := s.driverForMode("agent"); err != nil {
+		agentEnabled = false
+		agentReason = disabled("default_unavailable")
+	}
+	shellReason := (*string)(nil)
+	shellEnabled := true
+	if _, err := s.driverForMode("shell"); err != nil {
+		shellEnabled = false
+		shellReason = disabled("disabled")
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"schema_version": 1,
+		"default_mode":   "agent",
+		"session_modes": []modeDTO{
+			{Mode: "agent", Label: "Agent", Visible: true, CreateEnabled: agentEnabled, DisabledReason: agentReason},
+			{Mode: "shell", Label: "Shell", Visible: shellEnabled, CreateEnabled: shellEnabled, DisabledReason: shellReason},
+		},
+	})
+}
+
 func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Agent string `json:"agent"`
-	}
+	var raw map[string]json.RawMessage
 	if r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
 	}
-	req.Agent = strings.TrimSpace(req.Agent)
-	if req.Agent == "" {
-		req.Agent = strings.TrimSpace(s.cfg.DefaultAgent)
-	}
-	driverID, err := agents.CanonicalDriverID(req.Agent)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "unsupported agent")
+	if _, ok := raw["agent"]; ok {
+		writeError(w, http.StatusBadRequest, "agent input is no longer supported")
 		return
 	}
-	req.Agent = string(driverID)
+	mode := "agent"
+	if value, ok := raw["mode"]; ok {
+		if err := json.Unmarshal(value, &mode); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid mode")
+			return
+		}
+	}
+	mode = strings.TrimSpace(mode)
+	driverID, err := s.driverForMode(mode)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	count, err := s.store.CountActiveSessions(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -405,7 +447,8 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		ID:                    id,
 		UserID:                labUserID,
 		Status:                string(sessionstate.Created),
-		Agent:                 req.Agent,
+		Agent:                 string(driverID),
+		Mode:                  mode,
 		Workspace:             filepath.Join(s.cfg.SessionsRoot, id),
 		RestoreID:             "unused-" + id,
 		ClaudeSessionUUID:     uuid.NewString(),
@@ -420,6 +463,28 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	}
 	s.hub.Publish(events.Event{Type: "session.created", SessionID: id, Payload: publicSession(session)})
 	writeJSON(w, http.StatusCreated, publicSession(session))
+}
+
+func (s *Server) driverForMode(mode string) (agents.ID, error) {
+	switch mode {
+	case "", "agent":
+		driverID, err := agents.CanonicalDriverID(s.cfg.DefaultAgent)
+		if err != nil {
+			return "", fmt.Errorf("agent mode unavailable")
+		}
+		spec, ok := agents.DriverSpecFor(string(driverID))
+		if !ok || spec.Kind != agents.DriverKindAgent {
+			return "", fmt.Errorf("agent mode unavailable")
+		}
+		return driverID, nil
+	case "shell":
+		if _, ok := agents.DriverSpecFor(string(agents.Shell)); !ok {
+			return "", fmt.Errorf("shell mode unavailable")
+		}
+		return agents.Shell, nil
+	default:
+		return "", fmt.Errorf("unsupported mode")
+	}
 }
 
 func (s *Server) getSession(w http.ResponseWriter, r *http.Request, sessionID string) {
@@ -604,7 +669,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 			return err
 		}
-		contractPayload, err := sandboxContractPayload(generationDetails, preparedArtifacts, resourceIdentityDigest, dataVolumes)
+		contractPayload, err := s.sandboxContractPayload(session, generationDetails, preparedArtifacts, resourceIdentityDigest, dataVolumes)
 		if err != nil {
 			if leaseErr := leaseKeeper.err(); leaseErr != nil {
 				return leaseErr
@@ -618,6 +683,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			GenerationID:           allocation.GenerationID,
 			Owner:                  allocation.Owner,
 			SandboxContractVersion: store.SandboxContractVersion,
+			ContractGateVersion:    store.SandboxContractGatePhase9C,
 			DriverState:            allocation.DriverState,
 			Payload:                contractPayload,
 			Now:                    time.Now().UTC(),
@@ -1338,7 +1404,7 @@ func sandboxContractID(generationID string) string {
 	return "contract_" + strings.TrimSpace(generationID)
 }
 
-func sandboxContractPayload(details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, resourceIdentityDigest string, volumes sessionRuntimeDataVolumes) (map[string]any, error) {
+func (s *Server) sandboxContractPayload(session store.Session, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, resourceIdentityDigest string, volumes sessionRuntimeDataVolumes) (map[string]any, error) {
 	runscPlatform := strings.TrimSpace(details.RunscPlatform)
 	if runscPlatform == "" {
 		runscPlatform = "systrap"
@@ -1425,10 +1491,11 @@ func sandboxContractPayload(details store.RuntimeGenerationDetails, artifacts ru
 	if err != nil {
 		return nil, err
 	}
+	inputDigests := s.phase9CInputDigests(session, details, artifacts, driverSpec, providerSpec)
 	payload := map[string]any{
 		"sandbox_contract_version": store.SandboxContractVersion,
 		"contract_schema_version":  store.SandboxContractSchemaVersion,
-		"contract_gate_version":    store.SandboxContractGatePhase9A,
+		"contract_gate_version":    store.SandboxContractGatePhase9C,
 		"contract_id":              sandboxContractID(details.GenerationID),
 		"session_id":               details.SessionID,
 		"generation_id":            details.GenerationID,
@@ -1571,12 +1638,99 @@ func sandboxContractPayload(details store.RuntimeGenerationDetails, artifacts ru
 			"initial_driver_state_digest":   initialDriverStateDigest,
 		},
 		"input_digests": map[string]any{
-			"runtime_config_digest": nil,
+			"runtime_config_digest": inputDigests.RuntimeConfigDigest,
 			"rootfs_image_digest":   nil,
-			"agent_manifest_digest": nil,
+			"agent_manifest_digest": inputDigests.AgentManifestDigest,
 		},
 	}
 	return payload, nil
+}
+
+type phase9CInputDigests struct {
+	RuntimeConfigDigest string
+	AgentManifestDigest string
+}
+
+func (s *Server) phase9CInputDigests(session store.Session, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, driverSpec agents.DriverSpec, providerSpec agents.RuntimeProviderSpec) phase9CInputDigests {
+	mode := strings.TrimSpace(session.Mode)
+	if mode == "" {
+		mode = store.ModeForDriver(details.Agent)
+	}
+	runtimeConfigDigest := phase9ContractDigest(map[string]any{
+		"schema_version": 1,
+		"deployment_defaults": map[string]any{
+			"default_agent": strings.TrimSpace(s.cfg.DefaultAgent),
+		},
+		"selected": map[string]any{
+			"mode":                         mode,
+			"driver_id":                    details.Agent,
+			"model":                        details.Model,
+			"output_format":                details.OutputFormat,
+			"disable_nonessential_traffic": details.DisableNonessentialTraffic,
+			"sandbox_uid":                  details.SandboxUID,
+			"sandbox_gid":                  details.SandboxGID,
+			"sandbox_supplemental_gids":    append([]int(nil), details.SandboxSupplementalGIDs...),
+			"model_access_allowed":         details.ModelAccessAllowed,
+		},
+		"model_proxy": map[string]any{
+			"sandbox_base_url": details.ManifestAnthropicBaseURL,
+			"bind_port":        details.ProxyPort,
+		},
+		"runtime_provider": map[string]any{
+			"provider_id":           providerSpec.ID,
+			"provider_profile_id":   providerSpec.ProviderProfileID,
+			"capability_digest":     agents.CapabilityDigest(providerSpec),
+			"runsc_platform":        effectiveString(details.RunscPlatform, "systrap"),
+			"runsc_overlay2":        details.RunscOverlay2,
+			"runsc_version":         artifacts.RunscVersion,
+			"runsc_binary_digest":   artifacts.RunscBinaryDigest,
+			"runtime_config_digest": artifacts.RuntimeConfigDigest,
+		},
+	})
+	agentManifestDigest := phase9ContractDigest(map[string]any{
+		"schema_version": 1,
+		"drivers": []map[string]any{{
+			"driver_id":               driverSpec.ID,
+			"label":                   driverSpec.Label,
+			"kind":                    driverSpec.Kind,
+			"bridge_protocol":         driverSpec.BridgeProtocol,
+			"turn_input_schema":       "turn_input_v1",
+			"output_schema":           driverSpec.OutputSchema,
+			"required_capabilities":   append([]string(nil), driverSpec.RequiredRuntimeCapabilities...),
+			"model_access":            driverSpec.ModelAccess,
+			"supports_interrupt":      driverSpec.SupportsInterrupt,
+			"supports_compaction":     driverSpec.SupportsCompaction,
+			"installed_binary_digest": driverInstallDigest(driverSpec.ID),
+		}},
+	})
+	return phase9CInputDigests{
+		RuntimeConfigDigest: runtimeConfigDigest,
+		AgentManifestDigest: agentManifestDigest,
+	}
+}
+
+func effectiveString(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func driverInstallDigest(driverID agents.ID) string {
+	switch driverID {
+	case agents.Shell:
+		return phase9ContractDigest(map[string]any{
+			"driver_id": string(driverID),
+			"path":      "/usr/local/bin/harness-shell-agent",
+		})
+	default:
+		return phase9ContractDigest(map[string]any{
+			"driver_id": string(driverID),
+			"path":      "/usr/local/bin/claude",
+			"package":   "@anthropic-ai/claude-code",
+		})
+	}
 }
 
 func phase9ContractDigest(value any) string {
@@ -2964,7 +3118,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	for event := range ch {
-		if err := conn.WriteJSON(event); err != nil {
+		if err := conn.WriteJSON(publicEvent(event)); err != nil {
 			return
 		}
 	}
@@ -3119,6 +3273,7 @@ func writeSSEEvent(w http.ResponseWriter, event events.Event) error {
 	if event.Time.IsZero() {
 		event.Time = time.Now().UTC()
 	}
+	event = publicEvent(event)
 	payload, err := json.Marshal(event)
 	if err != nil {
 		return err

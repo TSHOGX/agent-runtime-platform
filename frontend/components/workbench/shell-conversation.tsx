@@ -7,7 +7,7 @@ import { useConversation, useHarness, useSelectedSession } from "@/components/ha
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { StatusDot, statusTone } from "@/components/ui/badge";
-import { agentLabel } from "@/lib/agents";
+import { sessionModeLabel } from "@/lib/agents";
 import { isAcceptingInput, isTerminal, statusLabel } from "@/lib/format";
 import type { ApiMessage } from "@/lib/types";
 
@@ -166,7 +166,7 @@ export function ShellConversation() {
         <div className="flex min-w-0 items-center gap-2">
           <StatusDot tone={statusTone(session.status)} />
           <span className="truncate text-sm font-medium">{session.id}</span>
-          <span className="text-[11px] text-[var(--color-foreground-muted)]">· {agentLabel(session.agent)}</span>
+          <span className="text-[11px] text-[var(--color-foreground-muted)]">· {sessionModeLabel(session.mode, session.mode_label)}</span>
         </div>
         <span className="text-[11px] text-[var(--color-foreground-muted)]">{statusLabel(session.status)}</span>
       </header>

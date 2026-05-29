@@ -1,29 +1,46 @@
 import { Bot, TerminalSquare, type LucideIcon } from "lucide-react";
 
-export type RuntimeAgent = "claude" | "sh";
+import type { DeploymentCapabilities, DeploymentSessionMode, SessionMode } from "./types";
 
-export type NewSessionMode = "agent" | "shell";
+const MODE_ICONS: Record<SessionMode, LucideIcon> = {
+  agent: Bot,
+  shell: TerminalSquare
+};
 
 export type NewSessionOption = {
-  value: NewSessionMode;
+  value: SessionMode;
   label: string;
-  agent: RuntimeAgent;
   icon: LucideIcon;
+  createEnabled: boolean;
+  disabledReason: string | null;
 };
 
-const AGENT_LABELS: Record<RuntimeAgent, string> = {
-  claude: "Agent",
-  sh: "Shell"
+export const FALLBACK_DEPLOYMENT_CAPABILITIES: DeploymentCapabilities = {
+  schema_version: 1,
+  default_mode: "agent",
+  session_modes: [
+    { mode: "agent", label: "Agent", visible: true, create_enabled: true, disabled_reason: null }
+  ]
 };
 
-export const NEW_SESSION_OPTIONS: readonly NewSessionOption[] = [
-  { value: "shell", label: "Shell", agent: "sh", icon: TerminalSquare },
-  { value: "agent", label: "Agent", agent: "claude", icon: Bot }
-];
+export function sessionModeLabel(mode: SessionMode | string, label?: string) {
+  return label || (mode === "shell" ? "Shell" : "Agent");
+}
 
-export function agentLabel(agent: string) {
-  if (agent === "claude" || agent === "sh") {
-    return AGENT_LABELS[agent];
-  }
-  return agent || "Agent";
+function optionFromCapability(capability: DeploymentSessionMode): NewSessionOption {
+  return {
+    value: capability.mode,
+    label: sessionModeLabel(capability.mode, capability.label),
+    icon: MODE_ICONS[capability.mode],
+    createEnabled: capability.create_enabled,
+    disabledReason: capability.disabled_reason
+  };
+}
+
+export function newSessionOptions(capabilities: DeploymentCapabilities | null): NewSessionOption[] {
+  const source = capabilities ?? FALLBACK_DEPLOYMENT_CAPABILITIES;
+  return source.session_modes
+    .filter((mode) => mode.visible)
+    .map(optionFromCapability)
+    .sort((left, right) => (left.value === source.default_mode ? -1 : right.value === source.default_mode ? 1 : 0));
 }

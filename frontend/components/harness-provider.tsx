@@ -15,6 +15,7 @@ import {
   createSession as apiCreateSession,
   destroySession as apiDestroySession,
   fetchArtifacts,
+  fetchDeploymentCapabilities,
   fetchHealth,
   fetchMessages,
   fetchSession,
@@ -22,15 +23,16 @@ import {
   interruptSession as apiInterruptSession,
   postMessage as apiPostMessage
 } from "@/lib/api";
-import type { RuntimeAgent } from "@/lib/agents";
 import { reduceSessionEvent } from "@/lib/session-events";
 import { buildEventsStreamUrl } from "@/lib/ws";
 import type {
   ApiArtifact,
+  DeploymentCapabilities,
   ApiMessage,
   ApiSession,
   ConnectionStatus,
   HarnessEvent,
+  SessionMode,
   SessionStatus,
   StreamLine
 } from "@/lib/types";
@@ -46,6 +48,7 @@ type HarnessState = {
   ready: boolean;
   bootError: string | null;
   connection: ConnectionStatus;
+  capabilities: DeploymentCapabilities | null;
   sessions: ApiSession[];
   selectedId: string | null;
   conversations: Record<string, ConversationState>;
@@ -55,7 +58,7 @@ type HarnessState = {
 type HarnessApi = {
   state: HarnessState;
   selectSession: (id: string | null) => void;
-  createSession: (agent: RuntimeAgent) => Promise<{ ok: boolean; error?: string; session?: ApiSession }>;
+  createSession: (mode: SessionMode) => Promise<{ ok: boolean; error?: string; session?: ApiSession }>;
   destroySession: (id: string) => Promise<{ ok: boolean; error?: string }>;
   interruptSession: (id: string) => Promise<{ ok: boolean; error?: string }>;
   sendMessage: (id: string, content: string) => Promise<{ ok: boolean; error?: string }>;
@@ -68,6 +71,7 @@ const initialState: HarnessState = {
   ready: false,
   bootError: null,
   connection: "connecting",
+  capabilities: null,
   sessions: [],
   selectedId: null,
   conversations: {},
@@ -459,6 +463,7 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
       setState((p) => ({ ...p, ready: true, bootError: sessions.error, sessions: [] }));
       return;
     }
+    const capabilities = await fetchDeploymentCapabilities();
     const list = sessions.data.sessions ?? [];
     const currentSelected = stateRef.current.selectedId;
     const selectedId = currentSelected && list.some((s) => s.id === currentSelected) ? currentSelected : list[0]?.id ?? null;
@@ -467,7 +472,15 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
       for (const s of list) {
         if (!conversations[s.id]) conversations[s.id] = emptyConvo();
       }
-      return { ...p, ready: true, bootError: null, sessions: list, selectedId, conversations };
+      return {
+        ...p,
+        ready: true,
+        bootError: capabilities.ok ? null : capabilities.error,
+        capabilities: capabilities.ok ? capabilities.data : p.capabilities,
+        sessions: list,
+        selectedId,
+        conversations
+      };
     });
     if (selectedId) {
       loadSessionDetails(selectedId, true);
@@ -573,8 +586,8 @@ export function HarnessProvider({ children }: { children: React.ReactNode }) {
   );
 
   const createSession = useCallback(
-    async (agent: RuntimeAgent) => {
-      const res = await apiCreateSession(agent);
+    async (mode: SessionMode) => {
+      const res = await apiCreateSession(mode);
       if (!res.ok) return { ok: false as const, error: res.error };
       const session = res.data;
       setState((p) => ({

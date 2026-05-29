@@ -12,8 +12,8 @@ function session(patch: Partial<ApiSession> = {}): ApiSession {
     id: "sess_1",
     user_id: "lab",
     status: "checkpointed",
-    agent: "claude",
-    active_generation_id: "gen_1",
+    mode: "agent",
+    mode_label: "Agent",
     restore_ms: 42,
     created_at: "2026-05-26T00:00:00Z",
     updated_at: "2026-05-26T00:00:00Z",
@@ -64,7 +64,6 @@ describe("reduceSessionEvent", () => {
         session_status: "running_idle",
         session_updated_at: "2026-05-26T01:02:00Z",
         session_last_activity_at: "2026-05-26T00:30:00Z",
-        active_generation_id: "gen_1",
         restore_ms: null
       }
     });
@@ -84,7 +83,6 @@ describe("reduceSessionEvent", () => {
       payload: {
         session_status: "running_idle",
         session_updated_at: "2026-05-26T01:03:00Z",
-        active_generation_id: "gen_1",
         restore_ms: null
       }
     });

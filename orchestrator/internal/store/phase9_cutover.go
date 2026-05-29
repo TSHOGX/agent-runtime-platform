@@ -160,6 +160,7 @@ func rebuildPhase9Schema(ctx context.Context, db dbRunner) error {
   user_id TEXT NOT NULL,
   status TEXT NOT NULL CHECK(status IN (` + statusCheck + `)),
   driver_id TEXT NOT NULL CHECK(driver_id IN ('claude_code','sh')),
+  mode TEXT NOT NULL CHECK(mode IN ('agent','shell')),
   workspace TEXT NOT NULL,
   restore_id TEXT NOT NULL,
   restore_ms INTEGER,
@@ -287,6 +288,31 @@ func rebuildPhase9Schema(ctx context.Context, db dbRunner) error {
 		if _, err := db.ExecContext(ctx, `ALTER TABLE runtime_generations ADD COLUMN checkpoint_driver_states_digest TEXT`); err != nil {
 			return fmt.Errorf("phase9 runtime generation checkpoint fence column: %w", err)
 		}
+	}
+	return nil
+}
+
+func (s *Store) ensurePhase9ModeSchema(ctx context.Context) error {
+	exists, err := columnExists(ctx, s.db, "sessions", "mode")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN mode TEXT NOT NULL DEFAULT 'agent' CHECK(mode IN ('agent','shell'))`); err != nil {
+			return fmt.Errorf("add sessions mode column: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `
+UPDATE sessions
+SET mode = CASE driver_id
+  WHEN 'sh' THEN 'shell'
+  ELSE 'agent'
+END
+WHERE mode <> CASE driver_id
+  WHEN 'sh' THEN 'shell'
+  ELSE 'agent'
+END`); err != nil {
+		return fmt.Errorf("backfill sessions mode: %w", err)
 	}
 	return nil
 }

@@ -8,7 +8,7 @@ import { ShellConversation } from "./shell-conversation";
 import { MessageBubble, StreamingBubble } from "./message-bubble";
 import { Composer } from "./composer";
 import { StatusDot, statusTone } from "@/components/ui/badge";
-import { agentLabel } from "@/lib/agents";
+import { sessionModeLabel } from "@/lib/agents";
 import { isAcceptingInput, isTerminal, statusLabel } from "@/lib/format";
 
 function formatRuntimeLine(line: string) {
@@ -26,7 +26,7 @@ function formatRuntimeLine(line: string) {
 
 export function Conversation() {
   const session = useSelectedSession();
-  if (session?.agent === "sh") {
+  if (session?.mode === "shell") {
     return <ShellConversation />;
   }
   return <ChatConversation />;
@@ -76,7 +76,7 @@ function ChatConversation() {
           <StatusDot tone={statusTone(session.status)} />
           <span className="truncate text-sm font-medium">{session.id}</span>
           <span className="text-[11px] text-[var(--color-foreground-muted)]">
-            · {agentLabel(session.agent)}
+            · {sessionModeLabel(session.mode, session.mode_label)}
           </span>
         </div>
         <span className="text-[11px] text-[var(--color-foreground-muted)]">{statusLabel(session.status)}</span>
