@@ -134,7 +134,10 @@ PRAGMA foreign_keys=ON;
 	if err := s.runPhase9Cutover(ctx); err != nil {
 		return err
 	}
-	return s.ensurePhase9ModeSchema(ctx)
+	if err := s.ensurePhase9ModeSchema(ctx); err != nil {
+		return err
+	}
+	return s.ensurePhase9PiSchema(ctx)
 }
 
 func (s *Store) EnsureUser(ctx context.Context, id, name string) error {
@@ -630,7 +633,7 @@ func ModeForDriver(driverID string) string {
 	switch strings.TrimSpace(driverID) {
 	case string(agents.Shell):
 		return "shell"
-	case string(agents.ClaudeCode):
+	case string(agents.ClaudeCode), string(agents.Pi):
 		return "agent"
 	default:
 		return ""

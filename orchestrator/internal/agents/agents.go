@@ -12,6 +12,7 @@ type ID string
 
 const (
 	ClaudeCode ID = "claude_code"
+	Pi         ID = "pi"
 	Shell      ID = "sh"
 )
 
@@ -21,6 +22,7 @@ type Protocol string
 
 const (
 	ProtocolClaudeStreamJSON Protocol = "claude_stream_json"
+	ProtocolPiRPC            Protocol = "pi_rpc"
 	ProtocolShellPTY         Protocol = "shell_pty"
 )
 
@@ -106,6 +108,36 @@ var driverSpecs = map[ID]DriverSpec{
 		SupportsCompaction: true,
 		Phase10Support:     []string{"single_driver_turns"},
 	}),
+	Pi: normalizeDriverSpec(DriverSpec{
+		ID:                    Pi,
+		Label:                 "Pi",
+		Kind:                  DriverKindAgent,
+		BridgeProtocol:        "harness_bridge_v2",
+		BridgeProtocolVersion: 2,
+		TurnInputSchema:       "RunTurn",
+		OutputSchema:          "pi_rpc_events_v1.0",
+		RequiredRuntimeCapabilities: []string{
+			"exec_stream",
+			"filesystem_rw",
+			"kill",
+			"logs",
+			"network_policy",
+			"snapshot_disk",
+			"stdin",
+		},
+		ModelAccess:        true,
+		OutputFormat:       "pi_rpc_events_v1.0",
+		SupportsInterrupt:  false,
+		SupportsCompaction: false,
+		Phase10Support: []string{
+			"single_driver_turns",
+			"system_prompt:unsupported",
+			"compaction:unsupported",
+			"skills:unsupported",
+			"hooks_mcp:unsupported",
+			"interrupt:unsupported",
+		},
+	}),
 	Shell: normalizeDriverSpec(DriverSpec{
 		ID:                    Shell,
 		Label:                 "Shell",
@@ -176,7 +208,10 @@ func Lookup(value string) (Definition, bool) {
 		return Definition{}, false
 	}
 	protocol := ProtocolClaudeStreamJSON
-	if spec.ID == Shell {
+	switch spec.ID {
+	case Pi:
+		protocol = ProtocolPiRPC
+	case Shell:
 		protocol = ProtocolShellPTY
 	}
 	return Definition{ID: spec.ID, Label: spec.Label, Protocol: protocol}, true
@@ -254,7 +289,7 @@ func CapabilityDigest(provider RuntimeProviderSpec) string {
 func CanonicalDriverID(value string) (ID, error) {
 	trimmed := strings.TrimSpace(value)
 	switch ID(trimmed) {
-	case ClaudeCode, Shell:
+	case ClaudeCode, Pi, Shell:
 		return ID(trimmed), nil
 	case ID(LegacyClaudeToken):
 		return ClaudeCode, nil
@@ -267,6 +302,8 @@ func PublicAgentForDriver(value string) (string, bool) {
 	switch ID(strings.TrimSpace(value)) {
 	case ClaudeCode:
 		return LegacyClaudeToken, true
+	case Pi:
+		return string(Pi), true
 	case Shell:
 		return string(Shell), true
 	default:

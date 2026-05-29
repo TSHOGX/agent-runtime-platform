@@ -253,7 +253,10 @@ func TestAgentsCatalogIsOperatorOnly(t *testing.T) {
 	if err := json.Unmarshal(operatorRec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode operator catalog: %v", err)
 	}
-	if len(payload.Drivers) != 2 || payload.Drivers[0].DriverID != "claude_code" || payload.Drivers[1].DriverID != "sh" {
+	if len(payload.Drivers) != 3 ||
+		payload.Drivers[0].DriverID != "claude_code" ||
+		payload.Drivers[1].DriverID != "pi" ||
+		payload.Drivers[2].DriverID != "sh" {
 		t.Fatalf("unexpected operator catalog: %+v", payload.Drivers)
 	}
 }

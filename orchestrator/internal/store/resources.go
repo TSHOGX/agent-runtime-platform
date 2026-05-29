@@ -2802,11 +2802,21 @@ func (c ResourceAllocatorConfig) modelAccessAllowed() bool {
 	if c.ModelAccessAllowed != nil {
 		return *c.ModelAccessAllowed
 	}
-	return c.agent() == string(agents.ClaudeCode)
+	switch c.agent() {
+	case string(agents.ClaudeCode), string(agents.Pi):
+		return true
+	default:
+		return false
+	}
 }
 
 func (c ResourceAllocatorConfig) providerCredentialsHostOnly() bool {
-	return c.agent() == string(agents.ClaudeCode)
+	switch c.agent() {
+	case string(agents.ClaudeCode), string(agents.Pi):
+		return true
+	default:
+		return false
+	}
 }
 
 func (c ResourceAllocatorConfig) requiresNetworkHostsProjection() bool {
@@ -2824,7 +2834,7 @@ func (c ResourceAllocatorConfig) requiresNetworkHostsProjection() bool {
 }
 
 func (c ResourceAllocatorConfig) manifestAnthropicBaseURL(baseURL string) string {
-	if c.agent() == string(agents.Shell) || !c.modelAccessAllowed() {
+	if !c.modelAccessAllowed() {
 		return ""
 	}
 	if c.providerCredentialsHostOnly() {

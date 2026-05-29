@@ -19,6 +19,9 @@ const (
 	checkpointDriverStatesDigestPrefix = "checkpoint_driver_states_digest_v1\n"
 	claudeDriverStateKind              = "claude_session"
 	emptyDriverStateKind               = "empty"
+	piDriverStateKindUninitialized     = "pi_uninitialized"
+	piDriverStateKindSession           = "pi_session"
+	piSessionDir                       = "/agent-home/.pi/agent/sessions"
 )
 
 type DriverStateToken struct {
@@ -114,6 +117,13 @@ func canonicalBootstrapDriverState(driverID, claudeSessionUUID string) ([]byte, 
 			"driver_id":      string(agents.Shell),
 			"state_kind":     emptyDriverStateKind,
 		}, string(agents.Shell))
+	case agents.Pi:
+		return canonicalDriverStatePayload(map[string]any{
+			"schema_version": 1,
+			"driver_id":      string(agents.Pi),
+			"state_kind":     piDriverStateKindUninitialized,
+			"session_dir":    piSessionDir,
+		}, string(agents.Pi))
 	default:
 		return nil, "", fmt.Errorf("unsupported driver %q", driverID)
 	}
@@ -169,10 +179,54 @@ func validateDriverStatePayload(canonicalPayload []byte, driverID string) error 
 		if got, _ := object["state_kind"].(string); got != emptyDriverStateKind {
 			return fmt.Errorf("shell driver state_kind = %q", got)
 		}
+	case agents.Pi:
+		if err := validatePiDriverStatePayload(object); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("unsupported driver %q", driverID)
 	}
 	return nil
+}
+
+func validatePiDriverStatePayload(object map[string]any) error {
+	if sessionDir, _ := object["session_dir"].(string); sessionDir != piSessionDir {
+		return fmt.Errorf("pi driver state session_dir = %q", sessionDir)
+	}
+	switch got, _ := object["state_kind"].(string); got {
+	case piDriverStateKindUninitialized:
+		return nil
+	case piDriverStateKindSession:
+		rel := strings.TrimSpace(stringValue(object["selected_session_relpath"]))
+		if rel == "" {
+			return fmt.Errorf("pi driver state selected_session_relpath is required")
+		}
+		if strings.HasPrefix(rel, "/") || strings.Contains(rel, "\\") {
+			return fmt.Errorf("pi driver state selected_session_relpath must be relative")
+		}
+		if rel != strings.TrimPrefix(rel, "./") || rel != strings.TrimSpace(rel) {
+			return fmt.Errorf("pi driver state selected_session_relpath must be clean")
+		}
+		parts := strings.Split(rel, "/")
+		for _, part := range parts {
+			if part == "" || part == "." || part == ".." {
+				return fmt.Errorf("pi driver state selected_session_relpath must stay under session_dir")
+			}
+		}
+		selectedFile, _ := object["selected_session_file"].(string)
+		if selectedFile != piSessionDir+"/"+rel {
+			return fmt.Errorf("pi driver state selected_session_file = %q, want %q", selectedFile, piSessionDir+"/"+rel)
+		}
+		if strings.TrimSpace(stringValue(object["selected_session_id"])) == "" {
+			return fmt.Errorf("pi driver state selected_session_id is required")
+		}
+		if strings.TrimSpace(stringValue(object["last_completed_turn_id"])) == "" {
+			return fmt.Errorf("pi driver state last_completed_turn_id is required")
+		}
+		return nil
+	default:
+		return fmt.Errorf("pi driver state_kind = %q", got)
+	}
 }
 
 func stringValue(value any) string {
