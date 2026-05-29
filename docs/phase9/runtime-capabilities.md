@@ -9,9 +9,9 @@ Rules:
 - A driver declares positive requirements.
 - A provider declares positive support.
 - Omitted provider capability means unsupported.
-- Unsupported is explicit: if a driver requires an unsupported capability,
-  allocation fails before data-volume provisioning, MountPlan generation, or
-  runtime creation.
+- Unsupported allocation is explicit: if a driver requires an omitted or
+  false provider capability, allocation fails before data-volume provisioning,
+  MountPlan generation, or runtime creation.
 - Silent no-op behavior is not allowed.
 
 ## Vocabulary
@@ -53,6 +53,56 @@ if required is not subset of provided:
 The failure should name the driver, provider, vocabulary version, and missing
 capabilities. It should not allocate runtime resources that then fail later.
 
+## Digest Rules
+
+Capability digests are versioned allocation fences. 9a introduces the hard-coded
+facts and 9b moves the same facts into registries; the digest bytes must remain
+stable across that move when the facts are unchanged.
+
+Two contract fields use this vocabulary:
+
+- `driver.required_runtime_capabilities_digest`
+- `runtime_provider.capability_digest`
+
+The v1 digest algorithm is:
+
+1. Normalize IDs and capability names as lower-case enum strings.
+2. For a driver digest, build:
+
+   ```json
+   {
+     "kind": "driver_required_runtime_capabilities",
+     "capability_vocab_version": "1",
+     "driver_id": "<canonical-driver-id>",
+     "required": ["<capability>", "..."]
+   }
+   ```
+
+3. For a provider digest, build:
+
+   ```json
+   {
+     "kind": "runtime_provider_capabilities",
+     "capability_vocab_version": "1",
+     "provider_id": "<canonical-provider-id>",
+     "capabilities": {
+       "<capability>": true
+     }
+   }
+   ```
+
+4. Sort `required` lexicographically by capability name. For provider
+   `capabilities`, normalize omitted and explicit `false` values to the same
+   unsupported state and emit only supported capabilities with value `true`.
+   Unknown capability names fail validation before digesting. Object keys are
+   emitted in deterministic lexical order with no insignificant whitespace.
+5. Prefix the bytes with `runtime_capabilities_digest_v1\n` and compute
+   `sha256:<hex>`.
+
+Digest fixtures for `claude_code`, `sh`, and `local_runsc` must land in 9a
+with the contract fixtures. 9b registry tests recompute those fixtures from the
+registry and fail if any unchanged digest byte changes.
+
 ## Initial Driver Requirements
 
 These requirements should be verified while implementing the registry. They are
@@ -61,7 +111,7 @@ initial targets, not a substitute for driver smoke evidence.
 | Driver | Initial required runtime capabilities |
 | --- | --- |
 | `claude_code` | `exec_stream`, `stdin`, `kill`, `filesystem_rw`, `network_policy`, `logs`, `snapshot_disk` |
-| `sh` | `exec_stream`, `pty`, `stdin`, `signal`, `kill`, `resize_pty`, `filesystem_rw`, `logs`, `snapshot_disk` |
+| `sh` | `exec_stream`, `pty`, `stdin`, `signal`, `kill`, `resize_pty`, `filesystem_rw`, `network_policy`, `logs`, `snapshot_disk` |
 | `pi` | `exec_stream`, `pty`, `stdin`, `signal`, `kill`, `filesystem_rw`, `network_policy`, `logs`, `snapshot_disk` |
 
 Pi is listed with `pty` until its pinned RPC mode proves pure pipe operation is
@@ -71,7 +121,8 @@ paired smoke evidence.
 ## Snapshot Semantics
 
 Capability booleans are not enough for snapshot behavior. Contract v2 also
-records `snapshot_policy.snapshot_semantic`:
+records `snapshot_policy.snapshot_semantic` and a provider-derived snapshot
+projection:
 
 - `generation_checkpoint_restore`: current `local_runsc` behavior. It supports
   crash/restart within the same generation lineage.
@@ -82,6 +133,42 @@ records `snapshot_policy.snapshot_semantic`:
 
 Phase 9 uses `generation_checkpoint_restore`. Fanout objects and child-result
 models belong to a later phase after a provider proves `branch: true`.
+
+`RuntimeProviderSpec` must define the source facts for every
+`snapshot_policy` field written to a v2 contract:
+
+```text
+snapshot.supports_disk
+snapshot.supports_memory
+snapshot.supports_branch
+snapshot.branch_count_limit
+snapshot.snapshot_semantic
+snapshot.must_quiesce_processes
+snapshot.stream_disconnects_on_snapshot
+```
+
+The first three booleans must match the provider capability map for
+`snapshot_disk`, `snapshot_memory`, and `branch`. `branch_count_limit` must be
+`0` when `supports_branch` is false. A provider may not declare
+`base_branch_fanout` unless `branch` is true, and may not declare
+`generation_checkpoint_restore` unless `snapshot_disk` is true. For
+`local_runsc` in Phase 9, the normative projection is:
+
+```json
+{
+  "supports_disk": true,
+  "supports_memory": false,
+  "supports_branch": false,
+  "branch_count_limit": 0,
+  "snapshot_semantic": "generation_checkpoint_restore",
+  "must_quiesce_processes": true,
+  "stream_disconnects_on_snapshot": true
+}
+```
+
+Registry tests must recompute the v2 `snapshot_policy` from these provider
+facts and fail if a contract carries independently supplied or contradictory
+snapshot values.
 
 ## Provider API Families
 

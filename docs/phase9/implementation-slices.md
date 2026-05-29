@@ -1,259 +1,130 @@
 # Phase 9 Implementation Slices
 
-This document is the implementation checklist for [README.md](./README.md).
-It is intentionally split by release slice so schema cleanup, no-op refactors,
-bridge abstraction, Pi integration, and secret-grant semantics do not block one
-another.
+This is the execution index for [README.md](./README.md). It keeps the phase
+sequence and shared constraints in one place; detailed deliverables, code
+touchpoints, and gates live in one file per slice under `slices/`.
 
-Old-data migration, backups, backfills, and down paths are not Phase 9 work.
-When a slice changes schema or contract shape, it can target the current
-working schema directly. Compatibility gates are behavioral and contract-level:
-Claude Code and shell must keep working, and new v2 contracts must be
-internally consistent.
+Reference documents:
 
-## 9a: Contract and Schema Shape
+- [sandbox-contract-v2.md](./sandbox-contract-v2.md)
+- [driver-state.md](./driver-state.md)
+- [runtime-capabilities.md](./runtime-capabilities.md)
+- [secret-grants.md](./secret-grants.md)
+- [pi-driver.md](./pi-driver.md)
+- [current-code-map.md](./current-code-map.md)
 
-Goal: reshape current Claude/shell surfaces into driver/provider-shaped slots
-without changing behavior.
+Clean-cutover rule: slices may use the automatic destructive cutover defined in
+[README.md](./README.md) for obsolete pre-gate state. Old runtime rows and old
+`sessions`, `messages`, `artifacts`, `turns`, and `events` rows are disposable,
+constrained SQLite tables may be rebuilt directly, and old interfaces may be
+removed when that produces a cleaner driver/provider implementation. Provider
+cleanup is automatic and coordinated by startup after the orchestrator owner
+lock is held. The 9a store-open cutover coordinator owns marker capture,
+cleanup replay, and final schema/deletion transactions around the existing
+transaction-only migration runner; injected cleanup helpers perform idempotent
+provider/filesystem cleanup outside DB transactions while the durable
+in-progress marker is present. Discoverable live provider/isolation resources
+must be cleaned, proven absent, or durably quarantined before their DB ownership
+rows are deleted; otherwise the in-progress marker remains and runtime startup
+stays blocked. Durable quarantine means an active
+`runtime_resource_quarantine_tombstones` row that allocator, restore, and
+host-state reconciliation paths enforce until explicit absence-evidence
+release. There is no preflight manifest, manual approval, retained-session
+quarantine, or reactivation path.
 
-Deliverables:
+## Slice Map
 
-1. Add `claude_code` as the canonical registry/config/contract ID while
-   keeping `claude` as a legacy alias for current public and persisted surfaces.
-   This is a constants and lookup change only; the full `DriverSpec` registry
-   belongs to 9b.
-2. Change new sandbox contract payloads to `contract_schema_version: 2`.
-   Keep `sandbox_contract_version: sandbox-isolation-v1` as the Phase 8
-   boundary label.
-3. Replace string `driver` in new contract payloads with a `driver` object:
-   `driver_id`, `driver_version`, `bridge_protocol`, `output_schema`,
-   command/config/runtime-capability digests, and capability booleans.
-4. Replace top-level `runtime_adapter` with `runtime_provider`:
-   `provider_id`, `provider_profile_id`, `isolation_kind`, `template_ref`,
-   `template_digest`, `capability_digest`, and `provider_specific` for runsc
-   facts.
-5. Add `snapshot_policy` with
-   `snapshot_semantic: generation_checkpoint_restore` for `local_runsc`.
-6. Add `credential_policy.secret_grants[]` with the full field shape, but allow
-   only `domain: model_provider` and `exposure_mode: proxy_only`.
-7. Remove SQL-level `agent IN ('claude','sh')` coupling from the active schema.
-   9a may keep app-layer validation as a hard-coded set until 9b replaces it
-   with the registry.
-8. Rename Anthropic-specific runtime profile fields to model-proxy names in the
-   active schema and code paths. Real provider credentials remain outside the
-   sandbox and outside runtime profiles.
-9. Introduce a generic driver state slot, for example
-   `session_driver_states(session_id, driver_id, state_payload, state_digest)`,
-   for current and future driver-private state. Historical `claude_session_uuid`
-   row migration is not required.
-10. Generate `/harness-control/driver/<driver_id>/` inside the existing
-    read-only `/harness-control` projection. This does not add a bind mount and
-    does not change the Phase 8 MountPlan allow-list.
+| Slice | Detail | New product capability | Primary gate |
+| --- | --- | --- | --- |
+| 9a | [Contract and schema shape](./slices/9a-contract-schema.md) | No | Canonical IDs, request/config-boundary legacy translation, automatic destructive cutover, sidecar/checkpoint fence, and v2 validation pass before v2 writes |
+| 9b | [Driver and provider registries](./slices/9b-driver-provider-registries.md) | No | Unsupported driver/provider pairs fail before allocation and 9a digest bytes stay stable |
+| 9c | [Generic config and frontend surface](./slices/9c-generic-config-frontend.md) | No | Current config maps cleanly and selected drivers match the built image manifest |
+| 9d | [Bridge and output refactor](./slices/9d-bridge-output.md) | No | Bridge protocol v2 negotiation gates `RunTurn`, and Claude/shell public event output remains unchanged |
+| 9e | [Strict secret grants](./slices/9e-secret-grants.md) | No | Only `domain: model_provider` with `proxy_only` passes in Phase 9 |
+| 9f | [Pi driver integration](./slices/9f-pi-driver.md) | Yes | Pi gates pass after 9a-9e and Claude/shell gates remain green |
 
-Code touchpoints:
+## Ordering Rules
 
-- `orchestrator/internal/agents/agents.go`
-- `orchestrator/internal/store/migrations.go`
-- `orchestrator/internal/store/resources.go`
-- `orchestrator/internal/store/sandbox_contract.go`
-- `orchestrator/internal/store/proxy.go`
-- `orchestrator/internal/server/server.go`
-- `orchestrator/internal/runtime/runtime.go`
-- `docs/phase8/fixtures/control-manifest-payload.json`
+9a is intentionally split into sub-gates so the v2 write cutover is not the
+first time schema, loader, sidecar, checkpoint, projection, and proxy
+authorization changes meet. 9b promotes 9a hard-coded driver/provider facts into
+registries without changing digest bytes for unchanged facts. 9c adds the
+product-facing mode/config layer and image-manifest gate before 9f can select
+Pi.
 
-Gates:
+9a, 9b, and 9c are independently releasable. Until 9c lands, 9a/9b may keep a
+public API compatibility adapter for the existing `agent: "claude" | "sh"`
+request/response shape. That adapter maps only at the HTTP DTO boundary; it
+accepts legacy input and derives any legacy response field from canonical
+`sessions.driver_id`. It does not register `claude` as a driver alias and must
+not feed runtime selectors, v2 contracts, grants, image manifests, sidecars,
+restore, or proxy authorization. 9a also owns the deployment-default boundary:
+legacy
+`HARNESS_DEFAULT_AGENT=claude` and any config-derived omitted create-session
+default must be normalized to canonical `claude_code` before runtime selection,
+or rejected if it cannot be mapped. No lower layer may receive `claude` from
+config defaults. The only post-boundary legacy-token exception before 9d is the
+protocol-v1 sandbox projection described below. 9c replaces the public adapter
+with product `mode` and removes or rejects legacy `agent` input.
 
-- New contracts write schema v2.
-- Contract validation rejects malformed driver/provider objects and
-  non-`proxy_only` grants.
-- Claude/shell API and event compatibility tests still pass.
-- Control manifest contains no host-only paths. The canonical host-side
-  sandbox contract may contain bind/resource identity paths, but those fields
-  must not be projected into the sandbox. Neither surface may contain provider
-  credentials.
+The only exception is 9a.1 staging before the destructive cutover: if a
+deployable build can still see pre-cutover rows with nullable/missing
+`sessions.driver_id`, it must keep the old-row selector and old-row legacy DTO
+projection for those rows until 9a.4 deletes or rebuilds them. That selector
+and DTO projection are quarantined to pre-cutover rows only. They must not
+create v2 contracts, sidecars, grants, image manifests, restore evidence,
+proxy authorization, or new response fields from legacy aliases, and they are
+removed or made unreachable by the 9a.4 cutover. If 9a.1 and 9a.4 ship
+atomically, this exception is unnecessary and all legacy response `agent`
+fields are derived only from canonical `sessions.driver_id`.
 
-## 9b: Driver and Provider Registries
+9a chooses protocol-v1 sandbox compatibility rather than teaching the current
+runner to consume `claude_code`. 9a may add the new driver/provider control
+projection before 9d, but the sandbox bridge runner still consumes the
+protocol-v1 manifest/env shape until the 9d bridge refactor lands. Therefore
+9a-9c must keep the old sandbox-visible compatibility fields required by the
+current `harness-agent-entrypoint` and `harness-bridge-client`: canonical
+`driver_id: "claude_code"` is projected to sandbox-visible `agent: "claude"` /
+`HARNESS_AGENT=claude`, and canonical `driver_id: "sh"` is projected to `sh`.
+Those values are projection-only compatibility output derived from canonical
+state; they are not accepted as host runtime selectors, persisted aliases, v2
+contract values, grants, image-manifest IDs, sidecar IDs, restore inputs, or
+proxy authorization facts. Because 9a also claims the Claude command-plan
+fresh/resume selector is sidecar-backed, 9a owns a narrow patch to the current
+`harness-bridge-client` so runner-local `first_turn` state and filesystem
+probing cannot override that projection. 9d owns removing the compatibility
+fields and legacy env values when the runner reads the driver/provider
+projection and bridge protocol v2 is required.
 
-Goal: make driver and provider facts first-class without changing runtime
-behavior.
+Contract v2 uses `contract_schema_version: 2` for the structural payload and a
+separate `contract_gate_version` for validation profile. 9a/9b writes use
+`contract_gate_version: "phase9a"` and must carry null runtime-config,
+agent-manifest, and rootfs-image input digests. 9c+ writes use
+`contract_gate_version: "phase9c"` and must satisfy the runtime-config and
+image-manifest digest gates. The shared loader keys version-specific validation
+from the persisted gate version, not from the current binary version or release
+date.
 
-Deliverables:
+9d is the protocol-v2 bridge cutover and owns the release reset for any
+active/checkpointed generation that cannot prove bridge protocol v2 from
+persisted allocation-time manifest evidence. That reset includes both 9c rows
+whose persisted manifest proves only protocol v1 and older `phase9a`
+generations with missing/null manifest evidence; a missing manifest is not
+treated as implicit protocol-v2 support. Any reset that deletes or fails
+active/checkpointed generations must run under the same owner-lock cleanup gate
+as 9a: live provider, network, bridge/control, checkpoint, bundle, and
+filesystem resources are cleaned, proven absent, or durably quarantined before
+their DB ownership rows are removed.
 
-1. Replace the constants-only agent map with a `DriverSpec` registry:
+Pi work in 9f depends on the generic 9a-9e contract path. Pi cannot be selected
+from `/latest` documentation assumptions alone; exact CLI version, event schema,
+RPC/session behavior, and normalizer corpus must be checked in as versioned
+release evidence. The 9f schema update is a preserving constraint-widening
+migration: it must not delete valid post-9a/9c/9e Claude Code or shell rows
+unless a separately named release-reset gate explicitly owns active/checkpointed
+session deletion.
 
-   ```go
-   type DriverSpec struct {
-       ID              agents.ID
-       LegacyIDs       []agents.ID
-       Label           string
-       Kind            DriverKind
-       BridgeProtocol  BridgeProtocol
-       OutputSchema    OutputSchema
-       RequiredRuntime []RuntimeCapability
-       Capabilities    DriverCapabilities
-       ModelAccess     ModelAccessSpec
-       Process         ProcessSpec
-   }
-   ```
+## Later Work
 
-2. Register `claude_code`, legacy `claude`, and `sh`.
-3. Add `RuntimeProviderSpec(local_runsc)` with capability vocabulary v1.
-4. Enforce `driver.required_runtime_capabilities` as a subset of
-   `runtime_provider.capabilities` before data-volume provisioning and
-   MountPlan generation.
-5. Add an internal/operator-facing `GET /api/agents` catalog after the registry
-   exists.
-
-Gates:
-
-- Missing provider capabilities fail before allocation.
-- Legacy `claude` resolves to `claude_code` for registry facts while public
-  compatibility remains intact.
-- Capability digests are stable and included in new contracts.
-
-## 9c: Generic Config and Frontend Product Surface
-
-Goal: move deployment choices to generic config while keeping the workbench
-product model unchanged.
-
-Deliverables:
-
-1. Add `harness.agents.<id>`, `harness.model_profiles.<id>`, and
-   `harness.runtime_providers.<id>`.
-2. Treat current `claude:` config as a compatibility input that normalizes into
-   `harness.agents.claude_code`.
-3. Keep `harness.model_proxy.sandbox_base_url` as the only sandbox proxy alias
-   source of truth.
-4. Remove any per-profile `sandbox_base_url`; `model_profiles` reference the
-   global proxy by `proxy_ref`.
-5. Change the frontend to use product modes:
-
-   ```text
-   Agent -> configured harness.default_agent
-   Shell -> sh
-   ```
-
-   Raw `driver_id` is not a user-facing picker value.
-
-Gates:
-
-- Existing deployment config maps to the same Claude Code behavior.
-- The frontend still labels coding sessions as `Agent` and shell sessions as
-  `Shell`.
-- Public DTOs do not expose driver-private state, host paths, or restore IDs.
-
-## 9d: Bridge and Output Refactor
-
-Goal: remove host-side driver-specific turn framing and parser branching.
-
-Deliverables:
-
-1. Replace sandbox `make_turn_runner(agent)` with an `AgentRunner` registry:
-
-   ```python
-   class AgentRunner:
-       protocol = "..."
-       def start(self): ...
-       def run_turn(self, content, emit): ...
-       def interrupt(self): ...
-       def compact(self, instructions=None): ...
-       def close(self): ...
-   ```
-
-2. Change host-to-sandbox input to driver-neutral `RunTurn` data:
-
-   ```text
-   RunTurn { turn_id, content, options }
-   ```
-
-   The sandbox runner renders Claude stream-json, Pi RPC JSONL, shell PTY
-   input, or future native frames.
-
-3. Replace the Go `stream_parser.go` branching model with an
-   `OutputNormalizer` registry:
-
-   ```go
-   type OutputNormalizer interface {
-       Handle(output runtime.Output) (events []NormalizedEvent, complete bool, err error)
-       Flush() []NormalizedEvent
-   }
-   ```
-
-4. Add and exercise `harness_native_events_v1` for at least one driver so the
-   path is real before Pi depends on it.
-
-Gates:
-
-- Claude/shell event output remains compatible at the existing event surface.
-- Turn completion is deterministic for each registered driver.
-- Unknown native event types fail closed for structured schemas.
-
-## 9e: Pi Driver Integration
-
-Goal: add Pi as a registered driver through the established 9a-9d contracts.
-
-Deliverables:
-
-1. Add rootfs build support for `SANDBOX_AGENT_DRIVERS=pi`.
-2. Record Pi CLI version and Pi event schema version in
-   `/etc/harness-image/agents.json`.
-3. Add generated Pi config under `/harness-control/driver/pi/`.
-4. Run Pi as a long-lived RPC process using `/agent-home/.pi/agent` for all
-   writable state.
-5. Add a Pi `AgentRunner`.
-6. Add a Pi `OutputNormalizer`.
-7. Add Pi support declarations for system prompt, compaction, skills, hooks,
-   MCP, and interrupt. Unsupported capabilities must be explicit.
-
-Gates:
-
-- Pi RPC smoke works without model credentials.
-- Pi only reaches models through the sandbox proxy alias during active turns.
-- Pi state remains under `/agent-home/.pi/agent`.
-- No real provider credentials are visible in sandbox env, argv, control
-  files, logs, bridge queues, artifacts, or process listings.
-- Pi interrupt/compaction are implemented or explicitly unsupported.
-- Pi restore/cold restart uses only `/agent-home` plus persisted driver state.
-
-## 9f: Strict Secret Grants
-
-Goal: make the `secret_grants[]` schema introduced in 9a semantically strict
-without enabling new secret exposure modes.
-
-Deliverables:
-
-1. Require `grant_id`.
-2. Normalize and validate `scope`.
-3. Validate optional `ttl_seconds` with a configured upper bound.
-4. Require `allowed_drivers` and validate against the driver registry.
-5. Require `allowed_runtime_providers` and validate against the provider
-   registry.
-6. Include grants in the credential-policy digest.
-7. Allow future domains such as `git`, `package_registry`, `mcp_remote`, and
-   `webhook` as schema values only when their exposure mode remains
-   `proxy_only`.
-
-Gates:
-
-- Phase 9 still rejects `gateway_url`, `brokered_token_env`,
-  `brokered_token_file`, and any OS-visible exposure mode.
-- Credential-policy digest changes whenever any effective grant field changes.
-- Phase 10d must introduce a broker/gateway contract before enabling
-  credential-bearing MCP, Git, package registry, or webhook paths.
-
-## Phase 10 and Later
-
-Phase 10 features must land through driver adapters:
-
-```text
-10a system prompt -> DriverSystemPromptAdapter
-10b compaction    -> DriverCompactionAdapter
-10c skills        -> shared /harness-skills mount + DriverSkillsAdapter
-10d hooks/MCP     -> DriverPolicyAdapter + DriverMCPAdapter
-interrupt         -> DriverControlAdapter
-output            -> OutputNormalizer
-```
-
-Fanout and base-to-N child branch semantics are not Phase 9 work. They require
-provider `branch: true` evidence and a separate object model after
-`snapshot_policy.snapshot_semantic == base_branch_fanout` is real.
+Phase 10 adapter expectations and out-of-scope fanout semantics are tracked in
+[Phase 10 and later](./slices/phase10-and-later.md).

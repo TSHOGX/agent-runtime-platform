@@ -46,12 +46,20 @@ this roadmap:
 
 Phase 9 makes "agent" a deployment-selected driver contract instead of a
 Claude-shaped string branch. Detailed design: [phase9/README.md](./phase9/README.md).
+Phase 9 uses an automatic destructive cutover for obsolete pre-9a state: old
+rows may be deleted and constrained SQLite tables rebuilt without a manual
+data-preservation gate, but live provider/isolation resources must be proven
+absent or durably quarantined before their ownership rows are removed.
 
-1. Add `AgentDriverSpec` for Claude Code, shell, and Pi, with legacy `claude` alias support.
+1. Add `AgentDriverSpec` for Claude Code, shell, and Pi. Do not register
+   legacy `claude` as a runtime alias; only the temporary 9a/9b public API
+   boundary may translate it to `claude_code` before the 9c mode cutover, and
+   only the protocol-v1 sandbox projection may emit `claude` to the current
+   runner until 9d replaces that bridge path.
 2. Add `RuntimeProviderSpec` for `local_runsc` and validate driver capabilities before allocation.
 3. Move model/provider config into `harness.agents` and `harness.model_profiles`; `harness.default_agent` selects the deployed driver.
-4. Keep the frontend product surface as "Agent" and "Shell"; users do not choose or see whether "Agent" is Claude Code, Pi, or another deployed driver.
-5. Build the sandbox image from the deployed driver set so only selected driver CLIs are pinned into the rootfs.
+4. Keep the frontend product surface as "Agent" and deployment-capable "Shell"; users do not choose or see whether "Agent" is Claude Code, Pi, or another deployed driver.
+5. Build the sandbox image from the deployed driver set so only selected driver CLIs are pinned into the rootfs; deployments that omit `sh` must not advertise Shell.
 6. Add generic driver state, runtime profile, sandbox contract, runner, and output-normalizer slots.
 7. Add Pi as a long-lived RPC driver through the Phase 8 model-proxy boundary.
 

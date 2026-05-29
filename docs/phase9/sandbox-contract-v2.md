@@ -7,244 +7,108 @@ Phase 9 keeps the Phase 8 outer contract label:
 ```
 
 The JSON payload schema changes from `contract_schema_version: 1` to
-`contract_schema_version: 2`. New writes should use v2 only. Historical v1 data
-migration and backup plans are not part of Phase 9.
+`contract_schema_version: 2`. After the 9a cutover, new writes are v2 only and
+old v1 rows are not a compatibility target.
 
-## Target Shape
+Contract schema version 2 has a separate top-level `contract_gate_version` for
+validation profile. Phase 9 uses:
 
-```json
-{
-  "sandbox_contract_version": "sandbox-isolation-v1",
-  "contract_schema_version": 2,
-  "contract_id": "contract_gen_123",
-  "session_id": "sess_123",
-  "generation_id": "gen_123",
-  "driver": {
-    "driver_id": "claude_code",
-    "driver_version": "pinned-or-discovered-version",
-    "bridge_protocol": "claude_stream_json_per_turn",
-    "output_schema": "claude_stream_json_v1",
-    "command_argv_digest": "sha256:...",
-    "driver_config_digest": "sha256:...",
-    "required_runtime_capabilities_digest": "sha256:...",
-    "supports_interrupt": true,
-    "supports_compaction": true
-  },
-  "runtime_provider": {
-    "provider_id": "local_runsc",
-    "provider_profile_id": "local_runsc_default",
-    "isolation_kind": "gvisor",
-    "template_ref": "default",
-    "template_digest": "sha256:...",
-    "capability_vocab_version": "1",
-    "capability_digest": "sha256:...",
-    "provider_specific": {
-      "runsc_platform": "systrap",
-      "runsc_version": "runsc release-...",
-      "runsc_binary_digest": "sha256:..."
-    }
-  },
-  "identity": {
-    "sandbox_uid": 65534,
-    "sandbox_gid": 65534,
-    "sandbox_supplemental_gids": [],
-    "model_access_allowed": true
-  },
-  "mount_plan": {
-    "workspace": {
-      "source": "<host path>",
-      "destination": "/workspace",
-      "mode": "rw"
-    },
-    "agent_home": {
-      "source": "<host path>",
-      "destination": "/agent-home",
-      "mode": "rw"
-    },
-    "control": {
-      "source": "<host path>",
-      "destination": "/harness-control",
-      "mode": "ro"
-    },
-    "bridge": {
-      "source": "<host path>",
-      "destination": "/harness-control/bridge",
-      "mode": "rw"
-    }
-  },
-  "network_identity": {
-    "runsc_network": "harness",
-    "sandbox_ip": "10.200.1.2",
-    "sandbox_ip_cidr": "10.200.1.2/30",
-    "host_gateway_ip": "10.200.1.1",
-    "netns_name": "harness-...",
-    "netns_path": "<host path>",
-    "host_veth": "veth...",
-    "sandbox_veth": "eth0",
-    "host_side_cidr": "10.200.1.1/30",
-    "nft_table_name": "harness_...",
-    "egress_policy_id": "egress_..."
-  },
-  "snapshot_policy": {
-    "provider_supports_snapshot_disk": true,
-    "provider_supports_snapshot_memory": false,
-    "provider_supports_branch": false,
-    "branch_count_limit": 0,
-    "must_quiesce_processes": true,
-    "stream_disconnects_on_snapshot": true,
-    "snapshot_semantic": "generation_checkpoint_restore"
-  },
-  "credential_policy": {
-    "provider_credentials": "host-only",
-    "sandbox_secret_mount": "absent",
-    "proxy_token": "absent",
-    "secret_grants": [
-      {
-        "grant_id": null,
-        "domain": "model_provider",
-        "scope": "anthropic_messages",
-        "exposure_mode": "proxy_only",
-        "ttl_seconds": null,
-        "allowed_drivers": [],
-        "allowed_runtime_providers": []
-      }
-    ]
-  },
-  "model_access": {
-    "model_access_allowed": true,
-    "active_turn_required": true,
-    "provider_protocol": "anthropic_messages",
-    "sandbox_model_proxy_base_url": "http://harness-model-proxy.internal:8082"
-  },
-  "driver_runtime": {
-    "driver_home_mount": "/agent-home",
-    "generated_driver_config_mount": "/harness-control/driver/claude_code",
-    "driver_state_digest": "sha256:..."
-  },
-  "resource_identity": {
-    "resource_identity_digest": "sha256:..."
-  },
-  "input_digests": {
-    "bundle_digest": "sha256:...",
-    "runtime_config_digest": "sha256:...",
-    "oci_spec_digest": "sha256:...",
-    "control_manifest_digest": "sha256:..."
-  }
-}
-```
+- `phase9a`: 9a/9b v2 payloads. Runtime-config, agent-manifest, and
+  rootfs-image input digests are not available yet and must be null.
+- `phase9c`: 9c+ v2 payloads. Runtime-config and image-manifest digest gates
+  are active for new writes and validation.
 
-## Driver Object
+`contract_gate_version` is a durable discriminator, not a replacement for the
+schema major version. Unknown gate versions fail closed.
 
-The `driver` object replaces the v1 string `driver` field. It is the immutable
-driver identity for the generation, not a UI label.
+Historical v1 data migration, backup, down migration, and backfill plans are
+not part of Phase 9. 9a may delete existing v1 `sandbox_contracts`,
+`runtime_generations`, `network_profiles`, `runtime_generation_resources`,
+`runtime_resource_instances`, sessions, messages, artifacts, turns, events,
+driver homes, and sidecars as part of the cutover to the clean v2 shape. The
+cutover may read `runtime_resource_instances.resource_identity_payload` for
+automatic provider cleanup before deleting rows. Provider/filesystem cleanup is
+coordinated by the 9a startup cutover coordinator after the orchestrator owner
+lock is acquired, not by a DB-only migration callback. It writes a durable
+in-progress marker before non-transactional cleanup and retries idempotently if
+cleanup succeeds but a later DB transaction rolls back or the process crashes.
+Discoverable live isolation resources must be cleaned, proven absent, or
+durably quarantined before their ownership rows are removed. If that live
+cleanup gate cannot be satisfied, the in-progress marker remains and runtime
+startup stays blocked. Old cleanup evidence is disposable unless it is the
+active `runtime_resource_quarantine_tombstones` row for a quarantined live
+resource; those tombstones are first-class schema rows and continue to block
+allocator/reconciler reuse after the old ownership rows are deleted.
 
-Required Phase 9a fields:
+Before removing v1 `runtime_generations`, the cutover may either unlink
+references or delete the referencing `sessions`, `messages`, `artifacts`,
+`turns`, and `events` rows directly. There is no retained-session matrix,
+whole-session purge choice, or reactivation path; live-resource quarantine is
+only a safety tombstone that prevents identity reuse. After the destructive
+cutover, runtime allocation, reconnect, restore, proxy authorization, and
+driver-state bootstrap operate only on post-cutover v2 rows.
 
-- `driver_id`
-- `driver_version`
-- `bridge_protocol`
-- `output_schema`
-- `command_argv_digest`
-- `driver_config_digest`
-- `required_runtime_capabilities_digest`
-- `supports_interrupt`
-- `supports_compaction`
+9a must persist `sandbox_contracts.contract_schema_version` and
+`sandbox_contracts.contract_gate_version` for new rows and require both columns
+to match the payload. Store, runtime, restore, and proxy authorization paths
+must use one audited contract-loading helper, and that helper is v2-only after
+cutover. Restore and proxy authorization must not independently parse contract
+payloads or reconstruct partial contract facts. Persisted v1 rows fail closed
+or are removed; there is no Phase 8 read/auth compatibility branch and no
+checkpoint restore path for pre-9a no-fence generations.
 
-`claude` remains a legacy alias for current public and persisted surfaces, but
-new v2 contracts should record the canonical driver spec ID, `claude_code`.
+9c must write `contract_gate_version: "phase9c"` for new contracts. Existing
+`phase9a` rows with null 9c-only digests remain distinguishable as pre-9c
+contracts, or an automatic destructive cutover may delete them. If that cutover
+deletes active/checkpointed generations or their runtime ownership rows, it
+must use the owner-lock cleanup/quarantine gate before row deletion. The loader
+must not silently reinterpret a `phase9a` row as `phase9c`.
 
-## Runtime Provider Object
+9d cannot infer bridge protocol support from those nullable 9a digests. Any
+active/checkpointed generation without persisted allocation-time image-manifest
+evidence must be reset, deleted, or explicitly failed before the host requires
+bridge protocol v2. That reset uses the same owner-lock cleanup/quarantine
+gate as the 9a destructive cutover before deleting DB ownership rows for live
+provider, network, bridge/control, checkpoint, bundle, or filesystem resources;
+missing manifest evidence is incompatible with v2 reconnect/restore.
 
-`runtime_provider` replaces top-level `runtime_adapter`. Runsc facts move under
-`runtime_provider.provider_specific` so future providers can keep their own
-provider-specific facts without polluting the contract root.
+The shared v2 loader validates immutable contract shape and allocation-time
+evidence. It must not silently turn mutable evidence into live equality checks:
+current driver sidecar equality is an allocation/start or checkpoint-restore
+gate, and current deployment config applies to new allocations only.
 
-The current Linux capability deny list belongs to OCI/runtime construction. It
-is not the Phase 9 product capability contract. Product capabilities and their
-digest come from [runtime-capabilities.md](./runtime-capabilities.md).
+## Contract Reference Map
 
-## Snapshot Policy
+The v2 contract is split into focused reference files so agents can load only
+the part they are changing:
 
-`snapshot_policy` distinguishes current checkpoint/restore behavior from
-future fanout:
+- [Target shape](./contract/target-shape.md): full canonical payload example.
+- [Driver object](./contract/driver-object.md): canonical driver identity and
+  command/config digest algorithms.
+- [Runtime provider](./contract/runtime-provider.md): provider-specific runtime
+  facts, resource identity digest, and template digest algorithm.
+- [DataVolume evidence](./contract/data-volumes.md): workspace and agent-home
+  DB/evidence checks.
+- [Snapshot policy](./contract/snapshot-policy.md): provider-derived snapshot
+  projection and fanout exclusions.
+- [Driver runtime and credentials](./contract/driver-runtime-and-credentials.md):
+  initial state digest, mutable sidecar boundary, and credential-policy summary.
+- [Input and artifact digests](./contract/input-and-artifact-digests.md):
+  runtime config, rootfs, agent manifest, and rendered artifact digest rules.
+- [Control projections](./contract/projections.md): sandbox-visible control
+  manifest and generated driver config projection.
+- [Validation gates](./contract/validation-gates.md): reject conditions for v2
+  validation and old v1 payloads.
 
-- `generation_checkpoint_restore`: current local runsc behavior.
-- `base_branch_fanout`: future base-to-N child sandbox behavior.
-- `pause_resume_only`: no checkpoint/branch guarantee.
+## Ownership Notes
 
-Phase 9 must not infer fanout readiness from `snapshot_disk: true`. Fanout
-requires `provider_supports_branch: true` and
-`snapshot_semantic: base_branch_fanout`.
+Driver-state CAS rules, sidecar digests, and checkpoint fencing are normative in
+[driver-state.md](./driver-state.md). Credential grant field coverage and Phase
+9 exposure limits are normative in [secret-grants.md](./secret-grants.md).
+Runtime capability vocabulary and provider capability digests are normative in
+[runtime-capabilities.md](./runtime-capabilities.md). Pi-specific config,
+runner, state, and release evidence rules are normative in
+[pi-driver.md](./pi-driver.md).
 
-## Credential Policy
-
-Top-level fields keep the sandbox-visible posture:
-
-- `provider_credentials: host-only`
-- `sandbox_secret_mount: absent`
-- `proxy_token: absent`
-
-`secret_grants[]` enumerates allowed secret domains and exposure mode. During
-Phase 9, only `domain: model_provider` and `exposure_mode: proxy_only` may pass
-validation. See [secret-grants.md](./secret-grants.md).
-
-## Control Manifest Projection
-
-The sandbox-visible control manifest may contain:
-
-- `driver_id`
-- `bridge_protocol`
-- generated driver config paths and digests
-- model proxy alias when model access is allowed
-- Phase 10 adapter metadata after Phase 10 lands
-
-It must not expose:
-
-- host roots
-- host gateway internals beyond sandbox-required network projection
-- netns paths when not required by the sandbox
-- veth names when not required by the sandbox
-- DB paths
-- bundle/spec/checkpoint host paths
-- proxy-internal paths
-- provider credential paths
-
-During 9a, existing top-level manifest fields such as `agent`,
-`claude_session_uuid`, `resume_claude`, and
-`claude_code_disable_nonessential_traffic` may remain as compatibility mirrors
-while the bridge and runner code still consume them. New code should read the
-driver object and generated driver config projection.
-
-## Driver Config Projection
-
-`/harness-control/driver/<driver_id>/` is generated inside the existing
-read-only `/harness-control` projection. It is not a new bind mount and does
-not change the Phase 8 MountPlan allow-list.
-
-Examples:
-
-```text
-/harness-control/driver/claude_code/settings.json
-/harness-control/driver/pi/models.json
-/harness-control/driver/pi/settings.json
-```
-
-Any driver that writes config, sessions, caches, sockets, or package data must
-declare exact writable paths under `/agent-home` or explicit scratch mounts. No
-driver may rely on writable rootfs paths.
-
-## Validation Gates
-
-Contract v2 validation should reject:
-
-- payloads containing `sandbox_contract_digest`
-- wrong `contract_id`, `session_id`, or `generation_id`
-- `contract_schema_version` other than `2` for new writes
-- string `driver` payloads
-- missing or unknown `driver.driver_id`
-- missing `runtime_provider.provider_id`
-- missing `capability_vocab_version`
-- missing capability/config/template digests
-- `credential_policy.secret_grants[]` with non-`proxy_only` exposure mode
-- host-only fields in sandbox-visible projection
-- `snapshot_semantic` values outside the allowed enum
+Implementation order and release gates are tracked from the slice index in
+[implementation-slices.md](./implementation-slices.md).

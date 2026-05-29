@@ -1,8 +1,22 @@
 # Pi Driver
 
 Pi enters Phase 9 as a registered driver after the driver/provider contract,
-capability check, bridge runner abstraction, and output normalizer registry are
-in place. It should not add a second Claude-shaped branch.
+capability check, bridge runner abstraction, output normalizer registry, and
+strict model-provider secret grants are in place. It should not add a second
+Claude-shaped branch.
+
+9f must also run the Pi schema-widening gate before Pi is selectable. The 9a
+schema intentionally constrains `sessions.driver_id`,
+`agent_runtime_profiles.driver_id`, and `session_driver_states.driver_id` to
+Claude Code and shell; the Pi schema update widens those canonical-driver
+checks to include `pi`. This widening is preserving, not a release reset. If
+SQLite constraints require table rebuilds, the migration must copy valid
+post-9a/9c/9e canonical rows into the rebuilt tables inside the migration
+transaction, keep foreign keys consistent, and leave valid Claude Code and
+shell sessions, sidecars, runtime profiles, active generations, checkpointed
+generations, message history, and artifact metadata intact. Any future choice
+to make Pi enablement a release reset must be explicit and gated separately
+before it deletes active or checkpointed state.
 
 ## Rootfs and Image Manifest
 
@@ -12,17 +26,29 @@ Rootfs build input:
 SANDBOX_AGENT_DRIVERS=pi FORCE=1 sandbox-image/build-rootfs.sh
 ```
 
+9c owns the generic image-manifest generator and Claude/shell rootfs
+parameterization. 9f extends that same build input and manifest schema with Pi;
+it must not add a separate hand-written manifest path.
+
 The image manifest at `/etc/harness-image/agents.json` must record:
 
 - `driver_id: pi`
 - pinned Pi CLI version
 - pinned Pi event schema version, for example `pi_rpc_events_v1.0`
 - binary path
-- package digest
+- package or binary digest
 - installed config/resource paths
 
-Allocation fails before runtime creation if `harness.default_agent` or any
-enabled Pi profile is not present in that manifest.
+The image manifest digest is recorded separately as
+`input_digests.agent_manifest_digest`. It is not the full rootfs/template
+content fence; `input_digests.rootfs_image_digest` keeps that role when the
+selected runtime provider exposes one.
+
+The generic allocation gate is introduced in 9c: allocation fails before
+runtime creation if the selected driver is not present in the image manifest.
+9f adds the Pi-specific manifest entries above and proves that
+`harness.default_agent: pi` and enabled Pi profiles pass that existing gate only
+when the image contains Pi.
 
 ## Runtime Command
 
@@ -30,10 +56,26 @@ Production Pi runs as a long-lived RPC process:
 
 ```text
 pi --mode rpc
-  --provider <provider>
+  --provider <harness_proxy_provider_id>
   --model <model>
   --session-dir /agent-home/.pi/agent/sessions
 ```
+
+Cold restart session selection is conditional on the pinned Pi release
+evidence. The current `/latest` RPC docs list startup session-directory and
+no-session controls and expose session switching through RPC, so Phase 9 must
+not treat an undocumented `--session` startup flag as normative. For the exact
+Pi CLI version installed in the image, 9f must prove one of these restore paths:
+
+- If pinned CLI evidence documents and verifies a startup session selector,
+  start Pi with `--session-dir` plus that selector and record the exact argv,
+  accepted selector value, and `get_session_stats` result.
+- Otherwise, start Pi with `--session-dir`, call RPC `switch_session` once with
+  the host-validated persisted session file or ID, then verify the selected
+  session with `get_session_stats` before accepting work.
+- If the pinned CLI proves neither path, Pi physical/logical restore from a
+  persisted session fails closed and Pi is not selectable for resumable
+  sessions.
 
 Sandbox environment:
 
@@ -41,14 +83,24 @@ Sandbox environment:
 HOME=/agent-home
 PI_CODING_AGENT_DIR=/agent-home/.pi/agent
 PI_CODING_AGENT_SESSION_DIR=/agent-home/.pi/agent/sessions
+PI_OFFLINE=1
+PI_SKIP_VERSION_CHECK=1
+PI_TELEMETRY=0
 ```
 
 Production must not use `--no-session`. That flag is reserved for smoke tests
 that prove JSONL framing without persistent state.
 
+`PI_OFFLINE=1` is the primary startup egress gate. `PI_SKIP_VERSION_CHECK=1`
+and `PI_TELEMETRY=0` are required defense-in-depth settings because Pi exposes
+separate controls for version checks and telemetry. If a future Pi version
+requires startup network activity for package, provider, or model discovery,
+that work must move behind an explicit Phase 10 broker/gateway contract or the
+active-turn model-proxy path; it is not allowed during sandbox cold start.
+
 ## Generated Config
 
-Pi config is generated under the existing control projection:
+Pi generated source config is written under the existing control projection:
 
 ```text
 /harness-control/driver/pi/models.json
@@ -59,11 +111,64 @@ These files are read-only from the sandbox. They may contain:
 
 - model/provider map
 - sandbox model proxy alias
-- non-secret compatibility key if Pi requires an API key field
+- non-secret placeholder key if Pi requires an API key field
 - driver settings selected by deployment config
 
 They must not contain real upstream provider credentials. Pi must reach the
 model through `harness.model_proxy.sandbox_base_url` during an active turn.
+
+Pi's config loader reads custom models and settings from
+`PI_CODING_AGENT_DIR`, which is `/agent-home/.pi/agent` in production. The
+runtime setup must therefore materialize the generated control projection at
+that path before Pi starts without making the config file pathnames mutable by
+the sandbox:
+
+```text
+/agent-home/.pi/agent/models.json   -> /harness-control/driver/pi/models.json
+/agent-home/.pi/agent/settings.json -> /harness-control/driver/pi/settings.json
+```
+
+Phase 9 materializes those two pathnames as exact read-only file bind entries
+in the v2 `mount_plan.driver_config_materializations` object. Each entry must
+also appear in `driver_runtime.materialized_driver_config` with the generated
+source projection path, source digest, sandbox destination, and
+`destination_mutable_by_sandbox: false`. The bind sources are the generated
+`/harness-control/driver/pi/` projection files, and the bind destinations are
+exactly:
+
+```text
+/agent-home/.pi/agent/models.json
+/agent-home/.pi/agent/settings.json
+```
+
+Symlinks inside a sandbox-writable `/agent-home` tree are not allowed for Pi
+config materialization in Phase 9 because the sandbox could otherwise retarget,
+replace, or unlink the pathname before Pi opens it. Copies into
+`/agent-home/.pi/agent` are also not allowed. A future symlink-based option
+would need a host-owned immutable parent path, separately declared writable
+subpaths, and validation evidence equivalent to the file-bind contract.
+
+The runner validates the materialized config before Pi startup, before every
+turn is submitted, and before every reconnect/cold-restart attach. It rejects
+the operation if `PI_CODING_AGENT_DIR` is not `/agent-home/.pi/agent`, if the
+materialized files are missing, if either destination is not an exact
+read-only file bind backed by the generated `/harness-control/driver/pi/`
+projection source and digest in the v2 contract, or if the sandbox can mutate
+either config pathname.
+
+The generated `models.json` must define a harness-specific provider ID such as
+`harness_anthropic_proxy`. Agent config and Pi argv must use that provider ID:
+
+```text
+pi --provider harness_anthropic_proxy --model <model>
+```
+
+The provider definition points at `harness.model_proxy.sandbox_base_url`, uses
+Pi's Anthropic-compatible custom-provider mode when the upstream model profile
+is Anthropic Messages, and includes only a non-secret dummy API key if Pi
+requires an API-key field. It must not use Pi's built-in `anthropic` provider
+ID, because that can bypass the harness proxy path and select Pi's native
+provider behavior.
 
 ## Writable State
 
@@ -73,8 +178,105 @@ All Pi writable state must stay under:
 /agent-home/.pi/agent
 ```
 
-No Pi cache, socket, session, package data, or settings write may target the
-read-only rootfs or `/harness-control`.
+The writable state contract must enumerate Pi's writable subpaths, including at
+least `/agent-home/.pi/agent/sessions`, separately from the two read-only
+config file binds above. No Pi cache, socket, session, package data, or
+settings write may target the read-only rootfs, `/harness-control`,
+`/agent-home/.pi/agent/models.json`, or
+`/agent-home/.pi/agent/settings.json`.
+
+## Restore State
+
+Pi restore state is the generic `session_driver_states` sidecar for
+`driver_id: pi`. New Pi-backed sessions do not create a sidecar at session
+creation, because `session_driver_states.updated_generation_id` must reference
+an existing `runtime_generations` row. First allocation for a new Pi
+session/driver pair creates the generation row, inserts the canonical
+uninitialized sidecar in that same allocation transaction with
+`state_version: 1`, and returns the digest/version as the allocation
+start-state token. The later contract write revalidates that token against the
+still-owned lease and current Pi sidecar before snapshotting the digest into
+the v2 contract. The canonical bootstrap payload is:
+
+```json
+{
+  "schema_version": 1,
+  "driver_id": "pi",
+  "state_kind": "pi_uninitialized",
+  "session_dir": "/agent-home/.pi/agent/sessions"
+}
+```
+
+The first Pi generation snapshots this digest into
+`driver_runtime.initial_driver_state_digest` and starts Pi with `--session-dir`
+but no explicit session selector. Production still must not use `--no-session`.
+After the first successful `completed` turn, the runner CAS-updates the sidecar
+to the initialized payload with `state_version: 2`.
+
+The initialized canonical payload is:
+
+```json
+{
+  "schema_version": 1,
+  "driver_id": "pi",
+  "state_kind": "pi_session",
+  "session_dir": "/agent-home/.pi/agent/sessions",
+  "selected_session_relpath": "<session>.jsonl",
+  "selected_session_file": "/agent-home/.pi/agent/sessions/<session>.jsonl",
+  "selected_session_id": "<pi-session-id>",
+  "last_completed_turn_id": "<turn-id>"
+}
+```
+
+After every successful `completed` turn, the Pi runner must call RPC
+`get_session_stats`, read `sessionFile` and `sessionId`, and validate
+`sessionFile` before sending a driver-state update. The runner check is not
+trusted persistence validation. The accepted runner value must be a clean
+relative session path under `session_dir` or a canonical path whose resolved
+target stays under `/agent-home/.pi/agent/sessions`. Absolute paths outside that
+root, `..` segments, empty names, symlinks that escape the session root, and
+paths whose realpath cannot be verified are rejected. The runner sends both the
+normalized relative session path and the canonical sandbox path in
+`driver_state_update.state_payload`; it never writes the sidecar directly.
+
+Pi does not advance sidecar state for `failed` or `canceled` terminal turns,
+even if the Pi process created or switched a session file before the failure or
+cancel. Those filesystem changes remain ordinary agent-home data and may be
+captured by later physical checkpoints, but they are not a trusted logical
+restore point until a later successful `completed` turn passes
+`get_session_stats`, runner path validation, host DataVolume-backed validation,
+digest recomputation, and CAS. The bridge must omit
+`driver_state_update` on failed/canceled Pi acknowledgements; if one is present,
+the host Pi validator rejects the completion before sidecar mutation.
+
+After runner validation for a successful `completed` turn, the runner includes
+the new payload in `ack_turn_completed.payload.driver_state_update`. The host
+applies that update with the generic driver-state compare-and-swap API in the
+same transaction as terminal turn state and active model-request cleanup, but
+only after `CompleteTurn` invokes the host Pi driver-state validator. That
+validator is the trusted boundary. It loads the current contract and verified
+`data_volumes.agent_home` row, maps the sandbox session path to the canonical
+host agent-home path, re-runs clean-relative/canonical-path validation using
+host `lstat`/`realpath`, rejects symlink escape and missing-file races,
+normalizes the persisted relative path, requires non-empty `sessionId`, and
+recomputes `state_digest` from canonical payload bytes. CAS runs only on the
+host-validated payload and digest; any mismatch between runner-supplied digest
+and host recomputation fails closed. Physical checkpoint metadata is fenced
+separately by the idle checkpoint path through
+`checkpoint_driver_states_digest`. A missing session file, empty session ID,
+host validation failure, digest mismatch, or CAS miss fails the turn completion
+path without replacing newer sidecar state.
+
+On cold restart, restore first runs the same host Pi driver-state validator
+against the persisted sidecar and current verified agent-home DataVolume before
+runtime launch. The runner then re-validates the persisted normalized session
+path and selects that session using the mechanism proven by the pinned release
+evidence: either a verified startup selector, or startup with `--session-dir`
+followed by one RPC `switch_session`. It then calls `get_session_stats` before
+accepting work. The returned `sessionFile` must pass the same runner validation
+and the validated `sessionFile` and `sessionId` must match the host-validated
+sidecar payload; otherwise restore fails closed and the generation is not
+allowed to run turns.
 
 ## Turn Flow
 
@@ -119,24 +321,87 @@ Pi must declare support mode for every Phase 10 feature:
 Unsupported means the adapter explicitly rejects the feature. It does not mean
 silently ignoring operator policy.
 
+## Release Evidence
+
+Pi docs under `/latest` are discovery references only. Before 9f can enable Pi
+selection, commit release evidence for the exact pinned Pi CLI and event schema
+that the sandbox image installs. Store it under a versioned fixture directory,
+for example:
+
+```text
+docs/phase9/fixtures/pi/<pi-cli-version>/
+  cli-version.txt
+  image-manifest-agent-entry.json
+  rpc-no-session-smoke.jsonl
+  rpc-session-stats.json
+  rpc-session-selection.jsonl
+  event-schema.json
+  event-normalizer-corpus.jsonl
+  verified-behavior.md
+```
+
+The evidence must record the exact CLI version, package or binary digest,
+event schema identifier, observed RPC framing, completion event behavior,
+`get_session_stats` fields, documented startup options, session selection or
+switch behavior, startup egress result, and the documentation URLs plus
+retrieval date used during the verification. Normalizer tests consume the
+checked-in event corpus; they do not depend on live `/latest` docs.
+
 ## Release Gates
 
-- Pinned Pi CLI version is recorded in the rootfs image manifest.
+- Pinned Pi CLI version is recorded in the agent image manifest.
 - Pinned Pi event schema version is recorded next to the CLI version.
+- Versioned Pi release evidence exists in `docs/phase9/fixtures/pi/` for the
+  pinned CLI, pinned event schema, RPC/session behavior, and normalizer corpus.
 - Pi CLI upgrades require paired event-schema review.
 - `pi --mode rpc --no-session` smoke proves JSONL framing without model
   credentials.
 - Production Pi stores state only under `/agent-home/.pi/agent`.
-- Pi reaches models only through the sandbox proxy alias during active turns.
+- Production Pi sets `PI_OFFLINE=1`, `PI_SKIP_VERSION_CHECK=1`, and
+  `PI_TELEMETRY=0`.
+- Pi cold start performs no version-check, telemetry, package, provider, model,
+  or other non-model-proxy egress.
+- Pi uses a generated harness proxy provider ID, never a Pi built-in upstream
+  provider ID, and reaches models only through the sandbox proxy alias during
+  active turns.
+- Pi startup proves that `/agent-home/.pi/agent/models.json` and
+  `/agent-home/.pi/agent/settings.json` are materialized from
+  `/harness-control/driver/pi/`, match the generated config digests, and are
+  not mutable by the sandbox UID/GID.
+- Pi runner revalidates the materialized config before each turn and before
+  reconnect/cold-restart attach; symlink materialization, exact file binds that
+  no longer resolve to the generated projection, missing files, or
+  sandbox-mutable config pathnames fail closed before Pi consumes config.
+- Pi is not selectable until the strict model-provider grant includes `pi` in
+  `allowed_drivers` and the selected runtime provider ID in
+  `allowed_runtime_providers`.
+- A new Pi-backed session can allocate its first generation by creating the
+  canonical `pi_uninitialized` sidecar only after the generation row exists and
+  in the same allocation transaction that returns the start-state token; the
+  later contract write must revalidate lease ownership plus sidecar
+  digest/version before snapshotting it into the contract. Later missing Pi
+  sidecars fail closed before launch or restore.
 - No real provider credentials appear in env, argv, `/agent-home`,
   `/harness-control`, bridge queues, process listings, logs, or artifacts.
 - Pi completes a turn with a deterministic completion signal.
+- Pi advances sidecar state only on successful `completed` turns. Failed or
+  canceled terminal turns, including cases where Pi created or switched a
+  session file before the terminal status, do not update
+  `session_driver_states`; any `driver_state_update` attached to those statuses
+  fails closed.
 - Pi interrupt/compaction are implemented through RPC `abort`/`compact` or
   explicitly marked `unsupported`.
 - Pi session/home isolation is proven across two sessions.
-- Restore/cold restart uses only `/agent-home` plus persisted driver state.
+- Restore/cold restart uses only `/agent-home` plus persisted driver state,
+  selects the Pi session only through a pinned-evidence startup selector or RPC
+  `switch_session`, and validates the selected Pi `sessionFile` / `sessionId`
+  on both runner and host, including canonical path and symlink containment
+  under the verified agent-home DataVolume.
 
 ## References
+
+These links are non-normative discovery references. The normative 9f gate is
+the pinned release evidence above.
 
 - Pi RPC mode: https://pi.dev/docs/latest/rpc
 - Pi models and provider compatibility: https://pi.dev/docs/latest/models
