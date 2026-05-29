@@ -80,8 +80,9 @@ Other completed baselines:
   proxy-only model grants, Pi rootfs evidence, Pi generated config
   materialization, Pi RPC runner, Pi output normalization, and host-validated Pi
   sidecar restore. The completed baseline includes generic deployment config
-  and manifest-backed `runtime_config_digest` /
-  `agent_manifest_digest` contract inputs through `7a0843e`.
+  plus persisted allocation-time evidence for manifest-backed
+  `runtime_config_digest` / `agent_manifest_digest` contract inputs through
+  `57b7898`.
 
 ## Current Flow
 

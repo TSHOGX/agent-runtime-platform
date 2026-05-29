@@ -211,7 +211,7 @@ Generic validation and not-found handlers may still return `{"error":"..."}`.
 
 SQLite stores sessions, messages, turns, durable events, proxy request context,
 runtime generations, runtime resource instances, network profiles, sandbox
-contracts, DataVolume rows, and artifact metadata.
+contracts, Phase 9 input evidence, DataVolume rows, and artifact metadata.
 
 Primary project config is `config/harness.yaml` under the `harness:` schema.
 The checked-in lab profile currently sets:
