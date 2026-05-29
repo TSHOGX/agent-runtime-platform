@@ -47,12 +47,13 @@ type ResumeTurnParams struct {
 }
 
 type TurnGrant struct {
-	TurnID    int64
-	Sequence  int64
-	Content   string
-	Attempt   int
-	Replayed  bool
-	ExpiresAt time.Time
+	TurnID      int64
+	Sequence    int64
+	Content     string
+	Attempt     int
+	Replayed    bool
+	ExpiresAt   time.Time
+	DriverState DriverStateToken
 }
 
 type BridgeHelloAck struct {
@@ -530,6 +531,10 @@ WHERE generation_id = ?
 		return TurnGrant{}, false, fmt.Errorf("generation CAS failed after turn claim")
 	}
 
+	grant, err = turnGrantByID(ctx, tx, p.SessionID, p.GenerationID, grant.TurnID, p.Owner, p.Now)
+	if err != nil {
+		return TurnGrant{}, false, err
+	}
 	grant.ExpiresAt = expiresAt
 	return grant, true, tx.Commit()
 }
@@ -1284,17 +1289,25 @@ WHERE session_id = ?
 
 func turnGrantByID(ctx context.Context, tx *sql.Tx, sessionID, generationID string, turnID int64, owner string, now time.Time) (TurnGrant, error) {
 	row := tx.QueryRowContext(ctx, `
-SELECT id, sequence, content, attempt, lease_expires_at
-FROM turns
-WHERE id = ?
-  AND session_id = ?
-  AND generation_id = ?
-  AND status IN ('leased', 'running')
-  AND lease_owner = ?
-  AND lease_expires_at > ?
+SELECT t.id, t.sequence, t.content, t.attempt, t.lease_expires_at,
+       ds.driver_id, ds.state_digest, ds.state_version
+FROM turns t
+JOIN runtime_generations g
+  ON g.session_id = t.session_id
+ AND g.generation_id = t.generation_id
+JOIN agent_runtime_profiles a
+  ON a.agent_runtime_profile_id = g.agent_runtime_profile_id
+JOIN session_driver_states ds
+  ON ds.session_id = t.session_id
+ AND ds.driver_id = a.driver_id
+WHERE t.id = ?
+  AND t.session_id = ?
+  AND t.generation_id = ?
+  AND t.status IN ('leased', 'running')
+  AND t.lease_owner = ?
+  AND t.lease_expires_at > ?
   AND EXISTS (
     SELECT 1 FROM runtime_resource_instances ri
-    JOIN runtime_generations g ON g.generation_id = ri.generation_id
     WHERE ri.generation_id = ?
       AND ri.state = 'live'
       AND ri.sandbox_contract_version = 'sandbox-isolation-v1'
@@ -1304,7 +1317,16 @@ WHERE id = ?
 		turnID, sessionID, generationID, owner, formatTime(now), generationID)
 	var grant TurnGrant
 	var leaseExpires string
-	err := row.Scan(&grant.TurnID, &grant.Sequence, &grant.Content, &grant.Attempt, &leaseExpires)
+	err := row.Scan(
+		&grant.TurnID,
+		&grant.Sequence,
+		&grant.Content,
+		&grant.Attempt,
+		&leaseExpires,
+		&grant.DriverState.DriverID,
+		&grant.DriverState.StateDigest,
+		&grant.DriverState.StateVersion,
+	)
 	if err != nil {
 		return TurnGrant{}, err
 	}

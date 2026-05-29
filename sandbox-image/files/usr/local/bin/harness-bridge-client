@@ -23,6 +23,12 @@ CHECKPOINT_READY = "checkpoint-ready"
 HOST_ONLY_DUMMY_API_KEY = "harness-model-proxy-dummy-key"
 CLAUDE_MARKER_DIR = ".harness"
 CLAUDE_SESSION_MARKER = "claude-session-initialized.json"
+PI_CODING_AGENT_DIR = "/agent-home/.pi/agent"
+PI_SESSION_DIR = "/agent-home/.pi/agent/sessions"
+PI_MODELS_SANDBOX_PATH = "/agent-home/.pi/agent/models.json"
+PI_SETTINGS_SANDBOX_PATH = "/agent-home/.pi/agent/settings.json"
+PI_HARNESS_PROXY_PROVIDER = "harness_anthropic_proxy"
+DRIVER_STATE_DIGEST_PREFIX = b"driver_state_digest_v1\n"
 
 
 def seq_name(seq):
@@ -162,6 +168,16 @@ def try_mark_claude_session_initialized(agent_home, session_uuid):
 
 def payload_mentions_claude_session(payload, session_uuid):
     return payload.get("session_id") == session_uuid or payload.get("sessionId") == session_uuid
+
+
+def canonical_json_bytes(payload):
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def driver_state_digest(payload):
+    import hashlib
+
+    return "sha256:" + hashlib.sha256(DRIVER_STATE_DIGEST_PREFIX + canonical_json_bytes(payload)).hexdigest()
 
 
 class Queue:
@@ -340,12 +356,14 @@ class BridgeClient:
             payload={"output_sequence": output_sequence, "stream": stream, "payload": payload},
         )
 
-    def ack_turn_completed(self, turn_id, status="completed", error_class="", error=""):
+    def ack_turn_completed(self, turn_id, status="completed", error_class="", error="", driver_state_update=None):
         payload = {"status": status}
         if error_class:
             payload["error_class"] = error_class
         if error:
             payload["error"] = error
+        if driver_state_update is not None:
+            payload["driver_state_update"] = driver_state_update
         self.send("ack_turn_completed", turn_id=turn_id, payload=payload)
 
 
@@ -509,6 +527,249 @@ class ClaudeTurnRunner:
         pass
 
 
+def validate_pi_runtime_environment():
+    required = {
+        "PI_CODING_AGENT_DIR": PI_CODING_AGENT_DIR,
+        "PI_CODING_AGENT_SESSION_DIR": PI_SESSION_DIR,
+        "PI_OFFLINE": "1",
+        "PI_SKIP_VERSION_CHECK": "1",
+        "PI_TELEMETRY": "0",
+    }
+    for name, want in required.items():
+        got = os.environ.get(name, "")
+        if got != want:
+            raise RuntimeError(f"{name} must be {want}")
+
+
+def validate_pi_config_materialization():
+    for path in (PI_MODELS_SANDBOX_PATH, PI_SETTINGS_SANDBOX_PATH):
+        candidate = Path(path)
+        if candidate.is_symlink():
+            raise RuntimeError(f"pi config must not be a sandbox symlink: {path}")
+        try:
+            st = candidate.stat()
+        except OSError as err:
+            raise RuntimeError(f"pi config missing: {path}") from err
+        if not candidate.is_file():
+            raise RuntimeError(f"pi config is not a regular file: {path}")
+        if pi_config_writable_by_sandbox_uid(st):
+            raise RuntimeError(f"pi config is writable by sandbox uid/gid: {path}")
+        with open(candidate, "rb") as f:
+            f.read(1)
+
+
+def pi_config_writable_by_sandbox_uid(st):
+    try:
+        uid = int(os.environ.get("HARNESS_AGENT_UID", "65534"))
+        gid = int(os.environ.get("HARNESS_AGENT_GID", "65534"))
+    except ValueError:
+        uid, gid = 65534, 65534
+    mode = st.st_mode
+    return bool(
+        mode & 0o002
+        or (st.st_uid == uid and mode & 0o200)
+        or (st.st_gid == gid and mode & 0o020)
+    )
+
+
+def normalize_pi_session_file(session_file):
+    raw = str(session_file or "").strip()
+    if not raw:
+        raise RuntimeError("pi sessionFile is required")
+    if "\\" in raw:
+        raise RuntimeError("pi sessionFile must use POSIX separators")
+    root = Path(PI_SESSION_DIR)
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        real_root = root.resolve(strict=True)
+        real_candidate = candidate.resolve(strict=True)
+    except OSError as err:
+        raise RuntimeError(f"pi sessionFile realpath failed: {raw}") from err
+    try:
+        rel = real_candidate.relative_to(real_root)
+    except ValueError as err:
+        raise RuntimeError(f"pi sessionFile escapes session dir: {raw}") from err
+    if str(rel) in {"", "."} or any(part in {"", ".", ".."} for part in rel.parts):
+        raise RuntimeError(f"pi sessionFile has invalid relative path: {raw}")
+    relpath = rel.as_posix()
+    return relpath, str(root / relpath)
+
+
+class PiRPCTurnRunner:
+    def __init__(self):
+        self.proc = None
+        self.current_grant = {}
+
+    def set_turn_context(self, grant):
+        self.current_grant = dict(grant or {})
+
+    def _start(self):
+        validate_pi_runtime_environment()
+        validate_pi_config_materialization()
+        if self.proc is not None and self.proc.poll() is None:
+            return
+        model = os.environ.get("PI_MODEL") or os.environ.get("CLAUDE_MODEL") or "sonnet"
+        pi_command = [
+            os.environ.get("PI_BIN", "/usr/local/bin/pi"),
+            "--mode",
+            "rpc",
+            "--provider",
+            PI_HARNESS_PROXY_PROVIDER,
+            "--model",
+            model,
+            "--session-dir",
+            PI_SESSION_DIR,
+        ]
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+            "HOME": "/agent-home",
+            "USER": "harness",
+            "LOGNAME": "harness",
+            "PI_CODING_AGENT_DIR": PI_CODING_AGENT_DIR,
+            "PI_CODING_AGENT_SESSION_DIR": PI_SESSION_DIR,
+            "PI_OFFLINE": "1",
+            "PI_SKIP_VERSION_CHECK": "1",
+            "PI_TELEMETRY": "0",
+            "ANTHROPIC_BASE_URL": os.environ.get("ANTHROPIC_BASE_URL", ""),
+        }
+        for optional_name in ("LANG", "TMPDIR"):
+            optional_value = os.environ.get(optional_name)
+            if optional_value:
+                env[optional_name] = optional_value
+        target_uid = os.environ.get("HARNESS_AGENT_UID", "65534")
+        target_gid = os.environ.get("HARNESS_AGENT_GID", "65534")
+        if str(os.geteuid()) == target_uid and str(os.getegid()) == target_gid:
+            command = pi_command
+        else:
+            command = [
+                "setpriv",
+                "--reuid",
+                target_uid,
+                "--regid",
+                target_gid,
+                "--clear-groups",
+                "env",
+                "HOME=/agent-home",
+                "USER=harness",
+                "LOGNAME=harness",
+                *[f"{name}={value}" for name, value in env.items() if name.startswith("PI_")],
+                *pi_command,
+            ]
+        self.proc = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+
+    def _write_rpc(self, payload):
+        self.proc.stdin.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+        self.proc.stdin.flush()
+
+    def _read_rpc(self):
+        line = self.proc.stdout.readline()
+        if line == "":
+            rc = self.proc.poll()
+            detail = "exited" if rc is None else f"exited with status {rc}"
+            raise RuntimeError(f"pi rpc process {detail}")
+        stripped = line.rstrip("\n")
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError as err:
+            raise RuntimeError(f"pi rpc emitted non-json output: {stripped}") from err
+        return stripped, payload
+
+    def _request_response(self, payload):
+        self._write_rpc(payload)
+        request_id = payload.get("id")
+        command = payload.get("type")
+        while True:
+            _, event = self._read_rpc()
+            if event.get("type") == "response" and event.get("id") == request_id:
+                if not event.get("success", False):
+                    raise RuntimeError(f"pi rpc command {command} failed")
+                return event
+            if event.get("type") == "error":
+                raise RuntimeError("pi rpc error during internal command")
+
+    def run_turn(self, content, emit):
+        validate_pi_config_materialization()
+        self._start()
+        turn_id = int(self.current_grant.get("turn_id") or 0)
+        prompt_id = f"harness-turn-{turn_id or int(time.time_ns())}"
+        self._write_rpc({"id": prompt_id, "type": "prompt", "message": content})
+        status = "completed"
+        error_class = ""
+        error = ""
+        while True:
+            stripped, event = self._read_rpc()
+            emit("stdout", stripped)
+            event_type = event.get("type")
+            if event_type == "response" and event.get("id") == prompt_id and not event.get("success", False):
+                status = "failed"
+                error_class = "agent_prompt_rejected"
+                error = f"pi prompt rejected: {event.get('error') or event.get('message') or 'unknown error'}"
+                break
+            if event_type == "error":
+                status = "failed"
+                error_class = "agent_execution_failed"
+                error = event.get("message") or event.get("error") or "pi rpc error"
+                break
+            if event_type in {"turn_end", "agent_end"}:
+                terminal_status = str(event.get("status") or "completed")
+                if terminal_status not in {"completed", "success", "ok"}:
+                    status = "failed"
+                    error_class = "agent_execution_failed"
+                    error = f"pi turn ended with status {terminal_status}"
+                break
+        if status != "completed":
+            return status, error_class, error
+        stats = self._request_response({"id": f"{prompt_id}-stats", "type": "get_session_stats"})
+        update = self._driver_state_update(stats.get("data") or {}, turn_id)
+        return status, error_class, error, update
+
+    def _driver_state_update(self, stats, turn_id):
+        token = self.current_grant.get("driver_state") or {}
+        previous_digest = str(token.get("state_digest") or "")
+        previous_version = int(token.get("state_version") or 0)
+        if token.get("driver_id") != "pi" or not previous_digest.startswith("sha256:") or previous_version <= 0:
+            raise RuntimeError("pi turn grant missing current driver_state token")
+        relpath, selected_file = normalize_pi_session_file(stats.get("sessionFile"))
+        session_id = str(stats.get("sessionId") or "").strip()
+        if not session_id:
+            raise RuntimeError("pi sessionId is required")
+        state_payload = {
+            "schema_version": 1,
+            "driver_id": "pi",
+            "state_kind": "pi_session",
+            "session_dir": PI_SESSION_DIR,
+            "selected_session_relpath": relpath,
+            "selected_session_file": selected_file,
+            "selected_session_id": session_id,
+            "last_completed_turn_id": str(turn_id),
+        }
+        return {
+            "driver_id": "pi",
+            "previous_state_digest": previous_digest,
+            "state_payload": state_payload,
+            "state_digest": driver_state_digest(state_payload),
+            "state_version": previous_version + 1,
+        }
+
+    def close(self):
+        if self.proc is None:
+            return
+        try:
+            self.proc.terminate()
+        except OSError:
+            pass
+
+
 class NativeEventsProbeRunner:
     def run_turn(self, content, emit):
         emit(
@@ -529,6 +790,7 @@ class NativeEventsProbeRunner:
 
 RUNNER_FACTORIES = {
     "claude_code": ClaudeTurnRunner,
+    "pi": PiRPCTurnRunner,
     "sh": ShellTurnRunner,
     "native_events_probe": NativeEventsProbeRunner,
 }
@@ -641,12 +903,33 @@ def execute_grant(client, runner, grant):
         output_sequence += 1
 
     try:
-        status, error_class, error = runner.run_turn(content, emit)
+        if hasattr(runner, "set_turn_context"):
+            runner.set_turn_context(grant)
+        result = runner.run_turn(content, emit)
+        driver_state_update = None
+        if isinstance(result, dict):
+            status = result.get("status") or "completed"
+            error_class = result.get("error_class") or ""
+            error = result.get("error") or ""
+            driver_state_update = result.get("driver_state_update")
+        else:
+            status, error_class, error = result[:3]
+            if len(result) > 3:
+                driver_state_update = result[3]
     except Exception as err:
         status, error_class, error = "failed", "agent_execution_failed", str(err)
+        driver_state_update = None
         emit("stderr", str(err))
+    if status != "completed":
+        driver_state_update = None
     client.last_output_sequence_by_turn[turn_id] = output_sequence - 1
-    client.ack_turn_completed(turn_id, status=status or "completed", error_class=error_class, error=error)
+    client.ack_turn_completed(
+        turn_id,
+        status=status or "completed",
+        error_class=error_class,
+        error=error,
+        driver_state_update=driver_state_update,
+    )
     client.mark_checkpoint_ready()
 
 

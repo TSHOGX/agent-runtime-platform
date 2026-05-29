@@ -1,9 +1,11 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -235,6 +237,71 @@ func TestStreamParserPersistsShellOutputAndCompletesOnTurnDone(t *testing.T) {
 	}
 	if messages[0].Role != "assistant" || messages[0].Content != "hello from shell\n" {
 		t.Fatalf("unexpected shell output message: %+v", messages[0])
+	}
+}
+
+func TestPiOutputNormalizerConsumesPinnedCorpus(t *testing.T) {
+	srv, st := newParserTestServer(t)
+	parser := newStreamParser(srv, "sess_1", "pi")
+	path := filepath.Join("..", "..", "..", "docs", "phase9", "fixtures", "pi", "0.77.0", "event-normalizer-corpus.jsonl")
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open pi corpus: %v", err)
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		parser.handle(runtime.Output{Stream: "stdout", Line: scanner.Text()})
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scan pi corpus: %v", err)
+	}
+	select {
+	case <-parser.Done():
+	case <-time.After(time.Second):
+		t.Fatal("parser did not complete after pi corpus")
+	}
+	if err := parser.Err(); err != nil {
+		t.Fatalf("pi corpus should not fail parser: %v", err)
+	}
+	messages, err := st.ListMessages(context.Background(), "sess_1")
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	if len(messages) != 1 || messages[0].Role != "assistant" || messages[0].Content != "Hello world" {
+		t.Fatalf("unexpected pi message: %+v", messages)
+	}
+}
+
+func TestPiOutputNormalizerRejectsUnknownType(t *testing.T) {
+	srv, _ := newParserTestServer(t)
+	parser := newStreamParser(srv, "sess_1", "pi")
+
+	parser.handle(runtime.Output{Stream: "stdout", Line: `{"type":"future_event"}`})
+
+	select {
+	case <-parser.Done():
+	case <-time.After(time.Second):
+		t.Fatal("parser did not complete after unknown pi event")
+	}
+	if err := parser.Err(); err == nil || err.Error() != `unsupported pi event type "future_event"` {
+		t.Fatalf("unexpected pi parser error: %v", err)
+	}
+}
+
+func TestPiOutputNormalizerRejectsUnknownAssistantEventType(t *testing.T) {
+	srv, _ := newParserTestServer(t)
+	parser := newStreamParser(srv, "sess_1", "pi")
+
+	parser.handle(runtime.Output{Stream: "stdout", Line: `{"type":"message_update","assistantMessageEvent":{"type":"future_delta"}}`})
+
+	select {
+	case <-parser.Done():
+	case <-time.After(time.Second):
+		t.Fatal("parser did not complete after unknown pi assistant event")
+	}
+	if err := parser.Err(); err == nil || err.Error() != `unsupported pi assistant message event type "future_delta"` {
+		t.Fatalf("unexpected pi parser error: %v", err)
 	}
 }
 

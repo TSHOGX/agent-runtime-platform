@@ -354,6 +354,164 @@ class BridgeClientTest(unittest.TestCase):
             )
             self.assertEqual(messages[-1]["type"], "ack_turn_completed")
 
+    def test_execute_grant_omits_driver_state_update_for_failed_turns(self):
+        with tempfile.TemporaryDirectory() as root:
+            client = bridge.BridgeClient(root, "sess", "gen", "pi", poll_interval=0.001)
+
+            class FailedRunner:
+                def run_turn(self, content, emit):
+                    return "failed", "agent_execution_failed", "boom", {"driver_id": "pi"}
+
+            with mock.patch.object(bridge, "sandbox_source_ip", return_value="10.240.0.2"):
+                bridge.execute_grant(
+                    client,
+                    FailedRunner(),
+                    {"turn_id": 9, "sequence": 1, "turn_input_schema": "RunTurn", "input": {"content": "run"}},
+                )
+
+            messages = [envelope for _, _, envelope in bridge.Queue(root, bridge.OUTBOX).read_all()]
+            completion = messages[-1]
+            self.assertEqual(completion["type"], "ack_turn_completed")
+            self.assertEqual(completion["payload"]["status"], "failed")
+            self.assertNotIn("driver_state_update", completion["payload"])
+
+    def test_pi_rpc_runner_uses_session_rpc_and_returns_driver_state_update(self):
+        class FakeStdin:
+            def __init__(self):
+                self.writes = []
+
+            def write(self, value):
+                self.writes.append(value)
+
+            def flush(self):
+                pass
+
+        class FakeStdout:
+            def __init__(self, lines):
+                self.lines = list(lines)
+
+            def readline(self):
+                if not self.lines:
+                    return ""
+                return self.lines.pop(0)
+
+        class FakeProcess:
+            def __init__(self, lines):
+                self.stdin = FakeStdin()
+                self.stdout = FakeStdout(lines)
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as root:
+            agent_dir = Path(root) / "agent"
+            session_dir = agent_dir / "sessions"
+            session_dir.mkdir(parents=True)
+            session_file = session_dir / "session-1.jsonl"
+            session_file.write_text("{}\n", encoding="utf-8")
+            models = agent_dir / "models.json"
+            settings = agent_dir / "settings.json"
+            for path in (models, settings):
+                path.write_text("{}\n", encoding="utf-8")
+                path.chmod(0o444)
+
+            lines = [
+                '{"id":"harness-turn-9","type":"response","command":"prompt","success":true}\n',
+                '{"type":"message_update","messageId":"msg-1","assistantMessageEvent":{"type":"text_delta","delta":"ok"}}\n',
+                '{"type":"turn_end","status":"completed"}\n',
+                json.dumps(
+                    {
+                        "id": "harness-turn-9-stats",
+                        "type": "response",
+                        "command": "get_session_stats",
+                        "success": True,
+                        "data": {"sessionFile": str(session_file), "sessionId": "pi-session-1"},
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n",
+            ]
+            captured = {}
+
+            def popen(command, **kwargs):
+                captured["command"] = command
+                captured["env"] = kwargs.get("env") or {}
+                captured["process"] = FakeProcess(lines)
+                return captured["process"]
+
+            patches = [
+                mock.patch.object(bridge, "PI_CODING_AGENT_DIR", str(agent_dir)),
+                mock.patch.object(bridge, "PI_SESSION_DIR", str(session_dir)),
+                mock.patch.object(bridge, "PI_MODELS_SANDBOX_PATH", str(models)),
+                mock.patch.object(bridge, "PI_SETTINGS_SANDBOX_PATH", str(settings)),
+                mock.patch.object(bridge.subprocess, "Popen", side_effect=popen),
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "PI_CODING_AGENT_DIR": str(agent_dir),
+                        "PI_CODING_AGENT_SESSION_DIR": str(session_dir),
+                        "PI_OFFLINE": "1",
+                        "PI_SKIP_VERSION_CHECK": "1",
+                        "PI_TELEMETRY": "0",
+                        "PI_MODEL": "sonnet",
+                        "HARNESS_AGENT_UID": str(os.geteuid()),
+                        "HARNESS_AGENT_GID": str(os.getegid()),
+                    },
+                    clear=True,
+                ),
+            ]
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                runner = bridge.PiRPCTurnRunner()
+                runner.set_turn_context(
+                    {
+                        "turn_id": 9,
+                        "driver_state": {
+                            "driver_id": "pi",
+                            "state_digest": "sha256:" + "a" * 64,
+                            "state_version": 1,
+                        },
+                    }
+                )
+                emitted = []
+                status, error_class, error, update = runner.run_turn("hello", lambda stream, line: emitted.append((stream, line)))
+
+            self.assertEqual((status, error_class, error), ("completed", "", ""))
+            self.assertEqual(captured["command"][:7], ["/usr/local/bin/pi", "--mode", "rpc", "--provider", "harness_anthropic_proxy", "--model", "sonnet"])
+            self.assertIn("--session-dir", captured["command"])
+            self.assertNotIn("--no-session", captured["command"])
+            self.assertEqual(captured["env"]["PI_OFFLINE"], "1")
+            self.assertEqual(captured["env"]["PI_TELEMETRY"], "0")
+            writes = [json.loads(value) for value in captured["process"].stdin.writes]
+            self.assertEqual(writes[0], {"id": "harness-turn-9", "type": "prompt", "message": "hello"})
+            self.assertEqual(writes[1], {"id": "harness-turn-9-stats", "type": "get_session_stats"})
+            self.assertEqual([json.loads(line)["type"] for _, line in emitted], ["response", "message_update", "turn_end"])
+            self.assertEqual(update["driver_id"], "pi")
+            self.assertEqual(update["previous_state_digest"], "sha256:" + "a" * 64)
+            self.assertEqual(update["state_version"], 2)
+            self.assertEqual(update["state_payload"]["selected_session_relpath"], "session-1.jsonl")
+            self.assertEqual(update["state_payload"]["selected_session_id"], "pi-session-1")
+            self.assertTrue(update["state_digest"].startswith("sha256:"))
+
+    def test_pi_rpc_runner_rejects_writable_config(self):
+        with tempfile.TemporaryDirectory() as root:
+            agent_dir = Path(root) / "agent"
+            session_dir = agent_dir / "sessions"
+            session_dir.mkdir(parents=True)
+            models = agent_dir / "models.json"
+            settings = agent_dir / "settings.json"
+            models.write_text("{}\n", encoding="utf-8")
+            settings.write_text("{}\n", encoding="utf-8")
+            models.chmod(0o644)
+            settings.chmod(0o444)
+            with mock.patch.object(bridge, "PI_MODELS_SANDBOX_PATH", str(models)):
+                with mock.patch.object(bridge, "PI_SETTINGS_SANDBOX_PATH", str(settings)):
+                    with mock.patch.dict(os.environ, {"HARNESS_AGENT_UID": str(os.geteuid()), "HARNESS_AGENT_GID": str(os.getegid())}, clear=False):
+                        with self.assertRaisesRegex(RuntimeError, "writable by sandbox uid/gid"):
+                            bridge.validate_pi_config_materialization()
+
     def test_claim_loop_handles_multiple_turns(self):
         with tempfile.TemporaryDirectory() as root:
             args = argparse_namespace(

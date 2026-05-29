@@ -54,6 +54,7 @@ type nativeBridgeEventPayload struct {
 }
 
 type claudeOutputNormalizer struct{}
+type piOutputNormalizer struct{}
 type shellOutputNormalizer struct{}
 type nativeEventsOutputNormalizer struct{}
 
@@ -149,6 +150,7 @@ func outputNormalizerForDriver(driverID string) outputNormalizer {
 
 var outputNormalizers = map[string]outputNormalizerFactory{
 	string(agents.ClaudeCode): func() outputNormalizer { return claudeOutputNormalizer{} },
+	string(agents.Pi):         func() outputNormalizer { return piOutputNormalizer{} },
 	string(agents.Shell):      func() outputNormalizer { return shellOutputNormalizer{} },
 	"native_events_probe":     func() outputNormalizer { return nativeEventsOutputNormalizer{} },
 }
@@ -231,6 +233,129 @@ func (shellOutputNormalizer) Handle(p *streamParser, output normalizerBridgeOutp
 		}
 	}
 	p.persistAssistant(rawLine)
+}
+
+func (piOutputNormalizer) Handle(p *streamParser, output normalizerBridgeOutput) {
+	rawLine, ok := output.line()
+	if !ok {
+		return
+	}
+	line := strings.TrimSpace(rawLine)
+	if line == "" {
+		return
+	}
+	var event map[string]any
+	if err := json.Unmarshal([]byte(line), &event); err != nil {
+		p.err = fmt.Errorf("pi event decode failed: %w", err)
+		p.complete()
+		return
+	}
+	eventType, _ := event["type"].(string)
+	switch eventType {
+	case "response":
+		if success, ok := event["success"].(bool); ok && !success {
+			p.err = fmt.Errorf("pi command %q failed", stringFromMap(event, "command"))
+			p.publish("agent.output", event)
+			p.complete()
+			return
+		}
+		p.publish("system.status", event)
+	case "agent_start", "turn_start", "queue_update", "compaction_start", "compaction_end", "auto_retry":
+		p.publish("system.status", event)
+	case "message_update":
+		p.handlePiMessageUpdate(event)
+	case "message_end":
+		p.handlePiMessageEnd(event)
+	case "tool_execution_start", "tool_execution_update", "tool_execution_end":
+		p.publish("agent.output", event)
+	case "turn_end", "agent_end":
+		p.publish("system.status", event)
+		p.flush()
+		p.complete()
+	case "error":
+		p.err = fmt.Errorf("pi event error")
+		p.publish("agent.output", event)
+		p.complete()
+	default:
+		p.err = fmt.Errorf("unsupported pi event type %q", eventType)
+		p.complete()
+	}
+}
+
+func (p *streamParser) handlePiMessageUpdate(event map[string]any) {
+	assistantEvent, _ := event["assistantMessageEvent"].(map[string]any)
+	assistantEventType, _ := assistantEvent["type"].(string)
+	switch assistantEventType {
+	case "text_delta":
+		text, _ := assistantEvent["delta"].(string)
+		if text == "" {
+			return
+		}
+		id := stringFromMap(event, "messageId")
+		if id == "" {
+			id = "pi_assistant_pending"
+		}
+		if _, ok := p.pending[id]; !ok {
+			p.pending[id] = &strings.Builder{}
+		}
+		p.pending[id].WriteString(text)
+		p.publish("agent.delta", map[string]any{
+			"message_id": id,
+			"text":       text,
+			"delta_type": assistantEventType,
+		})
+	default:
+		p.err = fmt.Errorf("unsupported pi assistant message event type %q", assistantEventType)
+		p.complete()
+	}
+}
+
+func (p *streamParser) handlePiMessageEnd(event map[string]any) {
+	text := piMessageText(event["message"])
+	if text == "" {
+		id := stringFromMap(event, "messageId")
+		if id == "" {
+			p.flush()
+			return
+		}
+		if pending, ok := p.pending[id]; ok {
+			delete(p.pending, id)
+			p.persistAssistant(pending.String())
+		}
+		return
+	}
+	delete(p.pending, stringFromMap(event, "messageId"))
+	delete(p.pending, "pi_assistant_pending")
+	p.persistAssistant(text)
+}
+
+func piMessageText(value any) string {
+	message, ok := value.(map[string]any)
+	if !ok {
+		return ""
+	}
+	content, ok := message["content"].([]any)
+	if !ok {
+		return ""
+	}
+	var b strings.Builder
+	for _, item := range content {
+		part, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if partType, _ := part["type"].(string); partType != "text" {
+			continue
+		}
+		text, _ := part["text"].(string)
+		b.WriteString(text)
+	}
+	return b.String()
+}
+
+func stringFromMap(value map[string]any, key string) string {
+	got, _ := value[key].(string)
+	return got
 }
 
 func (nativeEventsOutputNormalizer) Handle(p *streamParser, output normalizerBridgeOutput) {

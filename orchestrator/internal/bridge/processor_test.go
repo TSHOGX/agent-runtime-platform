@@ -91,6 +91,9 @@ func TestProcessorRequiresHelloAndProbeBeforeClaimGrant(t *testing.T) {
 	if grant.Input.Content != "hello bridge" || grant.TurnID == 0 || grant.Sequence != 1 || grant.TurnInputSchema != "RunTurn" {
 		t.Fatalf("unexpected grant: %+v", grant)
 	}
+	if grant.DriverState == nil || grant.DriverState.DriverID != "claude_code" || grant.DriverState.StateVersion != 1 || !strings.HasPrefix(grant.DriverState.StateDigest, "sha256:") {
+		t.Fatalf("grant missing driver state token: %+v", grant.DriverState)
+	}
 }
 
 func TestProcessorRejectsInvalidV2Hello(t *testing.T) {

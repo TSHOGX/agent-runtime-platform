@@ -24,9 +24,9 @@ const (
 )
 
 type DriverStateToken struct {
-	DriverID     string
-	StateDigest  string
-	StateVersion int
+	DriverID     string `json:"driver_id"`
+	StateDigest  string `json:"state_digest"`
+	StateVersion int    `json:"state_version"`
 }
 
 type DriverStateUpdate struct {

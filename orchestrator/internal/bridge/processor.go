@@ -56,13 +56,14 @@ func (p *Processor) MarkReady(sessionID, generationID string) {
 }
 
 type grantPayload struct {
-	TurnID          int64        `json:"turn_id"`
-	Sequence        int64        `json:"sequence"`
-	TurnInputSchema string       `json:"turn_input_schema"`
-	Input           runTurnInput `json:"input"`
-	Attempt         int          `json:"attempt"`
-	Replayed        bool         `json:"replayed"`
-	ExpiresAt       time.Time    `json:"expires_at"`
+	TurnID          int64                   `json:"turn_id"`
+	Sequence        int64                   `json:"sequence"`
+	TurnInputSchema string                  `json:"turn_input_schema"`
+	Input           runTurnInput            `json:"input"`
+	Attempt         int                     `json:"attempt"`
+	Replayed        bool                    `json:"replayed"`
+	ExpiresAt       time.Time               `json:"expires_at"`
+	DriverState     *store.DriverStateToken `json:"driver_state,omitempty"`
 }
 
 type runTurnInput struct {
@@ -220,6 +221,7 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 			Attempt:         grant.Attempt,
 			Replayed:        grant.Replayed,
 			ExpiresAt:       grant.ExpiresAt,
+			DriverState:     &grant.DriverState,
 		})
 	case TypeResumeTurn:
 		state := p.state(key)
@@ -253,6 +255,7 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 			Attempt:         grant.Attempt,
 			Replayed:        grant.Replayed,
 			ExpiresAt:       grant.ExpiresAt,
+			DriverState:     &grant.DriverState,
 		})
 	case TypeAckTurnStarted:
 		if envelope.TurnID == nil {
