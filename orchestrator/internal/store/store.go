@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"harness-platform/orchestrator/internal/agents"
 	"harness-platform/orchestrator/internal/sessionstate"
 
 	_ "modernc.org/sqlite"
@@ -126,7 +127,10 @@ PRAGMA foreign_keys=ON;
 `); err != nil {
 		return err
 	}
-	return s.runMigrations(ctx, defaultMigrations(s.options))
+	if err := s.runMigrations(ctx, defaultMigrations(s.options)); err != nil {
+		return err
+	}
+	return s.runPhase9Cutover(ctx)
 }
 
 func (s *Store) EnsureUser(ctx context.Context, id, name string) error {
@@ -142,12 +146,15 @@ func (s *Store) CreateSession(ctx context.Context, session Session) error {
 	if err := sessionstate.Validate(session.Status); err != nil {
 		return err
 	}
+	if _, ok := agents.Lookup(session.Agent); !ok {
+		return fmt.Errorf("unsupported driver %q", session.Agent)
+	}
 	if strings.TrimSpace(session.AgentHomePath) == "" {
 		session.AgentHomePath = filepath.Join(s.options.AgentHomesRoot, session.ID)
 	}
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO sessions (
-  id, user_id, status, agent, workspace, agent_home_path, restore_id, claude_session_uuid,
+  id, user_id, status, driver_id, workspace, agent_home_path, restore_id, claude_session_uuid,
   created_at, updated_at, expires_at, auto_checkpoint_enabled
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		session.ID, session.UserID, session.Status, session.Agent, session.Workspace, nullableString(session.AgentHomePath),
@@ -160,14 +167,14 @@ INSERT INTO sessions (
 
 func (s *Store) GetSession(ctx context.Context, id string) (Session, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT id, user_id, status, agent, workspace, agent_home_path, active_generation_id, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path, auto_checkpoint_enabled, failure_reason, error_class
+SELECT id, user_id, status, driver_id, workspace, agent_home_path, active_generation_id, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path, auto_checkpoint_enabled, failure_reason, error_class
 FROM sessions WHERE id = ?`, id)
 	return scanSession(row)
 }
 
 func (s *Store) ListSessions(ctx context.Context) ([]Session, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, user_id, status, agent, workspace, agent_home_path, active_generation_id, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path, auto_checkpoint_enabled, failure_reason, error_class
+SELECT id, user_id, status, driver_id, workspace, agent_home_path, active_generation_id, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path, auto_checkpoint_enabled, failure_reason, error_class
 FROM sessions ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -699,7 +706,7 @@ func (s *Store) ListSessionsByStatus(ctx context.Context, status string) ([]Sess
 		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, user_id, status, agent, workspace, agent_home_path, active_generation_id, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path, auto_checkpoint_enabled, failure_reason, error_class
+SELECT id, user_id, status, driver_id, workspace, agent_home_path, active_generation_id, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path, auto_checkpoint_enabled, failure_reason, error_class
 FROM sessions WHERE status = ? ORDER BY last_activity_at ASC`, status)
 	if err != nil {
 		return nil, err

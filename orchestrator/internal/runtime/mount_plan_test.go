@@ -20,7 +20,6 @@ func TestBuildSandboxMountPlanUsesExactSandboxSurface(t *testing.T) {
 		WorkspaceHostPath: filepath.Join(dir, "sessions", "sess-1"),
 		AgentHomeHostPath: filepath.Join(dir, "agent-homes", "sess-1", "sh"),
 		NetworkHostsPath:  filepath.Join(dir, "run", "network", "gen-1", "hosts"),
-		SchemaPackPath:    filepath.Join(dir, "schema-pack"),
 	})
 	if err != nil {
 		t.Fatalf("build mount plan: %v", err)
@@ -40,7 +39,9 @@ func TestBuildSandboxMountPlanUsesExactSandboxSurface(t *testing.T) {
 		t.Fatalf("host heartbeat must remain host-only, not mounted into sandbox: %+v", mounts)
 	}
 	assertMount(t, mounts, "/etc/hosts", filepath.Join(dir, "run", "network", "gen-1", "hosts"), "ro", true)
-	assertMount(t, mounts, "/schema-pack", filepath.Join(dir, "schema-pack"), "ro", true)
+	if mountByDestination(mounts, "/schema-pack") != nil {
+		t.Fatalf("phase9 v2 mount plan must not auto-mount schema-pack: %+v", mounts)
+	}
 
 	forbidden := []string{"/sessions", "/agent-homes", "/harness-secrets"}
 	for _, destination := range forbidden {
@@ -92,7 +93,7 @@ func TestMountPlanRejectsForbiddenAndRecursiveBinds(t *testing.T) {
 				Name:        "claude_home",
 				Destination: "/root/.claude",
 				Type:        "bind",
-				Source:      filepath.Join(dir, "agent-homes", "sess-1", "claude"),
+				Source:      filepath.Join(dir, "agent-homes", "sess-1", "claude_code"),
 				Mode:        "ro",
 				Options:     []string{"bind", "ro"},
 			}}},

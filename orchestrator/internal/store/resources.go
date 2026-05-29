@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"harness-platform/orchestrator/internal/agents"
 	"harness-platform/orchestrator/internal/sessionstate"
 
 	"github.com/google/uuid"
@@ -71,6 +72,7 @@ type GenerationAllocation struct {
 	AgentRuntimeProfileID string
 	Owner                 string
 	LeaseExpiresAt        time.Time
+	DriverState           DriverStateToken
 }
 
 type RuntimeGenerationDetails struct {
@@ -107,6 +109,7 @@ type RuntimeGenerationDetails struct {
 	CheckpointBundleDigest          string
 	CheckpointRuntimeConfigDigest   string
 	CheckpointControlManifestDigest string
+	CheckpointDriverStatesDigest    string
 	RunscNetwork                    string
 	RunscOverlay2                   string
 	HostProxyBindURL                string
@@ -143,6 +146,9 @@ type RuntimeGenerationDetails struct {
 	AnthropicAPIKeySecretID         string
 	AnthropicAuthTokenSecretID      string
 	SecretVersion                   string
+	DriverStateDigest               string
+	DriverStateVersion              int
+	DriverStatePayload              []byte
 }
 
 type BridgePollGeneration struct {
@@ -299,6 +305,9 @@ func (s *Store) AllocateGeneration(ctx context.Context, p AllocateGenerationPara
 	if err := p.Config.validateSandboxModelProxyBaseURL(); err != nil {
 		return GenerationAllocation{}, err
 	}
+	if _, ok := agents.Lookup(p.Config.agent()); !ok {
+		return GenerationAllocation{}, fmt.Errorf("unsupported driver %q", p.Config.agent())
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -353,17 +362,13 @@ func (s *Store) AllocateGeneration(ctx context.Context, p AllocateGenerationPara
 
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO agent_runtime_profiles (
-  agent_runtime_profile_id, agent, model, output_format,
+  agent_runtime_profile_id, driver_id, model, output_format,
   disable_nonessential_traffic, sandbox_uid, sandbox_gid, sandbox_supplemental_gids,
   requires_secret_drop,
-  model_access_allowed, manifest_anthropic_base_url, anthropic_api_key_secret_id,
-  anthropic_auth_token_secret_id, secret_version, created_at
+  model_access_allowed, manifest_model_proxy_base_url, model_proxy_api_key_secret_id,
+  model_proxy_auth_token_secret_id, secret_version, created_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(agent, model, output_format, disable_nonessential_traffic,
-  sandbox_uid, sandbox_gid, sandbox_supplemental_gids,
-  requires_secret_drop, model_access_allowed, manifest_anthropic_base_url,
-  anthropic_api_key_secret_id, anthropic_auth_token_secret_id, secret_version
-) DO NOTHING`,
+ON CONFLICT DO NOTHING`,
 		agentRuntimeProfileID, p.Config.agent(), nullableString(p.Config.AgentModel), p.Config.outputFormat(),
 		boolInt(p.Config.DisableNonessentialTraffic), p.Config.sandboxUID(), p.Config.sandboxGID(), string(supplementalGIDsJSON),
 		0,
@@ -375,7 +380,7 @@ ON CONFLICT(agent, model, output_format, disable_nonessential_traffic,
 	if err := tx.QueryRowContext(ctx, `
 SELECT agent_runtime_profile_id
 FROM agent_runtime_profiles
-WHERE agent = ?
+WHERE driver_id = ?
   AND COALESCE(model, '') = COALESCE(?, '')
   AND output_format = ?
   AND disable_nonessential_traffic = ?
@@ -384,9 +389,9 @@ WHERE agent = ?
   AND sandbox_supplemental_gids = ?
   AND requires_secret_drop = ?
   AND model_access_allowed = ?
-  AND COALESCE(manifest_anthropic_base_url, '') = COALESCE(?, '')
-  AND COALESCE(anthropic_api_key_secret_id, '') = COALESCE(?, '')
-  AND COALESCE(anthropic_auth_token_secret_id, '') = COALESCE(?, '')
+  AND COALESCE(manifest_model_proxy_base_url, '') = COALESCE(?, '')
+  AND COALESCE(model_proxy_api_key_secret_id, '') = COALESCE(?, '')
+  AND COALESCE(model_proxy_auth_token_secret_id, '') = COALESCE(?, '')
   AND COALESCE(secret_version, '') = COALESCE(?, '')`,
 		p.Config.agent(), nullableString(p.Config.AgentModel), p.Config.outputFormat(),
 		boolInt(p.Config.DisableNonessentialTraffic), p.Config.sandboxUID(), p.Config.sandboxGID(), string(supplementalGIDsJSON),
@@ -416,6 +421,20 @@ INSERT INTO runtime_generations (
   SELECT auto_checkpoint_enabled FROM sessions WHERE id = ?
 ), 0))`,
 		generationID, p.SessionID, networkProfileID, agentRuntimeProfileID, SandboxContractVersion, p.Owner, formatTime(leaseExpires), now, p.SessionID); err != nil {
+		return GenerationAllocation{}, err
+	}
+	var sessionDriverID, claudeSessionUUID string
+	if err := tx.QueryRowContext(ctx, `
+SELECT driver_id, COALESCE(claude_session_uuid, '')
+FROM sessions
+WHERE id = ?`, p.SessionID).Scan(&sessionDriverID, &claudeSessionUUID); err != nil {
+		return GenerationAllocation{}, err
+	}
+	if sessionDriverID != p.Config.agent() {
+		return GenerationAllocation{}, fmt.Errorf("session driver %q does not match allocation driver %q", sessionDriverID, p.Config.agent())
+	}
+	driverState, err := ensureAllocationDriverStateTx(ctx, tx, p.SessionID, generationID, sessionDriverID, claudeSessionUUID, p.Now)
+	if err != nil {
 		return GenerationAllocation{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -464,6 +483,7 @@ INSERT INTO runtime_generation_resources (
 		AgentRuntimeProfileID: agentRuntimeProfileID,
 		Owner:                 p.Owner,
 		LeaseExpiresAt:        leaseExpires,
+		DriverState:           driverState,
 	}, nil
 }
 
@@ -585,6 +605,24 @@ func (s *Store) ClaimCheckpointedGenerationForRestore(ctx context.Context, p Cla
 	if err := assertOwnerTx(ctx, tx, ownerUUIDFromLeaseOwner(p.Owner)); err != nil {
 		return GenerationAllocation{}, err
 	}
+	currentFence, err := checkpointDriverStatesDigestTx(ctx, tx, p.SessionID, p.GenerationID)
+	if err != nil {
+		return GenerationAllocation{}, err
+	}
+	var storedFence string
+	if err := tx.QueryRowContext(ctx, `
+SELECT COALESCE(checkpoint_driver_states_digest, '')
+FROM runtime_generations
+WHERE generation_id = ?
+  AND session_id = ?`, p.GenerationID, p.SessionID).Scan(&storedFence); err != nil {
+		return GenerationAllocation{}, err
+	}
+	if storedFence == "" {
+		return GenerationAllocation{}, fmt.Errorf("%w: checkpoint driver state fence is missing", ErrStaleCheckpointRestore)
+	}
+	if storedFence != currentFence {
+		return GenerationAllocation{}, fmt.Errorf("%w: checkpoint driver state fence mismatch", ErrStaleCheckpointRestore)
+	}
 
 	expiresAt := p.Now.Add(p.LeaseTTL)
 	res, err := tx.ExecContext(ctx, `
@@ -665,6 +703,11 @@ WHERE generation_id = ?
   AND session_id = ?`, p.GenerationID, p.SessionID).Scan(&allocation.NetworkProfileID, &allocation.AgentRuntimeProfileID); err != nil {
 		return GenerationAllocation{}, err
 	}
+	driverState, err := currentDriverStateTokenTx(ctx, tx, p.SessionID, p.GenerationID)
+	if err != nil {
+		return GenerationAllocation{}, err
+	}
+	allocation.DriverState = driverState
 	if err := tx.Commit(); err != nil {
 		return GenerationAllocation{}, err
 	}
@@ -1934,10 +1977,15 @@ func (s *Store) BeginGenerationCheckpoint(ctx context.Context, sessionID, genera
 	if _, err := getSandboxContractForGenerationWithMirrors(ctx, tx, sessionID, generationID); err != nil {
 		return err
 	}
+	checkpointDriverStatesDigest, err := checkpointDriverStatesDigestTx(ctx, tx, sessionID, generationID)
+	if err != nil {
+		return err
+	}
 	res, err := tx.ExecContext(ctx, `
 UPDATE runtime_generations
 SET status = 'checkpointing',
-    last_seen_at = ?
+    last_seen_at = ?,
+    checkpoint_driver_states_digest = ?
 WHERE generation_id = ?
   AND session_id = ?
   AND status = 'idle'
@@ -1968,7 +2016,7 @@ WHERE generation_id = ?
     SELECT 1 FROM turns
     WHERE session_id = ?
       AND status IN ('queued', 'leased', 'running')
-  )`, formatTime(now), generationID, sessionID, owner, formatTime(now), sessionID, generationID, sessionID)
+  )`, formatTime(now), checkpointDriverStatesDigest, generationID, sessionID, owner, formatTime(now), sessionID, generationID, sessionID)
 	if err != nil {
 		return err
 	}
@@ -2008,7 +2056,8 @@ func (s *Store) AbortGenerationCheckpoint(ctx context.Context, sessionID, genera
 	res, err := tx.ExecContext(ctx, `
 UPDATE runtime_generations
 SET status = 'idle',
-    last_seen_at = ?
+    last_seen_at = ?,
+    checkpoint_driver_states_digest = NULL
 WHERE generation_id = ?
   AND session_id = ?
   AND status = 'checkpointing'
@@ -2067,6 +2116,24 @@ func (s *Store) CompleteGenerationCheckpoint(ctx context.Context, p CompleteChec
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	currentFence, err := checkpointDriverStatesDigestTx(ctx, tx, p.SessionID, p.GenerationID)
+	if err != nil {
+		return err
+	}
+	var storedFence string
+	if err := tx.QueryRowContext(ctx, `
+SELECT COALESCE(checkpoint_driver_states_digest, '')
+FROM runtime_generations
+WHERE generation_id = ?
+  AND session_id = ?`, p.GenerationID, p.SessionID).Scan(&storedFence); err != nil {
+		return err
+	}
+	if storedFence == "" {
+		return fmt.Errorf("checkpoint driver state fence is missing")
+	}
+	if storedFence != currentFence {
+		return fmt.Errorf("checkpoint driver state fence mismatch")
+	}
 	res, err := tx.ExecContext(ctx, `
 UPDATE runtime_generations
 SET status = 'checkpointed',
@@ -2187,6 +2254,7 @@ SELECT
   COALESCE(g.checkpoint_bundle_digest, ''),
   COALESCE(g.checkpoint_runtime_config_digest, ''),
   COALESCE(g.checkpoint_control_manifest_digest, ''),
+  COALESCE(g.checkpoint_driver_states_digest, ''),
   n.runsc_network,
   n.runsc_overlay2,
   n.host_proxy_bind_url,
@@ -2209,7 +2277,7 @@ SELECT
   n.dns_policy,
   n.allocation_state,
   g.auto_checkpoint_enabled,
-  a.agent,
+  a.driver_id,
   COALESCE(a.model, ''),
   a.output_format,
   a.disable_nonessential_traffic,
@@ -2218,15 +2286,20 @@ SELECT
   a.sandbox_supplemental_gids,
   a.model_access_allowed,
   a.requires_secret_drop,
-  COALESCE(a.manifest_anthropic_base_url, ''),
-  COALESCE(a.anthropic_api_key_secret_id, ''),
-  COALESCE(a.anthropic_auth_token_secret_id, ''),
-  COALESCE(a.secret_version, '')
+  COALESCE(a.manifest_model_proxy_base_url, ''),
+  COALESCE(a.model_proxy_api_key_secret_id, ''),
+  COALESCE(a.model_proxy_auth_token_secret_id, ''),
+  COALESCE(a.secret_version, ''),
+  COALESCE(ds.state_digest, ''),
+  COALESCE(ds.state_version, 0),
+  COALESCE(ds.state_payload, '')
 FROM runtime_generations g
 JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
 JOIN network_profiles n ON n.network_profile_id = g.network_profile_id
 JOIN egress_policies e ON e.egress_policy_id = n.egress_policy_id
 JOIN agent_runtime_profiles a ON a.agent_runtime_profile_id = g.agent_runtime_profile_id
+LEFT JOIN session_driver_states ds ON ds.session_id = g.session_id
+  AND ds.driver_id = a.driver_id
 WHERE g.session_id = ?
   AND g.generation_id = ?`, sessionID, generationID)
 	var details RuntimeGenerationDetails
@@ -2266,6 +2339,7 @@ WHERE g.session_id = ?
 		&details.CheckpointBundleDigest,
 		&details.CheckpointRuntimeConfigDigest,
 		&details.CheckpointControlManifestDigest,
+		&details.CheckpointDriverStatesDigest,
 		&details.RunscNetwork,
 		&details.RunscOverlay2,
 		&details.HostProxyBindURL,
@@ -2301,6 +2375,9 @@ WHERE g.session_id = ?
 		&details.AnthropicAPIKeySecretID,
 		&details.AnthropicAuthTokenSecretID,
 		&details.SecretVersion,
+		&details.DriverStateDigest,
+		&details.DriverStateVersion,
+		&details.DriverStatePayload,
 	); err != nil {
 		return RuntimeGenerationDetails{}, err
 	}
@@ -2674,9 +2751,9 @@ func (c ResourceAllocatorConfig) agent() string {
 		return strings.TrimSpace(c.Agent)
 	}
 	if strings.TrimSpace(c.AgentOutputFormat) == "shell_pty" {
-		return "sh"
+		return string(agents.Shell)
 	}
-	return "claude"
+	return string(agents.ClaudeCode)
 }
 
 func (c ResourceAllocatorConfig) outputFormat() string {
@@ -2722,11 +2799,11 @@ func (c ResourceAllocatorConfig) modelAccessAllowed() bool {
 	if c.ModelAccessAllowed != nil {
 		return *c.ModelAccessAllowed
 	}
-	return c.agent() == "claude"
+	return c.agent() == string(agents.ClaudeCode)
 }
 
 func (c ResourceAllocatorConfig) providerCredentialsHostOnly() bool {
-	return c.agent() == "claude"
+	return c.agent() == string(agents.ClaudeCode)
 }
 
 func (c ResourceAllocatorConfig) requiresNetworkHostsProjection() bool {
@@ -2744,7 +2821,7 @@ func (c ResourceAllocatorConfig) requiresNetworkHostsProjection() bool {
 }
 
 func (c ResourceAllocatorConfig) manifestAnthropicBaseURL(baseURL string) string {
-	if c.agent() == "sh" || !c.modelAccessAllowed() {
+	if c.agent() == string(agents.Shell) || !c.modelAccessAllowed() {
 		return ""
 	}
 	if c.providerCredentialsHostOnly() {

@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"harness-platform/orchestrator/internal/agents"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -268,6 +270,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	defaultDriver, err := agents.CanonicalDriverID(getenv("HARNESS_DEFAULT_AGENT", agents.LegacyClaudeToken))
+	if err != nil {
+		return Config{}, fmt.Errorf("HARNESS_DEFAULT_AGENT: %w", err)
+	}
 	maxSessions := intEnv("HARNESS_MAX_SESSIONS", projectConfig.Phase7.MaxSessions)
 	cfg := Config{
 		Addr:             getenv("HARNESS_ORCHESTRATOR_ADDR", ":8090"),
@@ -283,7 +289,7 @@ func Load() (Config, error) {
 		BundleRoot:       getenv("HARNESS_BUNDLE_ROOT", filepath.Join(repoRoot, "bundle", "out")),
 		RootFSPath:       getenv("HARNESS_ROOTFS_PATH", filepath.Join(repoRoot, "sandbox-image", "rootfs")),
 		DBPath:           getenv("HARNESS_DB_PATH", "/var/lib/harness/state/orchestrator.db"),
-		DefaultAgent:     getenv("HARNESS_DEFAULT_AGENT", "claude"),
+		DefaultAgent:     string(defaultDriver),
 		MaxSessions:      maxSessions,
 		RunscNetwork:     defaultString(projectConfig.Runtime.RunscNetwork, "sandbox"),
 		RunscOverlay2:    defaultString(projectConfig.Runtime.RunscOverlay2, "none"),

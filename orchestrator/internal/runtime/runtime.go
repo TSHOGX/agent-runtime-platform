@@ -1318,12 +1318,13 @@ func modelProxyHostIsProviderUpstream(host string) bool {
 func (r *Runtime) buildGenerationManifest(req StartRequest, runscVersion, bundleDigest, runtimeConfigDigest, specDigest string) (controlManifest, error) {
 	details := req.Generation
 	if !isSandboxIsolatedRequest(req) {
-		agent := sandboxAgent(req)
-		if agent == "" {
+		selectedDriver := driverID(req)
+		if selectedDriver == "" {
 			return controlManifest{}, fmt.Errorf("agent is required")
 		}
-		return controlManifest{}, fmt.Errorf("unsupported agent %q", agent)
+		return controlManifest{}, fmt.Errorf("unsupported agent %q", selectedDriver)
 	}
+	agent, _ := agents.SandboxAgentForDriver(driverID(req))
 	return controlManifest{
 		SessionID:                            req.SessionID,
 		GenerationID:                         details.GenerationID,
@@ -1332,7 +1333,7 @@ func (r *Runtime) buildGenerationManifest(req StartRequest, runscVersion, bundle
 		AttemptID:                            "attempt-0",
 		NetworkProfileID:                     details.NetworkProfileID,
 		AgentRuntimeProfileID:                details.AgentRuntimeProfileID,
-		Agent:                                sandboxAgent(req),
+		Agent:                                agent,
 		ClaudeSessionUUID:                    req.ClaudeSessionUUID,
 		ResumeClaude:                         req.ResumeClaude,
 		RunscPlatform:                        effectiveRunscPlatform(details),
@@ -1362,15 +1363,15 @@ func validateGenerationDetails(req StartRequest) error {
 	if strings.TrimSpace(details.Agent) != "" && strings.TrimSpace(req.Agent) != "" && details.Agent != req.Agent {
 		return fmt.Errorf("generation agent mismatch")
 	}
-	agent := sandboxAgent(req)
-	if agent == "" {
+	selectedDriver := driverID(req)
+	if selectedDriver == "" {
 		return fmt.Errorf("agent is required")
 	}
-	if _, ok := agents.Lookup(agent); !ok {
-		return fmt.Errorf("unsupported agent %q", agent)
+	if _, ok := agents.Lookup(selectedDriver); !ok {
+		return fmt.Errorf("unsupported agent %q", selectedDriver)
 	}
 	if !isSandboxIsolatedRequest(req) {
-		return fmt.Errorf("unsupported agent %q", agent)
+		return fmt.Errorf("unsupported agent %q", selectedDriver)
 	}
 	if platform := effectiveRunscPlatform(details); platform != defaultRunscPlatform {
 		return fmt.Errorf("unsupported runsc platform %q", platform)
@@ -1457,21 +1458,24 @@ func controlManifestProjectionFields() (map[string]struct{}, map[string]struct{}
 }
 
 func (r *Runtime) renderRuntimeSpec(req StartRequest) (runtimeSpec, string, error) {
-	agent := sandboxAgent(req)
-	switch agent {
-	case string(agents.Claude), string(agents.Shell):
+	selectedDriver := driverID(req)
+	switch selectedDriver {
+	case string(agents.ClaudeCode), string(agents.Shell):
 		return r.renderSandboxIsolatedRuntimeSpec(req)
 	case "":
 		return runtimeSpec{}, "", fmt.Errorf("agent is required")
 	default:
-		return runtimeSpec{}, "", fmt.Errorf("unsupported agent %q", agent)
+		return runtimeSpec{}, "", fmt.Errorf("unsupported agent %q", selectedDriver)
 	}
 }
 
 func (r *Runtime) renderSandboxIsolatedRuntimeSpec(req StartRequest) (runtimeSpec, string, error) {
 	var spec runtimeSpec
 	details := req.Generation
-	agent := sandboxAgent(req)
+	agent, ok := agents.SandboxAgentForDriver(driverID(req))
+	if !ok {
+		return runtimeSpec{}, "", fmt.Errorf("unsupported agent %q", driverID(req))
+	}
 	identity, err := r.requiredSandboxIdentity(details)
 	if err != nil {
 		return runtimeSpec{}, "", err
@@ -1485,7 +1489,6 @@ func (r *Runtime) renderSandboxIsolatedRuntimeSpec(req StartRequest) (runtimeSpe
 		WorkspaceHostPath: workspaceHostPath,
 		AgentHomeHostPath: agentHomeHostPath,
 		NetworkHostsPath:  details.NetworkHostsPath,
-		SchemaPackPath:    r.schemaPackPath(),
 	})
 	if err != nil {
 		return runtimeSpec{}, "", err
@@ -1895,11 +1898,11 @@ func (r *Runtime) prepareRuntimeDataDirs(req StartRequest) error {
 	if isSandboxIsolatedRequest(req) {
 		return r.prepareSandboxIsolationDataDirs(req)
 	}
-	agent := sandboxAgent(req)
-	if agent == "" {
+	selectedDriver := driverID(req)
+	if selectedDriver == "" {
 		return fmt.Errorf("agent is required")
 	}
-	return fmt.Errorf("unsupported agent %q", agent)
+	return fmt.Errorf("unsupported agent %q", selectedDriver)
 }
 
 func (r *Runtime) prepareSandboxIsolationDataDirs(req StartRequest) error {
@@ -1971,7 +1974,7 @@ func cleanSandboxDataPath(path, label string) (string, error) {
 	return cleaned, nil
 }
 
-func sandboxAgent(req StartRequest) string {
+func driverID(req StartRequest) string {
 	if agent := strings.TrimSpace(req.Agent); agent != "" {
 		return agent
 	}
@@ -1979,8 +1982,8 @@ func sandboxAgent(req StartRequest) string {
 }
 
 func isSandboxIsolatedRequest(req StartRequest) bool {
-	switch sandboxAgent(req) {
-	case string(agents.Claude), string(agents.Shell):
+	switch driverID(req) {
+	case string(agents.ClaudeCode), string(agents.Shell):
 		return true
 	default:
 		return false

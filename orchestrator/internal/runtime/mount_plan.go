@@ -47,7 +47,6 @@ var contentMountPlanAllowList = map[string]allowedMountPlanSurface{
 	"bridge_inbox":    {Destination: filepath.Join(bridge.BridgeMountDestination, bridge.InboxDir), Type: "bind", Mode: "ro"},
 	"bridge_host_tmp": {Destination: filepath.Join(bridge.BridgeMountDestination, bridge.HostTmpDir), Type: "bind", Mode: "ro"},
 	"network_hosts":   {Destination: "/etc/hosts", Type: "bind", Mode: "ro"},
-	"schema_pack":     {Destination: "/schema-pack", Type: "bind", Mode: "ro"},
 }
 
 var scratchMountPlanAllowList = map[string]allowedMountPlanSurface{
@@ -76,9 +75,6 @@ func BuildSandboxMountPlan(input SandboxMountPlanInputs) (MountPlan, error) {
 	}
 	if strings.TrimSpace(input.NetworkHostsPath) != "" {
 		plan.Content = append(plan.Content, exactBindMount("network_hosts", input.NetworkHostsPath, "/etc/hosts", "ro", []string{"bind", "ro", "nosuid", "nodev", "noexec"}, nil))
-	}
-	if strings.TrimSpace(input.SchemaPackPath) != "" {
-		plan.Content = append(plan.Content, exactBindMount("schema_pack", input.SchemaPackPath, "/schema-pack", "ro", []string{"bind", "ro", "nosuid", "nodev", "noexec"}, nil))
 	}
 	if err := plan.Validate(); err != nil {
 		return MountPlan{}, err

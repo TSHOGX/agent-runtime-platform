@@ -1,11 +1,18 @@
 package agents
 
+import (
+	"fmt"
+	"strings"
+)
+
 type ID string
 
 const (
-	Claude ID = "claude"
-	Shell  ID = "sh"
+	ClaudeCode ID = "claude_code"
+	Shell      ID = "sh"
 )
+
+const LegacyClaudeToken = "claude"
 
 type Protocol string
 
@@ -21,8 +28,8 @@ type Definition struct {
 }
 
 var supported = map[ID]Definition{
-	Claude: {
-		ID:       Claude,
+	ClaudeCode: {
+		ID:       ClaudeCode,
 		Label:    "Claude Code",
 		Protocol: ProtocolClaudeStreamJSON,
 	},
@@ -36,4 +43,31 @@ var supported = map[ID]Definition{
 func Lookup(value string) (Definition, bool) {
 	def, ok := supported[ID(value)]
 	return def, ok
+}
+
+func CanonicalDriverID(value string) (ID, error) {
+	trimmed := strings.TrimSpace(value)
+	switch ID(trimmed) {
+	case ClaudeCode, Shell:
+		return ID(trimmed), nil
+	case ID(LegacyClaudeToken):
+		return ClaudeCode, nil
+	default:
+		return "", fmt.Errorf("unsupported driver %q", value)
+	}
+}
+
+func PublicAgentForDriver(value string) (string, bool) {
+	switch ID(strings.TrimSpace(value)) {
+	case ClaudeCode:
+		return LegacyClaudeToken, true
+	case Shell:
+		return string(Shell), true
+	default:
+		return "", false
+	}
+}
+
+func SandboxAgentForDriver(value string) (string, bool) {
+	return PublicAgentForDriver(value)
 }

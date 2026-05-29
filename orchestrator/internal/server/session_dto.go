@@ -3,6 +3,7 @@ package server
 import (
 	"time"
 
+	"harness-platform/orchestrator/internal/agents"
 	"harness-platform/orchestrator/internal/store"
 )
 
@@ -24,11 +25,15 @@ type apiSession struct {
 }
 
 func publicSession(session store.Session) apiSession {
+	publicAgent, ok := agents.PublicAgentForDriver(session.Agent)
+	if !ok {
+		publicAgent = session.Agent
+	}
 	return apiSession{
 		ID:                    session.ID,
 		UserID:                session.UserID,
 		Status:                session.Status,
-		Agent:                 session.Agent,
+		Agent:                 publicAgent,
 		ActiveGenerationID:    session.ActiveGenerationID,
 		RestoreMS:             session.RestoreMS,
 		CreatedAt:             session.CreatedAt,

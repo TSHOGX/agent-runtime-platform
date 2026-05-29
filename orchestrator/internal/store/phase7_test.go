@@ -15,7 +15,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func TestPhase7MigrationsCreateSchemaAndBackfillLegacySessions(t *testing.T) {
+func TestPhase9CutoverDeletesLegacySessionsAndRebuildsSchema(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "legacy.db")
@@ -39,17 +39,22 @@ func TestPhase7MigrationsCreateSchemaAndBackfillLegacySessions(t *testing.T) {
 		"active_model_request_contexts", "network_profiles", "agent_runtime_profiles",
 		"egress_policies", "orchestrator_owner", "sandbox_contracts",
 		"sandbox_contract_artifacts", "session_workspaces", "session_driver_homes",
-		"runtime_resource_instances",
+		"runtime_resource_instances", "phase9_cutover_state", "session_driver_states",
+		"runtime_resource_quarantine_tombstones",
 	} {
 		assertTableExists(t, st.db, table)
 	}
-	for _, column := range []string{"active_generation_id", "agent_home_path", "failure_reason", "error_class", "auto_checkpoint_enabled"} {
+	for _, column := range []string{"driver_id", "active_generation_id", "agent_home_path", "failure_reason", "error_class", "auto_checkpoint_enabled"} {
 		assertColumnExists(t, st.db, "sessions", column)
 	}
 	for _, column := range []string{"auto_checkpoint_enabled"} {
 		assertColumnExists(t, st.db, "runtime_generations", column)
 	}
-	for _, column := range []string{"model_access_allowed", "sandbox_uid", "sandbox_gid", "sandbox_supplemental_gids"} {
+	for _, column := range []string{
+		"driver_id", "model_access_allowed", "sandbox_uid", "sandbox_gid",
+		"sandbox_supplemental_gids", "manifest_model_proxy_base_url",
+		"model_proxy_api_key_secret_id", "model_proxy_auth_token_secret_id",
+	} {
 		assertColumnExists(t, st.db, "agent_runtime_profiles", column)
 	}
 	for _, column := range []string{"model_access_allowed"} {
@@ -73,41 +78,20 @@ func TestPhase7MigrationsCreateSchemaAndBackfillLegacySessions(t *testing.T) {
 	for _, column := range []string{"contract_id", "sandbox_contract_version", "state", "runsc_container_id", "runsc_binary_digest", "sandbox_ip", "resource_identity_payload", "resource_identity_digest", "evidence_json", "evidence_digest", "verified_at"} {
 		assertColumnExists(t, st.db, "runtime_resource_instances", column)
 	}
-	for _, index := range []string{"events_proxy_started_request_uq", "events_proxy_finished_request_uq", "events_created_at_idx", "runtime_generations_sandbox_contract_id_uq", "runtime_generation_resources_contract_id_uq", "session_driver_homes_session_idx", "runtime_resource_instances_runsc_container_id_active_uq", "runtime_resource_instances_sandbox_ip_active_uq"} {
+	for _, index := range []string{"events_proxy_started_request_uq", "events_proxy_finished_request_uq", "events_created_at_idx", "runtime_generations_sandbox_contract_id_uq", "runtime_generation_resources_contract_id_uq", "session_driver_homes_session_idx", "runtime_resource_instances_runsc_container_id_active_uq", "runtime_resource_instances_sandbox_ip_active_uq", "agent_runtime_profiles_tuple_uq", "runtime_resource_quarantine_active_uq"} {
 		assertIndexExists(t, st.db, index)
 	}
 
-	created, err := st.GetSession(ctx, "sess_created")
-	if err != nil {
-		t.Fatalf("get created: %v", err)
+	var cutoverMarker string
+	if err := st.db.QueryRowContext(ctx, `SELECT key FROM phase9_cutover_state WHERE key = 'phase9a_clean_schema'`).Scan(&cutoverMarker); err != nil {
+		t.Fatalf("phase9 cutover marker missing: %v", err)
 	}
-	if created.Status != string(sessionstate.Created) || created.ActiveGenerationID != "" {
-		t.Fatalf("created session should remain created with no generation: %+v", created)
+	var legacyRows int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions`).Scan(&legacyRows); err != nil {
+		t.Fatalf("count sessions: %v", err)
 	}
-	if created.AgentHomePath != filepath.Join(agentHomes, "sess_created") {
-		t.Fatalf("created agent home backfill: %q", created.AgentHomePath)
-	}
-
-	running, err := st.GetSession(ctx, "sess_running")
-	if err != nil {
-		t.Fatalf("get running: %v", err)
-	}
-	if running.Status != string(sessionstate.Failed) ||
-		running.ErrorClass != "legacy_pre_phase7_no_generation" ||
-		running.FailureReason != "legacy_pre_phase7_no_generation" ||
-		running.EndedAt == nil {
-		t.Fatalf("running legacy session not fenced as failed: %+v", running)
-	}
-
-	checkpointed, err := st.GetSession(ctx, "sess_checkpointed")
-	if err != nil {
-		t.Fatalf("get checkpointed: %v", err)
-	}
-	if checkpointed.Status != string(sessionstate.Failed) ||
-		checkpointed.ErrorClass != "legacy_checkpoint_unrestorable" ||
-		checkpointed.FailureReason != "legacy_checkpoint_unrestorable" ||
-		checkpointed.CheckpointPath == "" {
-		t.Fatalf("checkpointed legacy session not fenced as unrestorable: %+v", checkpointed)
+	if legacyRows != 0 {
+		t.Fatalf("phase9 cutover should delete legacy sessions, got %d", legacyRows)
 	}
 
 	var generations int
@@ -1586,12 +1570,17 @@ func assertColumnExists(t *testing.T, db *sql.DB, table, column string) {
 
 func createStoreSession(t *testing.T, ctx context.Context, st *Store, id string) {
 	t.Helper()
+	createStoreSessionWithAgent(t, ctx, st, id, "claude_code")
+}
+
+func createStoreSessionWithAgent(t *testing.T, ctx context.Context, st *Store, id, agent string) {
+	t.Helper()
 	now := time.Now().UTC()
 	if err := st.CreateSession(ctx, Session{
 		ID:        id,
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
-		Agent:     "claude",
+		Agent:     agent,
 		Workspace: filepath.Join(t.TempDir(), id),
 		RestoreID: "phase3-" + id,
 		CreatedAt: now,
@@ -1649,8 +1638,17 @@ INSERT INTO egress_policies (
 	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO agent_runtime_profiles (
-  agent_runtime_profile_id, agent, output_format, disable_nonessential_traffic, requires_secret_drop, created_at
-) VALUES (?, 'claude', 'stream-json', 1, 0, ?)`, agentRuntimeProfileID, formatTime(now)); err != nil {
+  agent_runtime_profile_id, driver_id, model, output_format,
+  disable_nonessential_traffic, sandbox_uid, sandbox_gid,
+  sandbox_supplemental_gids, requires_secret_drop, model_access_allowed,
+  manifest_model_proxy_base_url, model_proxy_api_key_secret_id,
+  model_proxy_auth_token_secret_id, secret_version, created_at
+) VALUES (?, 'claude_code', NULL, 'stream-json', 1, 65534, 65534, '[]', 0, 1,
+  'http://harness-model-proxy.internal:8082',
+  'anthropic_proxy_api_key',
+  'anthropic_proxy_auth_token',
+  'test-secret-version',
+  ?)`, agentRuntimeProfileID, formatTime(now)); err != nil {
 		t.Fatalf("insert agent runtime profile: %v", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -1660,6 +1658,19 @@ INSERT INTO runtime_generations (
 ) VALUES (?, ?, 'idle', ?, ?, ?, ?, ?, ?)`,
 		generationID, sessionID, networkProfileID, agentRuntimeProfileID, SandboxContractVersion, owner, formatTime(expires), formatTime(now)); err != nil {
 		t.Fatalf("insert generation: %v", err)
+	}
+	payload, digest, err := canonicalBootstrapDriverState("claude_code", "phase9a-"+sessionID)
+	if err != nil {
+		t.Fatalf("build driver state: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO session_driver_states (
+  session_id, driver_id, state_payload, state_digest, state_version,
+  updated_generation_id, updated_turn_id, updated_at
+) VALUES (?, 'claude_code', ?, ?, 1, ?, NULL, ?)
+ON CONFLICT(session_id, driver_id) DO NOTHING`,
+		sessionID, string(payload), digest, generationID, formatTime(now)); err != nil {
+		t.Fatalf("insert driver state: %v", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO network_profiles (

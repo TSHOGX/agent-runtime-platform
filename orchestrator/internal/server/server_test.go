@@ -46,7 +46,7 @@ func TestCreateSessionRejectsUnsupportedAgent(t *testing.T) {
 			SessionsRoot:     dir,
 			SessionRetention: time.Hour,
 			MaxSessions:      10,
-			DefaultAgent:     "claude",
+			DefaultAgent:     "claude_code",
 		},
 		store:   st,
 		runtime: runtime.New(runtime.Config{}),
@@ -83,7 +83,7 @@ func TestCreateSessionSoftLimitUsesPoolExhaustedEnvelope(t *testing.T) {
 			SessionsRoot:     dir,
 			SessionRetention: time.Hour,
 			MaxSessions:      1,
-			DefaultAgent:     "claude",
+			DefaultAgent:     "claude_code",
 		},
 		store:   st,
 		runtime: runtime.New(runtime.Config{}),
@@ -126,7 +126,7 @@ func TestCloseSessionReleasesSoftLimitWithoutDeletingHistory(t *testing.T) {
 		ID:                "sess_retained",
 		UserID:            labUserID,
 		Status:            string(sessionstate.Created),
-		Agent:             "claude",
+		Agent:             "claude_code",
 		Workspace:         filepath.Join(cfg.SessionsRoot, "sess_retained"),
 		AgentHomePath:     filepath.Join(dir, "agent-homes", "sess_retained"),
 		RestoreID:         "phase3-sess_retained",
@@ -230,7 +230,7 @@ func TestCreateSessionUsesNullExpiryWhenSessionRetentionDisabled(t *testing.T) {
 			SessionsRoot:     dir,
 			SessionRetention: 0,
 			MaxSessions:      10,
-			DefaultAgent:     "claude",
+			DefaultAgent:     "claude_code",
 		},
 		store:   st,
 		runtime: runtime.New(runtime.Config{}),
@@ -344,7 +344,7 @@ func TestCreateSessionUsesPublicSessionDTO(t *testing.T) {
 			SessionsRoot:     dir,
 			SessionRetention: time.Hour,
 			MaxSessions:      10,
-			DefaultAgent:     "claude",
+			DefaultAgent:     "claude_code",
 		},
 		store:   st,
 		runtime: runtime.New(runtime.Config{}),
@@ -457,7 +457,7 @@ func TestMonitorIdleSessionsReEnablesCheckpointedSessionsWhenCheckpointDisabled(
 		ID:        "sess_checkpointed",
 		UserID:    "lab",
 		Status:    string(sessionstate.Checkpointed),
-		Agent:     "claude",
+		Agent:     "claude_code",
 		Workspace: filepath.Join(dir, "sessions", "sess_checkpointed"),
 		RestoreID: "phase3-sess_checkpointed",
 		CreatedAt: now,
@@ -804,7 +804,7 @@ func TestSendMessageColdFallbackAllocatesReplacementGeneration(t *testing.T) {
 		Owner:     leaseOwner,
 		LeaseTTL:  time.Minute,
 		Now:       time.Now().UTC(),
-		Config:    serverTestAllocatorConfig(cfg, "claude"),
+		Config:    serverTestAllocatorConfig(cfg, "claude_code"),
 	})
 	if err != nil {
 		t.Fatalf("allocate old generation: %v", err)
@@ -895,7 +895,7 @@ WHERE session_id = ?
 	}
 	if startRequests[0].GenerationID != gotSession.ActiveGenerationID ||
 		startRequests[0].ClaudeSessionUUID != session.ClaudeSessionUUID ||
-		!startRequests[0].ResumeClaude ||
+		startRequests[0].ResumeClaude ||
 		startRequests[0].WaitForTurn {
 		t.Fatalf("unexpected replacement start request: %+v", startRequests[0])
 	}
@@ -913,7 +913,7 @@ func TestSendMessageRestoresCheckpointedGeneration(t *testing.T) {
 		Owner:     leaseOwner,
 		LeaseTTL:  time.Minute,
 		Now:       time.Now().UTC(),
-		Config:    serverTestAllocatorConfig(cfg, "claude"),
+		Config:    serverTestAllocatorConfig(cfg, "claude_code"),
 	})
 	if err != nil {
 		t.Fatalf("allocate checkpointed generation: %v", err)
@@ -981,7 +981,7 @@ WHERE session_id = ?
 	start := startRequests[0]
 	if start.GenerationID != allocation.GenerationID ||
 		!start.RestoreFromCheckpoint ||
-		!start.ResumeClaude ||
+		start.ResumeClaude ||
 		start.WaitForTurn ||
 		start.PreparedArtifacts.ManifestDigest != "restore_manifest_digest" ||
 		start.PreparedArtifacts.RunscVersion != "runsc restore-test" ||
@@ -1005,7 +1005,7 @@ func TestSendMessageFallsBackWhenCheckpointRestoreFails(t *testing.T) {
 		Owner:     leaseOwner,
 		LeaseTTL:  time.Minute,
 		Now:       time.Now().UTC(),
-		Config:    serverTestAllocatorConfig(cfg, "claude"),
+		Config:    serverTestAllocatorConfig(cfg, "claude_code"),
 	})
 	if err != nil {
 		t.Fatalf("allocate checkpointed generation: %v", err)
@@ -1124,7 +1124,7 @@ func TestSendMessageRestoreFallbackColdStartFailureLeavesSessionRetryable(t *tes
 		Owner:     leaseOwner,
 		LeaseTTL:  time.Minute,
 		Now:       time.Now().UTC(),
-		Config:    serverTestAllocatorConfig(cfg, "claude"),
+		Config:    serverTestAllocatorConfig(cfg, "claude_code"),
 	})
 	if err != nil {
 		t.Fatalf("allocate checkpointed generation: %v", err)
@@ -1220,7 +1220,7 @@ func TestSendMessageRestoreLiveCASFailureDestroysRunscContainerIDBeforeFallback(
 		Owner:     leaseOwner,
 		LeaseTTL:  time.Minute,
 		Now:       time.Now().UTC(),
-		Config:    serverTestAllocatorConfig(cfg, "claude"),
+		Config:    serverTestAllocatorConfig(cfg, "claude_code"),
 	})
 	if err != nil {
 		t.Fatalf("allocate checkpointed generation: %v", err)
@@ -1299,7 +1299,7 @@ func TestSendMessageRestoreLiveCASFailureDoesNotRetireWhenDestroyFails(t *testin
 		Owner:     leaseOwner,
 		LeaseTTL:  time.Minute,
 		Now:       time.Now().UTC(),
-		Config:    serverTestAllocatorConfig(cfg, "claude"),
+		Config:    serverTestAllocatorConfig(cfg, "claude_code"),
 	})
 	if err != nil {
 		t.Fatalf("allocate checkpointed generation: %v", err)
@@ -1372,7 +1372,7 @@ func TestSendMessageFallsBackWhenCheckpointImageManifestInvalid(t *testing.T) {
 	dir := t.TempDir()
 	st, owner := openServerOwnedStore(t, ctx, dir)
 	session := createServerTestSession(t, ctx, st, dir, "sess_restore_manifest_fallback", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
-	if _, err := st.DBForTest().ExecContext(ctx, `UPDATE sessions SET agent = 'sh' WHERE id = ?`, session.ID); err != nil {
+	if _, err := st.DBForTest().ExecContext(ctx, `UPDATE sessions SET driver_id = 'sh' WHERE id = ?`, session.ID); err != nil {
 		t.Fatalf("set shell session agent: %v", err)
 	}
 	session.Agent = "sh"
@@ -1519,7 +1519,7 @@ func TestColdFallbackMaintenanceStartsReplacementForQueuedTurn(t *testing.T) {
 		Owner:     leaseOwner,
 		LeaseTTL:  time.Minute,
 		Now:       time.Now().UTC(),
-		Config:    serverTestAllocatorConfig(cfg, "claude"),
+		Config:    serverTestAllocatorConfig(cfg, "claude_code"),
 	})
 	if err != nil {
 		t.Fatalf("allocate old generation: %v", err)
@@ -1566,7 +1566,7 @@ func TestColdFallbackMaintenanceStartsReplacementForQueuedTurn(t *testing.T) {
 	if len(startRequests) != 1 ||
 		startRequests[0].GenerationID != gotSession.ActiveGenerationID ||
 		startRequests[0].ClaudeSessionUUID != session.ClaudeSessionUUID ||
-		!startRequests[0].ResumeClaude {
+		startRequests[0].ResumeClaude {
 		t.Fatalf("unexpected maintenance start requests: %+v", startRequests)
 	}
 	grant, ok, err := st.ClaimNextTurn(ctx, store.ClaimNextTurnParams{
@@ -1598,7 +1598,7 @@ func TestColdFallbackMaintenanceStartFailureKeepsSessionInputBlocking(t *testing
 		Owner:     leaseOwner,
 		LeaseTTL:  time.Minute,
 		Now:       time.Now().UTC(),
-		Config:    serverTestAllocatorConfig(cfg, "claude"),
+		Config:    serverTestAllocatorConfig(cfg, "claude_code"),
 	})
 	if err != nil {
 		t.Fatalf("allocate old generation: %v", err)
@@ -1845,7 +1845,7 @@ func TestGetQuotaReportsSessionAndPoolCeilings(t *testing.T) {
 			EgressDNSPolicy:    string(cfg.Phase7.Network.Egress.DNSPolicy),
 			HostProxyBindURL:   cfg.ModelProxy.BindURL,
 			ProxyPort:          cfg.ModelProxy.BindPort,
-			Agent:              "claude",
+			Agent:              "claude_code",
 			AgentModel:         cfg.Claude.Model,
 			AgentOutputFormat:  cfg.Claude.OutputFormat,
 		},
@@ -1898,7 +1898,7 @@ func TestSendMessagePoolExhaustionDoesNotQueueTurn(t *testing.T) {
 		Owner:     store.GenerationLeaseOwner(owner.UUID),
 		LeaseTTL:  time.Minute,
 		Now:       time.Now().UTC(),
-		Config:    serverTestAllocatorConfig(cfg, "claude"),
+		Config:    serverTestAllocatorConfig(cfg, "claude_code"),
 	}); err != nil {
 		t.Fatalf("allocate pool slot: %v", err)
 	}
@@ -2729,7 +2729,7 @@ func TestRunPhase7MaintenancePollsBridgeOutbox(t *testing.T) {
 			EgressDNSPolicy:    string(cfg.Phase7.Network.Egress.DNSPolicy),
 			HostProxyBindURL:   cfg.ModelProxy.BindURL,
 			ProxyPort:          cfg.ModelProxy.BindPort,
-			Agent:              "claude",
+			Agent:              "claude_code",
 			AgentModel:         cfg.Claude.Model,
 			AgentOutputFormat:  cfg.Claude.OutputFormat,
 		},
@@ -2803,7 +2803,7 @@ func TestRunPhase7MaintenanceRecoversGenerationThatExpiresAfterStartup(t *testin
 		Owner:     leaseOwner,
 		LeaseTTL:  time.Minute,
 		Now:       time.Now().UTC(),
-		Config:    serverTestAllocatorConfig(cfg, "claude"),
+		Config:    serverTestAllocatorConfig(cfg, "claude_code"),
 	})
 	if err != nil {
 		t.Fatalf("allocate generation: %v", err)
@@ -2961,7 +2961,7 @@ func TestDestroyReclaimableGenerationResourcesMarksDestroyedOnlyAfterRuntimeClea
 				Owner:     store.GenerationLeaseOwner(owner.UUID),
 				LeaseTTL:  time.Minute,
 				Now:       now.Add(-time.Minute),
-				Config:    serverTestAllocatorConfig(cfg, "claude"),
+				Config:    serverTestAllocatorConfig(cfg, "claude_code"),
 			})
 			if err != nil {
 				t.Fatalf("allocate generation: %v", err)
@@ -3022,7 +3022,7 @@ func TestDestroyReclaimableGenerationResourcesRemovesFilesystemWithRealRuntime(t
 		Owner:     store.GenerationLeaseOwner(owner.UUID),
 		LeaseTTL:  time.Minute,
 		Now:       now.Add(-time.Minute),
-		Config:    serverTestAllocatorConfig(cfg, "claude"),
+		Config:    serverTestAllocatorConfig(cfg, "claude_code"),
 	})
 	if err != nil {
 		t.Fatalf("allocate generation: %v", err)
@@ -3091,7 +3091,7 @@ func TestRunPhase7MaintenancePublishesBridgeOutputAndCompletion(t *testing.T) {
 	dir := t.TempDir()
 	st, owner := openServerOwnedStore(t, ctx, dir)
 	session := createServerTestSession(t, ctx, st, dir, "sess_bridge_events", string(sessionstate.RunningActive), time.Now().UTC(), nil)
-	if _, err := st.DBForTest().ExecContext(ctx, `UPDATE sessions SET agent = 'sh' WHERE id = ?`, session.ID); err != nil {
+	if _, err := st.DBForTest().ExecContext(ctx, `UPDATE sessions SET driver_id = 'sh' WHERE id = ?`, session.ID); err != nil {
 		t.Fatalf("set shell agent: %v", err)
 	}
 	cfg := testServerConfig(dir)
@@ -3217,7 +3217,7 @@ func TestBridgeFailedCompletionDoesNotFailSession(t *testing.T) {
 		Owner:     store.GenerationLeaseOwner(owner.UUID),
 		LeaseTTL:  time.Minute,
 		Now:       time.Now().UTC(),
-		Config:    serverTestAllocatorConfig(cfg, "claude"),
+		Config:    serverTestAllocatorConfig(cfg, "claude_code"),
 	})
 	if err != nil {
 		t.Fatalf("allocate generation: %v", err)
@@ -4374,18 +4374,40 @@ func createServerRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 	if err != nil {
 		t.Fatalf("parse sandbox cidr: %v", err)
 	}
+	credentialPolicy := serverCredentialPolicyForTest(t, allocation.DriverState.DriverID)
 	if _, err := st.StoreSandboxContract(ctx, store.StoreSandboxContractParams{
 		ContractID:   contractID,
 		SessionID:    sessionID,
 		GenerationID: allocation.GenerationID,
 		Payload: map[string]any{
 			"sandbox_contract_version": store.SandboxContractVersion,
-			"contract_schema_version":  1,
+			"contract_schema_version":  store.SandboxContractSchemaVersion,
+			"contract_gate_version":    store.SandboxContractGatePhase9A,
 			"contract_id":              contractID,
 			"session_id":               sessionID,
 			"generation_id":            allocation.GenerationID,
 			"runtime_profile_id":       allocation.AgentRuntimeProfileID,
 			"network_profile_id":       allocation.NetworkProfileID,
+			"driver": map[string]any{
+				"driver_id":                            allocation.DriverState.DriverID,
+				"driver_version":                       "test",
+				"bridge_protocol":                      "claude_stream_json_per_turn",
+				"output_schema":                        "claude_stream_json_v1",
+				"command_argv_digest":                  "sha256:command",
+				"driver_config_digest":                 "sha256:driver-config",
+				"required_runtime_capabilities_digest": "sha256:driver-capabilities",
+				"supports_interrupt":                   false,
+				"supports_compaction":                  true,
+			},
+			"runtime_provider": map[string]any{
+				"provider_id":              "local_runsc",
+				"provider_profile_id":      "local_runsc_default",
+				"isolation_kind":           "gvisor",
+				"template_ref":             "default",
+				"template_digest":          "sha256:template",
+				"capability_vocab_version": "1",
+				"capability_digest":        "sha256:provider-capabilities",
+			},
 			"identity": map[string]any{
 				"model_access_allowed": true,
 			},
@@ -4393,13 +4415,20 @@ func createServerRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 				"runsc_network": details.RunscNetwork,
 				"sandbox_ip":    prefix.Addr().String(),
 			},
-			"credential_policy": map[string]any{
-				"provider_credentials": "host-only",
-				"sandbox_secret_mount": "absent",
-				"proxy_token":          "absent",
-			},
+			"credential_policy": credentialPolicy,
 			"model_access": map[string]any{
 				"model_access_allowed": true,
+			},
+			"driver_runtime": map[string]any{
+				"driver_home_mount":             "/agent-home",
+				"generated_driver_config_mount": "/harness-control/driver/" + allocation.DriverState.DriverID,
+				"materialized_driver_config":    map[string]any{},
+				"initial_driver_state_digest":   allocation.DriverState.StateDigest,
+			},
+			"input_digests": map[string]any{
+				"runtime_config_digest": nil,
+				"rootfs_image_digest":   nil,
+				"agent_manifest_digest": nil,
 			},
 		},
 		Now: now,
@@ -4478,6 +4507,30 @@ func createServerRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 		t.Fatalf("mark runtime resource live: %v", err)
 	}
 	return instance
+}
+
+func serverCredentialPolicyForTest(t *testing.T, driverID string) map[string]any {
+	t.Helper()
+	policy := map[string]any{
+		"provider_credentials": "host-only",
+		"sandbox_secret_mount": "absent",
+		"proxy_token":          "absent",
+		"secret_grants": []map[string]any{{
+			"grant_id":                  "model_provider:anthropic_proxy",
+			"domain":                    "model_provider",
+			"scope":                     "anthropic_messages",
+			"exposure_mode":             "proxy_only",
+			"ttl_seconds":               nil,
+			"allowed_drivers":           []string{driverID},
+			"allowed_runtime_providers": []string{"local_runsc"},
+		}},
+	}
+	digest, err := store.CredentialPolicyDigest(policy)
+	if err != nil {
+		t.Fatalf("credential digest: %v", err)
+	}
+	policy["digest"] = digest
+	return policy
 }
 
 func serverPostStartProofForTest(instance store.RuntimeResourceInstance) *store.RuntimeResourcePostStartProof {
@@ -4572,7 +4625,7 @@ func createServerTestSession(t *testing.T, ctx context.Context, st *store.Store,
 		ID:                id,
 		UserID:            labUserID,
 		Status:            status,
-		Agent:             "claude",
+		Agent:             "claude_code",
 		Workspace:         filepath.Join(dir, "sessions", id),
 		RestoreID:         "phase3-" + id,
 		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
@@ -4616,7 +4669,7 @@ func prepareServerIdleGeneration(t *testing.T, ctx context.Context, st *store.St
 		Owner:     store.GenerationLeaseOwner(ownerUUID),
 		LeaseTTL:  time.Minute,
 		Now:       now,
-		Config:    serverTestAllocatorConfig(cfg, "claude"),
+		Config:    serverTestAllocatorConfig(cfg, "claude_code"),
 	})
 	if err != nil {
 		t.Fatalf("allocate generation: %v", err)
@@ -4647,6 +4700,7 @@ func prepareServerIdleGeneration(t *testing.T, ctx context.Context, st *store.St
 func markServerGenerationCheckpointed(t *testing.T, ctx context.Context, st *store.Store, sessionID, generationID string, now time.Time) {
 	t.Helper()
 	formattedNow := now.UTC().Format(time.RFC3339Nano)
+	fence := serverCheckpointDriverStateFenceForTest(t, ctx, st, sessionID, generationID)
 	if _, err := st.DBForTest().ExecContext(ctx, `
 UPDATE runtime_generations
 SET status = 'checkpointed',
@@ -4672,11 +4726,12 @@ SET status = 'checkpointed',
       FROM runtime_generation_resources
       WHERE runtime_generation_resources.generation_id = runtime_generations.generation_id
     ), 'manifest_digest'),
+    checkpoint_driver_states_digest = ?,
     lease_owner = NULL,
     lease_expires_at = NULL,
     last_seen_at = ?
 WHERE generation_id = ?
-  AND session_id = ?`, formattedNow, formattedNow, generationID, sessionID); err != nil {
+  AND session_id = ?`, formattedNow, fence, formattedNow, generationID, sessionID); err != nil {
 		t.Fatalf("set checkpointed generation: %v", err)
 	}
 	if _, err := st.DBForTest().ExecContext(ctx, `
@@ -4695,6 +4750,31 @@ WHERE generation_id = ?`, generationID); err != nil {
 	if err := st.UpdateSessionStatus(ctx, sessionID, string(sessionstate.Checkpointed), nil); err != nil {
 		t.Fatalf("set checkpointed session: %v", err)
 	}
+}
+
+func serverCheckpointDriverStateFenceForTest(t *testing.T, ctx context.Context, st *store.Store, sessionID, generationID string) string {
+	t.Helper()
+	var driverID, stateDigest string
+	var stateVersion int
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT ds.driver_id, ds.state_digest, ds.state_version
+FROM session_driver_states ds
+JOIN runtime_generations g ON g.session_id = ds.session_id
+JOIN agent_runtime_profiles a ON a.agent_runtime_profile_id = g.agent_runtime_profile_id
+WHERE g.session_id = ?
+  AND g.generation_id = ?
+  AND ds.driver_id = a.driver_id`, sessionID, generationID).Scan(&driverID, &stateDigest, &stateVersion); err != nil {
+		t.Fatalf("query driver state fence input: %v", err)
+	}
+	fence, err := store.CheckpointDriverStatesDigest(generationID, []store.DriverStateToken{{
+		DriverID:     driverID,
+		StateDigest:  stateDigest,
+		StateVersion: stateVersion,
+	}})
+	if err != nil {
+		t.Fatalf("compute driver state fence: %v", err)
+	}
+	return fence
 }
 
 func newServerTestWatcher(t *testing.T, sessionsRoot string, st *store.Store, hub *events.Hub) *artifacts.Watcher {
@@ -4721,7 +4801,7 @@ func testServerConfig(dir string) config.Config {
 		RepoRoot:         dir,
 		SessionRetention: time.Hour,
 		MaxSessions:      10,
-		DefaultAgent:     "claude",
+		DefaultAgent:     "claude_code",
 		Claude: config.ClaudeConfig{
 			ProxyBindURL:               "http://0.0.0.0:8082",
 			SandboxBaseURL:             "http://harness-model-proxy.internal:8082",
@@ -4794,7 +4874,7 @@ func TestResourceAllocatorConfigUsesHostOnlyClaudeCredentials(t *testing.T) {
 	cfg.ModelProxy.SandboxBaseURL = "http://harness-model-proxy.internal:8082"
 	srv := &Server{cfg: cfg}
 
-	claudeConfig := srv.resourceAllocatorConfig("claude")
+	claudeConfig := srv.resourceAllocatorConfig("claude_code")
 	if !claudeConfig.ProviderCredentialsHostOnly {
 		t.Fatalf("claude allocator should keep provider credentials host-only: %+v", claudeConfig)
 	}
@@ -4821,7 +4901,7 @@ func TestResourceAllocatorConfigUsesModelProxyPort(t *testing.T) {
 	}
 	srv := &Server{cfg: cfg}
 
-	allocatorConfig := srv.resourceAllocatorConfig("claude")
+	allocatorConfig := srv.resourceAllocatorConfig("claude_code")
 	if allocatorConfig.HostProxyBindURL != "http://0.0.0.0:8083" ||
 		allocatorConfig.ProxyPort != 8083 ||
 		allocatorConfig.SandboxModelProxyBaseURL != "http://harness-model-proxy.internal:8083" {
@@ -4850,7 +4930,7 @@ func serverTestAllocatorConfig(cfg config.Config, agent string) store.ResourceAl
 		SandboxUID:                  cfg.Phase7.SandboxIdentity.UID,
 		SandboxGID:                  cfg.Phase7.SandboxIdentity.GID,
 		SandboxSupplementalGIDs:     cfg.Phase7.SandboxIdentity.SupplementalGIDs,
-		ProviderCredentialsHostOnly: agent == "claude",
+		ProviderCredentialsHostOnly: agent == "claude_code",
 		SandboxModelProxyBaseURL:    cfg.ModelProxy.SandboxBaseURL,
 	}
 }
@@ -5033,7 +5113,7 @@ func createServerRunningProxyTurn(t *testing.T, ctx context.Context, st *store.S
 		Owner:     owner,
 		LeaseTTL:  time.Minute,
 		Now:       now,
-		Config:    serverTestAllocatorConfig(cfg, "claude"),
+		Config:    serverTestAllocatorConfig(cfg, "claude_code"),
 	})
 	if err != nil {
 		t.Fatalf("allocate generation: %v", err)

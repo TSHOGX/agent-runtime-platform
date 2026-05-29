@@ -21,7 +21,7 @@ import (
 )
 
 func TestRuntimeStartRejectsUnsupportedAgent(t *testing.T) {
-	rt := New(Config{DefaultAgent: "claude"})
+	rt := New(Config{DefaultAgent: "claude_code"})
 	res := rt.Start(context.Background(), StartRequest{
 		SessionID: "sess_1",
 		Agent:     "opencode",
@@ -53,7 +53,7 @@ func TestPathIsMountPointDetectsRootAndTempDir(t *testing.T) {
 
 func TestRuntimeStartRequiresGenerationDetailsForColdPath(t *testing.T) {
 	rt := New(Config{
-		DefaultAgent:    "claude",
+		DefaultAgent:    "claude_code",
 		SessionsRoot:    filepath.Join(t.TempDir(), "sessions"),
 		AgentHomesRoot:  filepath.Join(t.TempDir(), "agent-homes"),
 		CheckpointsRoot: filepath.Join(t.TempDir(), "checkpoints"),
@@ -62,7 +62,7 @@ func TestRuntimeStartRequiresGenerationDetailsForColdPath(t *testing.T) {
 	})
 	res := rt.Start(context.Background(), StartRequest{
 		SessionID: "sess_1",
-		Agent:     "claude",
+		Agent:     "claude_code",
 		Done:      closedDone(),
 	}, nil)
 	if res.Err == nil {
@@ -100,10 +100,10 @@ func TestResolveCheckpointPathPrefersGenerationPath(t *testing.T) {
 }
 
 func TestRuntimeStartRestoreRequiresCheckpointPath(t *testing.T) {
-	rt := New(Config{DefaultAgent: "claude"})
+	rt := New(Config{DefaultAgent: "claude_code"})
 	res := rt.Start(context.Background(), StartRequest{
 		SessionID:             "sess_missing_checkpoint",
-		Agent:                 "claude",
+		Agent:                 "claude_code",
 		RestoreFromCheckpoint: true,
 		Generation: store.RuntimeGenerationDetails{
 			SessionID:    "sess_missing_checkpoint",
@@ -129,14 +129,14 @@ func TestRuntimeStartRestoreRequiresStoredArtifacts(t *testing.T) {
 	checkpointPath := filepath.Join(dir, "checkpoint")
 	writeCheckpointFiles(t, checkpointPath)
 	runner := &recordingCommandRunner{}
-	rt := New(Config{DefaultAgent: "claude", CommandRunner: runner})
+	rt := New(Config{DefaultAgent: "claude_code", CommandRunner: runner})
 	details := testGenerationDetails(dir, "gen_restore_missing_artifacts")
 	details.CheckpointPath = checkpointPath
 
 	res := rt.Start(context.Background(), StartRequest{
 		SessionID:             details.SessionID,
 		GenerationID:          details.GenerationID,
-		Agent:                 "claude",
+		Agent:                 "claude_code",
 		RestoreFromCheckpoint: true,
 		Generation:            details,
 	}, nil)
@@ -342,7 +342,7 @@ func TestRuntimeStartRestoreRejectsMetadataBeforeRunscRestore(t *testing.T) {
 		},
 	}
 	rt := New(Config{
-		DefaultAgent:   "claude",
+		DefaultAgent:   "claude_code",
 		SessionsRoot:   filepath.Join(dir, "sessions"),
 		AgentHomesRoot: filepath.Join(dir, "agent-homes"),
 		RootFSPath:     filepath.Join(dir, "rootfs"),
@@ -403,7 +403,7 @@ func TestRuntimeStartRejectsRunscPinMismatchBeforeRunscRun(t *testing.T) {
 		},
 	}
 	rt := New(Config{
-		DefaultAgent:  "claude",
+		DefaultAgent:  "claude_code",
 		CommandRunner: runner,
 	})
 	details := testGenerationDetails(dir, "gen_start_pin_mismatch")
@@ -427,7 +427,7 @@ func TestRuntimeStartRejectsRunscPinMismatchBeforeRunscRun(t *testing.T) {
 	res := rt.Start(context.Background(), StartRequest{
 		SessionID:         details.SessionID,
 		GenerationID:      details.GenerationID,
-		Agent:             "claude",
+		Agent:             "claude_code",
 		Generation:        details,
 		PreparedArtifacts: artifacts,
 	}, nil)
@@ -455,7 +455,7 @@ func TestRuntimeStartRestoreRejectsRunscBinaryMismatchBeforeRunscRestore(t *test
 		},
 	}
 	rt := New(Config{
-		DefaultAgent:   "claude",
+		DefaultAgent:   "claude_code",
 		SessionsRoot:   filepath.Join(dir, "sessions"),
 		AgentHomesRoot: filepath.Join(dir, "agent-homes"),
 		RootFSPath:     filepath.Join(dir, "rootfs"),
@@ -480,7 +480,7 @@ func TestRuntimeStartRestoreRejectsRunscBinaryMismatchBeforeRunscRestore(t *test
 	res := rt.Start(context.Background(), StartRequest{
 		SessionID:             details.SessionID,
 		GenerationID:          details.GenerationID,
-		Agent:                 "claude",
+		Agent:                 "claude_code",
 		RestoreFromCheckpoint: true,
 		Generation:            details,
 		PreparedArtifacts:     artifacts,
@@ -561,14 +561,14 @@ func TestCleanupExitedContainerDoesNotRemoveReplacement(t *testing.T) {
 }
 
 func TestRuntimeStartDoesNotReuseContainerForDifferentGeneration(t *testing.T) {
-	rt := New(Config{DefaultAgent: "claude"})
+	rt := New(Config{DefaultAgent: "claude_code"})
 	stdin := &recordingWriteCloser{}
 	canceled := make(chan struct{})
 	rt.containers["sess_1"] = &Container{
 		SessionID:        "sess_1",
 		GenerationID:     "gen_old",
 		RunscContainerID: "harness-gen-gen_old",
-		Agent:            "claude",
+		Agent:            "claude_code",
 		Stdin:            stdin,
 		OutputHub:        NewOutputHub(),
 		Cancel:           func() { close(canceled) },
@@ -577,7 +577,7 @@ func TestRuntimeStartDoesNotReuseContainerForDifferentGeneration(t *testing.T) {
 	res := rt.Start(context.Background(), StartRequest{
 		SessionID:    "sess_1",
 		GenerationID: "gen_new",
-		Agent:        "claude",
+		Agent:        "claude_code",
 		FirstMessage: "hello stale generation",
 		WaitForTurn:  true,
 		Done:         closedDone(),
@@ -710,7 +710,7 @@ func TestCheckpointRequiresGenerationScopedPath(t *testing.T) {
 
 func TestSendMessageDoesNotReconfigureLiveSandboxNetwork(t *testing.T) {
 	rt := New(Config{
-		DefaultAgent: "claude",
+		DefaultAgent: "claude_code",
 		RunscNetwork: "sandbox",
 	})
 	hub := NewOutputHub()
@@ -718,7 +718,7 @@ func TestSendMessageDoesNotReconfigureLiveSandboxNetwork(t *testing.T) {
 	container := &Container{
 		SessionID:        "sess_1",
 		RunscContainerID: "harness-gen-gen_a",
-		Agent:            "claude",
+		Agent:            "claude_code",
 		Stdin:            stdin,
 		OutputHub:        hub,
 	}
@@ -1384,7 +1384,7 @@ func TestRenderRuntimeSpecUsesGenerationNetnsPath(t *testing.T) {
 	spec, _, err := rt.renderRuntimeSpec(withDataVolumePathsForTest(dir, StartRequest{
 		SessionID:    "sess_1",
 		GenerationID: details.GenerationID,
-		Agent:        "claude",
+		Agent:        "claude_code",
 		Generation:   details,
 	}))
 	if err != nil {
@@ -1475,7 +1475,7 @@ func installFakeRunsc(t *testing.T, dir, label string) (string, string) {
 
 func TestWriteUserTurnClaudeJSONLFraming(t *testing.T) {
 	var buf bytes.Buffer
-	if err := writeUserTurn(&buf, "claude", "hello world"); err != nil {
+	if err := writeUserTurn(&buf, "claude_code", "hello world"); err != nil {
 		t.Fatalf("writeUserTurn: %v", err)
 	}
 
@@ -1514,7 +1514,7 @@ func TestWriteUserTurnClaudeJSONLFraming(t *testing.T) {
 func TestWriteUserTurnClaudeEscapesNewlines(t *testing.T) {
 	// Multi-line user input must stay on a single JSONL line.
 	var buf bytes.Buffer
-	if err := writeUserTurn(&buf, "claude", "line1\nline2"); err != nil {
+	if err := writeUserTurn(&buf, "claude_code", "line1\nline2"); err != nil {
 		t.Fatalf("writeUserTurn: %v", err)
 	}
 	if strings.Count(buf.String(), "\n") != 1 {
@@ -1607,11 +1607,11 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndIsolatedRuntime(t *t
 	})
 	details := testGenerationDetails(dir, "gen_a")
 
-	workspacePath, agentHomePath := dataVolumePathsForTest(dir, "sess_1", "claude")
+	workspacePath, agentHomePath := dataVolumePathsForTest(dir, "sess_1", "claude_code")
 	artifacts, err := rt.PrepareGeneration(context.Background(), withDataVolumePathsForTest(dir, StartRequest{
 		SessionID:         "sess_1",
 		GenerationID:      details.GenerationID,
-		Agent:             "claude",
+		Agent:             "claude_code",
 		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
 		ResumeClaude:      true,
 		Generation:        details,
@@ -1826,7 +1826,7 @@ func TestPrepareClaudeHostOnlyGenerationHasNoSecretMount(t *testing.T) {
 	if _, err := rt.PrepareGeneration(context.Background(), withDataVolumePathsForTest(dir, StartRequest{
 		SessionID:         "sess_1",
 		GenerationID:      details.GenerationID,
-		Agent:             "claude",
+		Agent:             "claude_code",
 		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
 		Generation:        details,
 	})); err != nil {
@@ -1944,7 +1944,7 @@ func TestPrepareGenerationConcurrentSessionsUseDistinctControlManifests(t *testi
 			_, err := rt.PrepareGeneration(context.Background(), withDataVolumePathsForTest(dir, StartRequest{
 				SessionID:    tc.sessionID,
 				GenerationID: tc.details.GenerationID,
-				Agent:        "claude",
+				Agent:        "claude_code",
 				Generation:   tc.details,
 			}))
 			if err != nil {
@@ -2160,7 +2160,7 @@ func TestPrepareSandboxGenerationRejectsSecretReferences(t *testing.T) {
 		agent        string
 		outputFormat string
 	}{
-		{name: "claude", sessionID: "sess_claude", generationID: "gen_claude_bad", agent: "claude", outputFormat: "stream-json"},
+		{name: "claude", sessionID: "sess_claude", generationID: "gen_claude_bad", agent: "claude_code", outputFormat: "stream-json"},
 		{name: "shell", sessionID: "sess_shell", generationID: "gen_shell_bad", agent: "sh", outputFormat: "shell_pty"},
 	}
 	for _, tc := range tests {
@@ -2215,7 +2215,7 @@ func TestPrepareGenerationRejectsMismatchedIdentity(t *testing.T) {
 	_, err := rt.PrepareGeneration(context.Background(), StartRequest{
 		SessionID:    "sess_wrong",
 		GenerationID: details.GenerationID,
-		Agent:        "claude",
+		Agent:        "claude_code",
 		Generation:   details,
 	})
 	if err == nil {
@@ -2231,7 +2231,7 @@ func withDataVolumePathsForTest(dir string, req StartRequest) StartRequest {
 	if sessionID == "" {
 		sessionID = req.Generation.SessionID
 	}
-	agent := sandboxAgent(req)
+	agent := driverID(req)
 	workspacePath, agentHomePath := dataVolumePathsForTest(dir, sessionID, agent)
 	req.WorkspaceHostPath = workspacePath
 	req.AgentHomeHostPath = agentHomePath
@@ -2267,7 +2267,7 @@ func testGenerationDetails(dir, generationID string) store.RuntimeGenerationDeta
 		NetnsName:                  "harness-gen-" + generationID,
 		NftTableName:               hostEgressTableName(generationID),
 		EgressPolicyDigest:         "egress_digest",
-		Agent:                      "claude",
+		Agent:                      "claude_code",
 		Model:                      "sonnet",
 		OutputFormat:               "stream-json",
 		DisableNonessentialTraffic: true,
@@ -2386,7 +2386,7 @@ func testControlManifest() controlManifest {
 		AttemptID:                            "attempt-1",
 		NetworkProfileID:                     "net_a",
 		AgentRuntimeProfileID:                "arp_a",
-		Agent:                                "claude",
+		Agent:                                "claude_code",
 		ClaudeSessionUUID:                    "11111111-2222-3333-4444-555555555555",
 		ResumeClaude:                         true,
 		RunscPlatform:                        "systrap",

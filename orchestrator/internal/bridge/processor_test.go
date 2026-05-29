@@ -914,7 +914,7 @@ func createBridgeSession(t *testing.T, ctx context.Context, st *store.Store, id 
 		ID:        id,
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
-		Agent:     "claude",
+		Agent:     "claude_code",
 		Workspace: workspace,
 		RestoreID: "phase3-" + id,
 		CreatedAt: now,
@@ -940,7 +940,7 @@ func allocateBridgeGeneration(t *testing.T, ctx context.Context, st *store.Store
 			EgressDNSPolicy:            "hostnames_only",
 			HostProxyBindURL:           "http://0.0.0.0:8082",
 			ProxyPort:                  8082,
-			Agent:                      "claude",
+			Agent:                      "claude_code",
 			AgentModel:                 "sonnet",
 			AgentOutputFormat:          "stream-json",
 			DisableNonessentialTraffic: true,
@@ -966,16 +966,62 @@ func allocateBridgeGeneration(t *testing.T, ctx context.Context, st *store.Store
 func createBridgeRuntimeResourceLive(t *testing.T, ctx context.Context, st *store.Store, sessionID string, allocation store.GenerationAllocation, details store.RuntimeGenerationDetails, ownerUUID string) {
 	t.Helper()
 	contractID := "contract_" + allocation.GenerationID
+	credentialPolicy := bridgeCredentialPolicyForTest(t, allocation.DriverState.DriverID)
 	if _, err := st.StoreSandboxContract(ctx, store.StoreSandboxContractParams{
 		ContractID:   contractID,
 		SessionID:    sessionID,
 		GenerationID: allocation.GenerationID,
 		Payload: map[string]any{
 			"contract_id":              contractID,
-			"contract_schema_version":  1,
+			"contract_schema_version":  store.SandboxContractSchemaVersion,
+			"contract_gate_version":    store.SandboxContractGatePhase9A,
 			"generation_id":            allocation.GenerationID,
 			"session_id":               sessionID,
 			"sandbox_contract_version": store.SandboxContractVersion,
+			"runtime_profile_id":       allocation.AgentRuntimeProfileID,
+			"network_profile_id":       allocation.NetworkProfileID,
+			"driver": map[string]any{
+				"driver_id":                            allocation.DriverState.DriverID,
+				"driver_version":                       "test",
+				"bridge_protocol":                      "claude_stream_json_per_turn",
+				"output_schema":                        "claude_stream_json_v1",
+				"command_argv_digest":                  "sha256:command",
+				"driver_config_digest":                 "sha256:driver-config",
+				"required_runtime_capabilities_digest": "sha256:driver-capabilities",
+				"supports_interrupt":                   false,
+				"supports_compaction":                  true,
+			},
+			"runtime_provider": map[string]any{
+				"provider_id":              "local_runsc",
+				"provider_profile_id":      "local_runsc_default",
+				"isolation_kind":           "gvisor",
+				"template_ref":             "default",
+				"template_digest":          "sha256:template",
+				"capability_vocab_version": "1",
+				"capability_digest":        "sha256:provider-capabilities",
+			},
+			"identity": map[string]any{
+				"model_access_allowed": true,
+			},
+			"network_identity": map[string]any{
+				"runsc_network": details.RunscNetwork,
+				"sandbox_ip":    "10.240.0.2",
+			},
+			"credential_policy": credentialPolicy,
+			"model_access": map[string]any{
+				"model_access_allowed": true,
+			},
+			"driver_runtime": map[string]any{
+				"driver_home_mount":             "/agent-home",
+				"generated_driver_config_mount": "/harness-control/driver/" + allocation.DriverState.DriverID,
+				"materialized_driver_config":    map[string]any{},
+				"initial_driver_state_digest":   allocation.DriverState.StateDigest,
+			},
+			"input_digests": map[string]any{
+				"runtime_config_digest": nil,
+				"rootfs_image_digest":   nil,
+				"agent_manifest_digest": nil,
+			},
 		},
 		Now: time.Now().UTC(),
 	}); err != nil {
@@ -1053,6 +1099,30 @@ func createBridgeRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 	}
 }
 
+func bridgeCredentialPolicyForTest(t *testing.T, driverID string) map[string]any {
+	t.Helper()
+	policy := map[string]any{
+		"provider_credentials": "host-only",
+		"sandbox_secret_mount": "absent",
+		"proxy_token":          "absent",
+		"secret_grants": []map[string]any{{
+			"grant_id":                  "model_provider:anthropic_proxy",
+			"domain":                    "model_provider",
+			"scope":                     "anthropic_messages",
+			"exposure_mode":             "proxy_only",
+			"ttl_seconds":               nil,
+			"allowed_drivers":           []string{driverID},
+			"allowed_runtime_providers": []string{"local_runsc"},
+		}},
+	}
+	digest, err := store.CredentialPolicyDigest(policy)
+	if err != nil {
+		t.Fatalf("credential digest: %v", err)
+	}
+	policy["digest"] = digest
+	return policy
+}
+
 func bridgePostStartProofForTest(instance store.RuntimeResourceInstance) *store.RuntimeResourcePostStartProof {
 	return &store.RuntimeResourcePostStartProof{
 		HostID:                 instance.HostID,
@@ -1074,6 +1144,7 @@ func bridgePostStartProofForTest(instance store.RuntimeResourceInstance) *store.
 
 func markBridgeGenerationCheckpointed(t *testing.T, ctx context.Context, st *store.Store, sessionID, generationID string, now time.Time) {
 	t.Helper()
+	fence := bridgeCheckpointDriverStateFenceForTest(t, ctx, st, sessionID, generationID)
 	if _, err := st.DBForTest().ExecContext(ctx, `
 UPDATE runtime_generations
 SET status = 'checkpointed',
@@ -1089,11 +1160,12 @@ SET status = 'checkpointed',
       FROM runtime_generation_resources
       WHERE runtime_generation_resources.generation_id = runtime_generations.generation_id
     ), 'manifest_digest'),
+    checkpoint_driver_states_digest = ?,
     lease_owner = NULL,
     lease_expires_at = NULL,
     last_seen_at = ?
 WHERE generation_id = ?
-  AND session_id = ?`, formatStoreTimeForBridgeTest(now), formatStoreTimeForBridgeTest(now), generationID, sessionID); err != nil {
+  AND session_id = ?`, formatStoreTimeForBridgeTest(now), fence, formatStoreTimeForBridgeTest(now), generationID, sessionID); err != nil {
 		t.Fatalf("set checkpointed generation: %v", err)
 	}
 	if _, err := st.DBForTest().ExecContext(ctx, `
@@ -1112,6 +1184,31 @@ WHERE generation_id = ?`, generationID); err != nil {
 	if err := st.UpdateSessionStatus(ctx, sessionID, string(sessionstate.Checkpointed), nil); err != nil {
 		t.Fatalf("set checkpointed session: %v", err)
 	}
+}
+
+func bridgeCheckpointDriverStateFenceForTest(t *testing.T, ctx context.Context, st *store.Store, sessionID, generationID string) string {
+	t.Helper()
+	var driverID, stateDigest string
+	var stateVersion int
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT ds.driver_id, ds.state_digest, ds.state_version
+FROM session_driver_states ds
+JOIN runtime_generations g ON g.session_id = ds.session_id
+JOIN agent_runtime_profiles a ON a.agent_runtime_profile_id = g.agent_runtime_profile_id
+WHERE g.session_id = ?
+  AND g.generation_id = ?
+  AND ds.driver_id = a.driver_id`, sessionID, generationID).Scan(&driverID, &stateDigest, &stateVersion); err != nil {
+		t.Fatalf("query driver state fence input: %v", err)
+	}
+	fence, err := store.CheckpointDriverStatesDigest(generationID, []store.DriverStateToken{{
+		DriverID:     driverID,
+		StateDigest:  stateDigest,
+		StateVersion: stateVersion,
+	}})
+	if err != nil {
+		t.Fatalf("compute driver state fence: %v", err)
+	}
+	return fence
 }
 
 type storeFailure struct {

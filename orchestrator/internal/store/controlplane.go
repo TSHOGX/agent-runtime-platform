@@ -73,17 +73,18 @@ type AckStartedParams struct {
 }
 
 type CompleteTurnParams struct {
-	SessionID      string
-	GenerationID   string
-	TurnID         int64
-	Owner          string
-	TerminalStatus string
-	ErrorClass     string
-	Error          string
-	EventType      string
-	EventDedupeKey string
-	EventPayload   any
-	Now            time.Time
+	SessionID         string
+	GenerationID      string
+	TurnID            int64
+	Owner             string
+	TerminalStatus    string
+	ErrorClass        string
+	Error             string
+	DriverStateUpdate *DriverStateUpdate
+	EventType         string
+	EventDedupeKey    string
+	EventPayload      any
+	Now               time.Time
 }
 
 type RenewHeartbeatParams struct {
@@ -762,6 +763,9 @@ func (s *Store) CompleteTurn(ctx context.Context, p CompleteTurnParams) (int64, 
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := applyDriverStateUpdateTx(ctx, tx, p); err != nil {
+		return 0, err
+	}
 	var alreadyTerminal int
 	if err := tx.QueryRowContext(ctx, `
 SELECT COUNT(*)
@@ -846,6 +850,7 @@ func completeTurnEventPayload(base any, p CompleteTurnParams, sessionMarkedIdle 
 			}
 		}
 	}
+	delete(payload, "driver_state_update")
 	payload["session_marked_idle"] = sessionMarkedIdle
 	payload["session_terminal"] = false
 	if sessionMarkedIdle {

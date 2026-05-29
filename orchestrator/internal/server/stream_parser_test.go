@@ -30,7 +30,7 @@ func newParserTestServer(t *testing.T) (*Server, *store.Store) {
 		ID:        "sess_1",
 		UserID:    "lab",
 		Status:    string(sessionstate.RunningActive),
-		Agent:     "claude",
+		Agent:     "claude_code",
 		Workspace: t.TempDir(),
 		RestoreID: "phase3-sess_1",
 		CreatedAt: now,

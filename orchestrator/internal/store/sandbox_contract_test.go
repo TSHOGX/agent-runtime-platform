@@ -301,11 +301,40 @@ func TestRecordSandboxContractArtifactsVerifiesContractDigest(t *testing.T) {
 func testSandboxContractPayload(t *testing.T, sessionID string, allocation GenerationAllocation) map[string]any {
 	t.Helper()
 	contractID := "contract_" + allocation.GenerationID
+	driverID := allocation.DriverState.DriverID
+	if driverID == "" {
+		driverID = "claude_code"
+	}
+	stateDigest := allocation.DriverState.StateDigest
+	if stateDigest == "" {
+		stateDigest = "sha256:test-driver-state"
+	}
+	secretGrants := []map[string]any{{
+		"grant_id":                  "model_provider:anthropic_proxy",
+		"domain":                    "model_provider",
+		"scope":                     "anthropic_messages",
+		"exposure_mode":             "proxy_only",
+		"ttl_seconds":               nil,
+		"allowed_drivers":           []string{driverID},
+		"allowed_runtime_providers": []string{"local_runsc"},
+	}}
+	credentialPolicy := map[string]any{
+		"provider_credentials": "host-only",
+		"sandbox_secret_mount": "absent",
+		"proxy_token":          "absent",
+		"secret_grants":        secretGrants,
+	}
+	credentialDigest, err := CredentialPolicyDigest(credentialPolicy)
+	if err != nil {
+		t.Fatalf("credential digest: %v", err)
+	}
+	credentialPolicy["digest"] = credentialDigest
 	return map[string]any{
 		"runtime_profile_id":       allocation.AgentRuntimeProfileID,
 		"session_id":               sessionID,
 		"network_profile_id":       allocation.NetworkProfileID,
-		"contract_schema_version":  1,
+		"contract_schema_version":  SandboxContractSchemaVersion,
+		"contract_gate_version":    SandboxContractGatePhase9A,
 		"generation_id":            allocation.GenerationID,
 		"sandbox_contract_version": SandboxContractVersion,
 		"contract_id":              contractID,
@@ -314,6 +343,31 @@ func testSandboxContractPayload(t *testing.T, sessionID string, allocation Gener
 			"sandbox_gid":               65534,
 			"sandbox_supplemental_gids": []int{},
 			"model_access_allowed":      true,
+		},
+		"driver": map[string]any{
+			"driver_id":                            driverID,
+			"driver_version":                       "test",
+			"bridge_protocol":                      "claude_stream_json_per_turn",
+			"output_schema":                        "claude_stream_json_v1",
+			"command_argv_digest":                  "sha256:command",
+			"driver_config_digest":                 "sha256:driver-config",
+			"required_runtime_capabilities_digest": "sha256:driver-capabilities",
+			"supports_interrupt":                   false,
+			"supports_compaction":                  true,
+		},
+		"runtime_provider": map[string]any{
+			"provider_id":              "local_runsc",
+			"provider_profile_id":      "local_runsc_default",
+			"isolation_kind":           "gvisor",
+			"template_ref":             "default",
+			"template_digest":          "sha256:template",
+			"capability_vocab_version": "1",
+			"capability_digest":        "sha256:provider-capabilities",
+			"provider_specific": map[string]any{
+				"runsc_container_id": "harness-gen-" + allocation.GenerationID,
+				"runsc_platform":     "systrap",
+				"runsc_version":      "runsc test",
+			},
 		},
 		"network_identity": map[string]any{
 			"runsc_network": "sandbox",
@@ -333,20 +387,22 @@ func testSandboxContractPayload(t *testing.T, sessionID string, allocation Gener
 			"runsc_binary_digest": "sha256:runsc",
 			"runsc_container_id":  "harness-gen-" + allocation.GenerationID,
 		},
-		"credential_policy": map[string]any{
-			"provider_credentials": "host-only",
-			"sandbox_secret_mount": "absent",
-			"proxy_token":          "absent",
-		},
+		"credential_policy": credentialPolicy,
 		"model_access": map[string]any{
 			"model_access_allowed":         true,
 			"active_turn_required":         true,
 			"sandbox_model_proxy_base_url": "http://harness-model-proxy.internal:8082",
 		},
+		"driver_runtime": map[string]any{
+			"driver_home_mount":             "/agent-home",
+			"generated_driver_config_mount": "/harness-control/driver/" + driverID,
+			"materialized_driver_config":    map[string]any{},
+			"initial_driver_state_digest":   stateDigest,
+		},
 		"input_digests": map[string]any{
-			"runtime_config_digest": "sha256:runtime",
-			"rootfs_image_digest":   "sha256:rootfs",
-			"schema_pack_digest":    nil,
+			"runtime_config_digest": nil,
+			"rootfs_image_digest":   nil,
+			"agent_manifest_digest": nil,
 		},
 	}
 }

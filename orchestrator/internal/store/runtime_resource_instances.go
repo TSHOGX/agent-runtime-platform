@@ -313,10 +313,9 @@ SET lease_expires_at = ?,
 WHERE generation_id = ?
   AND worker_id = ?
   AND host_id = ?
-  AND state IN ('materializing','ready')
-  AND lease_expires_at > ?`,
+  AND state IN ('materializing','ready')`,
 		formatTime(p.LeaseExpiresAt), formatTime(p.Now), strings.TrimSpace(p.GenerationID),
-		strings.TrimSpace(p.WorkerID), strings.TrimSpace(p.HostID), formatTime(p.Now))
+		strings.TrimSpace(p.WorkerID), strings.TrimSpace(p.HostID))
 	if err != nil {
 		return err
 	}

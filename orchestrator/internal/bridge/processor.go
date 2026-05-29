@@ -75,9 +75,10 @@ type emitOutputPayload struct {
 }
 
 type ackCompletedPayload struct {
-	Status     string `json:"status"`
-	ErrorClass string `json:"error_class,omitempty"`
-	Error      string `json:"error,omitempty"`
+	Status            string                   `json:"status"`
+	ErrorClass        string                   `json:"error_class,omitempty"`
+	Error             string                   `json:"error,omitempty"`
+	DriverStateUpdate *store.DriverStateUpdate `json:"driver_state_update,omitempty"`
 }
 
 func (p *Processor) ProcessOnce(ctx context.Context, root string) error {
@@ -289,17 +290,18 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 			payload.Status = "completed"
 		}
 		eventID, err := p.Store.CompleteTurn(ctx, store.CompleteTurnParams{
-			SessionID:      envelope.SessionID,
-			GenerationID:   envelope.GenerationID,
-			TurnID:         *envelope.TurnID,
-			Owner:          p.Owner,
-			TerminalStatus: payload.Status,
-			ErrorClass:     payload.ErrorClass,
-			Error:          payload.Error,
-			EventType:      TypeAckTurnCompleted,
-			EventDedupeKey: fmt.Sprintf("ack_completed:%s:%d", envelope.GenerationID, *envelope.TurnID),
-			EventPayload:   payload,
-			Now:            now,
+			SessionID:         envelope.SessionID,
+			GenerationID:      envelope.GenerationID,
+			TurnID:            *envelope.TurnID,
+			Owner:             p.Owner,
+			TerminalStatus:    payload.Status,
+			ErrorClass:        payload.ErrorClass,
+			Error:             payload.Error,
+			DriverStateUpdate: payload.DriverStateUpdate,
+			EventType:         TypeAckTurnCompleted,
+			EventDedupeKey:    fmt.Sprintf("ack_completed:%s:%d", envelope.GenerationID, *envelope.TurnID),
+			EventPayload:      payload,
+			Now:               now,
 		})
 		if err != nil {
 			return err

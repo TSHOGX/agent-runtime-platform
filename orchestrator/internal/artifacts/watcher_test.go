@@ -113,7 +113,7 @@ func newArtifactTestStore(t *testing.T, ctx context.Context, workspaceRoot, sess
 		ID:        sessionID,
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
-		Agent:     "claude",
+		Agent:     "claude_code",
 		Workspace: filepath.Join(workspaceRoot, sessionID),
 		RestoreID: "phase3-" + sessionID,
 		CreatedAt: now,

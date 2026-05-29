@@ -14,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"harness-platform/orchestrator/internal/agents"
 )
 
 const DataVolumeLayoutVersion = 1
@@ -89,6 +91,14 @@ const (
 	dataVolumeWorkspace  dataVolumeKind = "workspace"
 	dataVolumeDriverHome dataVolumeKind = "driver_home"
 )
+
+func DriverHomeKeyFor(driverID string) (string, error) {
+	driverID = strings.TrimSpace(driverID)
+	if _, ok := agents.Lookup(driverID); !ok {
+		return "", fmt.Errorf("unsupported driver home key %q", driverID)
+	}
+	return driverID, nil
+}
 
 type dataVolumeMarker struct {
 	MarkerVersion         int                    `json:"marker_version"`
@@ -179,7 +189,11 @@ func (s *Store) ProvisionSessionDriverHome(ctx context.Context, p ProvisionSessi
 	if err != nil {
 		return SessionDriverHomeVolume{}, err
 	}
-	driver, err := dataVolumeSafePathComponent("driver", p.Driver)
+	driver, err := DriverHomeKeyFor(p.Driver)
+	if err != nil {
+		return SessionDriverHomeVolume{}, err
+	}
+	driver, err = dataVolumeSafePathComponent("driver", driver)
 	if err != nil {
 		return SessionDriverHomeVolume{}, err
 	}
@@ -336,6 +350,10 @@ func (s *Store) GetSessionDriverHomeVolume(ctx context.Context, sessionID, drive
 	if err != nil {
 		return SessionDriverHomeVolume{}, err
 	}
+	driver, err = DriverHomeKeyFor(driver)
+	if err != nil {
+		return SessionDriverHomeVolume{}, err
+	}
 	driver, err = dataVolumeSafePathComponent("driver", driver)
 	if err != nil {
 		return SessionDriverHomeVolume{}, err
@@ -359,7 +377,11 @@ func (s *Store) VerifySessionDriverHomeVolume(ctx context.Context, p VerifySessi
 	if err != nil {
 		return SessionDriverHomeVolume{}, err
 	}
-	driver, err := dataVolumeSafePathComponent("driver", p.Driver)
+	driver, err := DriverHomeKeyFor(p.Driver)
+	if err != nil {
+		return SessionDriverHomeVolume{}, err
+	}
+	driver, err = dataVolumeSafePathComponent("driver", driver)
 	if err != nil {
 		return SessionDriverHomeVolume{}, err
 	}

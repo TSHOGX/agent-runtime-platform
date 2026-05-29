@@ -388,7 +388,7 @@ func TestAllocateGenerationSnapshotsSessionAutoCheckpointPolicy(t *testing.T) {
 		ID:                    "sess_policy",
 		UserID:                "lab",
 		Status:                string(sessionstate.Created),
-		Agent:                 "claude",
+		Agent:                 "claude_code",
 		Workspace:             filepath.Join(t.TempDir(), "sess_policy"),
 		RestoreID:             "phase3-sess_policy",
 		AutoCheckpointEnabled: true,
@@ -824,7 +824,7 @@ func TestListColdFallbackSessionsReturnsFailedActiveWithQueuedTurns(t *testing.T
 func TestAllocateShellGenerationHasNoSecretReferences(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
-	createStoreSession(t, ctx, st, "sess_shell")
+	createStoreSessionWithAgent(t, ctx, st, "sess_shell", "sh")
 	cfg := testAllocatorConfig(t)
 	cfg.Agent = "sh"
 	cfg.AgentModel = ""
@@ -876,7 +876,7 @@ func TestAllocateClaudeHostOnlyGenerationHasNoSecretReferences(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get host-only claude generation details: %v", err)
 	}
-	if details.Agent != "claude" ||
+	if details.Agent != "claude_code" ||
 		details.RequiresSecretDrop ||
 		details.SecretsDirPath != "" ||
 		details.AnthropicAPIKeySecretID != "" ||
@@ -2181,7 +2181,7 @@ func TestSweepExpiredSessionsDestroysAndRejectsInputState(t *testing.T) {
 		ID:        "sess_expired",
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
-		Agent:     "claude",
+		Agent:     "claude_code",
 		Workspace: filepath.Join(t.TempDir(), "sess_expired"),
 		RestoreID: "phase3-sess_expired",
 		CreatedAt: now.Add(-time.Hour),
@@ -2209,7 +2209,7 @@ func TestSweepExpiredSessionsDestroysAndRejectsInputState(t *testing.T) {
 		ID:        "sess_expired_allocated",
 		UserID:    "lab",
 		Status:    string(sessionstate.RunningIdle),
-		Agent:     "claude",
+		Agent:     "claude_code",
 		Workspace: filepath.Join(t.TempDir(), "sess_expired_allocated"),
 		RestoreID: "phase3-sess_expired_allocated",
 		CreatedAt: now.Add(-time.Hour),
@@ -2260,7 +2260,7 @@ func TestSweepExpiredSessionsIgnoresNullExpiry(t *testing.T) {
 		ID:        "sess_no_expiry",
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
-		Agent:     "claude",
+		Agent:     "claude_code",
 		Workspace: filepath.Join(t.TempDir(), "sess_no_expiry"),
 		RestoreID: "phase3-sess_no_expiry",
 		CreatedAt: now.Add(-time.Hour),
@@ -2296,7 +2296,7 @@ func TestClearActiveSessionExpiryClearsOnlyActiveSessions(t *testing.T) {
 			ID:        "sess_active_legacy_expiry",
 			UserID:    "lab",
 			Status:    string(sessionstate.RunningIdle),
-			Agent:     "claude",
+			Agent:     "claude_code",
 			Workspace: filepath.Join(t.TempDir(), "sess_active_legacy_expiry"),
 			RestoreID: "phase3-sess_active_legacy_expiry",
 			CreatedAt: now.Add(-2 * time.Hour),
@@ -2307,7 +2307,7 @@ func TestClearActiveSessionExpiryClearsOnlyActiveSessions(t *testing.T) {
 			ID:        "sess_failed_legacy_expiry",
 			UserID:    "lab",
 			Status:    string(sessionstate.Failed),
-			Agent:     "claude",
+			Agent:     "claude_code",
 			Workspace: filepath.Join(t.TempDir(), "sess_failed_legacy_expiry"),
 			RestoreID: "phase3-sess_failed_legacy_expiry",
 			CreatedAt: now.Add(-2 * time.Hour),
@@ -2318,7 +2318,7 @@ func TestClearActiveSessionExpiryClearsOnlyActiveSessions(t *testing.T) {
 			ID:        "sess_destroyed_legacy_expiry",
 			UserID:    "lab",
 			Status:    string(sessionstate.Destroyed),
-			Agent:     "claude",
+			Agent:     "claude_code",
 			Workspace: filepath.Join(t.TempDir(), "sess_destroyed_legacy_expiry"),
 			RestoreID: "phase3-sess_destroyed_legacy_expiry",
 			CreatedAt: now.Add(-2 * time.Hour),
@@ -2375,7 +2375,7 @@ func TestSweepExpiredSessionsCancelsUnstartedTurnsButPreservesAckStartedLease(t 
 		ID:        "sess_expired_queued",
 		UserID:    "lab",
 		Status:    string(sessionstate.RunningIdle),
-		Agent:     "claude",
+		Agent:     "claude_code",
 		Workspace: filepath.Join(t.TempDir(), "sess_expired_queued"),
 		RestoreID: "phase3-sess_expired_queued",
 		CreatedAt: now.Add(-time.Hour),
@@ -2393,7 +2393,7 @@ func TestSweepExpiredSessionsCancelsUnstartedTurnsButPreservesAckStartedLease(t 
 		ID:        "sess_expired_ack",
 		UserID:    "lab",
 		Status:    string(sessionstate.RunningActive),
-		Agent:     "claude",
+		Agent:     "claude_code",
 		Workspace: filepath.Join(t.TempDir(), "sess_expired_ack"),
 		RestoreID: "phase3-sess_expired_ack",
 		CreatedAt: now.Add(-time.Hour),
@@ -2610,6 +2610,7 @@ WHERE id = ?`, enqueued.TurnID).Scan(&status, &errorClass, &errText); err != nil
 
 func checkpointedGeneration(t *testing.T, ctx context.Context, st *Store, sessionID, generationID string, now time.Time) {
 	t.Helper()
+	fence := checkpointDriverStateFenceForTest(t, ctx, st, sessionID, generationID)
 	if _, err := st.db.ExecContext(ctx, `
 UPDATE runtime_generations
 SET status = 'checkpointed',
@@ -2635,11 +2636,12 @@ SET status = 'checkpointed',
       FROM runtime_generation_resources
       WHERE runtime_generation_resources.generation_id = runtime_generations.generation_id
     ), 'manifest_digest'),
+    checkpoint_driver_states_digest = ?,
     lease_owner = NULL,
     lease_expires_at = NULL,
     last_seen_at = ?
 WHERE generation_id = ?
-  AND session_id = ?`, formatTime(now), formatTime(now), generationID, sessionID); err != nil {
+  AND session_id = ?`, formatTime(now), fence, formatTime(now), generationID, sessionID); err != nil {
 		t.Fatalf("set checkpointed generation: %v", err)
 	}
 	if _, err := st.db.ExecContext(ctx, `
@@ -2658,6 +2660,31 @@ WHERE generation_id = ?`, generationID); err != nil {
 	if err := st.UpdateSessionStatus(ctx, sessionID, string(sessionstate.Checkpointed), nil); err != nil {
 		t.Fatalf("set checkpointed session: %v", err)
 	}
+}
+
+func checkpointDriverStateFenceForTest(t *testing.T, ctx context.Context, st *Store, sessionID, generationID string) string {
+	t.Helper()
+	var driverID, stateDigest string
+	var stateVersion int
+	if err := st.db.QueryRowContext(ctx, `
+SELECT ds.driver_id, ds.state_digest, ds.state_version
+FROM session_driver_states ds
+JOIN runtime_generations g ON g.session_id = ds.session_id
+JOIN agent_runtime_profiles a ON a.agent_runtime_profile_id = g.agent_runtime_profile_id
+WHERE g.session_id = ?
+  AND g.generation_id = ?
+  AND ds.driver_id = a.driver_id`, sessionID, generationID).Scan(&driverID, &stateDigest, &stateVersion); err != nil {
+		t.Fatalf("query driver state fence input: %v", err)
+	}
+	fence, err := CheckpointDriverStatesDigest(generationID, []DriverStateToken{{
+		DriverID:     driverID,
+		StateDigest:  stateDigest,
+		StateVersion: stateVersion,
+	}})
+	if err != nil {
+		t.Fatalf("compute driver state fence: %v", err)
+	}
+	return fence
 }
 
 func hasReclaimableGeneration(generations []ReclaimableGeneration, sessionID, generationID string) bool {
@@ -2703,7 +2730,7 @@ func createAutoCheckpointGeneration(t *testing.T, ctx context.Context, st *Store
 		ID:                    sessionID,
 		UserID:                "lab",
 		Status:                string(sessionstate.Created),
-		Agent:                 "claude",
+		Agent:                 "claude_code",
 		Workspace:             filepath.Join(t.TempDir(), sessionID),
 		RestoreID:             "phase3-" + sessionID,
 		AutoCheckpointEnabled: true,
@@ -2904,7 +2931,7 @@ func testAllocatorConfig(t *testing.T) ResourceAllocatorConfig {
 		EgressDNSPolicy:            "hostnames_only",
 		HostProxyBindURL:           "http://0.0.0.0:8082",
 		ProxyPort:                  8082,
-		Agent:                      "claude",
+		Agent:                      "claude_code",
 		AgentModel:                 "sonnet",
 		AgentOutputFormat:          "stream-json",
 		DisableNonessentialTraffic: true,

@@ -143,7 +143,7 @@ WHERE c.sandbox_source_ip = ?
 	snapshot.SandboxSourceIP = p.SandboxSourceIP
 	contract, err := getSandboxContractForGenerationWithMirrors(ctx, tx, result.SessionID, result.GenerationID)
 	if err != nil {
-		return StartProxyRequestResult{}, err
+		return StartProxyRequestResult{}, fmt.Errorf("%w: %v", ErrProxyContextUnavailable, err)
 	}
 	if err := validateProxyAuthorizationContract(contract, snapshot); err != nil {
 		return StartProxyRequestResult{}, fmt.Errorf("%w: %v", ErrProxyContextUnavailable, err)

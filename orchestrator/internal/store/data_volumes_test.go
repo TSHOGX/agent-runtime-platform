@@ -58,7 +58,7 @@ func TestProvisionSessionDriverHomeCreatesDriverScopedRows(t *testing.T) {
 
 	claude, err := st.ProvisionSessionDriverHome(ctx, ProvisionSessionDriverHomeParams{
 		SessionID: "sess_driver_home",
-		Driver:    "claude",
+		Driver:    "claude_code",
 		Config:    cfg,
 		Now:       time.Now().UTC(),
 	})
@@ -74,7 +74,7 @@ func TestProvisionSessionDriverHomeCreatesDriverScopedRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("provision shell driver home: %v", err)
 	}
-	if claude.HostPath != filepath.Join(cfg.AgentHomesRoot, "sess_driver_home", "claude") ||
+	if claude.HostPath != filepath.Join(cfg.AgentHomesRoot, "sess_driver_home", "claude_code") ||
 		shell.HostPath != filepath.Join(cfg.AgentHomesRoot, "sess_driver_home", "sh") ||
 		claude.HostPath == shell.HostPath {
 		t.Fatalf("driver home paths not scoped by driver: claude=%+v shell=%+v", claude, shell)
@@ -322,7 +322,7 @@ func TestVerifySessionDriverHomeVolumeRejectsConfigMismatch(t *testing.T) {
 	cfg := testDataVolumeConfig(t)
 	if _, err := st.ProvisionSessionDriverHome(ctx, ProvisionSessionDriverHomeParams{
 		SessionID: "sess_driver_verify",
-		Driver:    "claude",
+		Driver:    "claude_code",
 		Config:    cfg,
 		Now:       time.Now().UTC(),
 	}); err != nil {
@@ -333,7 +333,7 @@ func TestVerifySessionDriverHomeVolumeRejectsConfigMismatch(t *testing.T) {
 	other.AgentHomesRoot = filepath.Join(t.TempDir(), "agent-homes")
 	_, err := st.VerifySessionDriverHomeVolume(ctx, VerifySessionDriverHomeVolumeParams{
 		SessionID: "sess_driver_verify",
-		Driver:    "claude",
+		Driver:    "claude_code",
 		Config:    other,
 	})
 	if err == nil || !strings.Contains(err.Error(), "expected provisioning config") {

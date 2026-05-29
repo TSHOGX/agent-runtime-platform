@@ -340,10 +340,12 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	if req.Agent == "" {
 		req.Agent = strings.TrimSpace(s.cfg.DefaultAgent)
 	}
-	if _, ok := agents.Lookup(req.Agent); !ok {
+	driverID, err := agents.CanonicalDriverID(req.Agent)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "unsupported agent")
 		return
 	}
+	req.Agent = string(driverID)
 	count, err := s.store.CountActiveSessions(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -576,7 +578,9 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			ContractID:             sandboxContractID(allocation.GenerationID),
 			SessionID:              session.ID,
 			GenerationID:           allocation.GenerationID,
+			Owner:                  allocation.Owner,
 			SandboxContractVersion: store.SandboxContractVersion,
+			DriverState:            allocation.DriverState,
 			Payload:                contractPayload,
 			Now:                    time.Now().UTC(),
 		}); err != nil {
@@ -1174,6 +1178,9 @@ func generationLifecycleBusy(status string) bool {
 }
 
 func (s *Server) resourceAllocatorConfig(agent string) store.ResourceAllocatorConfig {
+	if driverID, err := agents.CanonicalDriverID(agent); err == nil {
+		agent = string(driverID)
+	}
 	outputFormat := s.cfg.Claude.OutputFormat
 	if agent == string(agents.Shell) {
 		outputFormat = "shell_pty"
@@ -1194,7 +1201,7 @@ func (s *Server) resourceAllocatorConfig(agent string) store.ResourceAllocatorCo
 		SandboxUID:                  s.cfg.Phase7.SandboxIdentity.UID,
 		SandboxGID:                  s.cfg.Phase7.SandboxIdentity.GID,
 		SandboxSupplementalGIDs:     s.cfg.Phase7.SandboxIdentity.SupplementalGIDs,
-		ProviderCredentialsHostOnly: agent == string(agents.Claude),
+		ProviderCredentialsHostOnly: agent == string(agents.ClaudeCode),
 		SandboxModelProxyBaseURL:    s.cfg.ModelProxy.SandboxBaseURL,
 	}
 }
@@ -1234,12 +1241,25 @@ func (s *Server) runtimeStartRequest(session store.Session, generationID string,
 		Agent:             session.Agent,
 		WaitForTurn:       false,
 		ClaudeSessionUUID: session.ClaudeSessionUUID,
-		ResumeClaude:      session.Status != string(sessionstate.Created),
+		ResumeClaude:      driverStateInitialized(details),
 		Generation:        details,
 		PreparedArtifacts: artifacts,
 		WorkspaceHostPath: volumes.Workspace.HostPath,
 		AgentHomeHostPath: volumes.DriverHome.HostPath,
 	}
+}
+
+func driverStateInitialized(details store.RuntimeGenerationDetails) bool {
+	if strings.TrimSpace(details.Agent) != string(agents.ClaudeCode) || len(details.DriverStatePayload) == 0 {
+		return false
+	}
+	var payload struct {
+		Initialized bool `json:"initialized"`
+	}
+	if err := json.Unmarshal(details.DriverStatePayload, &payload); err != nil {
+		return false
+	}
+	return payload.Initialized
 }
 
 func (s *Server) ensureSessionRuntimeDataVolumes(ctx context.Context, session store.Session) (sessionRuntimeDataVolumes, error) {
@@ -1285,6 +1305,18 @@ func sandboxContractPayload(details store.RuntimeGenerationDetails, artifacts ru
 	if runscPlatform == "" {
 		runscPlatform = "systrap"
 	}
+	driverID := strings.TrimSpace(details.Agent)
+	if _, ok := agents.Lookup(driverID); !ok {
+		return nil, fmt.Errorf("unsupported driver %q", driverID)
+	}
+	initialDriverStateDigest := strings.TrimSpace(details.DriverStateDigest)
+	if initialDriverStateDigest == "" {
+		initialDriverStateDigest = phase9ContractDigest(map[string]any{
+			"schema_version": 1,
+			"driver_id":      driverID,
+			"state_kind":     "phase9a_missing_driver_state",
+		})
+	}
 	sandboxIP, err := runtimeResourceSandboxIP(details.SandboxIPCIDR)
 	if err != nil {
 		return nil, err
@@ -1302,15 +1334,115 @@ func sandboxContractPayload(details store.RuntimeGenerationDetails, artifacts ru
 	if strings.TrimSpace(details.NetworkHostsPath) != "" {
 		mountPlan["network_hosts"] = map[string]any{"source": details.NetworkHostsPath, "destination": "/etc/hosts", "mode": "ro"}
 	}
+	driverConfigDigest := phase9ContractDigest(map[string]any{
+		"driver_id":     driverID,
+		"model":         details.Model,
+		"output_format": details.OutputFormat,
+	})
+	commandDigest := phase9ContractDigest(map[string]any{
+		"driver_id":    driverID,
+		"protocol":     details.OutputFormat,
+		"resume_field": "driver_state",
+	})
+	driverCapabilitiesDigest := phase9ContractDigest(map[string]any{
+		"driver_id": driverID,
+		"capabilities": []string{
+			"exec_stream",
+			"filesystem_rw",
+			"kill",
+			"logs",
+			"network_policy",
+			"snapshot_disk",
+			"stdin",
+		},
+	})
+	providerCapabilitiesDigest := phase9ContractDigest(map[string]any{
+		"provider_id": "local_runsc",
+		"capabilities": []string{
+			"exec_stream",
+			"filesystem_rw",
+			"kill",
+			"logs",
+			"network_policy",
+			"snapshot_disk",
+			"stdin",
+		},
+		"vocabulary_version": "1",
+	})
+	runtimeTemplateDigest := phase9ContractDigest(map[string]any{
+		"provider_id":          "local_runsc",
+		"runsc_platform":       runscPlatform,
+		"runsc_overlay2":       details.RunscOverlay2,
+		"no_new_privileges":    true,
+		"ambient_capabilities": []string{},
+	})
+	secretGrants := []map[string]any{}
+	if details.ModelAccessAllowed {
+		secretGrants = append(secretGrants, map[string]any{
+			"grant_id":                  "model_provider:anthropic_proxy",
+			"domain":                    "model_provider",
+			"scope":                     "anthropic_messages",
+			"exposure_mode":             "proxy_only",
+			"ttl_seconds":               nil,
+			"allowed_drivers":           []string{driverID},
+			"allowed_runtime_providers": []string{"local_runsc"},
+		})
+	}
+	credentialPreimage := map[string]any{
+		"provider_credentials": "host-only",
+		"sandbox_secret_mount": "absent",
+		"proxy_token":          "absent",
+		"secret_grants":        secretGrants,
+	}
+	credentialDigest, err := store.CredentialPolicyDigest(credentialPreimage)
+	if err != nil {
+		return nil, err
+	}
 	payload := map[string]any{
 		"sandbox_contract_version": store.SandboxContractVersion,
-		"contract_schema_version":  1,
+		"contract_schema_version":  store.SandboxContractSchemaVersion,
+		"contract_gate_version":    store.SandboxContractGatePhase9A,
 		"contract_id":              sandboxContractID(details.GenerationID),
 		"session_id":               details.SessionID,
 		"generation_id":            details.GenerationID,
-		"driver":                   details.Agent,
-		"runtime_profile_id":       details.AgentRuntimeProfileID,
-		"network_profile_id":       details.NetworkProfileID,
+		"driver": map[string]any{
+			"driver_id":                            driverID,
+			"driver_version":                       "bundled",
+			"bridge_protocol":                      driverBridgeProtocol(driverID),
+			"output_schema":                        driverOutputSchema(driverID),
+			"command_argv_digest":                  commandDigest,
+			"driver_config_digest":                 driverConfigDigest,
+			"required_runtime_capabilities_digest": driverCapabilitiesDigest,
+			"supports_interrupt":                   driverID == string(agents.Shell),
+			"supports_compaction":                  driverID == string(agents.ClaudeCode),
+		},
+		"runtime_provider": map[string]any{
+			"provider_id":              "local_runsc",
+			"provider_profile_id":      "local_runsc_default",
+			"isolation_kind":           "gvisor",
+			"template_ref":             "default",
+			"template_digest":          runtimeTemplateDigest,
+			"capability_vocab_version": "1",
+			"capability_digest":        providerCapabilitiesDigest,
+			"provider_specific": map[string]any{
+				"runsc_container_id":   details.RunscContainerID,
+				"runsc_platform":       runscPlatform,
+				"runsc_version":        artifacts.RunscVersion,
+				"runsc_binary_path":    artifacts.RunscBinaryPath,
+				"runsc_binary_digest":  artifacts.RunscBinaryDigest,
+				"runsc_overlay2":       details.RunscOverlay2,
+				"no_new_privileges":    true,
+				"ambient_capabilities": []string{},
+				"required_annotations": map[string]any{
+					bridge.BridgeMountDestination: map[string]string{
+						"dev.gvisor.spec.mount./harness-control/bridge.type":  "bind",
+						"dev.gvisor.spec.mount./harness-control/bridge.share": "exclusive",
+					},
+				},
+			},
+		},
+		"runtime_profile_id": details.AgentRuntimeProfileID,
+		"network_profile_id": details.NetworkProfileID,
 		"identity": map[string]any{
 			"sandbox_uid":               details.SandboxUID,
 			"sandbox_gid":               details.SandboxGID,
@@ -1373,6 +1505,7 @@ func sandboxContractPayload(details store.RuntimeGenerationDetails, artifacts ru
 				"table":                      "session_driver_homes",
 				"session_id":                 volumes.DriverHome.SessionID,
 				"driver":                     volumes.DriverHome.Driver,
+				"driver_home_key":            volumes.DriverHome.Driver,
 				"host_path":                  volumes.DriverHome.HostPath,
 				"layout_version":             volumes.DriverHome.LayoutVersion,
 				"runtime_identity_digest":    volumes.DriverHome.RuntimeIdentityDigest,
@@ -1386,20 +1519,63 @@ func sandboxContractPayload(details store.RuntimeGenerationDetails, artifacts ru
 			"provider_credentials": "host-only",
 			"sandbox_secret_mount": "absent",
 			"proxy_token":          "absent",
+			"digest":               credentialDigest,
+			"secret_grants":        secretGrants,
 		},
 		"model_access": map[string]any{
 			"model_access_allowed":         details.ModelAccessAllowed,
 			"active_turn_required":         true,
+			"provider_protocol":            "anthropic_messages",
 			"sandbox_model_proxy_base_url": sandboxModelProxyBaseURL,
 		},
+		"snapshot_policy": map[string]any{
+			"provider_supports_snapshot_disk":   true,
+			"provider_supports_snapshot_memory": false,
+			"provider_supports_branch":          false,
+			"branch_count_limit":                0,
+			"must_quiesce_processes":            true,
+			"stream_disconnects_on_snapshot":    true,
+			"snapshot_semantic":                 "generation_checkpoint_restore",
+		},
+		"driver_runtime": map[string]any{
+			"driver_home_mount":             "/agent-home",
+			"generated_driver_config_mount": "/harness-control/driver/" + driverID,
+			"materialized_driver_config":    map[string]any{},
+			"initial_driver_state_digest":   initialDriverStateDigest,
+		},
 		"input_digests": map[string]any{
-			"bundle_digest":           artifacts.BundleDigest,
-			"runtime_config_digest":   artifacts.RuntimeConfigDigest,
-			"oci_spec_digest":         artifacts.SpecDigest,
-			"control_manifest_digest": artifacts.ProjectedManifestDigest,
+			"runtime_config_digest": nil,
+			"rootfs_image_digest":   nil,
+			"agent_manifest_digest": nil,
 		},
 	}
 	return payload, nil
+}
+
+func phase9ContractDigest(value any) string {
+	payload, err := store.CanonicalSandboxContractPayload(value)
+	if err != nil {
+		return "sha256:invalid"
+	}
+	return store.SandboxContractDigest(payload)
+}
+
+func driverBridgeProtocol(driverID string) string {
+	switch driverID {
+	case string(agents.Shell):
+		return "shell_pty"
+	default:
+		return "claude_stream_json_per_turn"
+	}
+}
+
+func driverOutputSchema(driverID string) string {
+	switch driverID {
+	case string(agents.Shell):
+		return "shell_pty_v1"
+	default:
+		return "claude_stream_json_v1"
+	}
 }
 
 func runtimeArtifactsFromDetails(details store.RuntimeGenerationDetails) runtime.GenerationArtifacts {
