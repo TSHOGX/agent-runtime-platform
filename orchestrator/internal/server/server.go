@@ -1503,6 +1503,8 @@ func (s *Server) sandboxContractPayload(session store.Session, details store.Run
 			"driver_id":                            driverID,
 			"driver_version":                       "bundled",
 			"bridge_protocol":                      driverSpec.BridgeProtocol,
+			"bridge_protocol_version":              driverSpec.BridgeProtocolVersion,
+			"turn_input_schema":                    driverSpec.TurnInputSchema,
 			"output_schema":                        driverSpec.OutputSchema,
 			"command_argv_digest":                  commandDigest,
 			"driver_config_digest":                 driverConfigDigest,
@@ -1694,7 +1696,8 @@ func (s *Server) phase9CInputDigests(session store.Session, details store.Runtim
 			"label":                   driverSpec.Label,
 			"kind":                    driverSpec.Kind,
 			"bridge_protocol":         driverSpec.BridgeProtocol,
-			"turn_input_schema":       "turn_input_v1",
+			"bridge_protocol_version": driverSpec.BridgeProtocolVersion,
+			"turn_input_schema":       driverSpec.TurnInputSchema,
 			"output_schema":           driverSpec.OutputSchema,
 			"required_capabilities":   append([]string(nil), driverSpec.RequiredRuntimeCapabilities...),
 			"model_access":            driverSpec.ModelAccess,
@@ -2074,6 +2077,9 @@ func (s *Server) processBridgeStartupBatch(ctx context.Context, inbox, outbox br
 				state.heartbeatSeq = file.Seq
 			}
 		case bridge.TypeHello:
+			if _, _, err := bridge.ValidateHelloPayload(ctx, bridgeStore(s.store), envelope, 2, "RunTurn"); err != nil {
+				return false, fmt.Errorf("bridge startup probe hello validation failed: %w", err)
+			}
 			ack, err := s.store.BridgeHelloAck(ctx, envelope.SessionID, envelope.GenerationID, owner, time.Now().UTC(), 0)
 			if err != nil {
 				return false, fmt.Errorf("bridge startup probe hello failed: %w", err)
@@ -2677,10 +2683,8 @@ func (s *Server) publishDurableEvent(ctx context.Context, eventID int64) {
 
 func (s *Server) handleBridgeOutput(ctx context.Context, envelope bridge.Envelope) {
 	var payload struct {
-		Stream  string `json:"stream"`
-		Payload struct {
-			Line string `json:"line"`
-		} `json:"payload"`
+		Stream  string          `json:"stream"`
+		Payload json.RawMessage `json:"payload"`
 	}
 	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
 		s.log.Warn("failed to decode bridge output payload", "session_id", envelope.SessionID, "generation_id", envelope.GenerationID, "error", err)
@@ -2690,8 +2694,7 @@ func (s *Server) handleBridgeOutput(ctx context.Context, envelope bridge.Envelop
 	if stream == "" {
 		stream = "stdout"
 	}
-	line := payload.Payload.Line
-	if line == "" {
+	if len(payload.Payload) == 0 {
 		return
 	}
 	agent := ""
@@ -2701,7 +2704,7 @@ func (s *Server) handleBridgeOutput(ctx context.Context, envelope bridge.Envelop
 		s.log.Warn("failed to load session for bridge output", "session_id", envelope.SessionID, "error", err)
 	}
 	parser := s.bridgeStreamParser(envelope, agent)
-	parser.handle(runtime.Output{Stream: stream, Line: line})
+	parser.handleBridgeOutput(normalizerBridgeOutput{Stream: stream, Payload: payload.Payload})
 }
 
 func (s *Server) handleBridgeCompletion(ctx context.Context, envelope bridge.Envelope) {

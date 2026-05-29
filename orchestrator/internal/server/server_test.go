@@ -3014,6 +3014,7 @@ func TestRunPhase7MaintenancePollsBridgeOutbox(t *testing.T) {
 		Type:         bridge.TypeHello,
 		SessionID:    session.ID,
 		GenerationID: allocation.GenerationID,
+		Payload:      serverBridgeHelloPayload(t, session.Agent),
 	}); err != nil {
 		t.Fatalf("write hello: %v", err)
 	}
@@ -4510,7 +4511,7 @@ func writeServerBridgeBootstrapForRequest(req runtime.StartRequest) error {
 		return err
 	}
 	ctx := context.Background()
-	helloPayload, err := json.Marshal(map[string]any{"agent": req.Agent, "protocol_version": 1})
+	helloPayload, err := json.Marshal(map[string]any{"driver_id": req.Agent, "protocol_version": 2, "turn_input_schema": "RunTurn"})
 	if err != nil {
 		return err
 	}
@@ -4577,6 +4578,19 @@ func serverPostStartProofForRequest(req runtime.StartRequest) *store.RuntimeReso
 	}
 }
 
+func serverBridgeHelloPayload(t *testing.T, driverID string) json.RawMessage {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"driver_id":         driverID,
+		"protocol_version":  2,
+		"turn_input_schema": "RunTurn",
+	})
+	if err != nil {
+		t.Fatalf("marshal bridge hello payload: %v", err)
+	}
+	return payload
+}
+
 func recordServerRuntimeArtifacts(t *testing.T, ctx context.Context, st *store.Store, generationID, manifestDigest, runscVersion string) {
 	t.Helper()
 	artifacts := testGenerationArtifacts()
@@ -4641,7 +4655,7 @@ func createServerRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 		Payload: map[string]any{
 			"sandbox_contract_version": store.SandboxContractVersion,
 			"contract_schema_version":  store.SandboxContractSchemaVersion,
-			"contract_gate_version":    store.SandboxContractGatePhase9A,
+			"contract_gate_version":    store.SandboxContractGatePhase9C,
 			"contract_id":              contractID,
 			"session_id":               sessionID,
 			"generation_id":            allocation.GenerationID,
@@ -4650,7 +4664,9 @@ func createServerRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 			"driver": map[string]any{
 				"driver_id":                            allocation.DriverState.DriverID,
 				"driver_version":                       "test",
-				"bridge_protocol":                      "claude_stream_json_per_turn",
+				"bridge_protocol":                      "harness_bridge_v2",
+				"bridge_protocol_version":              2,
+				"turn_input_schema":                    "RunTurn",
 				"output_schema":                        "claude_stream_json_v1",
 				"command_argv_digest":                  "sha256:command",
 				"driver_config_digest":                 "sha256:driver-config",
@@ -4685,12 +4701,13 @@ func createServerRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 				"initial_driver_state_digest":   allocation.DriverState.StateDigest,
 			},
 			"input_digests": map[string]any{
-				"runtime_config_digest": nil,
+				"runtime_config_digest": "sha256:runtime-config",
 				"rootfs_image_digest":   nil,
-				"agent_manifest_digest": nil,
+				"agent_manifest_digest": "sha256:agent-manifest",
 			},
 		},
-		Now: now,
+		ContractGateVersion: store.SandboxContractGatePhase9C,
+		Now:                 now,
 	}); err != nil {
 		t.Fatalf("store sandbox contract: %v", err)
 	}

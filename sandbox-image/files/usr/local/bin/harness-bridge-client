@@ -223,12 +223,23 @@ class Queue:
             pass
 
 
+def canonical_driver_id(value):
+    value = (value or "").strip()
+    if value == "claude":
+        return "claude_code"
+    return value or "claude_code"
+
+
+def args_driver_id(args):
+    return canonical_driver_id(getattr(args, "driver_id", getattr(args, "agent", "claude_code")))
+
+
 class BridgeClient:
-    def __init__(self, root, session_id, generation_id, agent, poll_interval=0.05):
+    def __init__(self, root, session_id, generation_id, driver_id, poll_interval=0.05):
         self.root = Path(root)
         self.session_id = session_id
         self.generation_id = generation_id
-        self.agent = agent
+        self.driver_id = canonical_driver_id(driver_id)
         self.poll_interval = poll_interval
         self.inbox = Queue(root, INBOX)
         self.outbox = Queue(root, OUTBOX)
@@ -271,7 +282,11 @@ class BridgeClient:
 
     def hello(self, timeout=None):
         request_id = str(uuid.uuid4())
-        self.send("hello", request_id=request_id, payload={"agent": self.agent, "protocol_version": 1})
+        self.send(
+            "hello",
+            request_id=request_id,
+            payload={"driver_id": self.driver_id, "protocol_version": 2, "turn_input_schema": "RunTurn"},
+        )
         response = self.wait_response(request_id, timeout=timeout)
         payload = response.get("payload") or {}
         self.last_output_sequence_by_turn = {
@@ -494,12 +509,37 @@ class ClaudeTurnRunner:
         pass
 
 
-def make_turn_runner(agent):
-    if agent == "sh":
-        return ShellTurnRunner()
-    if agent == "claude":
-        return ClaudeTurnRunner()
-    raise RuntimeError(f"unsupported agent {agent}")
+class NativeEventsProbeRunner:
+    def run_turn(self, content, emit):
+        emit(
+            "stdout",
+            {
+                "schema": "harness_native_events_v1",
+                "event": {
+                    "type": "agent.message",
+                    "payload": {"content": content},
+                },
+            },
+        )
+        return "completed", "", ""
+
+    def close(self):
+        pass
+
+
+RUNNER_FACTORIES = {
+    "claude_code": ClaudeTurnRunner,
+    "sh": ShellTurnRunner,
+    "native_events_probe": NativeEventsProbeRunner,
+}
+
+
+def make_turn_runner(driver_id):
+    driver_id = canonical_driver_id(driver_id)
+    factory = RUNNER_FACTORIES.get(driver_id)
+    if factory is not None:
+        return factory()
+    raise RuntimeError(f"unsupported driver {driver_id}")
 
 
 def sandbox_source_ip():
@@ -546,10 +586,11 @@ def run_network_probe(base_url, healthz_statuses, timeout):
 
 
 def run_probe(args):
-    client = BridgeClient(args.bridge_dir, args.session_id, args.generation_id, args.agent, args.poll_interval)
+    driver_id = args_driver_id(args)
+    client = BridgeClient(args.bridge_dir, args.session_id, args.generation_id, driver_id, args.poll_interval)
     client.heartbeat()
     client.hello(timeout=args.timeout)
-    if args.agent == "claude":
+    if driver_id == "claude_code":
         run_network_probe(
             args.base_url,
             parse_statuses(args.healthz_statuses, {200}),
@@ -561,7 +602,7 @@ def run_probe(args):
 
 
 def run_heartbeat_loop(args):
-    client = BridgeClient(args.bridge_dir, args.session_id, args.generation_id, args.agent, args.poll_interval)
+    client = BridgeClient(args.bridge_dir, args.session_id, args.generation_id, args_driver_id(args), args.poll_interval)
     interval = max(args.interval, 0.001)
     while True:
         client.heartbeat()
@@ -585,14 +626,18 @@ def start_background_heartbeat(client, interval):
 
 def execute_grant(client, runner, grant):
     turn_id = int(grant["turn_id"])
-    content = str(grant.get("content") or "")
+    run_turn = grant.get("input") or {}
+    if grant.get("turn_input_schema") != "RunTurn":
+        raise RuntimeError(f"unsupported turn_input_schema {grant.get('turn_input_schema')}")
+    content = str(run_turn.get("content") or "")
     output_sequence = int(client.last_output_sequence_by_turn.get(turn_id, 0)) + 1
     client.clear_checkpoint_ready()
     client.ack_turn_started(turn_id, sandbox_source_ip())
 
     def emit(stream, line):
         nonlocal output_sequence
-        client.emit_output(turn_id, output_sequence, {"line": line}, stream=stream or "stdout")
+        payload = line if isinstance(line, dict) else {"line": line}
+        client.emit_output(turn_id, output_sequence, payload, stream=stream or "stdout")
         output_sequence += 1
 
     try:
@@ -606,10 +651,11 @@ def execute_grant(client, runner, grant):
 
 
 def run_claim_loop(args, runner=None):
-    client = BridgeClient(args.bridge_dir, args.session_id, args.generation_id, args.agent, args.poll_interval)
+    driver_id = args_driver_id(args)
+    client = BridgeClient(args.bridge_dir, args.session_id, args.generation_id, driver_id, args.poll_interval)
     client.heartbeat()
     client.hello(timeout=args.timeout)
-    if args.agent == "claude":
+    if driver_id == "claude_code":
         run_network_probe(
             args.base_url,
             parse_statuses(args.healthz_statuses, {200}),
@@ -617,7 +663,7 @@ def run_claim_loop(args, runner=None):
         )
     client.probe_network(timeout=args.timeout)
     client.mark_checkpoint_ready()
-    runner = runner or make_turn_runner(args.agent)
+    runner = runner or make_turn_runner(driver_id)
     stop_heartbeat = start_background_heartbeat(client, args.heartbeat_interval)
     completed = 0
     empty_polls = 0
@@ -649,7 +695,7 @@ def main(argv=None):
     parser.add_argument("--bridge-dir", default=os.environ.get("HARNESS_BRIDGE_DIR", "/harness-control/bridge"))
     parser.add_argument("--session-id", default=os.environ.get("SESSION_ID"))
     parser.add_argument("--generation-id", default=os.environ.get("GENERATION_ID"))
-    parser.add_argument("--agent", default=os.environ.get("HARNESS_AGENT", "claude"))
+    parser.add_argument("--driver-id", default=os.environ.get("HARNESS_DRIVER_ID", os.environ.get("HARNESS_AGENT", "claude_code")))
     parser.add_argument("--poll-interval", type=float, default=float(os.environ.get("HARNESS_BRIDGE_POLL_INTERVAL", "0.05")))
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--base-url", default=os.environ.get("ANTHROPIC_BASE_URL", ""))

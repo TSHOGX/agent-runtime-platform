@@ -54,6 +54,7 @@ func TestProcessorRequiresHelloAndProbeBeforeClaimGrant(t *testing.T) {
 		Type:         TypeHello,
 		SessionID:    sessionID,
 		GenerationID: allocation.GenerationID,
+		Payload:      bridgeHelloPayloadForTest("claude_code"),
 	})
 	if err := processor.ProcessOnce(ctx, details.BridgeDirPath); err != nil {
 		t.Fatalf("process hello: %v", err)
@@ -87,8 +88,64 @@ func TestProcessorRequiresHelloAndProbeBeforeClaimGrant(t *testing.T) {
 	if err := json.Unmarshal(response.Payload, &grant); err != nil {
 		t.Fatalf("decode grant: %v", err)
 	}
-	if grant.Content != "hello bridge" || grant.TurnID == 0 || grant.Sequence != 1 {
+	if grant.Input.Content != "hello bridge" || grant.TurnID == 0 || grant.Sequence != 1 || grant.TurnInputSchema != "RunTurn" {
 		t.Fatalf("unexpected grant: %+v", grant)
+	}
+}
+
+func TestProcessorRejectsInvalidV2Hello(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload json.RawMessage
+		want    string
+	}{
+		{name: "missing payload", want: "hello requires protocol_version"},
+		{name: "protocol v1", payload: json.RawMessage(`{"protocol_version":1,"driver_id":"claude_code","turn_input_schema":"RunTurn"}`), want: "unsupported bridge protocol_version 1"},
+		{name: "driver mismatch", payload: json.RawMessage(`{"protocol_version":2,"driver_id":"sh","turn_input_schema":"RunTurn"}`), want: "does not match generation driver"},
+		{name: "schema mismatch", payload: json.RawMessage(`{"protocol_version":2,"driver_id":"claude_code","turn_input_schema":"legacy"}`), want: "unsupported turn_input_schema"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			st, owner := openBridgeStore(t, ctx)
+			sessionID := "sess_bridge_hello_" + strings.ReplaceAll(tc.name, " ", "_")
+			createBridgeSession(t, ctx, st, sessionID)
+			allocation, details := allocateBridgeGeneration(t, ctx, st, owner, sessionID)
+			if _, err := st.EnqueueTurn(ctx, sessionID, "must not lease", time.Now().UTC()); err != nil {
+				t.Fatalf("enqueue turn: %v", err)
+			}
+			processor := &Processor{
+				Store:    st,
+				Owner:    allocation.Owner,
+				LeaseTTL: time.Minute,
+			}
+			writeOutbox(t, ctx, details.BridgeDirPath, Envelope{
+				MessageID:    "msg_bad_hello",
+				RequestID:    "req_bad_hello",
+				Type:         TypeHello,
+				SessionID:    sessionID,
+				GenerationID: allocation.GenerationID,
+				Payload:      tc.payload,
+			})
+			if err := processor.ProcessOnce(ctx, details.BridgeDirPath); err != nil {
+				t.Fatalf("process invalid hello: %v", err)
+			}
+			response := assertSingleInboxResponse(t, details.BridgeDirPath, TypeError, "req_bad_hello")
+			var payload errorPayload
+			if err := json.Unmarshal(response.Payload, &payload); err != nil {
+				t.Fatalf("decode error response: %v", err)
+			}
+			if payload.ErrorClass != "bridge_protocol_error" || !strings.Contains(payload.Error, tc.want) {
+				t.Fatalf("unexpected hello error payload: %+v want %q", payload, tc.want)
+			}
+			var leasedTurns int
+			if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM turns WHERE session_id = ? AND status <> 'queued'`, sessionID).Scan(&leasedTurns); err != nil {
+				t.Fatalf("count leased turns: %v", err)
+			}
+			if leasedTurns != 0 {
+				t.Fatalf("invalid hello should not lease turns, got %d", leasedTurns)
+			}
+		})
 	}
 }
 
@@ -128,7 +185,7 @@ func TestProcessorMarkReadyAllowsClaimAfterExternalStartupProbe(t *testing.T) {
 	if err := json.Unmarshal(response.Payload, &grant); err != nil {
 		t.Fatalf("decode grant: %v", err)
 	}
-	if grant.Content != "after startup probe" || grant.TurnID == 0 {
+	if grant.Input.Content != "after startup probe" || grant.TurnID == 0 || grant.TurnInputSchema != "RunTurn" {
 		t.Fatalf("unexpected grant: %+v", grant)
 	}
 }
@@ -203,6 +260,7 @@ WHERE id = ?`, turnID).Scan(&turnStatus, &turnGeneration, &turnOwner); err != ni
 		Type:         TypeHello,
 		SessionID:    sessionID,
 		GenerationID: allocation.GenerationID,
+		Payload:      bridgeHelloPayloadForTest("claude_code"),
 	})
 	if err := processor.ProcessOnce(ctx, details.BridgeDirPath); err != nil {
 		t.Fatalf("process restore hello: %v", err)
@@ -239,7 +297,7 @@ WHERE id = ?`, turnID).Scan(&turnStatus, &turnGeneration, &turnOwner); err != ni
 	if err := json.Unmarshal(response.Payload, &grant); err != nil {
 		t.Fatalf("decode restore grant: %v", err)
 	}
-	if grant.TurnID != turnID || grant.Content != "after restore" || grant.Sequence != 1 {
+	if grant.TurnID != turnID || grant.Input.Content != "after restore" || grant.Sequence != 1 || grant.TurnInputSchema != "RunTurn" {
 		t.Fatalf("unexpected restore grant: %+v", grant)
 	}
 }
@@ -436,7 +494,7 @@ func TestProcessorResumeTurnRequiresReadyBridgeAndExistingLease(t *testing.T) {
 	if err := json.Unmarshal(response.Payload, &resumed); err != nil {
 		t.Fatalf("decode resume grant: %v", err)
 	}
-	if resumed.TurnID != turnID || resumed.Content != "resume me" || !resumed.Replayed {
+	if resumed.TurnID != turnID || resumed.Input.Content != "resume me" || !resumed.Replayed || resumed.TurnInputSchema != "RunTurn" {
 		t.Fatalf("unexpected resume grant: %+v", resumed)
 	}
 
@@ -512,6 +570,7 @@ WHERE id = ?`, store.GenerationLeaseOwner("previous-owner"), formatStoreTimeForB
 		Type:         TypeHello,
 		SessionID:    sessionID,
 		GenerationID: allocation.GenerationID,
+		Payload:      bridgeHelloPayloadForTest("claude_code"),
 	})
 	if err := processor.ProcessOnce(ctx, details.BridgeDirPath); err != nil {
 		t.Fatalf("process hello: %v", err)
@@ -553,7 +612,7 @@ WHERE id = ?`, store.GenerationLeaseOwner("previous-owner"), formatStoreTimeForB
 	if err := json.Unmarshal(response.Payload, &resumed); err != nil {
 		t.Fatalf("decode resume grant: %v", err)
 	}
-	if resumed.TurnID != turnID || resumed.Content != "resume after restart" || !resumed.Replayed {
+	if resumed.TurnID != turnID || resumed.Input.Content != "resume after restart" || !resumed.Replayed || resumed.TurnInputSchema != "RunTurn" {
 		t.Fatalf("unexpected resume grant: %+v", resumed)
 	}
 
@@ -699,6 +758,7 @@ func TestProcessorDedupesMidStreamOutputReplayUnderLoad(t *testing.T) {
 		Type:         TypeHello,
 		SessionID:    sessionID,
 		GenerationID: allocation.GenerationID,
+		Payload:      bridgeHelloPayloadForTest("claude_code"),
 	})
 	if err := processor.ProcessOnce(ctx, details.BridgeDirPath); err != nil {
 		t.Fatalf("process reconnect hello: %v", err)
@@ -712,7 +772,10 @@ func TestProcessorDedupesMidStreamOutputReplayUnderLoad(t *testing.T) {
 		t.Fatalf("hello ack last output sequence=%d want 100: %+v", got, ack.LastOutputSequenceByTurn)
 	}
 
-	for seq := 41; seq <= 120; seq++ {
+	for seq := 41; seq <= 100; seq++ {
+		writeOutbox(t, ctx, details.BridgeDirPath, emitOutputEnvelope(sessionID, allocation.GenerationID, turnID, seq, "first"))
+	}
+	for seq := 101; seq <= 120; seq++ {
 		writeOutbox(t, ctx, details.BridgeDirPath, emitOutputEnvelope(sessionID, allocation.GenerationID, turnID, seq, "replay"))
 	}
 	if err := processor.ProcessOnce(ctx, details.BridgeDirPath); err != nil {
@@ -732,6 +795,210 @@ WHERE session_id = ?
 	}
 	if outputCount != 120 || distinctSequences != 120 || minSequence != 1 || maxSequence != 120 {
 		t.Fatalf("unexpected output sequence set: count=%d distinct=%d min=%d max=%d", outputCount, distinctSequences, minSequence, maxSequence)
+	}
+}
+
+func TestProcessorRejectsUnknownNativeEventPayload(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := EnsureLayout(root); err != nil {
+		t.Fatalf("ensure layout: %v", err)
+	}
+	turnID := int64(9)
+	processor := &Processor{
+		Store:    storeFailure{},
+		Owner:    "owner",
+		LeaseTTL: time.Minute,
+	}
+	writeOutbox(t, ctx, root, Envelope{
+		MessageID:    "msg_native_unknown",
+		RequestID:    "req_native_unknown",
+		Type:         TypeEmitOutput,
+		SessionID:    "sess_native",
+		GenerationID: "gen_native",
+		TurnID:       &turnID,
+		Payload: json.RawMessage(`{
+			"output_sequence":1,
+			"stream":"stdout",
+			"payload":{"schema":"harness_native_events_v1","event":{"type":"agent.future","payload":{}}}
+		}`),
+	})
+	if err := processor.ProcessOnce(ctx, root); err != nil {
+		t.Fatalf("process unknown native event: %v", err)
+	}
+	response := assertSingleInboxResponse(t, root, TypeError, "req_native_unknown")
+	var payload errorPayload
+	if err := json.Unmarshal(response.Payload, &payload); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if payload.ErrorClass != "bridge_protocol_error" || !strings.Contains(payload.Error, `unsupported native event type "agent.future"`) {
+		t.Fatalf("unexpected native event error: %+v", payload)
+	}
+}
+
+func TestProcessorFailsGenerationOnOutputSequenceMismatch(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openBridgeStore(t, ctx)
+	sessionID := "sess_output_mismatch"
+	createBridgeSession(t, ctx, st, sessionID)
+	allocation, details := allocateBridgeGeneration(t, ctx, st, owner, sessionID)
+	turnID, err := st.EnqueueTurn(ctx, sessionID, "stream mismatch", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("enqueue turn: %v", err)
+	}
+	if _, ok, err := st.ClaimNextTurn(ctx, store.ClaimNextTurnParams{
+		SessionID:    sessionID,
+		GenerationID: allocation.GenerationID,
+		Owner:        allocation.Owner,
+		RequestID:    "direct_claim",
+		LeaseTTL:     time.Minute,
+		Now:          time.Now().UTC(),
+	}); err != nil || !ok {
+		t.Fatalf("claim setup: ok=%v err=%v", ok, err)
+	}
+	processor := &Processor{Store: st, Owner: allocation.Owner, LeaseTTL: time.Minute}
+	writeOutbox(t, ctx, details.BridgeDirPath, Envelope{
+		MessageID:    "msg_started",
+		RequestID:    "req_started",
+		Type:         TypeAckTurnStarted,
+		SessionID:    sessionID,
+		GenerationID: allocation.GenerationID,
+		TurnID:       &turnID,
+		Payload:      json.RawMessage(`{"sandbox_source_ip":"10.240.0.2"}`),
+	})
+	writeOutbox(t, ctx, details.BridgeDirPath, emitOutputEnvelope(sessionID, allocation.GenerationID, turnID, 1, "first"))
+	if err := processor.ProcessOnce(ctx, details.BridgeDirPath); err != nil {
+		t.Fatalf("process first output: %v", err)
+	}
+
+	writeOutbox(t, ctx, details.BridgeDirPath, emitOutputEnvelope(sessionID, allocation.GenerationID, turnID, 1, "changed"))
+	if err := processor.ProcessOnce(ctx, details.BridgeDirPath); err != nil {
+		t.Fatalf("process mismatched duplicate: %v", err)
+	}
+	response := assertSingleInboxResponse(t, details.BridgeDirPath, TypeError, "req_output_changed_001")
+	var errorResponse errorPayload
+	if err := json.Unmarshal(response.Payload, &errorResponse); err != nil {
+		t.Fatalf("decode duplicate error: %v", err)
+	}
+	if errorResponse.ErrorClass != "bridge_protocol_error" || !strings.Contains(errorResponse.Error, "duplicate output_sequence mismatch") {
+		t.Fatalf("unexpected duplicate error response: %+v", errorResponse)
+	}
+
+	var generationStatus, generationErrorClass, turnStatus, turnErrorClass string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT g.status, COALESCE(g.error_class, ''), t.status, COALESCE(t.error_class, '')
+FROM runtime_generations g
+JOIN turns t ON t.generation_id = g.generation_id
+WHERE g.generation_id = ?
+  AND t.id = ?`, allocation.GenerationID, turnID).Scan(&generationStatus, &generationErrorClass, &turnStatus, &turnErrorClass); err != nil {
+		t.Fatalf("query failed generation: %v", err)
+	}
+	if generationStatus != "failed" || generationErrorClass != "bridge_output_sequence_mismatch" || turnStatus != "failed" || turnErrorClass != "bridge_output_sequence_mismatch" {
+		t.Fatalf("unexpected failure state: generation=%s/%s turn=%s/%s", generationStatus, generationErrorClass, turnStatus, turnErrorClass)
+	}
+	var outputCount int
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM events
+WHERE generation_id = ?
+  AND turn_id = ?
+  AND type = ?`, allocation.GenerationID, turnID, TypeEmitOutput).Scan(&outputCount); err != nil {
+		t.Fatalf("query output count: %v", err)
+	}
+	if outputCount != 1 {
+		t.Fatalf("mismatched duplicate should not append another output event, got %d", outputCount)
+	}
+}
+
+func TestProcessorFailsGenerationWhenCompletionCommitFailsAfterOutput(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openBridgeStore(t, ctx)
+	sessionID := "sess_completion_failure"
+	createBridgeSession(t, ctx, st, sessionID)
+	allocation, details := allocateBridgeGeneration(t, ctx, st, owner, sessionID)
+	turnID, err := st.EnqueueTurn(ctx, sessionID, "completion fails", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("enqueue turn: %v", err)
+	}
+	if _, ok, err := st.ClaimNextTurn(ctx, store.ClaimNextTurnParams{
+		SessionID:    sessionID,
+		GenerationID: allocation.GenerationID,
+		Owner:        allocation.Owner,
+		RequestID:    "direct_claim",
+		LeaseTTL:     time.Minute,
+		Now:          time.Now().UTC(),
+	}); err != nil || !ok {
+		t.Fatalf("claim setup: ok=%v err=%v", ok, err)
+	}
+	processor := &Processor{Store: st, Owner: allocation.Owner, LeaseTTL: time.Minute}
+	writeOutbox(t, ctx, details.BridgeDirPath, Envelope{
+		MessageID:    "msg_started",
+		RequestID:    "req_started",
+		Type:         TypeAckTurnStarted,
+		SessionID:    sessionID,
+		GenerationID: allocation.GenerationID,
+		TurnID:       &turnID,
+		Payload:      json.RawMessage(`{"sandbox_source_ip":"10.240.0.2"}`),
+	})
+	writeOutbox(t, ctx, details.BridgeDirPath, emitOutputEnvelope(sessionID, allocation.GenerationID, turnID, 1, "prefix"))
+	if err := processor.ProcessOnce(ctx, details.BridgeDirPath); err != nil {
+		t.Fatalf("process output prefix: %v", err)
+	}
+
+	writeOutbox(t, ctx, details.BridgeDirPath, Envelope{
+		MessageID:    "msg_bad_completion",
+		RequestID:    "req_bad_completion",
+		Type:         TypeAckTurnCompleted,
+		SessionID:    sessionID,
+		GenerationID: allocation.GenerationID,
+		TurnID:       &turnID,
+		Payload: json.RawMessage(`{
+			"status":"completed",
+			"driver_state_update":{
+				"driver_id":"claude_code",
+				"previous_state_digest":"sha256:stale",
+				"state_payload":{
+					"schema_version":1,
+					"driver_id":"claude_code",
+					"state_kind":"claude_session",
+					"claude_session_uuid":"phase9d-test-session",
+					"initialized":true,
+					"last_completed_turn_id":"1"
+				},
+				"state_digest":"sha256:not-the-canonical-digest",
+				"state_version":2
+			}
+		}`),
+	})
+	if err := processor.ProcessOnce(ctx, details.BridgeDirPath); err != nil {
+		t.Fatalf("process bad completion: %v", err)
+	}
+	assertInboxEmpty(t, details.BridgeDirPath)
+
+	var generationStatus, generationErrorClass, turnStatus, turnErrorClass string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT g.status, COALESCE(g.error_class, ''), t.status, COALESCE(t.error_class, '')
+FROM runtime_generations g
+JOIN turns t ON t.generation_id = g.generation_id
+WHERE g.generation_id = ?
+  AND t.id = ?`, allocation.GenerationID, turnID).Scan(&generationStatus, &generationErrorClass, &turnStatus, &turnErrorClass); err != nil {
+		t.Fatalf("query failed completion state: %v", err)
+	}
+	if generationStatus != "failed" || generationErrorClass != "driver_state_validation_failed" || turnStatus != "failed" || turnErrorClass != "driver_state_validation_failed" {
+		t.Fatalf("unexpected completion failure state: generation=%s/%s turn=%s/%s", generationStatus, generationErrorClass, turnStatus, turnErrorClass)
+	}
+	var outputCount, completionCount int
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT
+  SUM(CASE WHEN type = ? THEN 1 ELSE 0 END),
+  SUM(CASE WHEN type = ? THEN 1 ELSE 0 END)
+FROM events
+WHERE generation_id = ?
+  AND turn_id = ?`, TypeEmitOutput, TypeAckTurnCompleted, allocation.GenerationID, turnID).Scan(&outputCount, &completionCount); err != nil {
+		t.Fatalf("query event counts: %v", err)
+	}
+	if outputCount != 1 || completionCount != 0 {
+		t.Fatalf("event counts after completion failure: output=%d completion=%d", outputCount, completionCount)
 	}
 }
 
@@ -829,6 +1096,10 @@ func emitOutputEnvelope(sessionID, generationID string, turnID int64, sequence i
 		TurnID:       &turnID,
 		Payload:      json.RawMessage(fmt.Sprintf(`{"output_sequence":%d,"stream":"stdout","payload":{"line":"%s-%03d"}}`, sequence, suffix, sequence)),
 	}
+}
+
+func bridgeHelloPayloadForTest(driverID string) json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(`{"protocol_version":2,"driver_id":%q,"turn_input_schema":"RunTurn"}`, driverID))
 }
 
 func assertInboxEmpty(t *testing.T, root string) {
@@ -974,7 +1245,7 @@ func createBridgeRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 		Payload: map[string]any{
 			"contract_id":              contractID,
 			"contract_schema_version":  store.SandboxContractSchemaVersion,
-			"contract_gate_version":    store.SandboxContractGatePhase9A,
+			"contract_gate_version":    store.SandboxContractGatePhase9C,
 			"generation_id":            allocation.GenerationID,
 			"session_id":               sessionID,
 			"sandbox_contract_version": store.SandboxContractVersion,
@@ -983,7 +1254,9 @@ func createBridgeRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 			"driver": map[string]any{
 				"driver_id":                            allocation.DriverState.DriverID,
 				"driver_version":                       "test",
-				"bridge_protocol":                      "claude_stream_json_per_turn",
+				"bridge_protocol":                      "harness_bridge_v2",
+				"bridge_protocol_version":              2,
+				"turn_input_schema":                    "RunTurn",
 				"output_schema":                        "claude_stream_json_v1",
 				"command_argv_digest":                  "sha256:command",
 				"driver_config_digest":                 "sha256:driver-config",
@@ -1018,12 +1291,13 @@ func createBridgeRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 				"initial_driver_state_digest":   allocation.DriverState.StateDigest,
 			},
 			"input_digests": map[string]any{
-				"runtime_config_digest": nil,
+				"runtime_config_digest": "sha256:runtime-config",
 				"rootfs_image_digest":   nil,
-				"agent_manifest_digest": nil,
+				"agent_manifest_digest": "sha256:agent-manifest",
 			},
 		},
-		Now: time.Now().UTC(),
+		ContractGateVersion: store.SandboxContractGatePhase9C,
+		Now:                 time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("store sandbox contract: %v", err)
 	}
@@ -1219,6 +1493,10 @@ func (s storeFailure) BridgeHelloAck(context.Context, string, string, string, ti
 	return store.BridgeHelloAck{}, errors.New("unexpected BridgeHelloAck")
 }
 
+func (s storeFailure) BridgeProtocolEvidence(context.Context, string, string) (store.BridgeProtocolEvidence, error) {
+	return store.BridgeProtocolEvidence{}, errors.New("unexpected BridgeProtocolEvidence")
+}
+
 func (s storeFailure) RenewGenerationHeartbeat(context.Context, store.RenewHeartbeatParams) error {
 	return errors.New("unexpected RenewGenerationHeartbeat")
 }
@@ -1237,6 +1515,10 @@ func (s storeFailure) AckTurnStarted(context.Context, store.AckStartedParams) (i
 
 func (s storeFailure) CompleteTurn(context.Context, store.CompleteTurnParams) (int64, error) {
 	return 0, errors.New("unexpected CompleteTurn")
+}
+
+func (s storeFailure) FailGeneration(context.Context, store.FailGenerationParams) error {
+	return errors.New("unexpected FailGeneration")
 }
 
 func (s storeFailure) AppendEvent(context.Context, store.AppendEventParams) (int64, error) {

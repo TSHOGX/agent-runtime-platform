@@ -7,8 +7,15 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"strings"
 	"time"
 )
+
+var errDuplicateOutputSequenceMismatch = errors.New("duplicate output_sequence mismatch")
+
+func IsDuplicateOutputSequenceMismatch(err error) bool {
+	return errors.Is(err, errDuplicateOutputSequenceMismatch)
+}
 
 type ClaimNextTurnParams struct {
 	SessionID    string
@@ -17,6 +24,16 @@ type ClaimNextTurnParams struct {
 	RequestID    string
 	LeaseTTL     time.Duration
 	Now          time.Time
+}
+
+type BridgeProtocolEvidence struct {
+	DriverID              string
+	ProtocolVersion       int
+	TurnInputSchema       string
+	AgentManifestDigest   string
+	RuntimeConfigDigest   string
+	ContractGateVersion   string
+	SandboxContractDigest string
 }
 
 type ResumeTurnParams struct {
@@ -241,6 +258,57 @@ ORDER BY t.id`, sessionID, generationID)
 	return ack, tx.Commit()
 }
 
+func (s *Store) BridgeProtocolEvidence(ctx context.Context, sessionID, generationID string) (BridgeProtocolEvidence, error) {
+	record, err := getSandboxContractForGenerationWithMirrors(ctx, s.db, sessionID, generationID)
+	if err != nil {
+		return BridgeProtocolEvidence{}, err
+	}
+	if record.ContractGateVersion != SandboxContractGatePhase9C {
+		return BridgeProtocolEvidence{}, fmt.Errorf("bridge protocol v2 requires phase9c manifest evidence, got %s", record.ContractGateVersion)
+	}
+	object, err := decodeSandboxContractObject(record.CanonicalPayload)
+	if err != nil {
+		return BridgeProtocolEvidence{}, err
+	}
+	driver, ok := object["driver"].(map[string]any)
+	if !ok {
+		return BridgeProtocolEvidence{}, fmt.Errorf("sandbox contract missing driver object")
+	}
+	driverID := strings.TrimSpace(stringValue(driver["driver_id"]))
+	if driverID == "" {
+		return BridgeProtocolEvidence{}, fmt.Errorf("sandbox contract missing driver_id")
+	}
+	protocolVersion := 0
+	switch value := driver["bridge_protocol_version"].(type) {
+	case json.Number:
+		parsed, err := value.Int64()
+		if err == nil {
+			protocolVersion = int(parsed)
+		}
+	case float64:
+		protocolVersion = int(value)
+	}
+	turnInputSchema := strings.TrimSpace(stringValue(driver["turn_input_schema"]))
+	inputDigests, ok := object["input_digests"].(map[string]any)
+	if !ok {
+		return BridgeProtocolEvidence{}, fmt.Errorf("sandbox contract missing input_digests")
+	}
+	agentManifestDigest := strings.TrimSpace(stringValue(inputDigests["agent_manifest_digest"]))
+	runtimeConfigDigest := strings.TrimSpace(stringValue(inputDigests["runtime_config_digest"]))
+	if !strings.HasPrefix(agentManifestDigest, "sha256:") || !strings.HasPrefix(runtimeConfigDigest, "sha256:") {
+		return BridgeProtocolEvidence{}, fmt.Errorf("bridge protocol v2 requires manifest-backed input digests")
+	}
+	return BridgeProtocolEvidence{
+		DriverID:              driverID,
+		ProtocolVersion:       protocolVersion,
+		TurnInputSchema:       turnInputSchema,
+		AgentManifestDigest:   agentManifestDigest,
+		RuntimeConfigDigest:   runtimeConfigDigest,
+		ContractGateVersion:   record.ContractGateVersion,
+		SandboxContractDigest: record.SandboxContractDigest,
+	}, nil
+}
+
 func (s *Store) AppendEvent(ctx context.Context, p AppendEventParams) (int64, error) {
 	if p.Now.IsZero() {
 		p.Now = time.Now().UTC()
@@ -286,9 +354,41 @@ INSERT OR IGNORE INTO events (
 		return 0, err
 	}
 	if affected == 0 {
+		if err := assertDuplicateEventMatches(ctx, tx, p, string(payload)); err != nil {
+			return 0, err
+		}
 		return 0, nil
 	}
 	return res.LastInsertId()
+}
+
+func assertDuplicateEventMatches(ctx context.Context, tx *sql.Tx, p AppendEventParams, payload string) error {
+	if p.OutputSequence == nil || p.TurnID == nil {
+		return nil
+	}
+	var existingType, existingPayload string
+	var existingStream sql.NullString
+	err := tx.QueryRowContext(ctx, `
+SELECT type, stream, payload
+FROM events
+WHERE turn_id = ?
+  AND generation_id = ?
+  AND output_sequence = ?`,
+		*p.TurnID, p.GenerationID, *p.OutputSequence).Scan(&existingType, &existingStream, &existingPayload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	stream := ""
+	if existingStream.Valid {
+		stream = existingStream.String
+	}
+	if existingType == p.Type && stream == p.Stream && existingPayload == payload {
+		return nil
+	}
+	return fmt.Errorf("%w for turn %d generation %s sequence %d", errDuplicateOutputSequenceMismatch, *p.TurnID, p.GenerationID, *p.OutputSequence)
 }
 
 func assertOutputEventTurnTx(ctx context.Context, tx *sql.Tx, p AppendEventParams) error {

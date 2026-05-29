@@ -7,19 +7,20 @@ import (
 	"strings"
 	"sync"
 
+	"harness-platform/orchestrator/internal/agents"
 	"harness-platform/orchestrator/internal/events"
 	"harness-platform/orchestrator/internal/runtime"
 )
 
-// streamParser converts a runtime stdout/stderr stream into chat-friendly
-// hub events. Lines that successfully decode as Claude Code stream-json get
-// translated to agent.delta / agent.message; everything else is forwarded as
-// agent.output so the UI stays compatible with raw-text agents.
+// streamParser owns per-turn normalizer state. Driver-specific parsing is
+// dispatched through outputNormalizers so adding a driver does not add another
+// branch to the bridge output path.
 type streamParser struct {
-	srv       *Server
-	sessionID string
-	agent     string
-	turnID    int64
+	srv        *Server
+	sessionID  string
+	driverID   string
+	turnID     int64
+	normalizer outputNormalizer
 	// pending text chunks per assistant message id, flushed when we see the
 	// matching "assistant" full message (or when the runtime exits).
 	pending map[string]*strings.Builder
@@ -28,6 +29,33 @@ type streamParser struct {
 	err     error
 	last    string
 }
+
+type outputNormalizer interface {
+	Handle(*streamParser, normalizerBridgeOutput)
+}
+
+type outputNormalizerFactory func() outputNormalizer
+
+type normalizerBridgeOutput struct {
+	Stream  string
+	Payload json.RawMessage
+}
+
+type lineBridgePayload struct {
+	Line string `json:"line"`
+}
+
+type nativeBridgeEventPayload struct {
+	Schema string `json:"schema"`
+	Event  struct {
+		Type    string          `json:"type"`
+		Payload json.RawMessage `json:"payload,omitempty"`
+	} `json:"event"`
+}
+
+type claudeOutputNormalizer struct{}
+type shellOutputNormalizer struct{}
+type nativeEventsOutputNormalizer struct{}
 
 type claudeStreamDelta struct {
 	Type        string `json:"type"`
@@ -47,11 +75,12 @@ type claudeStreamEvent struct {
 
 func newStreamParser(srv *Server, sessionID, agent string) *streamParser {
 	return &streamParser{
-		srv:       srv,
-		sessionID: sessionID,
-		agent:     agent,
-		pending:   map[string]*strings.Builder{},
-		done:      make(chan struct{}),
+		srv:        srv,
+		sessionID:  sessionID,
+		driverID:   strings.TrimSpace(agent),
+		normalizer: outputNormalizerForDriver(agent),
+		pending:    map[string]*strings.Builder{},
+		done:       make(chan struct{}),
 	}
 }
 
@@ -68,24 +97,68 @@ func (p *streamParser) complete() {
 }
 
 func (p *streamParser) handle(output runtime.Output) {
-	rawLine := output.Line
-	line := strings.TrimSpace(rawLine)
-	if line == "" {
+	payload, _ := json.Marshal(lineBridgePayload{Line: output.Line})
+	p.handleBridgeOutput(normalizerBridgeOutput{Stream: output.Stream, Payload: payload})
+}
+
+func (p *streamParser) handleBridgeOutput(output normalizerBridgeOutput) {
+	if output.Stream == "" {
+		output.Stream = "stdout"
+	}
+	line, hasLine := output.line()
+	if hasLine && strings.TrimSpace(line) == "" {
 		return
 	}
-
-	// runtime stream → system.status event (system status messages)
 	if output.Stream == "runtime" {
-		p.publish("system.status", output)
+		if hasLine {
+			p.publish("system.status", runtime.Output{Stream: output.Stream, Line: line})
+		}
 		return
 	}
-
-	// stderr always goes to agent.output (debug/logs)
 	if output.Stream == "stderr" {
-		p.publish("agent.output", output)
+		if hasLine {
+			p.publish("agent.output", runtime.Output{Stream: output.Stream, Line: line})
+		}
 		return
 	}
-	// stdout: try to parse as stream-json first
+	p.normalizer.Handle(p, output)
+}
+
+func (output normalizerBridgeOutput) line() (string, bool) {
+	if len(output.Payload) == 0 {
+		return "", false
+	}
+	var payload lineBridgePayload
+	if err := json.Unmarshal(output.Payload, &payload); err != nil || payload.Line == "" {
+		return "", false
+	}
+	return payload.Line, true
+}
+
+func outputNormalizerForDriver(driverID string) outputNormalizer {
+	driverID = strings.TrimSpace(driverID)
+	if driverID == agents.LegacyClaudeToken {
+		driverID = string(agents.ClaudeCode)
+	}
+	factory := outputNormalizers[driverID]
+	if factory == nil {
+		factory = outputNormalizers[string(agents.ClaudeCode)]
+	}
+	return factory()
+}
+
+var outputNormalizers = map[string]outputNormalizerFactory{
+	string(agents.ClaudeCode): func() outputNormalizer { return claudeOutputNormalizer{} },
+	string(agents.Shell):      func() outputNormalizer { return shellOutputNormalizer{} },
+	"native_events_probe":     func() outputNormalizer { return nativeEventsOutputNormalizer{} },
+}
+
+func (claudeOutputNormalizer) Handle(p *streamParser, output normalizerBridgeOutput) {
+	rawLine, ok := output.line()
+	if !ok {
+		return
+	}
+	line := strings.TrimSpace(rawLine)
 	if strings.HasPrefix(line, "{") {
 		var event struct {
 			Type     string          `json:"type"`
@@ -109,38 +182,97 @@ func (p *streamParser) handle(output runtime.Output) {
 			case "result":
 				p.handleResult(event.Subtype, event.Result)
 				return
-			case "harness.shell_output":
-				if p.agent == "sh" {
-					text := event.Text
-					if text == "" {
-						text = event.Line
-					}
-					p.handleShellOutput(event.Stream, text)
-					return
-				}
-			case "harness.turn_done":
-				if p.agent == "sh" {
-					p.handleShellTurnDone(event.ExitCode)
-					return
-				}
 			case "error":
 				p.err = fmt.Errorf("claude stream error")
-				p.publish("agent.output", output)
+				p.publish("agent.output", runtime.Output{Stream: output.Stream, Line: rawLine})
 				p.complete()
 				return
 			default:
 				// system/init/user/error/etc.
-				p.publish("agent.output", output)
+				p.publish("agent.output", runtime.Output{Stream: output.Stream, Line: rawLine})
 				return
 			}
 		}
 	}
 	// stdout non-JSON: treat as assistant message for raw-text agents.
-	if p.agent == "sh" {
-		p.persistAssistant(rawLine)
+	p.persistAssistant(line)
+}
+
+func (shellOutputNormalizer) Handle(p *streamParser, output normalizerBridgeOutput) {
+	rawLine, ok := output.line()
+	if !ok {
 		return
 	}
-	p.persistAssistant(line)
+	line := strings.TrimSpace(rawLine)
+	if strings.HasPrefix(line, "{") {
+		var event struct {
+			Type     string `json:"type"`
+			Stream   string `json:"stream,omitempty"`
+			Text     string `json:"text,omitempty"`
+			Line     string `json:"line,omitempty"`
+			ExitCode int    `json:"exit_code,omitempty"`
+		}
+		if err := json.Unmarshal([]byte(line), &event); err == nil {
+			switch event.Type {
+			case "harness.shell_output":
+				text := event.Text
+				if text == "" {
+					text = event.Line
+				}
+				p.handleShellOutput(event.Stream, text)
+				return
+			case "harness.turn_done":
+				p.handleShellTurnDone(event.ExitCode)
+				return
+			default:
+				p.publish("agent.output", runtime.Output{Stream: output.Stream, Line: rawLine})
+				return
+			}
+		}
+	}
+	p.persistAssistant(rawLine)
+}
+
+func (nativeEventsOutputNormalizer) Handle(p *streamParser, output normalizerBridgeOutput) {
+	var native nativeBridgeEventPayload
+	if err := json.Unmarshal(output.Payload, &native); err != nil {
+		p.err = fmt.Errorf("native event decode failed: %w", err)
+		p.complete()
+		return
+	}
+	if native.Schema != "harness_native_events_v1" {
+		p.err = fmt.Errorf("unsupported native event schema %q", native.Schema)
+		p.complete()
+		return
+	}
+	switch native.Event.Type {
+	case "agent.message":
+		var payload struct {
+			Content string `json:"content"`
+		}
+		if err := json.Unmarshal(native.Event.Payload, &payload); err != nil {
+			p.err = fmt.Errorf("native agent.message decode failed: %w", err)
+			p.complete()
+			return
+		}
+		p.persistAssistant(payload.Content)
+	case "agent.delta", "agent.output", "system.status":
+		p.publish(native.Event.Type, nativeEventPublicPayload(native.Event.Payload))
+	default:
+		p.err = fmt.Errorf("unsupported native event type %q", native.Event.Type)
+		p.complete()
+	}
+}
+
+func nativeEventPublicPayload(raw json.RawMessage) any {
+	if len(raw) == 0 {
+		return map[string]any{}
+	}
+	var payload any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return map[string]string{"raw": string(raw)}
+	}
+	return payload
 }
 
 func (p *streamParser) handleStreamEvent(raw json.RawMessage) {
@@ -301,6 +433,6 @@ func (p *streamParser) flush() {
 	}
 }
 
-func (p *streamParser) publish(eventType string, output runtime.Output) {
-	p.srv.hub.Publish(events.Event{Type: eventType, SessionID: p.sessionID, Payload: output})
+func (p *streamParser) publish(eventType string, payload any) {
+	p.srv.hub.Publish(events.Event{Type: eventType, SessionID: p.sessionID, Payload: payload})
 }

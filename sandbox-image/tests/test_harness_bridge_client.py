@@ -64,6 +64,36 @@ class BridgeClientTest(unittest.TestCase):
             self.assertEqual(client.last_output_sequence_by_turn, {42: 7})
             self.assertEqual(client.leased_turn_id, 42)
 
+    def test_hello_sends_bridge_protocol_v2_identity(self):
+        with tempfile.TemporaryDirectory() as root:
+            client = bridge.BridgeClient(root, "sess", "gen", "claude", poll_interval=0.001)
+            inbox = bridge.Queue(root, bridge.INBOX)
+            original_write = bridge.Queue.write
+            sent = {}
+
+            def write_and_respond(queue, envelope):
+                if queue.name == bridge.OUTBOX and envelope.get("type") == "hello":
+                    sent.update(envelope)
+                    inbox.write(
+                        {
+                            "message_id": "host_hello",
+                            "request_id": envelope["request_id"],
+                            "type": "hello_ack",
+                            "session_id": "sess",
+                            "generation_id": "gen",
+                            "payload": {"last_output_sequence_by_turn": {}},
+                        }
+                    )
+                return original_write(queue, envelope)
+
+            with mock.patch.object(bridge.Queue, "write", write_and_respond):
+                client.hello(timeout=0.1)
+
+            self.assertEqual(
+                sent["payload"],
+                {"driver_id": "claude_code", "protocol_version": 2, "turn_input_schema": "RunTurn"},
+            )
+
     def test_claim_and_lifecycle_messages(self):
         with tempfile.TemporaryDirectory() as root:
             client = bridge.BridgeClient(root, "sess", "gen", "claude", poll_interval=0.001)
@@ -77,7 +107,7 @@ class BridgeClientTest(unittest.TestCase):
                     "type": "grant",
                     "session_id": "sess",
                     "generation_id": "gen",
-                    "payload": {"turn_id": 9, "sequence": 1, "content": "run"},
+                    "payload": {"turn_id": 9, "sequence": 1, "turn_input_schema": "RunTurn", "input": {"content": "run"}},
                 }
             )
             grant = client.wait_response("req_claim", timeout=0.1)["payload"]
@@ -113,7 +143,7 @@ class BridgeClientTest(unittest.TestCase):
             with mock.patch.object(client, "wait_response") as wait_response:
                 wait_response.return_value = {
                     "type": "grant",
-                    "payload": {"turn_id": 9, "sequence": 1, "content": "resume", "replayed": True},
+                    "payload": {"turn_id": 9, "sequence": 1, "turn_input_schema": "RunTurn", "input": {"content": "resume"}, "replayed": True},
                 }
                 grant = client.resume_turn(9, timeout=0.1)
             self.assertEqual(grant["turn_id"], 9)
@@ -212,7 +242,7 @@ class BridgeClientTest(unittest.TestCase):
                         payload = {"last_output_sequence_by_turn": {}}
                     elif message_type == "claim_next_turn":
                         response_type = "grant"
-                        payload = {"turn_id": 9, "sequence": 1, "content": "echo ok"}
+                        payload = {"turn_id": 9, "sequence": 1, "turn_input_schema": "RunTurn", "input": {"content": "echo ok"}}
                     inbox.write(
                         {
                             "message_id": f"host_{message_type}",
@@ -253,6 +283,44 @@ class BridgeClientTest(unittest.TestCase):
             ready = Path(root) / bridge.HEARTBEAT / bridge.CHECKPOINT_READY
             self.assertTrue(ready.exists())
 
+    def test_execute_grant_rejects_non_run_turn_schema(self):
+        with tempfile.TemporaryDirectory() as root:
+            client = bridge.BridgeClient(root, "sess", "gen", "sh", poll_interval=0.001)
+
+            class FakeRunner:
+                def run_turn(self, content, emit):
+                    raise AssertionError("runner should not execute invalid schema")
+
+            with self.assertRaisesRegex(RuntimeError, "unsupported turn_input_schema legacy"):
+                bridge.execute_grant(
+                    client,
+                    FakeRunner(),
+                    {"turn_id": 9, "sequence": 1, "turn_input_schema": "legacy", "input": {"content": "run"}},
+                )
+
+    def test_native_events_probe_runner_emits_schema_tagged_payload(self):
+        with tempfile.TemporaryDirectory() as root:
+            client = bridge.BridgeClient(root, "sess", "gen", "native_events_probe", poll_interval=0.001)
+            runner = bridge.make_turn_runner("native_events_probe")
+            with mock.patch.object(bridge, "sandbox_source_ip", return_value="10.240.0.2"):
+                bridge.execute_grant(
+                    client,
+                    runner,
+                    {"turn_id": 9, "sequence": 1, "turn_input_schema": "RunTurn", "input": {"content": "native ok"}},
+                )
+
+            messages = [envelope for _, _, envelope in bridge.Queue(root, bridge.OUTBOX).read_all()]
+            output = next(message for message in messages if message["type"] == "emit_output")
+            self.assertEqual(output["payload"]["output_sequence"], 1)
+            self.assertEqual(
+                output["payload"]["payload"],
+                {
+                    "schema": "harness_native_events_v1",
+                    "event": {"type": "agent.message", "payload": {"content": "native ok"}},
+                },
+            )
+            self.assertEqual(messages[-1]["type"], "ack_turn_completed")
+
     def test_claim_loop_handles_multiple_turns(self):
         with tempfile.TemporaryDirectory() as root:
             args = argparse_namespace(
@@ -271,8 +339,8 @@ class BridgeClientTest(unittest.TestCase):
                 max_empty_polls=0,
             )
             grants = [
-                {"turn_id": 9, "sequence": 1, "content": "first"},
-                {"turn_id": 10, "sequence": 2, "content": "second"},
+                {"turn_id": 9, "sequence": 1, "turn_input_schema": "RunTurn", "input": {"content": "first"}},
+                {"turn_id": 10, "sequence": 2, "turn_input_schema": "RunTurn", "input": {"content": "second"}},
             ]
             inbox = bridge.Queue(root, bridge.INBOX)
             original_write = bridge.Queue.write
@@ -358,7 +426,7 @@ class BridgeClientTest(unittest.TestCase):
                         payload = {"last_output_sequence_by_turn": {"9": 3}, "leased_turn_id": 9}
                     elif message_type == "resume_turn":
                         response_type = "grant"
-                        payload = {"turn_id": 9, "sequence": 1, "content": "resume"}
+                        payload = {"turn_id": 9, "sequence": 1, "turn_input_schema": "RunTurn", "input": {"content": "resume"}}
                     inbox.write(
                         {
                             "message_id": f"host_{message_type}",

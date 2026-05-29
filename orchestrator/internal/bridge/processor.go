@@ -12,31 +12,38 @@ import (
 )
 
 type Store interface {
+	BridgeProtocolEvidence(context.Context, string, string) (store.BridgeProtocolEvidence, error)
 	BridgeHelloAck(context.Context, string, string, string, time.Time, time.Duration) (store.BridgeHelloAck, error)
 	RenewGenerationHeartbeat(context.Context, store.RenewHeartbeatParams) error
 	ClaimNextTurn(context.Context, store.ClaimNextTurnParams) (store.TurnGrant, bool, error)
 	ResumeTurn(context.Context, store.ResumeTurnParams) (store.TurnGrant, bool, error)
 	AckTurnStarted(context.Context, store.AckStartedParams) (int64, error)
 	CompleteTurn(context.Context, store.CompleteTurnParams) (int64, error)
+	FailGeneration(context.Context, store.FailGenerationParams) error
 	AppendEvent(context.Context, store.AppendEventParams) (int64, error)
 }
 
 type Processor struct {
-	Store           Store
-	Owner           string
-	LeaseTTL        time.Duration
-	AckStartedGrace time.Duration
-	Now             func() time.Time
-	ProbeHandler    func(context.Context, Envelope) error
-	AfterCommit     func(context.Context, Envelope, int64)
-	connected       map[string]bridgeState
+	Store                   Store
+	Owner                   string
+	LeaseTTL                time.Duration
+	AckStartedGrace         time.Duration
+	RequiredProtocolVersion int
+	RequiredTurnInputSchema string
+	Now                     func() time.Time
+	ProbeHandler            func(context.Context, Envelope) error
+	AfterCommit             func(context.Context, Envelope, int64)
+	connected               map[string]bridgeState
 }
 
 var errProtocol = errors.New("bridge protocol error")
 
 type bridgeState struct {
-	helloSeen bool
-	probed    bool
+	helloSeen       bool
+	probed          bool
+	driverID        string
+	protocolVersion int
+	turnInputSchema string
 }
 
 func (p *Processor) MarkReady(sessionID, generationID string) {
@@ -49,12 +56,23 @@ func (p *Processor) MarkReady(sessionID, generationID string) {
 }
 
 type grantPayload struct {
-	TurnID    int64     `json:"turn_id"`
-	Sequence  int64     `json:"sequence"`
-	Content   string    `json:"content"`
-	Attempt   int       `json:"attempt"`
-	Replayed  bool      `json:"replayed"`
-	ExpiresAt time.Time `json:"expires_at"`
+	TurnID          int64        `json:"turn_id"`
+	Sequence        int64        `json:"sequence"`
+	TurnInputSchema string       `json:"turn_input_schema"`
+	Input           runTurnInput `json:"input"`
+	Attempt         int          `json:"attempt"`
+	Replayed        bool         `json:"replayed"`
+	ExpiresAt       time.Time    `json:"expires_at"`
+}
+
+type runTurnInput struct {
+	Content string `json:"content"`
+}
+
+type helloPayload struct {
+	ProtocolVersion int    `json:"protocol_version"`
+	DriverID        string `json:"driver_id"`
+	TurnInputSchema string `json:"turn_input_schema"`
 }
 
 type helloAckPayload struct {
@@ -72,6 +90,14 @@ type emitOutputPayload struct {
 	OutputSequence int64           `json:"output_sequence"`
 	Stream         string          `json:"stream,omitempty"`
 	Payload        json.RawMessage `json:"payload,omitempty"`
+}
+
+type nativeEventPayload struct {
+	Schema string `json:"schema"`
+	Event  struct {
+		Type    string          `json:"type"`
+		Payload json.RawMessage `json:"payload,omitempty"`
+	} `json:"event"`
 }
 
 type ackCompletedPayload struct {
@@ -121,12 +147,19 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 	key := stateKey(envelope.SessionID, envelope.GenerationID)
 	switch envelope.Type {
 	case TypeHello:
+		hello, evidence, err := p.validateHello(ctx, envelope)
+		if err != nil {
+			return err
+		}
 		ack, err := p.Store.BridgeHelloAck(ctx, envelope.SessionID, envelope.GenerationID, p.Owner, now, p.AckStartedGrace)
 		if err != nil {
 			return err
 		}
 		p.setState(key, func(state bridgeState) bridgeState {
 			state.helloSeen = true
+			state.driverID = evidence.DriverID
+			state.protocolVersion = hello.ProtocolVersion
+			state.turnInputSchema = hello.TurnInputSchema
 			return state
 		})
 		lastSequences := make(map[string]int64, len(ack.LastOutputSequenceByTurn))
@@ -180,12 +213,13 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 			return p.writeResponse(ctx, inbox, envelope, TypeNoWork, map[string]string{"reason": "no_eligible_turn"})
 		}
 		return p.writeResponse(ctx, inbox, envelope, TypeGrant, grantPayload{
-			TurnID:    grant.TurnID,
-			Sequence:  grant.Sequence,
-			Content:   grant.Content,
-			Attempt:   grant.Attempt,
-			Replayed:  grant.Replayed,
-			ExpiresAt: grant.ExpiresAt,
+			TurnID:          grant.TurnID,
+			Sequence:        grant.Sequence,
+			TurnInputSchema: p.turnInputSchema(),
+			Input:           runTurnInput{Content: grant.Content},
+			Attempt:         grant.Attempt,
+			Replayed:        grant.Replayed,
+			ExpiresAt:       grant.ExpiresAt,
 		})
 	case TypeResumeTurn:
 		state := p.state(key)
@@ -212,12 +246,13 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 		}
 		grant.Replayed = true
 		return p.writeResponse(ctx, inbox, envelope, TypeGrant, grantPayload{
-			TurnID:    grant.TurnID,
-			Sequence:  grant.Sequence,
-			Content:   grant.Content,
-			Attempt:   grant.Attempt,
-			Replayed:  grant.Replayed,
-			ExpiresAt: grant.ExpiresAt,
+			TurnID:          grant.TurnID,
+			Sequence:        grant.Sequence,
+			TurnInputSchema: p.turnInputSchema(),
+			Input:           runTurnInput{Content: grant.Content},
+			Attempt:         grant.Attempt,
+			Replayed:        grant.Replayed,
+			ExpiresAt:       grant.ExpiresAt,
 		})
 	case TypeAckTurnStarted:
 		if envelope.TurnID == nil {
@@ -260,8 +295,8 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 		if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
 			return protocolError(err)
 		}
-		if payload.OutputSequence <= 0 {
-			return protocolErrorf("emit_output requires positive output_sequence")
+		if err := validateEmitOutputPayload(payload); err != nil {
+			return err
 		}
 		eventID, err := p.Store.AppendEvent(ctx, store.AppendEventParams{
 			SessionID:      envelope.SessionID,
@@ -274,6 +309,12 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 			Payload:        jsonPayload(payload.Payload),
 			Now:            now,
 		})
+		if err != nil && store.IsDuplicateOutputSequenceMismatch(err) {
+			if failErr := p.failGeneration(ctx, envelope, "bridge_output_sequence_mismatch", err.Error(), now); failErr != nil {
+				return fmt.Errorf("%w; additionally failed to retire generation: %v", err, failErr)
+			}
+			return protocolError(err)
+		}
 		if err == nil && eventID != 0 {
 			p.afterCommit(ctx, envelope, eventID)
 		}
@@ -304,7 +345,10 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 			Now:               now,
 		})
 		if err != nil {
-			return err
+			if failErr := p.failGeneration(ctx, envelope, completionFailureClass(err), err.Error(), now); failErr != nil {
+				return fmt.Errorf("%w; additionally failed to retire generation: %v", err, failErr)
+			}
+			return nil
 		}
 		if eventID != 0 {
 			p.afterCommit(ctx, envelope, eventID)
@@ -329,6 +373,56 @@ func (p *Processor) writeResponse(ctx context.Context, inbox Queue, request Enve
 		Payload:      raw,
 	})
 	return err
+}
+
+func (p *Processor) validateHello(ctx context.Context, envelope Envelope) (helloPayload, store.BridgeProtocolEvidence, error) {
+	return ValidateHelloPayload(ctx, p.Store, envelope, p.protocolVersion(), p.turnInputSchema())
+}
+
+type ProtocolEvidenceStore interface {
+	BridgeProtocolEvidence(context.Context, string, string) (store.BridgeProtocolEvidence, error)
+}
+
+func ValidateHelloPayload(ctx context.Context, st ProtocolEvidenceStore, envelope Envelope, requiredProtocolVersion int, requiredTurnInputSchema string) (helloPayload, store.BridgeProtocolEvidence, error) {
+	if requiredProtocolVersion <= 0 {
+		requiredProtocolVersion = 2
+	}
+	requiredTurnInputSchema = strings.TrimSpace(requiredTurnInputSchema)
+	if requiredTurnInputSchema == "" {
+		requiredTurnInputSchema = "RunTurn"
+	}
+	var payload helloPayload
+	if len(envelope.Payload) == 0 {
+		return helloPayload{}, store.BridgeProtocolEvidence{}, protocolErrorf("hello requires protocol_version, driver_id, and turn_input_schema")
+	}
+	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+		return helloPayload{}, store.BridgeProtocolEvidence{}, protocolError(err)
+	}
+	payload.DriverID = strings.TrimSpace(payload.DriverID)
+	payload.TurnInputSchema = strings.TrimSpace(payload.TurnInputSchema)
+	if payload.ProtocolVersion != requiredProtocolVersion {
+		return helloPayload{}, store.BridgeProtocolEvidence{}, protocolErrorf("unsupported bridge protocol_version %d", payload.ProtocolVersion)
+	}
+	if payload.DriverID == "" {
+		return helloPayload{}, store.BridgeProtocolEvidence{}, protocolErrorf("hello requires driver_id")
+	}
+	if payload.TurnInputSchema != requiredTurnInputSchema {
+		return helloPayload{}, store.BridgeProtocolEvidence{}, protocolErrorf("unsupported turn_input_schema %q", payload.TurnInputSchema)
+	}
+	evidence, err := st.BridgeProtocolEvidence(ctx, envelope.SessionID, envelope.GenerationID)
+	if err != nil {
+		return helloPayload{}, store.BridgeProtocolEvidence{}, err
+	}
+	if payload.DriverID != evidence.DriverID {
+		return helloPayload{}, store.BridgeProtocolEvidence{}, protocolErrorf("hello driver_id %q does not match generation driver %q", payload.DriverID, evidence.DriverID)
+	}
+	if evidence.ProtocolVersion != requiredProtocolVersion {
+		return helloPayload{}, store.BridgeProtocolEvidence{}, protocolErrorf("generation manifest bridge protocol_version %d is incompatible", evidence.ProtocolVersion)
+	}
+	if evidence.TurnInputSchema != requiredTurnInputSchema {
+		return helloPayload{}, store.BridgeProtocolEvidence{}, protocolErrorf("generation manifest turn_input_schema %q is incompatible", evidence.TurnInputSchema)
+	}
+	return payload, evidence, nil
 }
 
 func (p *Processor) afterCommit(ctx context.Context, envelope Envelope, eventID int64) {
@@ -360,6 +454,70 @@ func protocolErrorf(format string, args ...any) error {
 	return protocolError(fmt.Errorf(format, args...))
 }
 
+func validateEmitOutputPayload(payload emitOutputPayload) error {
+	if payload.OutputSequence <= 0 {
+		return protocolErrorf("emit_output requires positive output_sequence")
+	}
+	if len(payload.Payload) == 0 {
+		return nil
+	}
+	var probe struct {
+		Schema string `json:"schema"`
+	}
+	if err := json.Unmarshal(payload.Payload, &probe); err != nil {
+		return protocolError(err)
+	}
+	if strings.TrimSpace(probe.Schema) == "" {
+		return nil
+	}
+	if probe.Schema != "harness_native_events_v1" {
+		return protocolErrorf("unsupported native event schema %q", probe.Schema)
+	}
+	var native nativeEventPayload
+	if err := json.Unmarshal(payload.Payload, &native); err != nil {
+		return protocolError(err)
+	}
+	switch native.Event.Type {
+	case "agent.delta", "agent.message", "agent.output", "system.status":
+		return nil
+	case "":
+		return protocolErrorf("native event payload requires event.type")
+	default:
+		return protocolErrorf("unsupported native event type %q", native.Event.Type)
+	}
+}
+
+func (p *Processor) failGeneration(ctx context.Context, envelope Envelope, errorClass, reason string, now time.Time) error {
+	turnID := int64(0)
+	if envelope.TurnID != nil {
+		turnID = *envelope.TurnID
+	}
+	return p.Store.FailGeneration(ctx, store.FailGenerationParams{
+		SessionID:    envelope.SessionID,
+		GenerationID: envelope.GenerationID,
+		TurnID:       turnID,
+		Owner:        p.Owner,
+		ErrorClass:   errorClass,
+		Reason:       reason,
+		Now:          now,
+	})
+}
+
+func completionFailureClass(err error) string {
+	if err == nil {
+		return "turn_completion_commit_failed"
+	}
+	message := err.Error()
+	switch {
+	case strings.Contains(message, "CAS"):
+		return "driver_state_cas_failed"
+	case strings.Contains(message, "driver state"):
+		return "driver_state_validation_failed"
+	default:
+		return "turn_completion_commit_failed"
+	}
+}
+
 func (p *Processor) now() time.Time {
 	if p.Now != nil {
 		return p.Now().UTC()
@@ -372,6 +530,20 @@ func (p *Processor) leaseTTL() time.Duration {
 		return p.LeaseTTL
 	}
 	return time.Minute
+}
+
+func (p *Processor) protocolVersion() int {
+	if p.RequiredProtocolVersion > 0 {
+		return p.RequiredProtocolVersion
+	}
+	return 2
+}
+
+func (p *Processor) turnInputSchema() string {
+	if strings.TrimSpace(p.RequiredTurnInputSchema) != "" {
+		return strings.TrimSpace(p.RequiredTurnInputSchema)
+	}
+	return "RunTurn"
 }
 
 func (p *Processor) state(key string) bridgeState {

@@ -238,6 +238,49 @@ func TestStreamParserPersistsShellOutputAndCompletesOnTurnDone(t *testing.T) {
 	}
 }
 
+func TestNativeEventsOutputNormalizerPersistsMessage(t *testing.T) {
+	srv, st := newParserTestServer(t)
+	parser := newStreamParser(srv, "sess_1", "native_events_probe")
+
+	parser.handleBridgeOutput(normalizerBridgeOutput{
+		Stream: "stdout",
+		Payload: json.RawMessage(`{
+			"schema":"harness_native_events_v1",
+			"event":{"type":"agent.message","payload":{"content":"native hello"}}
+		}`),
+	})
+
+	messages, err := st.ListMessages(context.Background(), "sess_1")
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	if len(messages) != 1 || messages[0].Role != "assistant" || messages[0].Content != "native hello" {
+		t.Fatalf("unexpected native message: %+v", messages)
+	}
+}
+
+func TestNativeEventsOutputNormalizerRejectsUnknownType(t *testing.T) {
+	srv, _ := newParserTestServer(t)
+	parser := newStreamParser(srv, "sess_1", "native_events_probe")
+
+	parser.handleBridgeOutput(normalizerBridgeOutput{
+		Stream: "stdout",
+		Payload: json.RawMessage(`{
+			"schema":"harness_native_events_v1",
+			"event":{"type":"agent.future","payload":{}}
+		}`),
+	})
+
+	select {
+	case <-parser.Done():
+	case <-time.After(time.Second):
+		t.Fatal("parser did not complete after unknown native event")
+	}
+	if err := parser.Err(); err == nil || err.Error() != `unsupported native event type "agent.future"` {
+		t.Fatalf("unexpected native parser error: %v", err)
+	}
+}
+
 func assertNoParserEvent(t *testing.T, ch <-chan events.Event) {
 	t.Helper()
 	select {

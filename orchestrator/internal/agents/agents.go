@@ -42,6 +42,8 @@ type DriverSpec struct {
 	Label                       string
 	Kind                        DriverKind
 	BridgeProtocol              string
+	BridgeProtocolVersion       int
+	TurnInputSchema             string
 	OutputSchema                string
 	RequiredRuntimeCapabilities []string
 	ModelAccess                 bool
@@ -74,11 +76,13 @@ type RuntimeProviderSpec struct {
 
 var driverSpecs = map[ID]DriverSpec{
 	ClaudeCode: normalizeDriverSpec(DriverSpec{
-		ID:             ClaudeCode,
-		Label:          "Claude Code",
-		Kind:           DriverKindAgent,
-		BridgeProtocol: "claude_stream_json_per_turn",
-		OutputSchema:   "claude_stream_json_v1",
+		ID:                    ClaudeCode,
+		Label:                 "Claude Code",
+		Kind:                  DriverKindAgent,
+		BridgeProtocol:        "harness_bridge_v2",
+		BridgeProtocolVersion: 2,
+		TurnInputSchema:       "RunTurn",
+		OutputSchema:          "claude_stream_json_v1",
 		RequiredRuntimeCapabilities: []string{
 			"exec_stream",
 			"filesystem_rw",
@@ -95,11 +99,13 @@ var driverSpecs = map[ID]DriverSpec{
 		Phase10Support:     []string{"single_driver_turns"},
 	}),
 	Shell: normalizeDriverSpec(DriverSpec{
-		ID:             Shell,
-		Label:          "Shell",
-		Kind:           DriverKindShell,
-		BridgeProtocol: "shell_pty",
-		OutputSchema:   "shell_pty_v1",
+		ID:                    Shell,
+		Label:                 "Shell",
+		Kind:                  DriverKindShell,
+		BridgeProtocol:        "harness_bridge_v2",
+		BridgeProtocolVersion: 2,
+		TurnInputSchema:       "RunTurn",
+		OutputSchema:          "shell_pty_v1",
 		RequiredRuntimeCapabilities: []string{
 			"exec_stream",
 			"filesystem_rw",

@@ -156,6 +156,9 @@ type controlManifest struct {
 	NetworkProfileID                     string `json:"network_profile_id"`
 	AgentRuntimeProfileID                string `json:"agent_runtime_profile_id"`
 	Agent                                string `json:"agent"`
+	DriverID                             string `json:"driver_id"`
+	BridgeProtocolVersion                int    `json:"bridge_protocol_version"`
+	TurnInputSchema                      string `json:"turn_input_schema"`
 	ClaudeSessionUUID                    string `json:"claude_session_uuid,omitempty"`
 	ResumeClaude                         bool   `json:"resume_claude"`
 	RunscPlatform                        string `json:"runsc_platform"`
@@ -1324,7 +1327,8 @@ func (r *Runtime) buildGenerationManifest(req StartRequest, runscVersion, bundle
 		}
 		return controlManifest{}, fmt.Errorf("unsupported agent %q", selectedDriver)
 	}
-	agent, _ := agents.SandboxAgentForDriver(driverID(req))
+	selectedDriver := driverID(req)
+	agent, _ := agents.SandboxAgentForDriver(selectedDriver)
 	return controlManifest{
 		SessionID:                            req.SessionID,
 		GenerationID:                         details.GenerationID,
@@ -1334,6 +1338,9 @@ func (r *Runtime) buildGenerationManifest(req StartRequest, runscVersion, bundle
 		NetworkProfileID:                     details.NetworkProfileID,
 		AgentRuntimeProfileID:                details.AgentRuntimeProfileID,
 		Agent:                                agent,
+		DriverID:                             selectedDriver,
+		BridgeProtocolVersion:                2,
+		TurnInputSchema:                      "RunTurn",
 		ClaudeSessionUUID:                    req.ClaudeSessionUUID,
 		ResumeClaude:                         req.ResumeClaude,
 		RunscPlatform:                        effectiveRunscPlatform(details),
@@ -1434,6 +1441,9 @@ func controlManifestProjectionFields() (map[string]struct{}, map[string]struct{}
 		"network_profile_id":           {},
 		"agent_runtime_profile_id":     {},
 		"agent":                        {},
+		"driver_id":                    {},
+		"bridge_protocol_version":      {},
+		"turn_input_schema":            {},
 		"claude_session_uuid":          {},
 		"resume_claude":                {},
 		"runsc_platform":               {},
@@ -1508,6 +1518,9 @@ func (r *Runtime) renderSandboxIsolatedRuntimeSpec(req StartRequest) (runtimeSpe
 		"SESSION_WORKSPACE=/workspace",
 		"HARNESS_AGENT_HOME=/agent-home",
 		"HARNESS_AGENT=" + agent,
+		"HARNESS_DRIVER_ID=" + driverID(req),
+		"HARNESS_TURN_INPUT_SCHEMA=RunTurn",
+		"HARNESS_BRIDGE_PROTOCOL_VERSION=2",
 		"HARNESS_EXPECTED_SESSION_ID=" + req.SessionID,
 		"HARNESS_EXPECTED_GENERATION_ID=" + details.GenerationID,
 		"HARNESS_EXPECTED_NETWORK_PROFILE_ID=" + details.NetworkProfileID,
