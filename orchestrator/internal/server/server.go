@@ -797,6 +797,18 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 	if runtimeResourceCreated {
 		generationDetails = runtimeDetailsWithResourceInstance(generationDetails, runtimeResourceInstance)
 	}
+	if err := validateDriverStateForRuntimeLaunch(generationDetails, dataVolumes); err != nil {
+		if ensured.RestoreFromCheckpoint {
+			retireRuntimeResource()
+			if retireErr := s.retireGenerationForRestoreFallback(session.ID, allocation.GenerationID, allocation.Owner, err); retireErr != nil {
+				return retireErr
+			}
+			return err
+		}
+		retireRuntimeResource()
+		s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+		return err
+	}
 	startReq := s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, preparedArtifacts, dataVolumes)
 	startReq.RestoreFromCheckpoint = ensured.RestoreFromCheckpoint
 	result := s.runtime.Start(startCtx, startReq, nil)
@@ -1356,6 +1368,19 @@ func (s *Server) runtimeStartRequest(session store.Session, generationID string,
 		WorkspaceHostPath: volumes.Workspace.HostPath,
 		AgentHomeHostPath: volumes.DriverHome.HostPath,
 	}
+}
+
+func validateDriverStateForRuntimeLaunch(details store.RuntimeGenerationDetails, volumes sessionRuntimeDataVolumes) error {
+	if strings.TrimSpace(details.Agent) != string(agents.Pi) {
+		return nil
+	}
+	if len(details.DriverStatePayload) == 0 {
+		return fmt.Errorf("pi runtime launch requires driver state payload")
+	}
+	if err := store.ValidatePiDriverStatePayloadForHost(details.DriverStatePayload, volumes.DriverHome.HostPath, ""); err != nil {
+		return fmt.Errorf("pi runtime launch driver state validation: %w", err)
+	}
+	return nil
 }
 
 func driverStateInitialized(details store.RuntimeGenerationDetails) bool {

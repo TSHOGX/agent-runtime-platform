@@ -56,18 +56,40 @@ func (p *Processor) MarkReady(sessionID, generationID string) {
 }
 
 type grantPayload struct {
-	TurnID          int64                   `json:"turn_id"`
-	Sequence        int64                   `json:"sequence"`
-	TurnInputSchema string                  `json:"turn_input_schema"`
-	Input           runTurnInput            `json:"input"`
-	Attempt         int                     `json:"attempt"`
-	Replayed        bool                    `json:"replayed"`
-	ExpiresAt       time.Time               `json:"expires_at"`
-	DriverState     *store.DriverStateToken `json:"driver_state,omitempty"`
+	TurnID          int64             `json:"turn_id"`
+	Sequence        int64             `json:"sequence"`
+	TurnInputSchema string            `json:"turn_input_schema"`
+	Input           runTurnInput      `json:"input"`
+	Attempt         int               `json:"attempt"`
+	Replayed        bool              `json:"replayed"`
+	ExpiresAt       time.Time         `json:"expires_at"`
+	DriverState     *grantDriverState `json:"driver_state,omitempty"`
+}
+
+type grantDriverState struct {
+	DriverID     string          `json:"driver_id"`
+	StateDigest  string          `json:"state_digest"`
+	StateVersion int             `json:"state_version"`
+	StatePayload json.RawMessage `json:"state_payload,omitempty"`
 }
 
 type runTurnInput struct {
 	Content string `json:"content"`
+}
+
+func grantDriverStatePayload(grant store.TurnGrant) *grantDriverState {
+	if strings.TrimSpace(grant.DriverState.DriverID) == "" {
+		return nil
+	}
+	payload := &grantDriverState{
+		DriverID:     grant.DriverState.DriverID,
+		StateDigest:  grant.DriverState.StateDigest,
+		StateVersion: grant.DriverState.StateVersion,
+	}
+	if len(grant.DriverStatePayload) > 0 {
+		payload.StatePayload = append(json.RawMessage(nil), grant.DriverStatePayload...)
+	}
+	return payload
 }
 
 type helloPayload struct {
@@ -221,7 +243,7 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 			Attempt:         grant.Attempt,
 			Replayed:        grant.Replayed,
 			ExpiresAt:       grant.ExpiresAt,
-			DriverState:     &grant.DriverState,
+			DriverState:     grantDriverStatePayload(grant),
 		})
 	case TypeResumeTurn:
 		state := p.state(key)
@@ -255,7 +277,7 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 			Attempt:         grant.Attempt,
 			Replayed:        grant.Replayed,
 			ExpiresAt:       grant.ExpiresAt,
-			DriverState:     &grant.DriverState,
+			DriverState:     grantDriverStatePayload(grant),
 		})
 	case TypeAckTurnStarted:
 		if envelope.TurnID == nil {

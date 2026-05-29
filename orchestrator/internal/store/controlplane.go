@@ -47,13 +47,14 @@ type ResumeTurnParams struct {
 }
 
 type TurnGrant struct {
-	TurnID      int64
-	Sequence    int64
-	Content     string
-	Attempt     int
-	Replayed    bool
-	ExpiresAt   time.Time
-	DriverState DriverStateToken
+	TurnID             int64
+	Sequence           int64
+	Content            string
+	Attempt            int
+	Replayed           bool
+	ExpiresAt          time.Time
+	DriverState        DriverStateToken
+	DriverStatePayload []byte
 }
 
 type BridgeHelloAck struct {
@@ -1290,7 +1291,7 @@ WHERE session_id = ?
 func turnGrantByID(ctx context.Context, tx *sql.Tx, sessionID, generationID string, turnID int64, owner string, now time.Time) (TurnGrant, error) {
 	row := tx.QueryRowContext(ctx, `
 SELECT t.id, t.sequence, t.content, t.attempt, t.lease_expires_at,
-       ds.driver_id, ds.state_digest, ds.state_version
+       ds.driver_id, ds.state_digest, ds.state_version, ds.state_payload
 FROM turns t
 JOIN runtime_generations g
   ON g.session_id = t.session_id
@@ -1326,6 +1327,7 @@ WHERE t.id = ?
 		&grant.DriverState.DriverID,
 		&grant.DriverState.StateDigest,
 		&grant.DriverState.StateVersion,
+		&grant.DriverStatePayload,
 	)
 	if err != nil {
 		return TurnGrant{}, err

@@ -601,6 +601,7 @@ class PiRPCTurnRunner:
     def __init__(self):
         self.proc = None
         self.current_grant = {}
+        self.restored_state_digest = ""
 
     def set_turn_context(self, grant):
         self.current_grant = dict(grant or {})
@@ -701,6 +702,7 @@ class PiRPCTurnRunner:
         validate_pi_config_materialization()
         self._start()
         turn_id = int(self.current_grant.get("turn_id") or 0)
+        self._restore_session_if_needed(turn_id)
         prompt_id = f"harness-turn-{turn_id or int(time.time_ns())}"
         self._write_rpc({"id": prompt_id, "type": "prompt", "message": content})
         status = "completed"
@@ -732,6 +734,42 @@ class PiRPCTurnRunner:
         stats = self._request_response({"id": f"{prompt_id}-stats", "type": "get_session_stats"})
         update = self._driver_state_update(stats.get("data") or {}, turn_id)
         return status, error_class, error, update
+
+    def _restore_session_if_needed(self, turn_id):
+        token = self.current_grant.get("driver_state") or {}
+        state_digest = str(token.get("state_digest") or "")
+        if not state_digest or state_digest == self.restored_state_digest:
+            return
+        payload = token.get("state_payload")
+        if not payload:
+            return
+        if not isinstance(payload, dict):
+            raise RuntimeError("pi restore state_payload must be an object")
+        state_kind = payload.get("state_kind")
+        if state_kind == "pi_uninitialized":
+            self.restored_state_digest = state_digest
+            return
+        if state_kind != "pi_session":
+            raise RuntimeError(f"unsupported pi restore state_kind {state_kind}")
+        expected_rel, expected_file = normalize_pi_session_file(payload.get("selected_session_file"))
+        if expected_rel != payload.get("selected_session_relpath"):
+            raise RuntimeError("pi restore session relpath mismatch")
+        expected_session_id = str(payload.get("selected_session_id") or "").strip()
+        if not expected_session_id:
+            raise RuntimeError("pi restore selected_session_id is required")
+        self._request_response(
+            {
+                "id": f"harness-restore-{turn_id or int(time.time_ns())}",
+                "type": "switch_session",
+                "sessionFile": expected_file,
+            }
+        )
+        stats = self._request_response({"id": f"harness-restore-{turn_id or int(time.time_ns())}-stats", "type": "get_session_stats"})
+        relpath, selected_file = normalize_pi_session_file((stats.get("data") or {}).get("sessionFile"))
+        session_id = str((stats.get("data") or {}).get("sessionId") or "").strip()
+        if relpath != expected_rel or selected_file != expected_file or session_id != expected_session_id:
+            raise RuntimeError("pi restore selected session verification failed")
+        self.restored_state_digest = state_digest
 
     def _driver_state_update(self, stats, turn_id):
         token = self.current_grant.get("driver_state") or {}
