@@ -544,8 +544,7 @@ def validate_pi_runtime_environment():
 def validate_pi_config_materialization():
     for path in (PI_MODELS_SANDBOX_PATH, PI_SETTINGS_SANDBOX_PATH):
         candidate = Path(path)
-        if candidate.is_symlink():
-            raise RuntimeError(f"pi config must not be a sandbox symlink: {path}")
+        reject_symlink_path_components(candidate, "pi config")
         try:
             st = candidate.stat()
         except OSError as err:
@@ -572,6 +571,17 @@ def pi_config_writable_by_sandbox_uid(st):
     )
 
 
+def reject_symlink_path_components(path, label):
+    current = Path(path)
+    for _ in range(4):
+        if current.is_symlink():
+            raise RuntimeError(f"{label} must not use sandbox symlink: {current}")
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+
+
 def normalize_pi_session_file(session_file):
     raw = str(session_file or "").strip()
     if not raw:
@@ -579,6 +589,7 @@ def normalize_pi_session_file(session_file):
     if "\\" in raw:
         raise RuntimeError("pi sessionFile must use POSIX separators")
     root = Path(PI_SESSION_DIR)
+    reject_symlink_path_components(root, "pi session dir")
     candidate = Path(raw)
     if not candidate.is_absolute():
         candidate = root / candidate
@@ -741,8 +752,8 @@ class PiRPCTurnRunner:
         if not state_digest or state_digest == self.restored_state_digest:
             return
         payload = token.get("state_payload")
-        if not payload:
-            return
+        if payload is None:
+            raise RuntimeError("pi restore state_payload is required")
         if not isinstance(payload, dict):
             raise RuntimeError("pi restore state_payload must be an object")
         state_kind = payload.get("state_kind")

@@ -74,13 +74,47 @@ func TestProvisionSessionDriverHomeCreatesDriverScopedRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("provision shell driver home: %v", err)
 	}
+	pi, err := st.ProvisionSessionDriverHome(ctx, ProvisionSessionDriverHomeParams{
+		SessionID: "sess_driver_home",
+		Driver:    "pi",
+		Config:    cfg,
+		Now:       time.Now().UTC().Add(2 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("provision pi driver home: %v", err)
+	}
 	if claude.HostPath != filepath.Join(cfg.AgentHomesRoot, "sess_driver_home", "claude_code") ||
 		shell.HostPath != filepath.Join(cfg.AgentHomesRoot, "sess_driver_home", "sh") ||
-		claude.HostPath == shell.HostPath {
-		t.Fatalf("driver home paths not scoped by driver: claude=%+v shell=%+v", claude, shell)
+		pi.HostPath != filepath.Join(cfg.AgentHomesRoot, "sess_driver_home", "pi") ||
+		claude.HostPath == shell.HostPath ||
+		claude.HostPath == pi.HostPath ||
+		shell.HostPath == pi.HostPath {
+		t.Fatalf("driver home paths not scoped by driver: claude=%+v shell=%+v pi=%+v", claude, shell, pi)
 	}
 	assertMarkerDigest(t, claude.ProvisioningMarkerPath, claude.ProvisioningMarkerDigest)
 	assertMarkerDigest(t, shell.ProvisioningMarkerPath, shell.ProvisioningMarkerDigest)
+	assertMarkerDigest(t, pi.ProvisioningMarkerPath, pi.ProvisioningMarkerDigest)
+	if marker := readMarker(t, pi.ProvisioningMarkerPath); marker["driver"] != "pi" || marker["host_path"] != pi.HostPath {
+		t.Fatalf("pi driver home marker mismatch: %+v volume=%+v", marker, pi)
+	}
+}
+
+func TestProvisionSessionDriverHomeRejectsNonCanonicalDrivers(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openOwnedStore(t, ctx)
+	createStoreSession(t, ctx, st, "sess_driver_home_reject")
+	cfg := testDataVolumeConfig(t)
+	for _, driver := range []string{"claude", "unknown", ""} {
+		_, err := st.ProvisionSessionDriverHome(ctx, ProvisionSessionDriverHomeParams{
+			SessionID: "sess_driver_home_reject",
+			Driver:    driver,
+			Config:    cfg,
+			Now:       time.Now().UTC(),
+		})
+		if err == nil || !strings.Contains(err.Error(), "unsupported driver home key") {
+			t.Fatalf("expected driver %q rejection, got %v", driver, err)
+		}
+	}
 }
 
 func TestProvisionSessionWorkspaceRejectsWritableEvidenceRoot(t *testing.T) {

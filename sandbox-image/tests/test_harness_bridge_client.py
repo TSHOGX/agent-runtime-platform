@@ -472,6 +472,12 @@ class BridgeClientTest(unittest.TestCase):
                             "driver_id": "pi",
                             "state_digest": "sha256:" + "a" * 64,
                             "state_version": 1,
+                            "state_payload": {
+                                "schema_version": 1,
+                                "driver_id": "pi",
+                                "state_kind": "pi_uninitialized",
+                                "session_dir": str(session_dir),
+                            },
                         },
                     }
                 )
@@ -624,6 +630,53 @@ class BridgeClientTest(unittest.TestCase):
             self.assertEqual(update["previous_state_digest"], "sha256:" + "b" * 64)
             self.assertEqual(update["state_version"], 3)
             self.assertEqual(update["state_payload"]["selected_session_id"], "pi-session-1")
+
+    def test_pi_rpc_runner_requires_restore_payload(self):
+        runner = bridge.PiRPCTurnRunner()
+        runner.set_turn_context({"driver_state": {"state_digest": "sha256:" + "c" * 64}})
+        with self.assertRaisesRegex(RuntimeError, "state_payload is required"):
+            runner._restore_session_if_needed(11)
+
+    def test_normalize_pi_session_file_rejects_symlink_session_root(self):
+        with tempfile.TemporaryDirectory() as root:
+            agent_dir = Path(root) / "agent"
+            agent_dir.mkdir()
+            real_sessions = Path(root) / "real-sessions"
+            real_sessions.mkdir()
+            session_link = agent_dir / "sessions"
+            session_link.symlink_to(real_sessions, target_is_directory=True)
+            with mock.patch.object(bridge, "PI_SESSION_DIR", str(session_link)):
+                with self.assertRaisesRegex(RuntimeError, "session dir must not use sandbox symlink"):
+                    bridge.normalize_pi_session_file("session-1.jsonl")
+
+    def test_pi_config_materialization_rejects_missing_config(self):
+        with tempfile.TemporaryDirectory() as root:
+            agent_dir = Path(root) / "agent"
+            agent_dir.mkdir(parents=True)
+            settings = agent_dir / "settings.json"
+            settings.write_text("{}\n", encoding="utf-8")
+            settings.chmod(0o444)
+            with mock.patch.object(bridge, "PI_MODELS_SANDBOX_PATH", str(agent_dir / "models.json")):
+                with mock.patch.object(bridge, "PI_SETTINGS_SANDBOX_PATH", str(settings)):
+                    with self.assertRaisesRegex(RuntimeError, "pi config missing"):
+                        bridge.validate_pi_config_materialization()
+
+    def test_pi_config_materialization_rejects_symlink_config_path(self):
+        with tempfile.TemporaryDirectory() as root:
+            agent_dir = Path(root) / "agent"
+            agent_dir.mkdir(parents=True)
+            real_models = Path(root) / "models.json"
+            real_models.write_text("{}\n", encoding="utf-8")
+            real_models.chmod(0o444)
+            models = agent_dir / "models.json"
+            models.symlink_to(real_models)
+            settings = agent_dir / "settings.json"
+            settings.write_text("{}\n", encoding="utf-8")
+            settings.chmod(0o444)
+            with mock.patch.object(bridge, "PI_MODELS_SANDBOX_PATH", str(models)):
+                with mock.patch.object(bridge, "PI_SETTINGS_SANDBOX_PATH", str(settings)):
+                    with self.assertRaisesRegex(RuntimeError, "pi config must not use sandbox symlink"):
+                        bridge.validate_pi_config_materialization()
 
     def test_pi_rpc_runner_rejects_writable_config(self):
         with tempfile.TemporaryDirectory() as root:
