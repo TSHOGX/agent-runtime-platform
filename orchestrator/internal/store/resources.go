@@ -308,6 +308,9 @@ func (s *Store) AllocateGeneration(ctx context.Context, p AllocateGenerationPara
 	if _, ok := agents.Lookup(p.Config.agent()); !ok {
 		return GenerationAllocation{}, fmt.Errorf("unsupported driver %q", p.Config.agent())
 	}
+	if err := agents.EnsureDriverSupportedByProvider(p.Config.agent(), "local_runsc"); err != nil {
+		return GenerationAllocation{}, err
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

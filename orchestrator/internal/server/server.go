@@ -145,11 +145,49 @@ func (s *Server) Routes() http.Handler {
 	return mux
 }
 
+func (s *Server) OperatorRoutes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/agents", s.operatorAgentsCatalog)
+	return mux
+}
+
 func (s *Server) ProxyCorrelationRoutes() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("POST /internal/proxy/requests/start", s.requireProxyPeerCredentials(http.HandlerFunc(s.internalProxyRequestStart)))
 	mux.Handle("POST /internal/proxy/requests/finish", s.requireProxyPeerCredentials(http.HandlerFunc(s.internalProxyRequestFinish)))
 	return mux
+}
+
+func (s *Server) operatorAgentsCatalog(w http.ResponseWriter, r *http.Request) {
+	type driverDTO struct {
+		DriverID                    string   `json:"driver_id"`
+		Label                       string   `json:"label"`
+		Kind                        string   `json:"kind"`
+		BridgeProtocol              string   `json:"bridge_protocol"`
+		OutputSchema                string   `json:"output_schema"`
+		RequiredRuntimeCapabilities []string `json:"required_runtime_capabilities"`
+		ModelAccess                 bool     `json:"model_access"`
+		SupportsInterrupt           bool     `json:"supports_interrupt"`
+		SupportsCompaction          bool     `json:"supports_compaction"`
+	}
+	drivers := []driverDTO{}
+	for _, spec := range agents.AllDriverSpecs() {
+		drivers = append(drivers, driverDTO{
+			DriverID:                    string(spec.ID),
+			Label:                       spec.Label,
+			Kind:                        string(spec.Kind),
+			BridgeProtocol:              spec.BridgeProtocol,
+			OutputSchema:                spec.OutputSchema,
+			RequiredRuntimeCapabilities: append([]string(nil), spec.RequiredRuntimeCapabilities...),
+			ModelAccess:                 spec.ModelAccess,
+			SupportsInterrupt:           spec.SupportsInterrupt,
+			SupportsCompaction:          spec.SupportsCompaction,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"schema_version": 1,
+		"drivers":        drivers,
+	})
 }
 
 func (s *Server) ProxyCorrelationServer() *http.Server {
@@ -1306,8 +1344,16 @@ func sandboxContractPayload(details store.RuntimeGenerationDetails, artifacts ru
 		runscPlatform = "systrap"
 	}
 	driverID := strings.TrimSpace(details.Agent)
-	if _, ok := agents.Lookup(driverID); !ok {
+	driverSpec, ok := agents.DriverSpecFor(driverID)
+	if !ok {
 		return nil, fmt.Errorf("unsupported driver %q", driverID)
+	}
+	providerSpec, ok := agents.RuntimeProviderSpecFor("local_runsc")
+	if !ok {
+		return nil, fmt.Errorf("unsupported runtime provider local_runsc")
+	}
+	if err := agents.EnsureDriverSupportedByProvider(driverID, providerSpec.ID); err != nil {
+		return nil, err
 	}
 	initialDriverStateDigest := strings.TrimSpace(details.DriverStateDigest)
 	if initialDriverStateDigest == "" {
@@ -1345,32 +1391,13 @@ func sandboxContractPayload(details store.RuntimeGenerationDetails, artifacts ru
 		"resume_field": "driver_state",
 	})
 	driverCapabilitiesDigest := phase9ContractDigest(map[string]any{
-		"driver_id": driverID,
-		"capabilities": []string{
-			"exec_stream",
-			"filesystem_rw",
-			"kill",
-			"logs",
-			"network_policy",
-			"snapshot_disk",
-			"stdin",
-		},
+		"driver_id":     driverID,
+		"capabilities":  driverSpec.RequiredRuntimeCapabilities,
+		"registry_kind": string(driverSpec.Kind),
 	})
-	providerCapabilitiesDigest := phase9ContractDigest(map[string]any{
-		"provider_id": "local_runsc",
-		"capabilities": []string{
-			"exec_stream",
-			"filesystem_rw",
-			"kill",
-			"logs",
-			"network_policy",
-			"snapshot_disk",
-			"stdin",
-		},
-		"vocabulary_version": "1",
-	})
+	providerCapabilitiesDigest := agents.CapabilityDigest(providerSpec)
 	runtimeTemplateDigest := phase9ContractDigest(map[string]any{
-		"provider_id":          "local_runsc",
+		"provider_id":          providerSpec.ID,
 		"runsc_platform":       runscPlatform,
 		"runsc_overlay2":       details.RunscOverlay2,
 		"no_new_privileges":    true,
@@ -1385,7 +1412,7 @@ func sandboxContractPayload(details store.RuntimeGenerationDetails, artifacts ru
 			"exposure_mode":             "proxy_only",
 			"ttl_seconds":               nil,
 			"allowed_drivers":           []string{driverID},
-			"allowed_runtime_providers": []string{"local_runsc"},
+			"allowed_runtime_providers": []string{providerSpec.ID},
 		})
 	}
 	credentialPreimage := map[string]any{
@@ -1408,21 +1435,21 @@ func sandboxContractPayload(details store.RuntimeGenerationDetails, artifacts ru
 		"driver": map[string]any{
 			"driver_id":                            driverID,
 			"driver_version":                       "bundled",
-			"bridge_protocol":                      driverBridgeProtocol(driverID),
-			"output_schema":                        driverOutputSchema(driverID),
+			"bridge_protocol":                      driverSpec.BridgeProtocol,
+			"output_schema":                        driverSpec.OutputSchema,
 			"command_argv_digest":                  commandDigest,
 			"driver_config_digest":                 driverConfigDigest,
 			"required_runtime_capabilities_digest": driverCapabilitiesDigest,
-			"supports_interrupt":                   driverID == string(agents.Shell),
-			"supports_compaction":                  driverID == string(agents.ClaudeCode),
+			"supports_interrupt":                   driverSpec.SupportsInterrupt,
+			"supports_compaction":                  driverSpec.SupportsCompaction,
 		},
 		"runtime_provider": map[string]any{
-			"provider_id":              "local_runsc",
-			"provider_profile_id":      "local_runsc_default",
-			"isolation_kind":           "gvisor",
-			"template_ref":             "default",
+			"provider_id":              providerSpec.ID,
+			"provider_profile_id":      providerSpec.ProviderProfileID,
+			"isolation_kind":           providerSpec.IsolationKind,
+			"template_ref":             providerSpec.TemplateRef,
 			"template_digest":          runtimeTemplateDigest,
-			"capability_vocab_version": "1",
+			"capability_vocab_version": providerSpec.CapabilityVocabulary,
 			"capability_digest":        providerCapabilitiesDigest,
 			"provider_specific": map[string]any{
 				"runsc_container_id":   details.RunscContainerID,
@@ -1529,13 +1556,13 @@ func sandboxContractPayload(details store.RuntimeGenerationDetails, artifacts ru
 			"sandbox_model_proxy_base_url": sandboxModelProxyBaseURL,
 		},
 		"snapshot_policy": map[string]any{
-			"provider_supports_snapshot_disk":   true,
-			"provider_supports_snapshot_memory": false,
-			"provider_supports_branch":          false,
-			"branch_count_limit":                0,
-			"must_quiesce_processes":            true,
-			"stream_disconnects_on_snapshot":    true,
-			"snapshot_semantic":                 "generation_checkpoint_restore",
+			"provider_supports_snapshot_disk":   providerSpec.SnapshotPolicy.ProviderSupportsSnapshotDisk,
+			"provider_supports_snapshot_memory": providerSpec.SnapshotPolicy.ProviderSupportsSnapshotMemory,
+			"provider_supports_branch":          providerSpec.SnapshotPolicy.ProviderSupportsBranch,
+			"branch_count_limit":                providerSpec.SnapshotPolicy.BranchCountLimit,
+			"must_quiesce_processes":            providerSpec.SnapshotPolicy.MustQuiesceProcesses,
+			"stream_disconnects_on_snapshot":    providerSpec.SnapshotPolicy.StreamDisconnectsOnSnapshot,
+			"snapshot_semantic":                 providerSpec.SnapshotPolicy.SnapshotSemantic,
 		},
 		"driver_runtime": map[string]any{
 			"driver_home_mount":             "/agent-home",
