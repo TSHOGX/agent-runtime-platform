@@ -25,6 +25,11 @@ long-lived AI agent work.
   `/agent-home`, `/harness-control`, and bridge binds; no parent `/sessions` or
   `/agent-homes` mounts; no `/harness-secrets`; read-only rootfs; empty OCI
   capabilities; `noNewPrivileges`; non-root agent execution.
+- Driver selection: product `Agent`/`Shell` modes resolve through
+  `harness.default_agent`, `harness.agents`, `harness.model_profiles`,
+  `harness.runtime_providers`, provider capabilities, and the selected
+  rootfs `/etc/harness-image/agents.json` manifest. New sessions and
+  allocations reject selected drivers missing from the current image manifest.
 - Model boundary: upstream provider credentials stay host/proxy-side. Sandbox
   model access uses the stable proxy alias and proxy authorization based on
   live turn context, source IP, contract/resource identity, and entitlement.
@@ -74,12 +79,15 @@ Other completed baselines:
   driver/provider registries, product modes, bridge protocol v2, strict
   proxy-only model grants, Pi rootfs evidence, Pi generated config
   materialization, Pi RPC runner, Pi output normalization, and host-validated Pi
-  sidecar restore.
+  sidecar restore. The completed baseline includes generic deployment config
+  and manifest-backed `runtime_config_digest` /
+  `agent_manifest_digest` contract inputs through `7a0843e`.
 
 ## Current Flow
 
 ```text
 POST /api/sessions
+  -> resolve product mode through deployment config and image manifest
   -> created
 
 POST /api/sessions/<id>/messages
@@ -93,11 +101,13 @@ POST /api/sessions/<id>/messages
   -> running_idle
 ```
 
-Agent mode selects the deployment default agent driver (`claude_code` or `pi`).
+Agent mode selects the enabled deployment default agent driver (`claude_code`
+or `pi`) only when that driver is present in the selected image manifest.
 Claude Code uses stream-json. Pi runs as a long-lived RPC process through the
 same model-proxy boundary and advances its logical restore sidecar only after
-successful completed turns pass runner and host validation. Shell turns use the
-same bridge lifecycle, complete through `harness.turn_done`, and can be
+successful completed turns pass runner and host validation. Shell is available
+only when enabled in config and present in the image manifest; shell turns use
+the same bridge lifecycle, complete through `harness.turn_done`, and can be
 interrupted with `POST /api/sessions/<id>/interrupt`.
 
 Canonical session states and public API/event details live in

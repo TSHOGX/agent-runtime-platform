@@ -7,7 +7,7 @@ It is retained as implementation history; the live baseline is summarized in
 Migration scope follows [README.md](./README.md) and
 [implementation-slices.md](./implementation-slices.md).
 
-| Area | Current code fact | Phase 9 owner | Target |
+| Area | Pre-Phase 9 code fact | Phase 9 owner | Target |
 | --- | --- | --- | --- |
 | Agent constants | `orchestrator/internal/agents/agents.go` defines only `claude`, `sh`, `ProtocolClaudeStreamJSON`, and `ProtocolShellPTY`. | 9a, 9b | Add canonical `claude_code`, remove `claude` from new runtime selectors, and promote temporary 9a facts into `DriverSpec`. |
 | Driver registry | No `DriverSpec` structure exists. | 9b | Add canonical driver/provider registries; do not register `claude` as an alias. |

@@ -69,9 +69,12 @@ Environment overrides:
 
 ## Current Agent Flow
 
+- The UI fetches `GET /api/deployment-capabilities` and creates sessions by
+  product mode, not raw driver ID.
 - Create a session through `POST /api/sessions`.
 - `Agent` maps to the deployment-selected agent driver, currently Claude Code
-  or Pi; `Shell` maps to the PTY-backed shell session when enabled.
+  or Pi; `Shell` maps to the PTY-backed shell session only when enabled and
+  present in the selected image manifest.
 - Send a task prompt through `POST /api/sessions/:id/messages`.
 - Interrupt a running shell session through `POST /api/sessions/:id/interrupt`.
 - The orchestrator keeps per-generation resources alive across turns once the sandbox is running.

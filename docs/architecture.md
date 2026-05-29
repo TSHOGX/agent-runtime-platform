@@ -77,13 +77,17 @@ governance, observability, and operational scale.
 
 The active runtime boundary is `sandbox-isolation-v1`, with Phase 9 sandbox
 contract v2 metadata for driver/provider identity, credential policy, runtime
-capabilities, DataVolume evidence, and driver-state fences.
+capabilities, DataVolume evidence, driver-state fences, source deployment
+config digests, and image agent-manifest digests.
 
 - gVisor uses `runsc` with the `systrap` platform.
 - The runtime launches `runsc` directly with sandbox networking and
   `overlay2=none`.
 - Each generation receives an immutable sandbox contract and rendered OCI spec,
   control manifest, bridge dir, resource identity, and network profile.
+- New allocations require the selected driver to be enabled in deployment
+  config and present in the current rootfs `/etc/harness-image/agents.json`
+  manifest or host-visible equivalent.
 - Workspace and agent HOME are provisioned through host-trusted DataVolume rows
   and mounted as exact `/workspace` and `/agent-home` binds.
 - Parent `/sessions` and `/agent-homes` mounts are forbidden.
@@ -133,10 +137,12 @@ Turns are stored before execution. The bridge claims queued turns, acks start,
 emits output, and acks completion with CAS fencing so bridge clients, turn
 runners, and sandboxes can restart at turn boundaries.
 
-Agent mode selects the deployment default agent driver. Claude Code runs with
-stream-json input. Pi runs as a long-lived RPC process through the model-proxy
-boundary, emits normalized Pi events, and persists logical restore state through
-the generic driver-state sidecar after successful completed turns. The shell
+Agent mode selects the enabled `harness.default_agent` driver after provider
+capability and image-manifest validation. Claude Code runs with stream-json
+input. Pi runs as a long-lived RPC process through the model-proxy boundary,
+emits normalized Pi events, and persists logical restore state through the
+generic driver-state sidecar after successful completed turns. Shell is exposed
+only when `sh` is enabled and present in the selected image manifest; the shell
 shim emits `harness.shell_output` and `harness.turn_done`; shell sessions
 support `POST /api/sessions/{id}/interrupt`.
 
@@ -210,6 +216,11 @@ contracts, DataVolume rows, and artifact metadata.
 Primary project config is `config/harness.yaml` under the `harness:` schema.
 The checked-in lab profile currently sets:
 
+- `default_agent: claude_code`
+- `agents.claude_code`, `agents.sh`, and disabled `agents.pi` deployment
+  entries
+- `model_profiles.anthropic_default` with `proxy_ref: model_proxy`
+- `runtime_providers.local_runsc`
 - `run_dir: /var/lib/harness/run`
 - `session_retention: 0s`
 - `max_sessions: 30`
