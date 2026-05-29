@@ -16,7 +16,7 @@
 - [x] **P0 fixes**: rename `harness.session_ttl` to `harness.session_retention` with `0s = no expiry` as default, decouple retryable runtime/turn failures from terminal session failure, add checkpoint image retention, and close the generation cleanup/quota documentation gaps.
 - [x] **Phase 8**: runtime isolation hardening — exact per-session/per-driver mounts, unified generation resource reconciliation, non-root shell, read-only rootfs, and host-side model credential boundary.
 - [x] **Pre-Phase 9 cleanup**: model proxy port moved into `harness.model_proxy`, main/publish runtime resources isolated, and product-visible naming kept on Agent Runtime Platform wording. Details: [pre-phase-runtime-cleanup.md](./pre-phase-runtime-cleanup.md).
-- [ ] **Phase 9**: Agent Driver abstraction, runtime provider contract, deployment-selected agent driver, and Pi Agent integration.
+- [x] **Phase 9**: Agent Driver abstraction, runtime provider contract, deployment-selected agent driver, and Pi Agent integration.
 - [ ] **Phase 10**: configurable agent system prompt, proactive context compaction driven by proxy-reported token usage, system-skills mount, control-plane-managed driver settings/hooks/MCP.
 - [ ] **Phase 11**: multi-user auth, credential storage/rotation/GC, tenant egress policy enforcement, cgroup limits, observability, multi-orchestrator HA.
 - [ ] **Phase 12** (future, design only): trajectory → memory → skill pipeline.
@@ -24,11 +24,10 @@
 ## Current Target
 
 The checkpoint-safe Phase 7 baseline, P0 lifetime separation, Phase 8 runtime
-isolation baseline, and pre-Phase 9 runtime cleanup gate are complete. Active
-engineering work moves to Phase 9 Agent Driver and Pi integration work on top
-of the Phase 8 mount and credential boundary. Phase 10 agent capability work
-then lands behind the driver adapters. Phase 11 production operations follows
-Phase 10. Phase 12 is design-only for now.
+isolation baseline, pre-Phase 9 runtime cleanup gate, and Phase 9 driver/Pi
+baseline are complete. Active engineering work moves to Phase 10 agent
+capability work behind the driver adapters. Phase 11 production operations
+follows Phase 10. Phase 12 is design-only for now.
 
 ## Completed Baselines
 
@@ -41,11 +40,14 @@ this roadmap:
   [phase8/README.md](./phase8/README.md).
 - Pre-Phase 9 runtime cleanup and local publish isolation:
   [pre-phase-runtime-cleanup.md](./pre-phase-runtime-cleanup.md).
+- Phase 9 driver/provider contract and Pi integration:
+  [phase9/README.md](./phase9/README.md).
 
 ## Phase 9: Agent Driver and Pi integration
 
-Phase 9 makes "agent" a deployment-selected driver contract instead of a
-Claude-shaped string branch. Detailed design: [phase9/README.md](./phase9/README.md).
+Phase 9 made "agent" a deployment-selected driver contract instead of a
+Claude-shaped string branch. Detailed design and release gates:
+[phase9/README.md](./phase9/README.md).
 Phase 9 uses an automatic destructive cutover for obsolete pre-9a state: old
 rows may be deleted and constrained SQLite tables rebuilt without a manual
 data-preservation gate, but live provider/isolation resources must be proven
@@ -83,7 +85,7 @@ Design only. Folds raw session trajectories into reviewed skills via episode mem
 
 ## Ongoing Guardrails
 
-Standing constraints that must hold after P0 and Phase 8, throughout Phase 9,
+Standing constraints that must hold after P0, Phase 8, and Phase 9, throughout
 Phase 10, Phase 11, and any later work. These are not deliverables — there is no "done"
 state — but any change that violates one should be revisited before it lands.
 

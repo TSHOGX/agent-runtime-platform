@@ -1,6 +1,6 @@
 # Agent Runtime Platform Architecture
 
-> Last updated: 2026-05-28
+> Last updated: 2026-05-30
 
 ## Overview
 
@@ -45,7 +45,7 @@ Go orchestrator
         gVisor sandbox
           |-- harness-agent-entrypoint
           |-- harness-bridge-client
-          |-- Claude Code or PTY shell agent
+          |-- Claude Code, Pi, or PTY shell agent
           |-- /workspace exact bind
           `-- /agent-home exact bind
 ```
@@ -63,8 +63,8 @@ manual-debug endpoint.
 ## Runtime Vs Control Plane
 
 Runtime is the execution substrate: gVisor `runsc`, the sandbox process,
-rootfs, mounts, network namespace, bridge client, Claude Code or shell agent,
-and checkpoint/restore mechanics. Its concerns are isolation, resource shape,
+rootfs, mounts, network namespace, bridge client, selected agent driver, and
+checkpoint/restore mechanics. Its concerns are isolation, resource shape,
 execution compatibility, and recovery behavior.
 
 Control plane is the host-side manager: session and turn state, generation
@@ -75,7 +75,9 @@ governance, observability, and operational scale.
 
 ## Sandbox Boundary
 
-The active runtime contract is `sandbox-isolation-v1`.
+The active runtime boundary is `sandbox-isolation-v1`, with Phase 9 sandbox
+contract v2 metadata for driver/provider identity, credential policy, runtime
+capabilities, DataVolume evidence, and driver-state fences.
 
 - gVisor uses `runsc` with the `systrap` platform.
 - The runtime launches `runsc` directly with sandbox networking and
@@ -131,10 +133,12 @@ Turns are stored before execution. The bridge claims queued turns, acks start,
 emits output, and acks completion with CAS fencing so bridge clients, turn
 runners, and sandboxes can restart at turn boundaries.
 
-Claude Code runs with stream-json input. The parser completes a Claude turn on
-`result`, `error`, or non-success result frames. The shell shim emits
-`harness.shell_output` and `harness.turn_done`; shell sessions support
-`POST /api/sessions/{id}/interrupt`.
+Agent mode selects the deployment default agent driver. Claude Code runs with
+stream-json input. Pi runs as a long-lived RPC process through the model-proxy
+boundary, emits normalized Pi events, and persists logical restore state through
+the generic driver-state sidecar after successful completed turns. The shell
+shim emits `harness.shell_output` and `harness.turn_done`; shell sessions
+support `POST /api/sessions/{id}/interrupt`.
 
 Claude logical sessions are stored in `/agent-home`. Once a Claude UUID exists,
 later turns must use Claude Code `--resume`; correctness cannot depend only on
@@ -173,6 +177,7 @@ HTTP routes:
 - `GET /healthz`
 - `POST /api/login`
 - `GET /api/quota`
+- `GET /api/deployment-capabilities`
 - `GET /api/sessions`
 - `POST /api/sessions`
 - `GET /api/sessions/{id}`
@@ -273,8 +278,8 @@ metadata events.
 
 ## Current Limitations
 
-- Supported agent paths are Claude Code and the shell shim. Other adapters need
-  their own completion/output contract.
+- Supported agent paths are Claude Code, Pi, and the shell shim. Other adapters
+  must enter through the Phase 9 driver/provider contracts.
 - The artifact UI is read-only.
 - The output hub is appropriate for UI streaming but not an audit log.
 - Automatic checkpointing is disabled by default.

@@ -1,9 +1,9 @@
 # Current Status
 
-> Last updated: 2026-05-28
+> Last updated: 2026-05-30
 > Scope: live baseline after Phase 7 control-plane qualification, completed P0
-> lifetime separation, Phase 8 runtime-isolation qualification, and the
-> pre-Phase 9 runtime cleanup.
+> lifetime separation, Phase 8 runtime-isolation qualification, the
+> pre-Phase 9 runtime cleanup, and Phase 9 driver/Pi integration.
 
 ## Snapshot
 
@@ -16,14 +16,15 @@ long-lived AI agent work.
   lab auth via `HARNESS_LAB_PASSWORD`.
 - Runtime: gVisor `runsc` direct launch with per-generation OCI specs,
   control manifests, bridge dirs, network profiles, and SQLite persistence.
-- Turn execution: Agent Bridge claim/ack is the live path for Claude Code and
-  shell sessions. Durable turns, events, output, proxy correlation, generation
-  state, resource state, messages, sessions, and artifact metadata are stored in
-  SQLite before in-memory publish.
-- Sandbox boundary: Phase 8 `sandbox-isolation-v1` is active. Sandboxes get
-  exact `/workspace`, `/agent-home`, `/harness-control`, and bridge binds; no
-  parent `/sessions` or `/agent-homes` mounts; no `/harness-secrets`; read-only
-  rootfs; empty OCI capabilities; `noNewPrivileges`; non-root agent execution.
+- Turn execution: Agent Bridge protocol v2 claim/ack is the live path for
+  Claude Code, Pi, and shell sessions. Durable turns, events, output, proxy
+  correlation, generation state, resource state, messages, sessions, and
+  artifact metadata are stored in SQLite before in-memory publish.
+- Sandbox boundary: Phase 9 v2 contracts run on the Phase 8
+  `sandbox-isolation-v1` runtime boundary. Sandboxes get exact `/workspace`,
+  `/agent-home`, `/harness-control`, and bridge binds; no parent `/sessions` or
+  `/agent-homes` mounts; no `/harness-secrets`; read-only rootfs; empty OCI
+  capabilities; `noNewPrivileges`; non-root agent execution.
 - Model boundary: upstream provider credentials stay host/proxy-side. Sandbox
   model access uses the stable proxy alias and proxy authorization based on
   live turn context, source IP, contract/resource identity, and entitlement.
@@ -69,6 +70,11 @@ Other completed baselines:
 - P0 lifetime separation: complete at `20a8c07`; details in
   [p0-session-lifetime.md](./p0-session-lifetime.md).
 - Phase 8 design and gate map: [phase8/README.md](./phase8/README.md).
+- Phase 9 driver/provider contract and Pi integration: implemented through
+  driver/provider registries, product modes, bridge protocol v2, strict
+  proxy-only model grants, Pi rootfs evidence, Pi generated config
+  materialization, Pi RPC runner, Pi output normalization, and host-validated Pi
+  sidecar restore.
 
 ## Current Flow
 
@@ -87,9 +93,12 @@ POST /api/sessions/<id>/messages
   -> running_idle
 ```
 
-Shell turns use the same bridge lifecycle, complete through
-`harness.turn_done`, and can be interrupted with
-`POST /api/sessions/<id>/interrupt`.
+Agent mode selects the deployment default agent driver (`claude_code` or `pi`).
+Claude Code uses stream-json. Pi runs as a long-lived RPC process through the
+same model-proxy boundary and advances its logical restore sidecar only after
+successful completed turns pass runner and host validation. Shell turns use the
+same bridge lifecycle, complete through `harness.turn_done`, and can be
+interrupted with `POST /api/sessions/<id>/interrupt`.
 
 Canonical session states and public API/event details live in
 [architecture.md](./architecture.md). Historical phase logs remain useful as
@@ -98,8 +107,8 @@ behavior.
 
 ## Constraints
 
-- Supported interactive paths are Claude Code and the shell shim. Future agent
-  adapters need their own completion contract.
+- Supported interactive paths are Claude Code, Pi, and the shell shim. Future
+  agent adapters must enter through the Phase 9 driver/provider contracts.
 - Phase 2 bundle scripts are quarantined smoke tooling and are not
   `sandbox-isolation-v1` release evidence.
 - Legacy public session path fields (`workspace`, `agent_home_path`,
@@ -110,13 +119,11 @@ behavior.
   only on an in-memory "first turn" flag.
 - Reclaimable runtime resources remain visible for
   `harness.reaper.failed_retention` before physical cleanup by design.
-- Phase 9 is the active architecture target after the pre-Phase 9 runtime cleanup
-  gate: Agent Driver abstraction, runtime provider contract, deployment-selected
-  agent driver, and Pi Agent integration. System prompt, context compaction,
-  system skills, and managed driver settings move to Phase 10 behind driver
-  adapters. Production auth/authorization, credential rotation, tenant egress
-  policy, resource limits, observability, and multi-orchestrator HA are Phase
-  11.
+- Phase 10 is the active architecture target after the Phase 9 driver/Pi gate:
+  configurable system prompt, context compaction, system skills, and managed
+  driver settings behind explicit driver adapters. Production
+  auth/authorization, credential rotation, tenant egress policy, resource
+  limits, observability, and multi-orchestrator HA are Phase 11.
 
 ## Checks
 

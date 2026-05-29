@@ -1,6 +1,6 @@
 # Phase 9: Driver/Provider Contract and Pi Integration
 
-> Status: architecture plan on top of the completed [Phase 8 runtime isolation hardening](../phase8/README.md).
+> Status: implemented baseline on top of the completed [Phase 8 runtime isolation hardening](../phase8/README.md).
 > Roadmap entry: [PLAN.md -> Phase 9](../PLAN.md#phase-9-agent-driver-and-pi-integration).
 
 Phase 9 turns "agent" from a Claude-shaped branch into two contracts:

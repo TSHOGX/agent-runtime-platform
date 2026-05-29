@@ -1,8 +1,8 @@
-# Current Code Map
+# Phase 9 Code Map
 
-This map records the current worktree facts that Phase 9 changes. It should be
-updated as slices land so the plan stays anchored to code, not only target
-architecture.
+This map records the pre-Phase 9 worktree facts that the Phase 9 slices changed.
+It is retained as implementation history; the live baseline is summarized in
+[current-status.md](../current-status.md).
 
 Migration scope follows [README.md](./README.md) and
 [implementation-slices.md](./implementation-slices.md).
