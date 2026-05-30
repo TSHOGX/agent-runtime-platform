@@ -122,11 +122,6 @@ func (c Phase7Config) BridgeRoot() string {
 	return filepath.Join(c.RunDir, "bridge")
 }
 
-type RuntimeYAMLConfig struct {
-	RunscNetwork  string `yaml:"runsc_network"`
-	RunscOverlay2 string `yaml:"runsc_overlay2"`
-}
-
 type NetworkConfig struct {
 	CIDRPool CIDRPrefix   `yaml:"cidr_pool"`
 	Egress   EgressConfig `yaml:"egress"`
@@ -326,8 +321,8 @@ func Load() (Config, error) {
 		DBPath:               getenv("HARNESS_DB_PATH", "/var/lib/harness/state/orchestrator.db"),
 		DefaultAgent:         string(defaultDriver),
 		MaxSessions:          maxSessions,
-		RunscNetwork:         defaultString(projectConfig.Runtime.RunscNetwork, "sandbox"),
-		RunscOverlay2:        defaultString(projectConfig.Runtime.RunscOverlay2, "none"),
+		RunscNetwork:         "sandbox",
+		RunscOverlay2:        "none",
 		Claude:               projectConfig.Claude,
 		ModelProxy:           projectConfig.Phase7.ModelProxy,
 		Phase7:               projectConfig.Phase7,
@@ -368,79 +363,43 @@ func validateDefaultAgentDriver(driverID agents.ID, agentConfigs map[string]Agen
 }
 
 type projectConfig struct {
-	Phase7  Phase7Config
-	Runtime RuntimeYAMLConfig
-	Claude  ClaudeConfig
+	Phase7 Phase7Config
+	Claude ClaudeConfig
 }
 
 func loadProjectConfig(path string) (projectConfig, error) {
 	cfg := projectConfig{
 		Phase7: defaultPhase7Config(),
-		Runtime: RuntimeYAMLConfig{
-			RunscNetwork:  "sandbox",
-			RunscOverlay2: "none",
-		},
 		Claude: defaultClaudeConfig(),
 	}
 
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return finalizeProjectConfig(path, cfg, false)
+		return finalizeProjectConfig(path, cfg)
 	}
 	if err != nil {
 		return cfg, err
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
-		return finalizeProjectConfig(path, cfg, false)
+		return finalizeProjectConfig(path, cfg)
 	}
 
-	hasHarness, hasLegacy, err := inspectProjectConfigTopLevel(data)
-	if err != nil {
+	var target struct {
+		Harness Phase7Config `yaml:"harness"`
+	}
+	target.Harness = cfg.Phase7
+	target.Harness.ModelProxy.SandboxBaseURL = ""
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&target); err != nil {
 		return cfg, fmt.Errorf("load %s: %w", path, err)
 	}
-	if hasHarness && hasLegacy {
-		return cfg, fmt.Errorf("load %s: mixed harness and legacy runtime/claude sections are not allowed", path)
-	}
-	if hasHarness {
-		var target struct {
-			Harness Phase7Config `yaml:"harness"`
-		}
-		target.Harness = cfg.Phase7
-		target.Harness.ModelProxy.SandboxBaseURL = ""
-		decoder := yaml.NewDecoder(bytes.NewReader(data))
-		decoder.KnownFields(true)
-		if err := decoder.Decode(&target); err != nil {
-			return cfg, fmt.Errorf("load %s: %w", path, err)
-		}
-		cfg.Phase7 = target.Harness
-	} else if hasLegacy {
-		var target struct {
-			Runtime RuntimeYAMLConfig `yaml:"runtime"`
-			Claude  ClaudeConfig      `yaml:"claude"`
-		}
-		target.Runtime = cfg.Runtime
-		target.Claude = cfg.Claude
-		target.Claude.SandboxBaseURL = ""
-		decoder := yaml.NewDecoder(bytes.NewReader(data))
-		decoder.KnownFields(true)
-		if err := decoder.Decode(&target); err != nil {
-			return cfg, fmt.Errorf("load %s: %w", path, err)
-		}
-		cfg.Runtime = target.Runtime
-		cfg.Claude = target.Claude
-	}
-	return finalizeProjectConfig(path, cfg, hasLegacy)
+	cfg.Phase7 = target.Harness
+	return finalizeProjectConfig(path, cfg)
 }
 
-func finalizeProjectConfig(path string, cfg projectConfig, legacy bool) (projectConfig, error) {
+func finalizeProjectConfig(path string, cfg projectConfig) (projectConfig, error) {
 	cfg.Claude = normalizeClaudeConfig(cfg.Claude)
-	if legacy {
-		cfg.Phase7.ModelProxy = ModelProxyConfig{
-			BindURL:        cfg.Claude.ProxyBindURL,
-			SandboxBaseURL: cfg.Claude.SandboxBaseURL,
-		}
-		cfg.Phase7 = syncDeploymentConfigFromClaude(cfg.Phase7, cfg.Claude)
-	}
 	cfg.Phase7 = normalizePhase7Config(cfg.Phase7)
 	if err := validateDeploymentConfig(cfg.Phase7); err != nil {
 		return cfg, fmt.Errorf("load %s: %w", path, err)
@@ -451,32 +410,6 @@ func finalizeProjectConfig(path string, cfg projectConfig, legacy bool) (project
 	cfg.Claude = syncClaudeModelProxy(cfg.Claude, cfg.Phase7.ModelProxy)
 	cfg.Claude = syncClaudeDeploymentConfig(cfg.Claude, cfg.Phase7)
 	return cfg, nil
-}
-
-func inspectProjectConfigTopLevel(data []byte) (hasHarness bool, hasLegacy bool, err error) {
-	var doc yaml.Node
-	if err := yaml.NewDecoder(bytes.NewReader(data)).Decode(&doc); err != nil {
-		return false, false, err
-	}
-	if len(doc.Content) == 0 {
-		return false, false, nil
-	}
-	root := doc.Content[0]
-	if root.Kind != yaml.MappingNode {
-		return false, false, fmt.Errorf("top-level config must be a mapping")
-	}
-	for i := 0; i < len(root.Content); i += 2 {
-		key := root.Content[i].Value
-		switch key {
-		case "harness":
-			hasHarness = true
-		case "runtime", "claude":
-			hasLegacy = true
-		default:
-			return false, false, fmt.Errorf("line %d: unknown top-level config key %q", root.Content[i].Line, key)
-		}
-	}
-	return hasHarness, hasLegacy, nil
 }
 
 func defaultPhase7Config() Phase7Config {
@@ -1203,26 +1136,6 @@ func validateDeploymentConfig(cfg Phase7Config) error {
 		}
 	}
 	return nil
-}
-
-func syncDeploymentConfigFromClaude(phase7 Phase7Config, claude ClaudeConfig) Phase7Config {
-	phase7.Agents = normalizeAgentConfigs(phase7.Agents, claude)
-	phase7.ModelProfiles = normalizeModelProfileConfigs(phase7.ModelProfiles, claude)
-	claudeAgent := phase7.Agents[string(agents.ClaudeCode)]
-	claudeAgent.DisableNonessentialTraffic = boolPtr(claude.DisableNonessentialTraffic)
-	phase7.Agents[string(agents.ClaudeCode)] = claudeAgent
-	profileID := defaultString(claudeAgent.ModelProfile, defaultModelProfileID)
-	profile := phase7.ModelProfiles[profileID]
-	profile.Model = defaultString(claude.Model, "sonnet")
-	profile.ProxyRef = DefaultModelProxyRef
-	if strings.TrimSpace(profile.Provider) == "" {
-		profile.Provider = defaultModelProvider
-	}
-	if profile.Enabled == nil {
-		profile.Enabled = boolPtr(true)
-	}
-	phase7.ModelProfiles[profileID] = profile
-	return phase7
 }
 
 func syncClaudeDeploymentConfig(claude ClaudeConfig, phase7 Phase7Config) ClaudeConfig {

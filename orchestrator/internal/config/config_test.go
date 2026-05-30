@@ -124,9 +124,6 @@ func TestLoadProjectConfigUsesPhase7HarnessSchema(t *testing.T) {
 		phase7.Checkpoint.MonitorInterval.Duration != 11*time.Second {
 		t.Fatalf("unexpected checkpoint config: %+v", phase7.Checkpoint)
 	}
-	if cfg.Runtime.RunscNetwork != "sandbox" || cfg.Runtime.RunscOverlay2 != "none" {
-		t.Fatalf("unexpected runtime defaults: %+v", cfg.Runtime)
-	}
 	if !cfg.Claude.DisableNonessentialTraffic {
 		t.Fatalf("expected default nonessential traffic setting to be true")
 	}
@@ -233,73 +230,6 @@ func TestLoadProjectConfigRejectsDisabledDefaultAgent(t *testing.T) {
 	_, err := loadProjectConfig(path)
 	if err == nil || !strings.Contains(err.Error(), `default agent "pi" is not enabled`) {
 		t.Fatalf("expected disabled default agent error, got %v", err)
-	}
-}
-
-func TestLoadProjectConfigUsesLegacyHarnessProxyConfig(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "harness.yaml")
-	if err := os.WriteFile(path, []byte(`runtime:
-  runsc_network: sandbox
-  runsc_overlay2: none
-
-claude:
-  proxy_bind_url: http://0.0.0.0:8082
-  sandbox_base_url: http://10.200.1.1:8082
-  api_key: "123"
-  auth_token: "123"
-  model: sonnet
-  output_format: stream-json
-  disable_nonessential_traffic: true
-`), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-
-	cfg, err := loadProjectConfig(path)
-	if err != nil {
-		t.Fatalf("load project config: %v", err)
-	}
-	if cfg.Runtime.RunscNetwork != "sandbox" || cfg.Runtime.RunscOverlay2 != "none" {
-		t.Fatalf("unexpected runtime config: %+v", cfg.Runtime)
-	}
-	if cfg.Claude.ProxyBindURL != "http://0.0.0.0:8082" ||
-		cfg.Claude.SandboxBaseURL != "http://10.200.1.1:8082" ||
-		cfg.Claude.APIKey != "123" ||
-		cfg.Claude.AuthToken != "123" {
-		t.Fatalf("unexpected claude config: %+v", cfg.Claude)
-	}
-	if cfg.Phase7.ModelProxy.BindURL != "http://0.0.0.0:8082" ||
-		cfg.Phase7.ModelProxy.BindPort != 8082 ||
-		cfg.Phase7.ModelProxy.SandboxBaseURL != "http://10.200.1.1:8082" {
-		t.Fatalf("legacy claude proxy was not mapped to harness model_proxy: %+v", cfg.Phase7.ModelProxy)
-	}
-	if !cfg.Claude.DisableNonessentialTraffic {
-		t.Fatalf("expected nonessential traffic disabled: %+v", cfg.Claude)
-	}
-}
-
-func TestLoadProjectConfigDerivesLegacySandboxBaseURLPort(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "harness.yaml")
-	if err := os.WriteFile(path, []byte(`runtime:
-  runsc_network: sandbox
-
-claude:
-  proxy_bind_url: http://0.0.0.0:8083
-`), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-
-	cfg, err := loadProjectConfig(path)
-	if err != nil {
-		t.Fatalf("load project config: %v", err)
-	}
-	if cfg.Phase7.ModelProxy.BindPort != 8083 ||
-		cfg.Phase7.ModelProxy.SandboxBaseURL != "http://harness-model-proxy.internal:8083" {
-		t.Fatalf("legacy proxy sandbox base URL was not derived from bind port: %+v", cfg.Phase7.ModelProxy)
-	}
-	if cfg.Claude.SandboxBaseURL != "http://harness-model-proxy.internal:8083" {
-		t.Fatalf("legacy claude sandbox base URL was not derived: %+v", cfg.Claude)
 	}
 }
 
@@ -448,7 +378,7 @@ func TestLoadProjectConfigRejectsMalformedModelProxySandboxBaseURL(t *testing.T)
 	}
 }
 
-func TestLoadProjectConfigRejectsMixedHarnessAndLegacySections(t *testing.T) {
+func TestLoadProjectConfigRejectsLegacyRuntimeSection(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "harness.yaml")
 	if err := os.WriteFile(path, []byte(`harness:
@@ -460,8 +390,8 @@ runtime:
 	}
 
 	_, err := loadProjectConfig(path)
-	if err == nil || !strings.Contains(err.Error(), "mixed harness and legacy") {
-		t.Fatalf("expected mixed section error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "field runtime not found") {
+		t.Fatalf("expected legacy runtime section rejection, got %v", err)
 	}
 }
 
