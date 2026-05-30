@@ -13,12 +13,11 @@ import (
 	"time"
 
 	"harness-platform/orchestrator/internal/agents"
-	"harness-platform/orchestrator/internal/sessionstate"
 
 	_ "modernc.org/sqlite"
 )
 
-func TestPhase9PiSchemaWideningPreservesExistingRows(t *testing.T) {
+func TestPhase9CutoverSchemaAcceptsPiDriver(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	db, err := sql.Open("sqlite", filepath.Join(dir, "phase9f.db"))
@@ -57,17 +56,11 @@ func TestPhase9PiSchemaWideningPreservesExistingRows(t *testing.T) {
 
 	baseCfg := testAllocatorConfig(t)
 	baseCfg.CIDRPool = netip.MustParsePrefix("10.240.0.0/28")
-	claude := createAllocatedPhase9Session(t, ctx, st, owner.UUID, baseCfg, "sess_pi_widen_claude", "claude_code", "stream-json")
+	createAllocatedPhase9Session(t, ctx, st, owner.UUID, baseCfg, "sess_pi_widen_claude", "claude_code", "stream-json")
 	createAllocatedPhase9Session(t, ctx, st, owner.UUID, baseCfg, "sess_pi_widen_shell", "sh", "shell_pty")
 	addPhase9UserRows(t, ctx, st, "sess_pi_widen_claude")
 	addPhase9UserRows(t, ctx, st, "sess_pi_widen_shell")
 
-	assertPiRejectedByRestrictedPhase9Schema(t, ctx, st, claude.GenerationID)
-
-	if err := st.ensurePhase9PiSchema(ctx); err != nil {
-		t.Fatalf("ensure pi schema: %v", err)
-	}
-	assertPhase9PiMarker(t, ctx, st)
 	assertForeignKeyCheckClean(t, ctx, st.db)
 
 	for _, sessionID := range []string{"sess_pi_widen_claude", "sess_pi_widen_shell"} {
@@ -314,47 +307,6 @@ func addPhase9UserRows(t *testing.T, ctx context.Context, st *Store, sessionID s
 		ModTime:   time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("upsert artifact %s: %v", sessionID, err)
-	}
-}
-
-func assertPiRejectedByRestrictedPhase9Schema(t *testing.T, ctx context.Context, st *Store, generationID string) {
-	t.Helper()
-	now := formatTime(time.Now().UTC())
-	if _, err := st.db.ExecContext(ctx, `
-INSERT INTO sessions (
-  id, user_id, status, driver_id, mode, workspace, restore_id, created_at, updated_at
-) VALUES ('sess_pi_before_9f', 'lab', ?, 'pi', 'agent', '/tmp/pi', 'restore-pi', ?, ?)`,
-		string(sessionstate.Created), now, now); err == nil {
-		t.Fatalf("restricted sessions.driver_id accepted pi before 9f")
-	}
-	if _, err := st.db.ExecContext(ctx, `
-INSERT INTO agent_runtime_profiles (
-  agent_runtime_profile_id, driver_id, model, output_format,
-  disable_nonessential_traffic, sandbox_uid, sandbox_gid,
-  sandbox_supplemental_gids, requires_secret_drop, model_access_allowed,
-  created_at
-) VALUES ('arp_pi_before_9f', 'pi', 'sonnet', 'pi_rpc_events_v1.0', 1, 7000, 7001, '[]', 0, 1, ?)`, now); err == nil {
-		t.Fatalf("restricted agent_runtime_profiles.driver_id accepted pi before 9f")
-	}
-	if _, err := st.db.ExecContext(ctx, `
-INSERT INTO session_driver_states (
-  session_id, driver_id, state_payload, state_digest, state_version,
-  updated_generation_id, updated_at
-) VALUES ('sess_pi_widen_claude', 'pi', '{}', 'sha256:bad', 1, ?, ?)`, generationID, now); err == nil {
-		t.Fatalf("restricted session_driver_states.driver_id accepted pi before 9f")
-	}
-}
-
-func assertPhase9PiMarker(t *testing.T, ctx context.Context, st *Store) {
-	t.Helper()
-	var payload string
-	if err := st.db.QueryRowContext(ctx, `SELECT payload FROM phase9_cutover_state WHERE key = ?`, phase9PiSchemaMarker).Scan(&payload); err != nil {
-		t.Fatalf("phase9f marker missing: %v", err)
-	}
-	for _, field := range []string{"sessions.driver_id", "agent_runtime_profiles.driver_id", "session_driver_states.driver_id"} {
-		if !strings.Contains(payload, field) {
-			t.Fatalf("phase9f marker payload %q missing %s", payload, field)
-		}
 	}
 }
 

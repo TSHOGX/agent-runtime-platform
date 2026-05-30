@@ -12,7 +12,6 @@ import (
 
 const phase9CutoverMarker = "phase9a_clean_schema"
 const phase9CutoverInProgressMarker = "phase9_cutover_in_progress"
-const phase9PiSchemaMarker = "phase9f_pi_driver_schema"
 
 func (s *Store) runPhase9Cutover(ctx context.Context) error {
 	if err := s.ensurePhase9CutoverState(ctx, s.db); err != nil {
@@ -142,93 +141,9 @@ func phase9StateMarkerDone(ctx context.Context, db dbRunner, markerKey string) (
 	return false, err
 }
 
-func (s *Store) ensurePhase9PiSchema(ctx context.Context) error {
-	if err := s.ensurePhase9CutoverState(ctx, s.db); err != nil {
-		return err
-	}
-	done, err := phase9StateMarkerDone(ctx, s.db, phase9PiSchemaMarker)
-	if err != nil {
-		return err
-	}
-	if done {
-		return nil
-	}
-
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
-		return fmt.Errorf("phase9f pi schema disable foreign keys: %w", err)
-	}
-	defer func() { _, _ = conn.ExecContext(context.Background(), `PRAGMA foreign_keys=ON`) }()
-
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return fmt.Errorf("phase9f pi schema begin: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
-		}
-	}()
-
-	if err := s.ensurePhase9CutoverState(ctx, conn); err != nil {
-		return err
-	}
-	done, err = phase9StateMarkerDone(ctx, conn, phase9PiSchemaMarker)
-	if err != nil {
-		return err
-	}
-	if done {
-		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-			return fmt.Errorf("phase9f pi schema commit: %w", err)
-		}
-		committed = true
-		return nil
-	}
-
-	if err := rebuildPhase9PiDriverSchema(ctx, conn); err != nil {
-		return err
-	}
-	now := formatTime(time.Now().UTC())
-	if _, err := conn.ExecContext(ctx, `
-INSERT INTO phase9_cutover_state (key, payload, updated_at)
-VALUES (?, ?, ?)
-ON CONFLICT(key) DO UPDATE SET
-  payload = excluded.payload,
-  updated_at = excluded.updated_at`,
-		phase9PiSchemaMarker,
-		`{"contract_gate_version":"phase9f","driver_id":"pi","widened_canonical_driver_slots":["sessions.driver_id","agent_runtime_profiles.driver_id","session_driver_states.driver_id"]}`,
-		now,
-	); err != nil {
-		return fmt.Errorf("phase9f pi schema marker: %w", err)
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return fmt.Errorf("phase9f pi schema commit: %w", err)
-	}
-	committed = true
-	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys=ON`); err != nil {
-		return fmt.Errorf("phase9f pi schema enable foreign keys: %w", err)
-	}
-	if rows, err := conn.QueryContext(ctx, `PRAGMA foreign_key_check`); err != nil {
-		return fmt.Errorf("phase9f pi schema foreign key check: %w", err)
-	} else {
-		defer rows.Close()
-		if rows.Next() {
-			return fmt.Errorf("phase9f pi schema foreign key check failed")
-		}
-		if err := rows.Err(); err != nil {
-			return fmt.Errorf("phase9f pi schema foreign key check: %w", err)
-		}
-	}
-	return nil
-}
-
 func rebuildPhase9Schema(ctx context.Context, db dbRunner) error {
 	statusCheck := sqlStringList(sessionstate.AllStatuses())
+	driverCheck := sqlStringList([]string{string(agents.ClaudeCode), string(agents.Pi), string(agents.Shell)})
 	statements := []string{
 		`DELETE FROM active_model_request_contexts`,
 		`DELETE FROM events`,
@@ -250,7 +165,7 @@ func rebuildPhase9Schema(ctx context.Context, db dbRunner) error {
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
   status TEXT NOT NULL CHECK(status IN (` + statusCheck + `)),
-  driver_id TEXT NOT NULL CHECK(driver_id IN ('claude_code','sh')),
+  driver_id TEXT NOT NULL CHECK(driver_id IN (` + driverCheck + `)),
   mode TEXT NOT NULL CHECK(mode IN ('agent','shell')),
   workspace TEXT NOT NULL,
   restore_id TEXT NOT NULL,
@@ -274,7 +189,7 @@ func rebuildPhase9Schema(ctx context.Context, db dbRunner) error {
 		`DROP TABLE IF EXISTS agent_runtime_profiles_phase9`,
 		`CREATE TABLE agent_runtime_profiles_phase9 (
   agent_runtime_profile_id TEXT PRIMARY KEY,
-  driver_id TEXT NOT NULL CHECK(driver_id IN ('claude_code','sh')),
+  driver_id TEXT NOT NULL CHECK(driver_id IN (` + driverCheck + `)),
   model TEXT,
   output_format TEXT NOT NULL,
   disable_nonessential_traffic INTEGER NOT NULL CHECK(disable_nonessential_traffic IN (0,1)),
@@ -325,7 +240,7 @@ func rebuildPhase9Schema(ctx context.Context, db dbRunner) error {
 		`ALTER TABLE sandbox_contracts_phase9 RENAME TO sandbox_contracts`,
 		`CREATE TABLE IF NOT EXISTS session_driver_states (
   session_id TEXT NOT NULL,
-  driver_id TEXT NOT NULL CHECK(driver_id <> '' AND driver_id IN ('claude_code','sh')),
+  driver_id TEXT NOT NULL CHECK(driver_id <> '' AND driver_id IN (` + driverCheck + `)),
   state_payload TEXT NOT NULL CHECK(state_payload <> ''),
   state_digest TEXT NOT NULL CHECK(state_digest LIKE 'sha256:%'),
   state_version INTEGER NOT NULL CHECK(state_version > 0),
@@ -378,132 +293,6 @@ func rebuildPhase9Schema(ctx context.Context, db dbRunner) error {
 	} else if !exists {
 		if _, err := db.ExecContext(ctx, `ALTER TABLE runtime_generations ADD COLUMN checkpoint_driver_states_digest TEXT`); err != nil {
 			return fmt.Errorf("phase9 runtime generation checkpoint fence column: %w", err)
-		}
-	}
-	return nil
-}
-
-func rebuildPhase9PiDriverSchema(ctx context.Context, db dbRunner) error {
-	statusCheck := sqlStringList(sessionstate.AllStatuses())
-	driverCheck := sqlStringList([]string{string(agents.ClaudeCode), string(agents.Pi), string(agents.Shell)})
-	statements := []string{
-		`DROP TABLE IF EXISTS sessions_phase9f`,
-		`CREATE TABLE sessions_phase9f (
-  id TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL,
-  status TEXT NOT NULL CHECK(status IN (` + statusCheck + `)),
-  driver_id TEXT NOT NULL CHECK(driver_id IN (` + driverCheck + `)),
-  mode TEXT NOT NULL CHECK(mode IN ('agent','shell')),
-  workspace TEXT NOT NULL,
-  restore_id TEXT NOT NULL,
-  restore_ms INTEGER,
-  claude_session_uuid TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  expires_at TEXT,
-  ended_at TEXT,
-  last_activity_at TEXT,
-  checkpoint_path TEXT,
-  auto_checkpoint_enabled INTEGER NOT NULL DEFAULT 0 CHECK(auto_checkpoint_enabled IN (0,1)),
-  active_generation_id TEXT REFERENCES runtime_generations(generation_id),
-  agent_home_path TEXT,
-  failure_reason TEXT,
-  error_class TEXT
-)`,
-		`INSERT INTO sessions_phase9f (
-  id, user_id, status, driver_id, mode, workspace, restore_id, restore_ms,
-  claude_session_uuid, created_at, updated_at, expires_at, ended_at,
-  last_activity_at, checkpoint_path, auto_checkpoint_enabled,
-  active_generation_id, agent_home_path, failure_reason, error_class
-)
-SELECT
-  id, user_id, status, driver_id, mode, workspace, restore_id, restore_ms,
-  claude_session_uuid, created_at, updated_at, expires_at, ended_at,
-  last_activity_at, checkpoint_path, auto_checkpoint_enabled,
-  active_generation_id, agent_home_path, failure_reason, error_class
-FROM sessions`,
-		`DROP TABLE sessions`,
-		`ALTER TABLE sessions_phase9f RENAME TO sessions`,
-		`DROP INDEX IF EXISTS agent_runtime_profiles_tuple_uq`,
-		`DROP TABLE IF EXISTS agent_runtime_profiles_phase9f`,
-		`CREATE TABLE agent_runtime_profiles_phase9f (
-  agent_runtime_profile_id TEXT PRIMARY KEY,
-  driver_id TEXT NOT NULL CHECK(driver_id IN (` + driverCheck + `)),
-  model TEXT,
-  output_format TEXT NOT NULL,
-  disable_nonessential_traffic INTEGER NOT NULL CHECK(disable_nonessential_traffic IN (0,1)),
-  sandbox_uid INTEGER NOT NULL CHECK(sandbox_uid > 0),
-  sandbox_gid INTEGER NOT NULL CHECK(sandbox_gid > 0),
-  sandbox_supplemental_gids TEXT NOT NULL,
-  requires_secret_drop INTEGER NOT NULL CHECK(requires_secret_drop IN (0,1)),
-  model_access_allowed INTEGER NOT NULL CHECK(model_access_allowed IN (0,1)),
-  manifest_model_proxy_base_url TEXT,
-  model_proxy_api_key_secret_id TEXT,
-  model_proxy_auth_token_secret_id TEXT,
-  secret_version TEXT,
-  created_at TEXT NOT NULL
-)`,
-		`INSERT INTO agent_runtime_profiles_phase9f (
-  agent_runtime_profile_id, driver_id, model, output_format,
-  disable_nonessential_traffic, sandbox_uid, sandbox_gid,
-  sandbox_supplemental_gids, requires_secret_drop, model_access_allowed,
-  manifest_model_proxy_base_url, model_proxy_api_key_secret_id,
-  model_proxy_auth_token_secret_id, secret_version, created_at
-)
-SELECT
-  agent_runtime_profile_id, driver_id, model, output_format,
-  disable_nonessential_traffic, sandbox_uid, sandbox_gid,
-  sandbox_supplemental_gids, requires_secret_drop, model_access_allowed,
-  manifest_model_proxy_base_url, model_proxy_api_key_secret_id,
-  model_proxy_auth_token_secret_id, secret_version, created_at
-FROM agent_runtime_profiles`,
-		`DROP TABLE agent_runtime_profiles`,
-		`ALTER TABLE agent_runtime_profiles_phase9f RENAME TO agent_runtime_profiles`,
-		`CREATE UNIQUE INDEX agent_runtime_profiles_tuple_uq
-  ON agent_runtime_profiles (
-    driver_id,
-    COALESCE(model, ''),
-    output_format,
-    disable_nonessential_traffic,
-    sandbox_uid,
-    sandbox_gid,
-    sandbox_supplemental_gids,
-    requires_secret_drop,
-    model_access_allowed,
-    COALESCE(manifest_model_proxy_base_url, ''),
-    COALESCE(model_proxy_api_key_secret_id, ''),
-    COALESCE(model_proxy_auth_token_secret_id, ''),
-    COALESCE(secret_version, '')
-  )`,
-		`DROP TABLE IF EXISTS session_driver_states_phase9f`,
-		`CREATE TABLE session_driver_states_phase9f (
-  session_id TEXT NOT NULL,
-  driver_id TEXT NOT NULL CHECK(driver_id <> '' AND driver_id IN (` + driverCheck + `)),
-  state_payload TEXT NOT NULL CHECK(state_payload <> ''),
-  state_digest TEXT NOT NULL CHECK(state_digest LIKE 'sha256:%'),
-  state_version INTEGER NOT NULL CHECK(state_version > 0),
-  updated_generation_id TEXT NOT NULL,
-  updated_turn_id INTEGER,
-  updated_at TEXT NOT NULL,
-  PRIMARY KEY(session_id, driver_id),
-  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE,
-  FOREIGN KEY(updated_generation_id) REFERENCES runtime_generations(generation_id) ON DELETE RESTRICT,
-  FOREIGN KEY(updated_turn_id) REFERENCES turns(id) ON DELETE SET NULL
-)`,
-		`INSERT INTO session_driver_states_phase9f (
-  session_id, driver_id, state_payload, state_digest, state_version,
-  updated_generation_id, updated_turn_id, updated_at
-)
-SELECT
-  session_id, driver_id, state_payload, state_digest, state_version,
-  updated_generation_id, updated_turn_id, updated_at
-FROM session_driver_states`,
-		`DROP TABLE session_driver_states`,
-		`ALTER TABLE session_driver_states_phase9f RENAME TO session_driver_states`,
-	}
-	for _, stmt := range statements {
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("phase9f pi schema rebuild statement %q: %w", stmt, err)
 		}
 	}
 	return nil

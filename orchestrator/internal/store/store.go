@@ -137,10 +137,7 @@ PRAGMA foreign_keys=ON;
 	if err := s.ensureSandboxContractInputEvidenceSchema(ctx); err != nil {
 		return err
 	}
-	if err := s.ensurePhase9ModeSchema(ctx); err != nil {
-		return err
-	}
-	return s.ensurePhase9PiSchema(ctx)
+	return s.ensurePhase9ModeSchema(ctx)
 }
 
 func (s *Store) EnsureUser(ctx context.Context, id, name string) error {
