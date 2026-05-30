@@ -151,7 +151,7 @@ Common regression checks:
 (cd orchestrator && go test ./...)
 (cd frontend && npm run lint && npm run typecheck && npm test && npm run build)
 python3 -m unittest sandbox-image/tests/test_harness_bridge_client.py
-python3 tools/phase8/release-gates.py --static-only
+python3 tools/release/run.py --suite sandbox_isolation --static-only
 ```
 
 After runtime, bridge, proxy, deployment-config, rootfs, or session-lifecycle
@@ -162,4 +162,6 @@ Claude Code-specific changes, use a rootfs/manifest that includes
 verify both turns complete under the same Claude session UUID.
 
 For publishable runtime-isolation candidates, rerun the full evidence-producing
-Phase 8 gate sequence in [phase8/release-gates.md](./phase8/release-gates.md).
+gate sequence per [release-qualification.md](./release-qualification.md) (the
+`sandbox_isolation` suite; gate detail in
+[phase8/release-gates.md](./phase8/release-gates.md)).

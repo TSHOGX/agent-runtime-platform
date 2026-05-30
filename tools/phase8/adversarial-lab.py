@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
 import argparse
 import hashlib
-import importlib.util
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONTRACT = "sandbox-isolation-v1"
-RELEASE_GATES_PATH = Path(__file__).with_name("release-gates.py")
-SPEC = importlib.util.spec_from_file_location("phase8_release_gates", RELEASE_GATES_PATH)
-RELEASE_GATES = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(RELEASE_GATES)
+sys.path.insert(0, str(REPO_ROOT))
+from tools.release.suites import sandbox_isolation as RELEASE_GATES  # noqa: E402
 
 REQUIRED_RUNSC_FIELDS = ("platform", "version", "binary_path", "binary_digest")
 

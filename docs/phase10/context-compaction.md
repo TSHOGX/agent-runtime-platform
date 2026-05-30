@@ -68,11 +68,11 @@ No schema migration is required: the values land inside the existing JSON payloa
 
 ### Pinned proxy contract update
 
-`/root/claude-code-proxy/tests/test_harness_probe_contract.py` currently asserts that finish payloads include `upstream_total_latency_ms` but does not forbid extra fields. Adding token fields is non-breaking. To formalize the new behavior, append assertions that the finish payload includes `input_tokens` and `output_tokens` whenever the upstream returned usage. Then re-pin per the standard process described in `docs/phase7/release-qualification.md`:
+`/root/claude-code-proxy/tests/test_harness_probe_contract.py` currently asserts that finish payloads include `upstream_total_latency_ms` but does not forbid extra fields. Adding token fields is non-breaking. To formalize the new behavior, append assertions that the finish payload includes `input_tokens` and `output_tokens` whenever the upstream returned usage. Then re-pin per the standard process described in [`docs/release-qualification.md`](../release-qualification.md):
 
 1. Update `tests/test_harness_probe_contract.py`.
 2. Re-run the proxy contract gate (`.venv/bin/python -m pytest -q tests/test_harness_probe_contract.py`).
-3. Record the new commit in `tools/phase7/release-gates.py`'s pinned-proxy reference.
+3. Record the new proxy commit alongside the regenerated release evidence (`tools/release/run.py --suite sandbox_isolation --include-proxy`).
 
 ## Part 2: Compaction Trigger
 
