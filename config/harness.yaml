@@ -1,5 +1,5 @@
 harness:
-  default_agent: claude_code
+  default_agent: pi
   agents:
     claude_code:
       enabled: true
@@ -12,7 +12,7 @@ harness:
       driver_id: sh
       runtime_provider: local_runsc
     pi:
-      enabled: false
+      enabled: true
       driver_id: pi
       model_profile: anthropic_default
       runtime_provider: local_runsc

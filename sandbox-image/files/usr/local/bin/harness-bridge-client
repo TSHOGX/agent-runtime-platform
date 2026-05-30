@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import collections
 import json
 import os
 import subprocess
@@ -613,6 +614,8 @@ class PiRPCTurnRunner:
         self.proc = None
         self.current_grant = {}
         self.restored_state_digest = ""
+        self.stderr_tail = collections.deque(maxlen=20)
+        self.stderr_lock = threading.Lock()
 
     def set_turn_context(self, grant):
         self.current_grant = dict(grant or {})
@@ -673,11 +676,31 @@ class PiRPCTurnRunner:
             command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
             env=env,
         )
+        if self.proc.stderr is not None:
+            threading.Thread(target=self._drain_stderr, args=(self.proc.stderr,), daemon=True).start()
+
+    def _drain_stderr(self, stream):
+        for line in stream:
+            stripped = line.rstrip("\n")
+            if stripped:
+                with self.stderr_lock:
+                    self.stderr_tail.append(stripped)
+                print(f"[pi stderr] {stripped}", file=sys.stderr, flush=True)
+
+    def _stderr_detail(self):
+        with self.stderr_lock:
+            lines = list(self.stderr_tail)
+        if not lines:
+            return ""
+        detail = " | ".join(lines[-5:])
+        if len(detail) > 1000:
+            detail = detail[-1000:]
+        return detail
 
     def _write_rpc(self, payload):
         self.proc.stdin.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
@@ -688,6 +711,9 @@ class PiRPCTurnRunner:
         if line == "":
             rc = self.proc.poll()
             detail = "exited" if rc is None else f"exited with status {rc}"
+            stderr_detail = self._stderr_detail()
+            if stderr_detail:
+                detail = f"{detail}: {stderr_detail}"
             raise RuntimeError(f"pi rpc process {detail}")
         stripped = line.rstrip("\n")
         try:
@@ -704,6 +730,9 @@ class PiRPCTurnRunner:
             _, event = self._read_rpc()
             if event.get("type") == "response" and event.get("id") == request_id:
                 if not event.get("success", False):
+                    detail = event.get("error") or event.get("message")
+                    if detail:
+                        raise RuntimeError(f"pi rpc command {command} failed: {detail}")
                     raise RuntimeError(f"pi rpc command {command} failed")
                 return event
             if event.get("type") == "error":
@@ -772,7 +801,7 @@ class PiRPCTurnRunner:
             {
                 "id": f"harness-restore-{turn_id or int(time.time_ns())}",
                 "type": "switch_session",
-                "sessionFile": expected_file,
+                "sessionPath": expected_file,
             }
         )
         stats = self._request_response({"id": f"harness-restore-{turn_id or int(time.time_ns())}-stats", "type": "get_session_stats"})

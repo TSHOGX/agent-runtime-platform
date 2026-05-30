@@ -260,7 +260,7 @@ func (piOutputNormalizer) Handle(p *streamParser, output normalizerBridgeOutput)
 			return
 		}
 		p.publish("system.status", event)
-	case "agent_start", "turn_start", "queue_update", "compaction_start", "compaction_end", "auto_retry":
+	case "agent_start", "turn_start", "message_start", "queue_update", "compaction_start", "compaction_end", "auto_retry", "auto_retry_start", "auto_retry_end":
 		p.publish("system.status", event)
 	case "message_update":
 		p.handlePiMessageUpdate(event)
@@ -286,6 +286,8 @@ func (p *streamParser) handlePiMessageUpdate(event map[string]any) {
 	assistantEvent, _ := event["assistantMessageEvent"].(map[string]any)
 	assistantEventType, _ := assistantEvent["type"].(string)
 	switch assistantEventType {
+	case "text_start", "text_end":
+		p.publish("agent.output", event)
 	case "text_delta":
 		text, _ := assistantEvent["delta"].(string)
 		if text == "" {
@@ -311,6 +313,10 @@ func (p *streamParser) handlePiMessageUpdate(event map[string]any) {
 }
 
 func (p *streamParser) handlePiMessageEnd(event map[string]any) {
+	if messageRole(event["message"]) != "assistant" {
+		p.publish("system.status", event)
+		return
+	}
 	text := piMessageText(event["message"])
 	if text == "" {
 		id := stringFromMap(event, "messageId")
@@ -327,6 +333,15 @@ func (p *streamParser) handlePiMessageEnd(event map[string]any) {
 	delete(p.pending, stringFromMap(event, "messageId"))
 	delete(p.pending, "pi_assistant_pending")
 	p.persistAssistant(text)
+}
+
+func messageRole(value any) string {
+	message, ok := value.(map[string]any)
+	if !ok {
+		return ""
+	}
+	role, _ := message["role"].(string)
+	return role
 }
 
 func piMessageText(value any) string {

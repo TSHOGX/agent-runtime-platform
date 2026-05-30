@@ -1330,22 +1330,16 @@ func buildPiDriverConfigProjection(details store.RuntimeGenerationDetails) (piDr
 	}
 	return piDriverConfigProjection{
 		Models: map[string]any{
-			"schema_version": 1,
-			"providers": []map[string]any{
-				{
-					"id":                  agents.PiHarnessProxyProvider,
-					"protocol":            "anthropic_messages",
-					"base_url":            baseURL,
-					"api_key":             "harness-model-proxy-dummy-key",
-					"credential_source":   "harness_active_turn_proxy",
-					"provider_is_builtin": false,
-				},
-			},
-			"models": []map[string]any{
-				{
-					"id":       model,
-					"provider": agents.PiHarnessProxyProvider,
-					"protocol": "anthropic_messages",
+			"providers": map[string]any{
+				agents.PiHarnessProxyProvider: map[string]any{
+					"baseUrl": baseURL,
+					"api":     "anthropic-messages",
+					"apiKey":  "harness-model-proxy-dummy-key",
+					"models": []map[string]any{
+						{
+							"id": model,
+						},
+					},
 				},
 			},
 		},
@@ -2076,6 +2070,22 @@ func (r *Runtime) prepareSandboxIsolationDataDirs(req StartRequest) error {
 	} {
 		if err := ensureSandboxOwnedDir(item.path, identity.UID, identity.GID, item.mode); err != nil {
 			return fmt.Errorf("%s: %w", item.label, err)
+		}
+	}
+	if driverID(req) == string(agents.Pi) {
+		piRootDir := filepath.Join(agentHomeHostPath, ".pi")
+		piAgentDir := filepath.Join(agentHomeHostPath, ".pi", "agent")
+		for _, item := range []struct {
+			label string
+			path  string
+		}{
+			{label: "pi root dir", path: piRootDir},
+			{label: "pi agent dir", path: piAgentDir},
+			{label: "pi session dir", path: filepath.Join(piAgentDir, "sessions")},
+		} {
+			if err := ensureSandboxOwnedDir(item.path, identity.UID, identity.GID, 0o750); err != nil {
+				return fmt.Errorf("%s: %w", item.label, err)
+			}
 		}
 	}
 	if err := prepareBridgeMountPlaceholder(req.Generation.ControlDirPath); err != nil {

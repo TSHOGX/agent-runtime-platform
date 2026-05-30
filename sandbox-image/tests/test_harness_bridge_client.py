@@ -399,6 +399,7 @@ class BridgeClientTest(unittest.TestCase):
             def __init__(self, lines):
                 self.stdin = FakeStdin()
                 self.stdout = FakeStdout(lines)
+                self.stderr = iter([])
 
             def poll(self):
                 return None
@@ -501,6 +502,187 @@ class BridgeClientTest(unittest.TestCase):
             self.assertEqual(update["state_payload"]["selected_session_id"], "pi-session-1")
             self.assertTrue(update["state_digest"].startswith("sha256:"))
 
+    def test_pi_rpc_runner_keeps_stderr_out_of_json_rpc_stream(self):
+        class FakeStdin:
+            def __init__(self):
+                self.writes = []
+
+            def write(self, value):
+                self.writes.append(value)
+
+            def flush(self):
+                pass
+
+        class FakeStdout:
+            def __init__(self, lines):
+                self.lines = list(lines)
+
+            def readline(self):
+                if not self.lines:
+                    return ""
+                return self.lines.pop(0)
+
+        class FakeProcess:
+            def __init__(self, stdout_lines):
+                self.stdin = FakeStdin()
+                self.stdout = FakeStdout(stdout_lines)
+                self.stderr = iter(["Warning: startup settings lock failed\n"])
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as root:
+            agent_dir = Path(root) / "agent"
+            session_dir = agent_dir / "sessions"
+            session_dir.mkdir(parents=True)
+            session_file = session_dir / "session-1.jsonl"
+            session_file.write_text("{}\n", encoding="utf-8")
+            models = agent_dir / "models.json"
+            settings = agent_dir / "settings.json"
+            for path in (models, settings):
+                path.write_text("{}\n", encoding="utf-8")
+                path.chmod(0o444)
+
+            lines = [
+                '{"id":"harness-turn-9","type":"response","command":"prompt","success":true}\n',
+                '{"type":"turn_end","status":"completed"}\n',
+                json.dumps(
+                    {
+                        "id": "harness-turn-9-stats",
+                        "type": "response",
+                        "command": "get_session_stats",
+                        "success": True,
+                        "data": {"sessionFile": str(session_file), "sessionId": "pi-session-1"},
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n",
+            ]
+            captured = {}
+
+            def popen(command, **kwargs):
+                captured["stderr"] = kwargs.get("stderr")
+                captured["process"] = FakeProcess(lines)
+                return captured["process"]
+
+            patches = [
+                mock.patch.object(bridge, "PI_CODING_AGENT_DIR", str(agent_dir)),
+                mock.patch.object(bridge, "PI_SESSION_DIR", str(session_dir)),
+                mock.patch.object(bridge, "PI_MODELS_SANDBOX_PATH", str(models)),
+                mock.patch.object(bridge, "PI_SETTINGS_SANDBOX_PATH", str(settings)),
+                mock.patch.object(bridge.subprocess, "Popen", side_effect=popen),
+                mock.patch.object(bridge.threading.Thread, "start", lambda self: None),
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "PI_CODING_AGENT_DIR": str(agent_dir),
+                        "PI_CODING_AGENT_SESSION_DIR": str(session_dir),
+                        "PI_OFFLINE": "1",
+                        "PI_SKIP_VERSION_CHECK": "1",
+                        "PI_TELEMETRY": "0",
+                        "PI_MODEL": "sonnet",
+                        "HARNESS_AGENT_UID": str(os.geteuid()),
+                        "HARNESS_AGENT_GID": str(os.getegid()),
+                    },
+                    clear=True,
+                ),
+            ]
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+                runner = bridge.PiRPCTurnRunner()
+                runner.set_turn_context(
+                    {
+                        "turn_id": 9,
+                        "driver_state": {
+                            "driver_id": "pi",
+                            "state_digest": "sha256:" + "a" * 64,
+                            "state_version": 1,
+                            "state_payload": {"schema_version": 1, "driver_id": "pi", "state_kind": "pi_uninitialized"},
+                        },
+                    }
+                )
+                status, error_class, error, update = runner.run_turn("hello", lambda stream, line: None)
+
+            self.assertEqual((status, error_class, error), ("completed", "", ""))
+            self.assertEqual(captured["stderr"], bridge.subprocess.PIPE)
+            self.assertEqual(update["state_payload"]["selected_session_id"], "pi-session-1")
+
+    def test_pi_rpc_runner_reports_recent_stderr_when_process_exits(self):
+        class FakeStdin:
+            def write(self, value):
+                pass
+
+            def flush(self):
+                pass
+
+        class FakeStdout:
+            def readline(self):
+                return ""
+
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = FakeStdin()
+                self.stdout = FakeStdout()
+                self.stderr = iter([])
+
+            def poll(self):
+                return 1
+
+            def terminate(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as root:
+            agent_dir = Path(root) / "agent"
+            session_dir = agent_dir / "sessions"
+            session_dir.mkdir(parents=True)
+            models = agent_dir / "models.json"
+            settings = agent_dir / "settings.json"
+            for path in (models, settings):
+                path.write_text("{}\n", encoding="utf-8")
+                path.chmod(0o444)
+
+            patches = [
+                mock.patch.object(bridge, "PI_CODING_AGENT_DIR", str(agent_dir)),
+                mock.patch.object(bridge, "PI_SESSION_DIR", str(session_dir)),
+                mock.patch.object(bridge, "PI_MODELS_SANDBOX_PATH", str(models)),
+                mock.patch.object(bridge, "PI_SETTINGS_SANDBOX_PATH", str(settings)),
+                mock.patch.object(bridge.subprocess, "Popen", return_value=FakeProcess()),
+                mock.patch.object(bridge.threading.Thread, "start", lambda self: None),
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "PI_CODING_AGENT_DIR": str(agent_dir),
+                        "PI_CODING_AGENT_SESSION_DIR": str(session_dir),
+                        "PI_OFFLINE": "1",
+                        "PI_SKIP_VERSION_CHECK": "1",
+                        "PI_TELEMETRY": "0",
+                        "PI_MODEL": "sonnet",
+                        "HARNESS_AGENT_UID": str(os.geteuid()),
+                        "HARNESS_AGENT_GID": str(os.getegid()),
+                    },
+                    clear=True,
+                ),
+            ]
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+                runner = bridge.PiRPCTurnRunner()
+                runner.set_turn_context(
+                    {
+                        "turn_id": 9,
+                        "driver_state": {
+                            "driver_id": "pi",
+                            "state_digest": "sha256:" + "a" * 64,
+                            "state_version": 1,
+                            "state_payload": {"schema_version": 1, "driver_id": "pi", "state_kind": "pi_uninitialized"},
+                        },
+                    }
+                )
+                runner.stderr_tail.append('Error: Unknown provider "harness_anthropic_proxy"')
+
+                with self.assertRaisesRegex(RuntimeError, 'pi rpc process exited with status 1: Error: Unknown provider "harness_anthropic_proxy"'):
+                    runner.run_turn("hello", lambda stream, line: None)
+
     def test_pi_rpc_runner_restores_sidecar_session_before_prompt(self):
         class FakeStdin:
             def __init__(self):
@@ -525,6 +707,7 @@ class BridgeClientTest(unittest.TestCase):
             def __init__(self, lines):
                 self.stdin = FakeStdin()
                 self.stdout = FakeStdout(lines)
+                self.stderr = iter([])
 
             def poll(self):
                 return None
@@ -625,11 +808,107 @@ class BridgeClientTest(unittest.TestCase):
             self.assertEqual((status, error_class, error), ("completed", "", ""))
             writes = [json.loads(value) for value in captured["process"].stdin.writes]
             self.assertEqual([write["type"] for write in writes], ["switch_session", "get_session_stats", "prompt", "get_session_stats"])
-            self.assertEqual(writes[0]["sessionFile"], str(session_file))
+            self.assertEqual(writes[0]["sessionPath"], str(session_file))
+            self.assertNotIn("sessionFile", writes[0])
             self.assertEqual(writes[2], {"id": "harness-turn-10", "type": "prompt", "message": "restored"})
             self.assertEqual(update["previous_state_digest"], "sha256:" + "b" * 64)
             self.assertEqual(update["state_version"], 3)
             self.assertEqual(update["state_payload"]["selected_session_id"], "pi-session-1")
+
+    def test_pi_rpc_runner_reports_failed_command_detail(self):
+        class FakeStdin:
+            def __init__(self):
+                self.writes = []
+
+            def write(self, value):
+                self.writes.append(value)
+
+            def flush(self):
+                pass
+
+        class FakeStdout:
+            def __init__(self, lines):
+                self.lines = list(lines)
+
+            def readline(self):
+                if not self.lines:
+                    return ""
+                return self.lines.pop(0)
+
+        class FakeProcess:
+            def __init__(self, lines):
+                self.stdin = FakeStdin()
+                self.stdout = FakeStdout(lines)
+                self.stderr = iter([])
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as root:
+            agent_dir = Path(root) / "agent"
+            session_dir = agent_dir / "sessions"
+            session_dir.mkdir(parents=True)
+            session_file = session_dir / "session-1.jsonl"
+            session_file.write_text("{}\n", encoding="utf-8")
+            models = agent_dir / "models.json"
+            settings = agent_dir / "settings.json"
+            for path in (models, settings):
+                path.write_text("{}\n", encoding="utf-8")
+                path.chmod(0o444)
+
+            lines = ['{"id":"harness-restore-10","type":"response","command":"switch_session","success":false,"error":"sessionPath is required"}\n']
+
+            def popen(command, **kwargs):
+                return FakeProcess(lines)
+
+            patches = [
+                mock.patch.object(bridge, "PI_CODING_AGENT_DIR", str(agent_dir)),
+                mock.patch.object(bridge, "PI_SESSION_DIR", str(session_dir)),
+                mock.patch.object(bridge, "PI_MODELS_SANDBOX_PATH", str(models)),
+                mock.patch.object(bridge, "PI_SETTINGS_SANDBOX_PATH", str(settings)),
+                mock.patch.object(bridge.subprocess, "Popen", side_effect=popen),
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "PI_CODING_AGENT_DIR": str(agent_dir),
+                        "PI_CODING_AGENT_SESSION_DIR": str(session_dir),
+                        "PI_OFFLINE": "1",
+                        "PI_SKIP_VERSION_CHECK": "1",
+                        "PI_TELEMETRY": "0",
+                        "PI_MODEL": "sonnet",
+                        "HARNESS_AGENT_UID": str(os.geteuid()),
+                        "HARNESS_AGENT_GID": str(os.getegid()),
+                    },
+                    clear=True,
+                ),
+            ]
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                runner = bridge.PiRPCTurnRunner()
+                runner.set_turn_context(
+                    {
+                        "turn_id": 10,
+                        "driver_state": {
+                            "driver_id": "pi",
+                            "state_digest": "sha256:" + "b" * 64,
+                            "state_version": 2,
+                            "state_payload": {
+                                "schema_version": 1,
+                                "driver_id": "pi",
+                                "state_kind": "pi_session",
+                                "session_dir": str(session_dir),
+                                "selected_session_relpath": "session-1.jsonl",
+                                "selected_session_file": str(session_file),
+                                "selected_session_id": "pi-session-1",
+                                "last_completed_turn_id": "9",
+                            },
+                        },
+                    }
+                )
+                with self.assertRaisesRegex(RuntimeError, "pi rpc command switch_session failed: sessionPath is required"):
+                    runner.run_turn("restored", lambda stream, line: None)
 
     def test_pi_rpc_runner_requires_restore_payload(self):
         runner = bridge.PiRPCTurnRunner()

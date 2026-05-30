@@ -1150,6 +1150,13 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ne
 	}); err != nil {
 		t.Fatalf("mark generation resources destroyed: %v", err)
 	}
+	if err := st.MarkGenerationResourcesDestroyed(ctx, DestroyGenerationResourcesParams{
+		SessionID:    "sess_recover",
+		GenerationID: allocation.GenerationID,
+		Now:          now.Add(3 * time.Second),
+	}); err != nil {
+		t.Fatalf("mark already destroyed generation resources: %v", err)
+	}
 	if destroyable, err = st.ListDestroyableReclaimableGenerations(ctx, now.Add(3*time.Second), 0); err != nil {
 		t.Fatalf("list destroyable after mark: %v", err)
 	} else if len(destroyable) != 0 {

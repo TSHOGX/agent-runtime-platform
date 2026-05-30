@@ -1282,6 +1282,27 @@ func (s *Store) MarkGenerationResourcesDestroyed(ctx context.Context, p DestroyG
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	var networkState, resourceState string
+	if err := tx.QueryRowContext(ctx, `
+SELECT n.allocation_state, r.resource_state
+FROM network_profiles n
+JOIN runtime_generation_resources r ON r.generation_id = n.generation_id
+WHERE n.session_id = ?
+  AND n.generation_id = ?`, p.SessionID, p.GenerationID).Scan(&networkState, &resourceState); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("generation resources not found for session %q generation %q", p.SessionID, p.GenerationID)
+		}
+		return err
+	}
+	if networkState == "destroyed" && resourceState == "destroyed" {
+		return tx.Commit()
+	}
+	if networkState != "reclaimable" {
+		return fmt.Errorf("network allocation destroyed CAS failed: state=%q", networkState)
+	}
+	if resourceState != "reclaimable" {
+		return fmt.Errorf("generation resource destroyed CAS failed: state=%q", resourceState)
+	}
 	res, err := tx.ExecContext(ctx, `
 UPDATE network_profiles
 SET allocation_state = 'destroyed',

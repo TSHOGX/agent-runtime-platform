@@ -273,6 +273,68 @@ func TestPiOutputNormalizerConsumesPinnedCorpus(t *testing.T) {
 	}
 }
 
+func TestPiOutputNormalizerIgnoresUserMessageEndAndPersistsAssistantOnly(t *testing.T) {
+	srv, st := newParserTestServer(t)
+	parser := newStreamParser(srv, "sess_1", "pi")
+
+	lines := []string{
+		`{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}`,
+		`{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}`,
+		`{"type":"message_start","message":{"role":"assistant","content":[]}}`,
+		`{"type":"message_update","messageId":"msg_1","assistantMessageEvent":{"type":"text_start","contentIndex":0}}`,
+		`{"type":"message_update","messageId":"msg_1","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"hello"}}`,
+		`{"type":"message_update","messageId":"msg_1","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"hello"}}`,
+		`{"type":"message_end","messageId":"msg_1","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}`,
+		`{"type":"agent_end"}`,
+	}
+	for _, line := range lines {
+		parser.handle(runtime.Output{Stream: "stdout", Line: line})
+	}
+
+	messages, err := st.ListMessages(context.Background(), "sess_1")
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	if len(messages) != 1 || messages[0].Role != "assistant" || messages[0].Content != "hello" {
+		t.Fatalf("unexpected pi messages: %+v", messages)
+	}
+	if err := parser.Err(); err != nil {
+		t.Fatalf("pi normalizer should accept standard message events: %v", err)
+	}
+}
+
+func TestPiOutputNormalizerAcceptsRetryLifecycleEvents(t *testing.T) {
+	srv, _ := newParserTestServer(t)
+	parser := newStreamParser(srv, "sess_1", "pi")
+	ch, cancel := srv.hub.Subscribe("sess_1")
+	defer cancel()
+
+	for _, line := range []string{
+		`{"type":"auto_retry_start","attempt":1}`,
+		`{"type":"auto_retry_end","attempt":1}`,
+	} {
+		parser.handle(runtime.Output{Stream: "stdout", Line: line})
+	}
+
+	for _, wantType := range []string{"auto_retry_start", "auto_retry_end"} {
+		select {
+		case event := <-ch:
+			if event.Type != "system.status" {
+				t.Fatalf("expected retry lifecycle event to publish system.status, got %+v", event)
+			}
+			payload, ok := event.Payload.(map[string]any)
+			if !ok || payload["type"] != wantType {
+				t.Fatalf("unexpected retry lifecycle payload: %+v", event.Payload)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for %s event", wantType)
+		}
+	}
+	if err := parser.Err(); err != nil {
+		t.Fatalf("pi normalizer should accept retry lifecycle events: %v", err)
+	}
+}
+
 func TestPiOutputNormalizerRejectsUnknownType(t *testing.T) {
 	srv, _ := newParserTestServer(t)
 	parser := newStreamParser(srv, "sess_1", "pi")

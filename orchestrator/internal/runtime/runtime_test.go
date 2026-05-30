@@ -1929,12 +1929,37 @@ func TestPreparePiGenerationMaterializesReadOnlyConfig(t *testing.T) {
 	if err := json.Unmarshal(mustReadFile(t, entries["models"].HostSourcePath), &models); err != nil {
 		t.Fatalf("parse pi models config: %v", err)
 	}
-	modelsJSON := string(mustJSONForTest(t, models))
-	if !strings.Contains(modelsJSON, agents.PiHarnessProxyProvider) ||
-		!strings.Contains(modelsJSON, "http://harness-model-proxy.internal:8082") ||
-		strings.Contains(modelsJSON, `"anthropic"`) {
-		t.Fatalf("pi models config does not force harness proxy provider: %s", modelsJSON)
+	providers, ok := models["providers"].(map[string]any)
+	if !ok {
+		t.Fatalf("pi models config providers must be an object: %+v", models)
 	}
+	provider, ok := providers[agents.PiHarnessProxyProvider].(map[string]any)
+	if !ok {
+		t.Fatalf("pi models config missing harness proxy provider: %+v", models)
+	}
+	if provider["baseUrl"] != "http://harness-model-proxy.internal:8082" ||
+		provider["api"] != "anthropic-messages" ||
+		provider["apiKey"] != "harness-model-proxy-dummy-key" {
+		t.Fatalf("unexpected pi provider config: %+v", provider)
+	}
+	modelEntries, ok := provider["models"].([]any)
+	if !ok || len(modelEntries) != 1 {
+		t.Fatalf("unexpected pi provider models: %+v", provider["models"])
+	}
+	modelEntry, ok := modelEntries[0].(map[string]any)
+	if !ok || modelEntry["id"] != "sonnet" {
+		t.Fatalf("unexpected pi model entry: %+v", modelEntries[0])
+	}
+	if _, ok := models["schema_version"]; ok {
+		t.Fatalf("pi models config must use Pi native schema without harness schema_version: %+v", models)
+	}
+	if _, ok := models["models"]; ok {
+		t.Fatalf("pi models config must not use legacy top-level models array: %+v", models)
+	}
+	if _, ok := providers["anthropic"]; ok {
+		t.Fatalf("pi models config must not use built-in anthropic provider: %+v", models)
+	}
+	modelsJSON := string(mustJSONForTest(t, models))
 	if strings.Contains(modelsJSON, "sk-ant-") || strings.Contains(modelsJSON, "ANTHROPIC_API_KEY") {
 		t.Fatalf("pi models config leaked provider credentials: %s", modelsJSON)
 	}
@@ -1948,6 +1973,17 @@ func TestPreparePiGenerationMaterializesReadOnlyConfig(t *testing.T) {
 		settings["skip_version_check"] != true ||
 		settings["telemetry"] != false {
 		t.Fatalf("unexpected pi settings config: %+v", settings)
+	}
+	_, piAgentHomePath := dataVolumePathsForTest(dir, "sess_pi", "pi")
+	for _, check := range []struct {
+		path string
+		mode os.FileMode
+	}{
+		{path: filepath.Join(piAgentHomePath, ".pi"), mode: 0o750},
+		{path: filepath.Join(piAgentHomePath, ".pi", "agent"), mode: 0o750},
+		{path: filepath.Join(piAgentHomePath, ".pi", "agent", "sessions"), mode: 0o750},
+	} {
+		assertDirOwnership(t, check.path, testSandboxUID(), testSandboxGID(), check.mode)
 	}
 
 	var spec runtimeSpec
@@ -2444,19 +2480,24 @@ func assertGenerationFilesystemMissing(t *testing.T, paths []string) {
 
 func assertBridgeDirOwnership(t *testing.T, path string, uid, gid int, mode os.FileMode) {
 	t.Helper()
+	assertDirOwnership(t, path, uid, gid, mode)
+}
+
+func assertDirOwnership(t *testing.T, path string, uid, gid int, mode os.FileMode) {
+	t.Helper()
 	info, err := os.Stat(path)
 	if err != nil {
-		t.Fatalf("stat bridge dir %s: %v", path, err)
+		t.Fatalf("stat dir %s: %v", path, err)
 	}
 	if !info.IsDir() || info.Mode().Perm() != mode {
-		t.Fatalf("bridge dir %s mode=%#o is_dir=%v want mode=%#o", path, info.Mode().Perm(), info.IsDir(), mode)
+		t.Fatalf("dir %s mode=%#o is_dir=%v want mode=%#o", path, info.Mode().Perm(), info.IsDir(), mode)
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		t.Fatalf("bridge dir %s stat type = %T", path, info.Sys())
+		t.Fatalf("dir %s stat type = %T", path, info.Sys())
 	}
 	if int(stat.Uid) != uid || int(stat.Gid) != gid {
-		t.Fatalf("bridge dir %s owner=%d:%d want %d:%d", path, stat.Uid, stat.Gid, uid, gid)
+		t.Fatalf("dir %s owner=%d:%d want %d:%d", path, stat.Uid, stat.Gid, uid, gid)
 	}
 }
 
