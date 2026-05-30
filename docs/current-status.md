@@ -14,6 +14,12 @@ long-lived AI agent work.
 - Frontend workbench: Next.js on port `8000`.
 - Orchestrator API: Go service on port `8090`, with optional shared-password
   lab auth via `HARNESS_LAB_PASSWORD`.
+- Checked-in lab deployment: product `Agent` resolves to Pi
+  (`harness.default_agent: pi`) and product `Shell` uses `sh`; `claude_code`
+  remains configured for explicit overrides and smokes.
+- Expected active rootfs manifest for the default product modes:
+  `SANDBOX_AGENT_DRIVERS=pi,sh`, with Pi
+  `@earendil-works/pi-coding-agent@0.77.0` and the shell shim present.
 - Runtime: gVisor `runsc` direct launch with per-generation OCI specs,
   control manifests, bridge dirs, network profiles, and SQLite persistence.
 - Turn execution: Agent Bridge protocol v2 claim/ack is the live path for
@@ -102,14 +108,15 @@ POST /api/sessions/<id>/messages
   -> running_idle
 ```
 
-Agent mode selects the enabled deployment default agent driver (`claude_code`
-or `pi`) only when that driver is present in the selected image manifest.
-Claude Code uses stream-json. Pi runs as a long-lived RPC process through the
-same model-proxy boundary and advances its logical restore sidecar only after
-successful completed turns pass runner and host validation. Shell is available
-only when enabled in config and present in the image manifest; shell turns use
-the same bridge lifecycle, complete through `harness.turn_done`, and can be
-interrupted with `POST /api/sessions/<id>/interrupt`.
+Agent mode selects the enabled deployment default agent driver, which is `pi`
+in the checked-in lab profile and may be `claude_code` in another deployment
+when the selected image manifest contains it. Claude Code uses stream-json. Pi
+runs as a long-lived RPC process through the same model-proxy boundary and
+advances its logical restore sidecar only after successful completed turns pass
+runner and host validation. Shell is available only when enabled in config and
+present in the image manifest; shell turns use the same bridge lifecycle,
+complete through `harness.turn_done`, and can be interrupted with
+`POST /api/sessions/<id>/interrupt`.
 
 Canonical session states and public API/event details live in
 [architecture.md](./architecture.md). Historical phase logs remain useful as
@@ -147,9 +154,12 @@ python3 -m unittest sandbox-image/tests/test_harness_bridge_client.py
 python3 tools/phase8/release-gates.py --static-only
 ```
 
-After runtime, bridge, Claude CLI, proxy, or session-lifecycle changes, also run
-a live two-turn Claude smoke on a fresh session and verify both turns complete
-under the same Claude session UUID.
+After runtime, bridge, proxy, deployment-config, rootfs, or session-lifecycle
+changes, also run a live smoke for the selected deployment driver. For the
+checked-in lab default that means `mode: "agent"` resolving to `pi`; for
+Claude Code-specific changes, use a rootfs/manifest that includes
+`claude_code`, then run a live two-turn Claude smoke on a fresh session and
+verify both turns complete under the same Claude session UUID.
 
 For publishable runtime-isolation candidates, rerun the full evidence-producing
 Phase 8 gate sequence in [phase8/release-gates.md](./phase8/release-gates.md).

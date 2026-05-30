@@ -20,7 +20,7 @@ Runtime evidence:
 - RPC mode starts with `pi --mode rpc`.
 - Smoke tests may add `--no-session`; production must not.
 - Production starts with `--session-dir /agent-home/.pi/agent/sessions`.
-- The harness uses RPC `switch_session` followed by `get_session_stats` for restore selection because this fixture does not prove a startup session selector for Phase 9.
-- Session state evidence is accepted only when `sessionFile` resolves under `/agent-home/.pi/agent/sessions` and `sessionId` is non-empty.
+- The harness uses RPC `switch_session` with `sessionPath`, followed by `get_session_stats`, for restore selection because this fixture does not prove a startup session selector for Phase 9.
+- Session state evidence is accepted only when `get_session_stats.sessionFile` resolves under `/agent-home/.pi/agent/sessions` and `sessionId` is non-empty.
 - Startup gates are `PI_CODING_AGENT_DIR=/agent-home/.pi/agent`, `PI_CODING_AGENT_SESSION_DIR=/agent-home/.pi/agent/sessions`, `PI_OFFLINE=1`, `PI_SKIP_VERSION_CHECK=1`, and `PI_TELEMETRY=0`.
 - Normalizer tests consume `event-normalizer-corpus.jsonl` and fail closed for event types outside `event-schema.json`.

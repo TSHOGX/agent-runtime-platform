@@ -32,9 +32,9 @@ The Phase 3 foundation is now running with the newer runtime path from commits `
 - Browser event delivery is now SSE on the frontend origin, with WebSocket kept only for compatibility.
 - The old "multi-turn routing is not implemented yet" note is no longer current.
 
-## API Gate
+## Historical Smoke Flow
 
-Target smoke flow:
+Original Phase 3 smoke flow:
 
 ```bash
 cd orchestrator
@@ -64,6 +64,6 @@ If `HARNESS_LAB_PASSWORD` is set, first call `/api/login` and pass the returned 
 ## Important Notes
 
 - The MVP originally reused the Phase 2 shell script as the runtime boundary. That note is now historical; the active orchestrator path drives `runsc` directly.
-- The shell path is now an interactive PTY-backed session with `/api/sessions/<id>/interrupt`; Claude remains the primary long-form analysis path.
+- Shell is now an interactive PTY-backed session with `/api/sessions/<id>/interrupt`. Current Agent driver selection is deployment-configured; see [current-status.md](./current-status.md).
 - The upgraded `runsc release-20260511.0` no longer reproduces the earlier long-running service restore panic on this host. The old stdin turn channel was not reconnectable enough after restore; Phase 7 replaced it with bridge claim/ack and keeps automatic checkpointing policy-gated.
 - Multi-turn routing is now handled by the per-container `OutputHub` and stream parser completion logic.

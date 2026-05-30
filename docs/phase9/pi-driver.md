@@ -1,34 +1,47 @@
 # Pi Driver
 
-Pi enters Phase 9 as a registered driver after the driver/provider contract,
-capability check, bridge runner abstraction, output normalizer registry, and
-strict model-provider secret grants are in place. It should not add a second
-Claude-shaped branch.
+> Status: implemented Phase 9 baseline. The current checked-in lab profile uses
+> Pi as the product `Agent` default.
 
-9f must also run the Pi schema-widening gate before Pi is selectable. The 9a
-schema intentionally constrains `sessions.driver_id`,
-`agent_runtime_profiles.driver_id`, and `session_driver_states.driver_id` to
-Claude Code and shell; the Pi schema update widens those canonical-driver
-checks to include `pi`. This widening is preserving, not a release reset. If
-SQLite constraints require table rebuilds, the migration must copy valid
-post-9a/9c/9e canonical rows into the rebuilt tables inside the migration
-transaction, keep foreign keys consistent, and leave valid Claude Code and
-shell sessions, sidecars, runtime profiles, active generations, checkpointed
-generations, message history, and artifact metadata intact. Any future choice
-to make Pi enablement a release reset must be explicit and gated separately
-before it deletes active or checkpointed state.
+Pi is a registered driver on top of the driver/provider contract, capability
+check, bridge runner abstraction, output normalizer registry, and strict
+model-provider secret grants. It is not a second Claude-shaped branch.
+
+The 9f Pi schema-widening gate made Pi selectable. The 9a schema intentionally
+constrained `sessions.driver_id`, `agent_runtime_profiles.driver_id`, and
+`session_driver_states.driver_id` to Claude Code and shell; the Pi schema update
+widened those canonical-driver checks to include `pi`. This widening is
+preserving, not a release reset. If future SQLite constraints require table
+rebuilds, the migration must copy valid post-9a/9c/9e canonical rows into the
+rebuilt tables inside the migration transaction, keep foreign keys consistent,
+and leave valid Claude Code and shell sessions, sidecars, runtime profiles,
+active generations, checkpointed generations, message history, and artifact
+metadata intact. Any future choice to make Pi enablement a release reset must
+be explicit and gated separately before it deletes active or checkpointed
+state.
 
 ## Rootfs and Image Manifest
 
-Rootfs build input:
+For the checked-in lab default:
 
 ```bash
-SANDBOX_AGENT_DRIVERS=pi FORCE=1 sandbox-image/build-rootfs.sh
+SANDBOX_AGENT_DRIVERS=pi,sh ./sandbox-image/build-rootfs.sh
 ```
 
-9c owns the generic image-manifest generator and Claude/shell rootfs
-parameterization. 9f extends that same build input and manifest schema with Pi;
-it must not add a separate hand-written manifest path.
+The active rootfs manifest must include `pi` and `sh`. Use `FORCE=1` with the
+same driver set when the existing rootfs lacks a selected driver CLI or
+otherwise requires a full rebuild:
+
+```bash
+SANDBOX_AGENT_DRIVERS=pi,sh FORCE=1 ./sandbox-image/build-rootfs.sh
+```
+
+For a Pi-only deployment, `SANDBOX_AGENT_DRIVERS=pi` is valid, but Shell must
+then be disabled or unavailable in deployment capabilities.
+
+9c introduced the generic image-manifest generator and Claude/shell rootfs
+parameterization. 9f extended that same build input and manifest schema with
+Pi; there is no separate hand-written Pi manifest path.
 
 The image manifest at `/etc/harness-image/agents.json` must record:
 
@@ -44,11 +57,11 @@ The image manifest digest is recorded separately as
 content fence; `input_digests.rootfs_image_digest` keeps that role when the
 selected runtime provider exposes one.
 
-The generic allocation gate is introduced in 9c: allocation fails before
-runtime creation if the selected driver is not present in the image manifest.
-9f adds the Pi-specific manifest entries above and proves that
-`harness.default_agent: pi` and enabled Pi profiles pass that existing gate only
-when the image contains Pi.
+The generic allocation gate landed in 9c: allocation fails before runtime
+creation if the selected driver is not present in the image manifest. 9f added
+the Pi-specific manifest entries above and proved that
+`harness.default_agent: pi` and enabled Pi profiles pass that gate only when
+the image contains Pi.
 
 ## Runtime Command
 
@@ -65,7 +78,8 @@ Cold restart session selection is conditional on the pinned Pi release
 evidence. The current `/latest` RPC docs list startup session-directory and
 no-session controls and expose session switching through RPC, so Phase 9 must
 not treat an undocumented `--session` startup flag as normative. For the exact
-Pi CLI version installed in the image, 9f must prove one of these restore paths:
+Pi CLI version installed in the image, release evidence must prove one of these
+restore paths:
 
 - If pinned CLI evidence documents and verifies a startup session selector,
   start Pi with `--session-dir` plus that selector and record the exact argv,
@@ -74,8 +88,8 @@ Pi CLI version installed in the image, 9f must prove one of these restore paths:
   the host-validated persisted session file or ID, then verify the selected
   session with `get_session_stats` before accepting work.
 - If the pinned CLI proves neither path, Pi physical/logical restore from a
-  persisted session fails closed and Pi is not selectable for resumable
-  sessions.
+  persisted session fails closed and that Pi version is not selectable for
+  resumable sessions.
 
 Sandbox environment:
 
@@ -156,19 +170,33 @@ read-only file bind backed by the generated `/harness-control/driver/pi/`
 projection source and digest in the v2 contract, or if the sandbox can mutate
 either config pathname.
 
-The generated `models.json` must define a harness-specific provider ID such as
-`harness_anthropic_proxy`. Agent config and Pi argv must use that provider ID:
+The generated `models.json` must use Pi's native custom-provider object schema
+with a harness-specific provider ID such as `harness_anthropic_proxy`:
 
-```text
-pi --provider harness_anthropic_proxy --model <model>
+```json
+{
+  "providers": {
+    "harness_anthropic_proxy": {
+      "baseUrl": "http://harness-model-proxy.internal:8082",
+      "api": "anthropic-messages",
+      "apiKey": "harness-model-proxy-dummy-key",
+      "models": [
+        {
+          "id": "<model>"
+        }
+      ]
+    }
+  }
+}
 ```
 
 The provider definition points at `harness.model_proxy.sandbox_base_url`, uses
-Pi's Anthropic-compatible custom-provider mode when the upstream model profile
-is Anthropic Messages, and includes only a non-secret dummy API key if Pi
-requires an API-key field. It must not use Pi's built-in `anthropic` provider
-ID, because that can bypass the harness proxy path and select Pi's native
-provider behavior.
+Pi's Anthropic Messages custom-provider API when the upstream model profile is
+Anthropic Messages, and includes only a non-secret dummy API key. It must not
+use Pi's built-in `anthropic` provider ID, a top-level harness
+`schema_version`, a legacy top-level `models` array, or real upstream provider
+credentials, because those either fail against the pinned Pi schema or bypass
+the harness proxy boundary.
 
 ## Writable State
 
@@ -291,16 +319,21 @@ emit normalized output
 ack completed, failed, or canceled
 ```
 
-Initial mapping:
+Initial normalizer mapping:
 
-| Pi event | Harness event |
+| Pi signal | Harness result |
 | --- | --- |
-| text delta | `agent.delta` |
+| successful `response` | `system.status` |
+| failed `response` / `error` | fail closed |
+| assistant `message_update` `text_delta` | `agent.delta` |
+| assistant `message_update` `text_start` / `text_end` | `agent.output` |
 | final assistant message | `agent.message` |
-| tool execution event | `agent.output` initially |
-| `turn_end` / `agent_end` | turn completion |
-| RPC `abort` | interrupt |
-| RPC `compact` | compaction |
+| non-assistant `message_end` | `system.status` |
+| `agent_start`, `turn_start`, `message_start`, queue/compaction/retry lifecycle | `system.status` |
+| `tool_execution_*` | `agent.output` initially |
+| `turn_end` / `agent_end` | `system.status` and turn completion |
+| RPC `abort` command | interrupt |
+| RPC `compact` command | compaction |
 
 Unknown event types must fail closed. The normalizer should not silently pass
 through unknown structured events because Pi CLI upgrades can change the event
@@ -323,10 +356,9 @@ silently ignoring operator policy.
 
 ## Release Evidence
 
-Pi docs under `/latest` are discovery references only. Before 9f can enable Pi
-selection, commit release evidence for the exact pinned Pi CLI and event schema
-that the sandbox image installs. Store it under a versioned fixture directory,
-for example:
+Pi docs under `/latest` are discovery references only. Release evidence for the
+exact pinned Pi CLI and event schema that the sandbox image installs is stored
+under a versioned fixture directory, currently `0.77.0`:
 
 ```text
 docs/phase9/fixtures/pi/<pi-cli-version>/
@@ -361,9 +393,9 @@ checked-in event corpus; they do not depend on live `/latest` docs.
   `PI_TELEMETRY=0`.
 - Pi cold start performs no version-check, telemetry, package, provider, model,
   or other non-model-proxy egress.
-- Pi uses a generated harness proxy provider ID, never a Pi built-in upstream
-  provider ID, and reaches models only through the sandbox proxy alias during
-  active turns.
+- Pi uses generated Pi-native `models.json` custom-provider config with a
+  harness proxy provider ID, never a Pi built-in upstream provider ID, and
+  reaches models only through the sandbox proxy alias during active turns.
 - Pi startup proves that `/agent-home/.pi/agent/models.json` and
   `/agent-home/.pi/agent/settings.json` are materialized from
   `/harness-control/driver/pi/`, match the generated config digests, and are
@@ -372,7 +404,7 @@ checked-in event corpus; they do not depend on live `/latest` docs.
   reconnect/cold-restart attach; symlink materialization, exact file binds that
   no longer resolve to the generated projection, missing files, or
   sandbox-mutable config pathnames fail closed before Pi consumes config.
-- Pi is not selectable until the strict model-provider grant includes `pi` in
+- Pi selection requires the strict model-provider grant to include `pi` in
   `allowed_drivers` and the selected runtime provider ID in
   `allowed_runtime_providers`.
 - A new Pi-backed session can allocate its first generation by creating the

@@ -3,7 +3,7 @@
 > Status: implemented baseline on top of the completed [Phase 8 runtime isolation hardening](../phase8/README.md).
 > Roadmap entry: [PLAN.md -> Phase 9](../PLAN.md#phase-9-agent-driver-and-pi-integration).
 
-Phase 9 turns "agent" from a Claude-shaped branch into two contracts:
+Phase 9 made "agent" a deployment-selected path built from two contracts:
 
 - `AgentDriverSpec`: conversation semantics, runner protocol, output schema,
   model access, driver-private state, and Phase 10 adapter support.
@@ -147,16 +147,16 @@ the workbench.
   may delete missing, legacy, unknown, or malformed rows, but purging valid rows
   for a now-disabled driver requires a separately named destructive reset with
   explicit provider cleanup/quarantine behavior.
-- The image manifest gate lands in 9c before Pi can be selected. It applies to
-  every selected driver, including `sh`.
+- The image manifest gate landed in 9c before Pi selection. It applies to every
+  selected driver, including `sh`.
 
 ## Document Map
 
 - [implementation-slices.md](./implementation-slices.md): 9a-9f execution
   index. Detailed checklists, code touchpoints, and gates live under
   `slices/`.
-- [current-code-map.md](./current-code-map.md): current code facts and the
-  Phase 9 slice that owns each change.
+- [current-code-map.md](./current-code-map.md): pre-Phase 9 code facts and the
+  Phase 9 slice that changed each area.
 - [sandbox-contract-v2.md](./sandbox-contract-v2.md): contract schema v2
   index and v1 sunset rules. Focused contract references live under
   `contract/`.
@@ -189,5 +189,6 @@ adapters or normalizers; silent no-op behavior is not allowed.
 - Phase 8 sandbox contract: [docs/phase8/sandbox-contract.md](../phase8/sandbox-contract.md)
 - Phase 10 adapter plan: [docs/phase10/README.md](../phase10/README.md)
 - Pi discovery references are intentionally non-normative because `/latest`
-  can drift. 9f must commit pinned CLI/schema evidence before Pi is selectable;
+  can drift. Pinned CLI/schema evidence is committed for the selected Pi
+  version, and future Pi upgrades must refresh that evidence before rollout;
   see [pi-driver.md](./pi-driver.md#release-evidence).

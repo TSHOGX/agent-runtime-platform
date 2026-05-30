@@ -216,9 +216,8 @@ contracts, Phase 9 input evidence, DataVolume rows, and artifact metadata.
 Primary project config is `config/harness.yaml` under the `harness:` schema.
 The checked-in lab profile currently sets:
 
-- `default_agent: claude_code`
-- `agents.claude_code`, `agents.sh`, and disabled `agents.pi` deployment
-  entries
+- `default_agent: pi`
+- enabled `agents.pi`, `agents.claude_code`, and `agents.sh` entries
 - `model_profiles.anthropic_default` with `proxy_ref: model_proxy`
 - `runtime_providers.local_runsc`
 - `run_dir: /var/lib/harness/run`
@@ -234,10 +233,18 @@ The checked-in lab profile currently sets:
 - failed resource retention: `10m`
 - checkpoint image retention: `720h`
 
+The active rootfs image manifest is an operational artifact, not only source
+config. The checked-in lab default selects Pi for `Agent` and exposes `Shell`,
+so the selected rootfs must include `pi` and `sh` entries in
+`/etc/harness-image/agents.json`. `claude_code` remains configured for explicit
+overrides and smokes, but any deployment that selects it must use a manifest
+containing `claude_code`.
+
 Important environment overrides:
 
 - `HARNESS_ORCHESTRATOR_ADDR`
 - `HARNESS_LAB_PASSWORD`
+- `HARNESS_DEFAULT_AGENT`
 - `HARNESS_SESSION_RETENTION`
 - `HARNESS_MAX_SESSIONS`
 - `HARNESS_SESSIONS_ROOT`

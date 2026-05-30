@@ -89,7 +89,7 @@ Standing constraints that must hold after P0, Phase 8, and Phase 9, throughout
 Phase 10, Phase 11, and any later work. These are not deliverables — there is no "done"
 state — but any change that violates one should be revisited before it lands.
 
-1. Maintain the supported Claude Code and shell session paths.
+1. Maintain the supported Pi, Claude Code, and shell session paths.
 2. Keep Phase 7 release gates blocking for runtime, proxy, or config changes
    until a later phase explicitly retires or replaces a gate. Phase 8's gate
    compatibility and retired-gate mapping live in
@@ -112,6 +112,10 @@ state — but any change that violates one should be revisited before it lands.
    the active rootfs before live testing. The repo overlay is source of truth,
    but gVisor launches the files currently present under `sandbox-image/rootfs`
    or the configured `HARNESS_ROOTFS_PATH`.
-8. For runtime, bridge, Claude CLI, proxy, or session-lifecycle changes, run a
-   live two-turn Claude smoke on a fresh session and verify both turns complete
-   under the same Claude session UUID.
+8. For runtime, bridge, proxy, deployment-config, rootfs, or
+   session-lifecycle changes, run a live smoke for the selected deployment
+   driver. For the checked-in lab default that means `mode: "agent"` resolving
+   to Pi. For Claude CLI or Claude state-continuity changes, use a rootfs
+   manifest containing `claude_code`, then run a live two-turn Claude smoke on
+   a fresh session and verify both turns complete under the same Claude session
+   UUID.

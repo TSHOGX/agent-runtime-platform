@@ -49,8 +49,7 @@ quarantine, or reactivation path.
 first time schema, loader, sidecar, checkpoint, projection, and proxy
 authorization changes meet. 9b promotes 9a hard-coded driver/provider facts into
 registries without changing digest bytes for unchanged facts. 9c adds the
-product-facing mode/config layer and image-manifest gate before 9f can select
-Pi.
+product-facing mode/config layer and image-manifest gate before Pi selection.
 
 9a, 9b, and 9c are independently releasable. Until 9c lands, 9a/9b may keep a
 public API compatibility adapter for the existing `agent: "claude" | "sh"`

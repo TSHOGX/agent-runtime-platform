@@ -47,7 +47,8 @@ Useful environment variables:
 - `HARNESS_CHECKPOINTS_ROOT` defaults to `/var/lib/harness/checkpoints`.
 - `HARNESS_BUNDLE_ROOT` defaults to `<repo>/bundle/out`.
 - `HARNESS_DB_PATH` defaults to `/var/lib/harness/state/orchestrator.db`.
-- `HARNESS_DEFAULT_AGENT` defaults to `claude`.
+- `HARNESS_DEFAULT_AGENT` overrides `harness.default_agent`; the checked-in
+  lab config defaults Agent mode to `pi`.
 - `HARNESS_MAX_SESSIONS` defaults to `30` and caps non-terminal sessions, not live `/30` slots.
 - `RUNSC_ROOT` defaults to `/var/lib/harness/runsc`.
 - `HARNESS_RESTORE_SCRIPT` is loaded for compatibility, but the current direct `runsc` path does not execute it.
@@ -58,6 +59,33 @@ Runtime network and model proxy settings are explicit in `config/harness.yaml`:
 
 ```yaml
 harness:
+  default_agent: pi
+  agents:
+    pi:
+      enabled: true
+      driver_id: pi
+      model_profile: anthropic_default
+      runtime_provider: local_runsc
+    claude_code:
+      enabled: true
+      driver_id: claude_code
+      model_profile: anthropic_default
+      runtime_provider: local_runsc
+    sh:
+      enabled: true
+      driver_id: sh
+      runtime_provider: local_runsc
+  model_profiles:
+    anthropic_default:
+      enabled: true
+      provider: anthropic_messages
+      model: sonnet
+      proxy_ref: model_proxy
+  runtime_providers:
+    local_runsc:
+      enabled: true
+      provider_id: local_runsc
+      profile_id: local_runsc_default
   run_dir: /var/lib/harness/run
   session_retention: 0s
   max_sessions: 30
@@ -101,11 +129,45 @@ harness:
     checkpoint_image_retention: 720h
 ```
 
-The loader uses strict YAML decoding for the Phase 7 `harness:` schema. `harness.model_proxy.bind_url` controls the host listener port used for probes and egress allow-listing; `harness.model_proxy.sandbox_base_url` is the sandbox-visible alias written into generated control manifests. Legacy files containing only top-level `runtime:` / `claude:` sections still load for compatibility, and legacy `claude.proxy_bind_url` / `claude.sandbox_base_url` map to `harness.model_proxy`, but mixing them with `harness:` is rejected. Legacy `harness.secrets.*` keys are rejected; provider credentials stay host-side.
+The loader uses strict YAML decoding for the Phase 7 `harness:` schema.
+`harness.default_agent` selects the product `Agent` driver for new sessions;
+`sh` is selected only through product `mode: "shell"`.
+`harness.model_proxy.bind_url` controls the host listener port used for probes
+and egress allow-listing; `harness.model_proxy.sandbox_base_url` is the
+sandbox-visible alias written into generated control manifests.
+
+Legacy files containing only top-level `runtime:` / `claude:` sections still
+load for compatibility, and legacy `claude.proxy_bind_url` /
+`claude.sandbox_base_url` map to `harness.model_proxy`, but mixing them with
+`harness:` is rejected. Legacy `harness.secrets.*` keys are rejected; provider
+credentials stay host-side.
+
+The selected rootfs must contain an image manifest for the drivers selected by
+product modes. The checked-in lab default needs Pi Agent and Shell:
+
+```bash
+SANDBOX_AGENT_DRIVERS=pi,sh ./sandbox-image/build-rootfs.sh
+```
+
+Use `FORCE=1` with the same driver set when the existing rootfs lacks a
+selected driver CLI; the non-`FORCE` path only syncs the overlay and regenerates
+the manifest. If the manifest is missing `pi`, Agent session
+creation/allocation fails before runtime start; if it is missing `sh`, Shell is
+hidden or rejected. `claude_code` remains configured for explicit
+overrides/smokes; include it in `SANDBOX_AGENT_DRIVERS` before selecting it.
 
 With `session_retention: 0s`, retained non-terminal sessions keep counting toward `max_sessions` even after runtime resources are retired. The `/api/quota` response reports the session ceiling and live `/30` pool ceiling separately. Use `DELETE /api/sessions/<id>` to close sessions and free session quota; close preserves messages, artifacts, workspace, and agent-home paths while reclaiming runtime resources.
 
-The runtime currently launches `runsc` directly in sandbox mode and keeps containers alive across turns. Each generation gets its own network profile, netns/veth pair, `/30`, generated runtime spec, control manifest, and file-queue bridge. Automatic idle checkpointing is a per-session policy: the checked-in default is off, `HARNESS_AUTO_CHECKPOINT_ENABLED=true` enables the policy for newly created sessions, and only the next idle generation with an empty turn queue plus fresh bridge heartbeat/checkpoint-ready markers can checkpoint. `Shell` sessions use the PTY-backed shell shim and can be interrupted with `POST /api/sessions/<id>/interrupt`. The legacy `bundle/bake-bundle.sh` and `bundle/restore-sandbox.sh` smoke tools fail closed and are not Phase 8 release evidence.
+The runtime launches `runsc` directly in sandbox mode and keeps containers alive
+across turns. Each generation gets its own network profile, netns/veth pair,
+`/30`, generated runtime spec, control manifest, and file-queue bridge.
+
+Automatic idle checkpointing is a per-session policy. The checked-in default is
+off; `HARNESS_AUTO_CHECKPOINT_ENABLED=true` enables it for newly created
+sessions. Only the next idle generation with an empty turn queue plus fresh
+bridge heartbeat/checkpoint-ready markers can checkpoint. The legacy
+`bundle/bake-bundle.sh` and `bundle/restore-sandbox.sh` smoke tools fail closed
+and are not Phase 8 release evidence.
 
 ## Event Streams
 
@@ -135,8 +197,11 @@ Create a session:
 curl -b /tmp/harness.cookies \
   -X POST http://127.0.0.1:8090/api/sessions \
   -H 'content-type: application/json' \
-  -d '{"agent":"claude"}'
+  -d '{"mode":"agent"}'
 ```
+
+Use `{"mode":"shell"}` for the PTY shell path when Shell is enabled. Raw
+`agent` input is rejected after the Phase 9 product-mode cutover.
 
 Send the first message:
 
@@ -172,6 +237,8 @@ Artifact downloads are read-only and limited to regular files under the session 
 
 ## Notes
 
-- The current Claude path uses stream-json turns and a per-container output hub.
+- Product `Agent` resolves to Pi in the checked-in lab config.
+- Claude Code remains available for deployments or smokes that select it and
+  use an image manifest containing `claude_code`.
 - `sh` is the interactive shell session path; it is still useful for smoke tests and shell-style debugging.
 - Checkpoint/restore is generation-aware. Automatic checkpointing remains default-off in the checked-in lab config, and should be enabled only for lab profiles or explicit test environments.

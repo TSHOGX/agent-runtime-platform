@@ -1,9 +1,15 @@
 {"type":"response","id":"prompt-1","command":"prompt","success":true}
+{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"Hello"}]}}
+{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"Hello"}]}}
 {"type":"turn_start","turnId":"turn-1"}
+{"type":"message_start","message":{"role":"assistant","content":[]}}
+{"type":"message_update","messageId":"msg-1","assistantMessageEvent":{"type":"text_start","contentIndex":0}}
 {"type":"message_update","messageId":"msg-1","assistantMessageEvent":{"type":"text_delta","delta":"Hello"}}
 {"type":"message_update","messageId":"msg-1","assistantMessageEvent":{"type":"text_delta","delta":" world"}}
+{"type":"message_update","messageId":"msg-1","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"Hello world"}}
 {"type":"tool_execution_start","id":"tool-1","name":"read_file","input":{"path":"README.md"}}
 {"type":"tool_execution_end","id":"tool-1","name":"read_file","success":true,"output":"read README.md"}
+{"type":"auto_retry_start","attempt":1}
+{"type":"auto_retry_end","attempt":1}
 {"type":"message_end","messageId":"msg-1","message":{"role":"assistant","content":[{"type":"text","text":"Hello world"}]}}
 {"type":"turn_end","turnId":"turn-1","status":"completed"}
-

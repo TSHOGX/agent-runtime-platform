@@ -2,7 +2,7 @@
 
 > 测试时间：2026-05-19
 > 目的：确认本机 Claude Code Proxy、Claude Code、OpenCode 能否通过 Anthropic-compatible 方式完成最小请求。
-> 当前实现注记：这是 Phase 0 本机连通性记录。OpenCode 只保留为候选验证记录；当前 agent registry 支持 Claude Code 和 PTY-backed Shell。当前 sandbox 模型访问边界见 [architecture.md](./architecture.md) 和 [current-status.md](./current-status.md)。
+> 当前实现注记：这是 Phase 0 本机连通性记录。OpenCode 只保留为候选验证记录；当前 Phase 9 driver registry 支持 Pi、Claude Code 和 PTY-backed Shell，仓库默认 `Agent` 解析到 Pi。当前 sandbox 模型访问边界见 [architecture.md](./architecture.md) 和 [current-status.md](./current-status.md)。
 
 ## 环境概览
 
@@ -100,4 +100,4 @@ opencode run --pure \
 - Phase 0 的 LLM API / harness 连通性已验证：本机已有可用的 Anthropic-compatible proxy。
 - 当前 orchestrator 不依赖宿主机 Claude settings。`config/harness.yaml` 已迁到 `harness:` schema；Phase 8 热路径通过 `harness.model_proxy.bind_url` 配置宿主机 listener，通过 `harness.model_proxy.sandbox_base_url` 把稳定 alias 写入每个 generation 的 control manifest。上游 provider credentials 保持 host/proxy-side，不再通过 sandbox secret mount 注入。
 - Phase 1 sandbox 集成说明只保留为历史记录；当前模型访问约定以 Phase 8 model-proxy boundary 为准。
-- OpenCode 当时验证为可行候选，但当前实现没有注册 OpenCode agent；现有主路径是 Claude Code，Shell 作为交互式命令会话。
+- OpenCode 当时验证为可行候选，但当前实现没有注册 OpenCode agent；现有交互路径是 Pi、Claude Code 和 Shell，仓库默认 `Agent` 路径为 Pi。

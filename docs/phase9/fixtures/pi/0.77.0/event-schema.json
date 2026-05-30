@@ -11,10 +11,13 @@
     "agent_end",
     "agent_start",
     "auto_retry",
+    "auto_retry_end",
+    "auto_retry_start",
     "compaction_end",
     "compaction_start",
     "error",
     "message_end",
+    "message_start",
     "message_update",
     "queue_update",
     "response",
@@ -25,11 +28,18 @@
     "turn_start"
   ],
   "message_update_assistant_event_types": [
-    "text_delta"
+    "text_delta",
+    "text_end",
+    "text_start"
+  ],
+  "session_selection_request_fields": [
+    "sessionPath"
+  ],
+  "session_selection_response_fields": [
+    "cancelled"
   ],
   "session_stats_fields": [
     "sessionFile",
     "sessionId"
   ]
 }
-

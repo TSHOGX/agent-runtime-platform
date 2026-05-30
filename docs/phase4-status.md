@@ -13,7 +13,7 @@ The current frontend baseline has moved beyond this round log:
 - The UI no longer depends on a direct browser WebSocket connection to the orchestrator.
 - The current session lifecycle uses only canonical long-lived states: `created`, `running_active`, `running_idle`, `checkpointing`, `checkpointed`, `failed`, and `destroyed`.
 - The top-level "backend unreachable" state is the current non-healthy backend behavior; there is no separate mock workspace in the live path.
-- The session picker exposes `Shell` and `Agent`; `Shell` is the interactive PTY-backed shell path, and `Agent` maps to Claude Code.
+- The session picker is driven by `GET /api/deployment-capabilities`; current product-mode and default-agent behavior is documented in [current-status.md](./current-status.md).
 
 ## Round 4/8
 

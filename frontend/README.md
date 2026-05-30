@@ -69,14 +69,12 @@ Environment overrides:
 
 ## Current Agent Flow
 
-- The UI fetches `GET /api/deployment-capabilities` and creates sessions by
-  product mode, not raw driver ID.
+- The UI fetches `GET /api/deployment-capabilities` and offers only product
+  modes, not raw driver IDs.
 - Create a session through `POST /api/sessions`.
-- `Agent` maps to the deployment-selected agent driver, currently Claude Code
-  or Pi; `Shell` maps to the PTY-backed shell session only when enabled and
-  present in the selected image manifest.
+- `Agent` maps to the deployment-selected agent driver. In the checked-in lab
+  profile it resolves to Pi. `Shell` maps to the PTY-backed shell session only
+  when enabled and present in the selected image manifest.
 - Send a task prompt through `POST /api/sessions/:id/messages`.
 - Interrupt a running shell session through `POST /api/sessions/:id/interrupt`.
 - The orchestrator keeps per-generation resources alive across turns once the sandbox is running.
-- Automatic idle checkpointing is a default-off Phase 7 policy; `HARNESS_AUTO_CHECKPOINT_ENABLED=true` enables it for newly created sessions in lab/test environments.
-- `sh` remains useful for smoke tests and shell-style debugging.
