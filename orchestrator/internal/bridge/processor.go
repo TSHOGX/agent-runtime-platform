@@ -39,11 +39,8 @@ type Processor struct {
 var errProtocol = errors.New("bridge protocol error")
 
 type bridgeState struct {
-	helloSeen       bool
-	probed          bool
-	driverID        string
-	protocolVersion int
-	turnInputSchema string
+	helloSeen bool
+	probed    bool
 }
 
 func (p *Processor) MarkReady(sessionID, generationID string) {
@@ -75,6 +72,19 @@ type grantDriverState struct {
 
 type runTurnInput struct {
 	Content string `json:"content"`
+}
+
+func (p *Processor) buildGrantPayload(grant store.TurnGrant) grantPayload {
+	return grantPayload{
+		TurnID:          grant.TurnID,
+		Sequence:        grant.Sequence,
+		TurnInputSchema: p.turnInputSchema(),
+		Input:           runTurnInput{Content: grant.Content},
+		Attempt:         grant.Attempt,
+		Replayed:        grant.Replayed,
+		ExpiresAt:       grant.ExpiresAt,
+		DriverState:     grantDriverStatePayload(grant),
+	}
 }
 
 func grantDriverStatePayload(grant store.TurnGrant) *grantDriverState {
@@ -170,8 +180,7 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 	key := stateKey(envelope.SessionID, envelope.GenerationID)
 	switch envelope.Type {
 	case TypeHello:
-		hello, evidence, err := p.validateHello(ctx, envelope)
-		if err != nil {
+		if _, _, err := p.validateHello(ctx, envelope); err != nil {
 			return err
 		}
 		ack, err := p.Store.BridgeHelloAck(ctx, envelope.SessionID, envelope.GenerationID, p.Owner, now, p.AckStartedGrace)
@@ -180,9 +189,6 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 		}
 		p.setState(key, func(state bridgeState) bridgeState {
 			state.helloSeen = true
-			state.driverID = evidence.DriverID
-			state.protocolVersion = hello.ProtocolVersion
-			state.turnInputSchema = hello.TurnInputSchema
 			return state
 		})
 		lastSequences := make(map[string]int64, len(ack.LastOutputSequenceByTurn))
@@ -235,16 +241,7 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 		if !ok {
 			return p.writeResponse(ctx, inbox, envelope, TypeNoWork, map[string]string{"reason": "no_eligible_turn"})
 		}
-		return p.writeResponse(ctx, inbox, envelope, TypeGrant, grantPayload{
-			TurnID:          grant.TurnID,
-			Sequence:        grant.Sequence,
-			TurnInputSchema: p.turnInputSchema(),
-			Input:           runTurnInput{Content: grant.Content},
-			Attempt:         grant.Attempt,
-			Replayed:        grant.Replayed,
-			ExpiresAt:       grant.ExpiresAt,
-			DriverState:     grantDriverStatePayload(grant),
-		})
+		return p.writeResponse(ctx, inbox, envelope, TypeGrant, p.buildGrantPayload(grant))
 	case TypeResumeTurn:
 		state := p.state(key)
 		if !state.helloSeen || !state.probed {
@@ -269,16 +266,7 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 			return p.writeResponse(ctx, inbox, envelope, TypeNoWork, map[string]string{"reason": "no_resumable_turn"})
 		}
 		grant.Replayed = true
-		return p.writeResponse(ctx, inbox, envelope, TypeGrant, grantPayload{
-			TurnID:          grant.TurnID,
-			Sequence:        grant.Sequence,
-			TurnInputSchema: p.turnInputSchema(),
-			Input:           runTurnInput{Content: grant.Content},
-			Attempt:         grant.Attempt,
-			Replayed:        grant.Replayed,
-			ExpiresAt:       grant.ExpiresAt,
-			DriverState:     grantDriverStatePayload(grant),
-		})
+		return p.writeResponse(ctx, inbox, envelope, TypeGrant, p.buildGrantPayload(grant))
 	case TypeAckTurnStarted:
 		if envelope.TurnID == nil {
 			return protocolErrorf("ack_turn_started requires turn_id")

@@ -114,7 +114,7 @@ func (s *Server) resolveDriverDeployment(mode string, driverID agents.ID) (deplo
 		modelProfile, ok = profiles[modelProfileID]
 		if !ok || !deploymentConfigEnabled(modelProfile.Enabled) ||
 			strings.TrimSpace(modelProfile.Model) == "" ||
-			strings.TrimSpace(modelProfile.ProxyRef) != "model_proxy" {
+			strings.TrimSpace(modelProfile.ProxyRef) != config.DefaultModelProxyRef {
 			return deploymentResolution{}, capabilityError("operator_unavailable", modeUnavailableMessage(mode))
 		}
 	}
@@ -148,23 +148,7 @@ func (s *Server) resolveDriverDeployment(mode string, driverID agents.ID) (deplo
 }
 
 func (s *Server) enabledAgentConfigForDriver(driverID agents.ID) (string, config.AgentConfig, bool) {
-	agentConfigs := s.cfg.DeploymentAgents()
-	keys := make([]string, 0, len(agentConfigs))
-	for key := range agentConfigs {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		cfg := agentConfigs[key]
-		if !deploymentConfigEnabled(cfg.Enabled) {
-			continue
-		}
-		candidate, err := agents.CanonicalDriverID(effectiveString(cfg.DriverID, key))
-		if err == nil && candidate == driverID {
-			return key, cfg, true
-		}
-	}
-	return "", config.AgentConfig{}, false
+	return config.EnabledAgentConfigForDriver(s.cfg.DeploymentAgents(), string(driverID))
 }
 
 func deploymentConfigEnabled(value *bool) bool {

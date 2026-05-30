@@ -328,9 +328,6 @@ func Load() (Config, error) {
 		MaxSessions:          maxSessions,
 		RunscNetwork:         defaultString(projectConfig.Runtime.RunscNetwork, "sandbox"),
 		RunscOverlay2:        defaultString(projectConfig.Runtime.RunscOverlay2, "none"),
-		Agents:               cloneAgentConfigs(projectConfig.Phase7.Agents),
-		ModelProfiles:        cloneModelProfileConfigs(projectConfig.Phase7.ModelProfiles),
-		RuntimeProviders:     cloneRuntimeProviderConfigs(projectConfig.Phase7.RuntimeProviders),
 		Claude:               projectConfig.Claude,
 		ModelProxy:           projectConfig.Phase7.ModelProxy,
 		Phase7:               projectConfig.Phase7,
@@ -364,7 +361,7 @@ func validateDefaultAgentDriver(driverID agents.ID, agentConfigs map[string]Agen
 	if spec.Kind != agents.DriverKindAgent {
 		return fmt.Errorf("default agent must be an agent-capable driver, got %q", driverID)
 	}
-	if _, _, ok := enabledAgentConfigForDriver(agentConfigs, string(driverID)); !ok {
+	if _, _, ok := EnabledAgentConfigForDriver(agentConfigs, string(driverID)); !ok {
 		return fmt.Errorf("default agent %q is not enabled in harness.agents", driverID)
 	}
 	return nil
@@ -987,7 +984,7 @@ func defaultAgentConfigs(claude ClaudeConfig) map[string]AgentConfig {
 		string(agents.ClaudeCode): {
 			Enabled:                    boolPtr(true),
 			DriverID:                   string(agents.ClaudeCode),
-			ModelProfile:               "anthropic_default",
+			ModelProfile:               defaultModelProfileID,
 			RuntimeProvider:            "local_runsc",
 			DisableNonessentialTraffic: boolPtr(claude.DisableNonessentialTraffic),
 		},
@@ -999,21 +996,33 @@ func defaultAgentConfigs(claude ClaudeConfig) map[string]AgentConfig {
 		string(agents.Pi): {
 			Enabled:                    boolPtr(true),
 			DriverID:                   string(agents.Pi),
-			ModelProfile:               "anthropic_default",
+			ModelProfile:               defaultModelProfileID,
 			RuntimeProvider:            "local_runsc",
 			DisableNonessentialTraffic: boolPtr(claude.DisableNonessentialTraffic),
 		},
 	}
 }
 
+// Default model-access identifiers. The legacy Claude migration, the
+// model-profile validator, and the server-side deployment resolver all
+// reference these, so they must stay in sync.
+const (
+	defaultModelProfileID = "anthropic_default"
+	defaultModelProvider  = "anthropic_messages"
+	// DefaultModelProxyRef is the only proxy reference accepted on model
+	// profiles; it is exported because the server re-validates the same
+	// invariant when resolving a deployment.
+	DefaultModelProxyRef = "model_proxy"
+)
+
 func defaultModelProfileConfigs(claude ClaudeConfig) map[string]ModelProfileConfig {
 	claude = normalizeClaudeConfig(claude)
 	return map[string]ModelProfileConfig{
-		"anthropic_default": {
+		defaultModelProfileID: {
 			Enabled:  boolPtr(true),
-			Provider: "anthropic_messages",
+			Provider: defaultModelProvider,
 			Model:    claude.Model,
-			ProxyRef: "model_proxy",
+			ProxyRef: DefaultModelProxyRef,
 		},
 	}
 }
@@ -1188,8 +1197,8 @@ func validateDeploymentConfig(cfg Phase7Config) error {
 			if strings.TrimSpace(profile.Model) == "" {
 				return fmt.Errorf("harness.model_profiles.%s.model is required", agentCfg.ModelProfile)
 			}
-			if strings.TrimSpace(profile.ProxyRef) != "model_proxy" {
-				return fmt.Errorf("harness.model_profiles.%s.proxy_ref must be model_proxy", agentCfg.ModelProfile)
+			if strings.TrimSpace(profile.ProxyRef) != DefaultModelProxyRef {
+				return fmt.Errorf("harness.model_profiles.%s.proxy_ref must be %s", agentCfg.ModelProfile, DefaultModelProxyRef)
 			}
 		}
 	}
@@ -1202,12 +1211,12 @@ func syncDeploymentConfigFromClaude(phase7 Phase7Config, claude ClaudeConfig) Ph
 	claudeAgent := phase7.Agents[string(agents.ClaudeCode)]
 	claudeAgent.DisableNonessentialTraffic = boolPtr(claude.DisableNonessentialTraffic)
 	phase7.Agents[string(agents.ClaudeCode)] = claudeAgent
-	profileID := defaultString(claudeAgent.ModelProfile, "anthropic_default")
+	profileID := defaultString(claudeAgent.ModelProfile, defaultModelProfileID)
 	profile := phase7.ModelProfiles[profileID]
 	profile.Model = defaultString(claude.Model, "sonnet")
-	profile.ProxyRef = "model_proxy"
+	profile.ProxyRef = DefaultModelProxyRef
 	if strings.TrimSpace(profile.Provider) == "" {
-		profile.Provider = "anthropic_messages"
+		profile.Provider = defaultModelProvider
 	}
 	if profile.Enabled == nil {
 		profile.Enabled = boolPtr(true)
@@ -1217,7 +1226,7 @@ func syncDeploymentConfigFromClaude(phase7 Phase7Config, claude ClaudeConfig) Ph
 }
 
 func syncClaudeDeploymentConfig(claude ClaudeConfig, phase7 Phase7Config) ClaudeConfig {
-	if _, agentCfg, ok := enabledAgentConfigForDriver(phase7.Agents, string(agents.ClaudeCode)); ok {
+	if _, agentCfg, ok := EnabledAgentConfigForDriver(phase7.Agents, string(agents.ClaudeCode)); ok {
 		if agentCfg.DisableNonessentialTraffic != nil {
 			claude.DisableNonessentialTraffic = *agentCfg.DisableNonessentialTraffic
 		}
@@ -1228,7 +1237,10 @@ func syncClaudeDeploymentConfig(claude ClaudeConfig, phase7 Phase7Config) Claude
 	return claude
 }
 
-func enabledAgentConfigForDriver(agentConfigs map[string]AgentConfig, driverID string) (string, AgentConfig, bool) {
+// EnabledAgentConfigForDriver returns the agent-config key and config of the
+// first enabled agent (in sorted key order) whose canonical driver matches
+// driverID.
+func EnabledAgentConfigForDriver(agentConfigs map[string]AgentConfig, driverID string) (string, AgentConfig, bool) {
 	canonical, err := agents.CanonicalDriverID(driverID)
 	if err != nil {
 		return "", AgentConfig{}, false
