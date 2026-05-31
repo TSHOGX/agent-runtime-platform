@@ -1,15 +1,9 @@
-#!/usr/bin/env python3
-import importlib.util
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
-
-MODULE_PATH = Path(__file__).with_name("release-gates.py")
-SPEC = importlib.util.spec_from_file_location("phase8_release_gates", MODULE_PATH)
-MODULE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(MODULE)
+from tools.release.suites import sandbox_isolation as MODULE
 
 
 class ReleaseGatesTest(unittest.TestCase):
@@ -38,12 +32,12 @@ class ReleaseGatesTest(unittest.TestCase):
             ],
         )
         self.assertEqual({gate.category for gate in gates}, {"deterministic"})
-        self.assertIn("tools/phase8/test_release_gates.py", gates[2].command)
-        self.assertIn("tools/phase8/test_adversarial_lab.py", gates[2].command)
-        self.assertIn("tools/phase8/test_cutover_cleanup.py", gates[2].command)
-        self.assertIn("tools/phase8/test_cutover_inventory.py", gates[2].command)
-        self.assertIn("tools/phase8/test_reconciliation_evidence.py", gates[2].command)
-        self.assertIn("tools/phase8/test_rootfs_inspect.py", gates[2].command)
+        self.assertIn("tools/release/gates/sandbox_isolation/test_release_gates.py", gates[2].command)
+        self.assertIn("tools/release/gates/sandbox_isolation/test_adversarial_lab.py", gates[2].command)
+        self.assertIn("tools/release/gates/sandbox_isolation/test_cutover_cleanup.py", gates[2].command)
+        self.assertIn("tools/release/gates/sandbox_isolation/test_cutover_inventory.py", gates[2].command)
+        self.assertIn("tools/release/gates/sandbox_isolation/test_reconciliation_evidence.py", gates[2].command)
+        self.assertIn("tools/release/gates/sandbox_isolation/test_rootfs_inspect.py", gates[2].command)
 
     def test_optional_flags_add_external_and_compatibility_gates(self):
         args = argparse_namespace(
@@ -53,7 +47,7 @@ class ReleaseGatesTest(unittest.TestCase):
             include_rootfs_inspection=True,
             include_proxy=True,
             include_adversarial_lab=True,
-            adversarial_lab_report="/tmp/phase8-lab.json",
+            adversarial_lab_report="/tmp/sandbox-adversarial-lab.json",
             include_bridge_lab=True,
             include_live_latency=True,
         )
@@ -68,7 +62,7 @@ class ReleaseGatesTest(unittest.TestCase):
                 "runtime_reconciliation_evidence",
                 "rootfs_image_inspection",
                 "pinned_proxy_contract",
-                "phase8_adversarial_lab",
+                "sandbox_adversarial_lab",
                 "gvisor_bridge_durability_lab",
                 "live_turn_start_latency",
             ],
@@ -76,7 +70,7 @@ class ReleaseGatesTest(unittest.TestCase):
         self.assertEqual(gates[-8].category, "compatibility")
         self.assertEqual({gates[-7].category, gates[-6].category, gates[-5].category, gates[-3].category}, {"evidence"})
         self.assertEqual({gates[-4].category, gates[-2].category, gates[-1].category}, {"external"})
-        self.assertIn("/tmp/phase8-lab.json", gates[-3].command)
+        self.assertIn("/tmp/sandbox-adversarial-lab.json", gates[-3].command)
 
     def test_run_gate_captures_success_and_failure(self):
         ok = MODULE.Gate(
@@ -236,7 +230,7 @@ class ReleaseGatesTest(unittest.TestCase):
         payload = MODULE.evidence(
             [
                 {
-                    "name": "phase8_adversarial_lab",
+                    "name": "sandbox_adversarial_lab",
                     "status": "passed",
                     "structured_output": lab_payload,
                 }

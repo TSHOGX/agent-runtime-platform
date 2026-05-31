@@ -16,8 +16,8 @@ script.
 |-------|---------|-------------|--------|
 | `control_plane` | Durable control-plane gates: orchestrator package tests, turn-start latency bench, pinned proxy contract, gVisor bridge durability lab, secret-permission lab, live latency. | [phase7/release-qualification.md](./phase7/release-qualification.md) | **Blocking** per guardrail below. |
 | `sandbox_isolation` | The `sandbox-isolation-v1` runtime-isolation contract: deterministic repo gates, supplied-evidence model, static release scans, doc-inventory cross-check. | [phase8/release-gates.md](./phase8/release-gates.md), [phase8 boundary](./phase8/README.md#phase-7-boundary) | **Live release harness.** |
-| `driver_contract` | Phase 9 driver/provider contract. | Reserved placeholder — phase 9 qualification is `go test ./...`, already run by `sandbox_isolation`. | Reserved. |
-| `agent_capability` | Phase 10 agent capability / UX. | Reserved — exposes the phase 10 static-check subset as a focused view. | Reserved. |
+| `driver_contract` | Driver/provider contract. | Reserved placeholder; qualification is currently covered by `go test ./...`, already run by `sandbox_isolation`. | Reserved. |
+| `agent_capability` | Agent capability / UX. | Reserved; exposes the capability static-check subset as a focused view. | Reserved. |
 
 The detailed adversarial gate listing lives in
 [phase8/release-gates.md](./phase8/release-gates.md); the `sandbox_isolation`
@@ -36,9 +36,9 @@ python3 tools/release/run.py --suite control_plane
 # Compose all registered suites (mainly --list):
 python3 tools/release/run.py --suite all --list
 
-# Legacy shim aliases (retained, identical behavior):
-python3 tools/phase8/release-gates.py --static-only      # == --suite sandbox_isolation
-python3 tools/phase7/release-gates.py                    # == --suite control_plane
+# Focused deterministic checks:
+python3 tools/release/run.py --suite sandbox_isolation --static-only
+python3 tools/release/run.py --suite control_plane
 ```
 
 Supplied evidence and release completion (sandbox_isolation):
@@ -53,13 +53,12 @@ python3 tools/release/run.py --suite sandbox_isolation \
 
 ## Guardrail: control-plane gates stay blocking
 
-> Keep Phase 7 release gates blocking for runtime, proxy, or config changes
-> until a later phase explicitly retires or replaces a gate.
+> Keep control-plane release gates blocking for runtime, proxy, or config changes
+> until a later release suite explicitly retires or replaces a gate.
 
-The former Phase 7 gates are carried verbatim by the `control_plane` suite
-(same names, categories, commands, and exit semantics). They are not retired or
-weakened by the move to suites; `--suite control_plane` (and the
-`tools/phase7/release-gates.py` shim) is their carrier. See
+The durable control-plane gates are carried by the `control_plane` suite. They
+are not retired or weakened by the move to suites; `tools/release/run.py
+--suite control_plane` is their carrier. See
 [PLAN.md](./PLAN.md) and [phase8/README.md](./phase8/README.md#phase-7-boundary).
 
 ## Pinned proxy contract re-pin

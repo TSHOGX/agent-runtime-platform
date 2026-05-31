@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sandbox-isolation release suite (formerly the Phase 8 release gates).
+"""Sandbox-isolation release suite.
 
 The current runtime-isolation contract (`sandbox-isolation-v1`). Owns the
 deterministic repo gates, the supplied-evidence model, the static release
@@ -35,11 +35,11 @@ JSON_OUTPUT_GATES = {
     "rootfs_image_inspection",
     "cutover_inventory",
     "runtime_reconciliation_evidence",
-    "phase8_adversarial_lab",
+    "sandbox_adversarial_lab",
 }
 EVIDENCE_FILE_GATES = {"gvisor_bridge_durability_lab"}
 
-_NOTE_INCOMPLETE = "Runtime isolation release requires target-lab adversarial evidence for every gate in docs/phase8/release-gates.md."
+_NOTE_INCOMPLETE = "Runtime isolation release requires target-lab adversarial evidence for every gate in runtime-isolation release gates doc."
 _NOTE_COMPLETE = "Selected gates passed and all required supplied evidence labels were attached."
 
 
@@ -51,7 +51,7 @@ def parse_args(argv=None):
     parser.add_argument("--include-rootfs-inspection", action="store_true", help="Inspect the configured sandbox rootfs image.")
     parser.add_argument("--include-proxy", action="store_true", help="Run the pinned claude-code-proxy contract gate.")
     parser.add_argument("--include-adversarial-lab", action="store_true", help="Validate target-lab adversarial evidence coverage.")
-    parser.add_argument("--adversarial-lab-report", default=os.environ.get("HARNESS_PHASE8_ADVERSARIAL_LAB_REPORT", ""), help="Path to the target-lab adversarial JSON report.")
+    parser.add_argument("--adversarial-lab-report", default=os.environ.get("HARNESS_SANDBOX_ADVERSARIAL_LAB_REPORT", ""), help="Path to the target-lab adversarial JSON report.")
     parser.add_argument("--include-bridge-lab", action="store_true", help="Run the gVisor bridge durability lab.")
     parser.add_argument("--include-live-latency", action="store_true", help="Run the live turn-start latency gate.")
     parser.add_argument(
@@ -86,11 +86,11 @@ def deterministic_gates():
                 "go",
                 "test",
                 "-tags",
-                "phase7bench",
+                "controlplanebench",
                 "-count=1",
                 "./internal/server",
                 "-run",
-                "TestPhase7TurnStartLatencyGate",
+                "TestTurnStartLatencyGate",
             ),
             cwd=REPO_ROOT / "orchestrator",
             category="deterministic",
@@ -104,12 +104,12 @@ def deterministic_gates():
                 "-m",
                 "unittest",
                 "sandbox-image/tests/test_harness_bridge_client.py",
-                "tools/phase8/test_adversarial_lab.py",
-                "tools/phase8/test_cutover_cleanup.py",
-                "tools/phase8/test_cutover_inventory.py",
-                "tools/phase8/test_reconciliation_evidence.py",
-                "tools/phase8/test_release_gates.py",
-                "tools/phase8/test_rootfs_inspect.py",
+                "tools/release/gates/sandbox_isolation/test_adversarial_lab.py",
+                "tools/release/gates/sandbox_isolation/test_cutover_cleanup.py",
+                "tools/release/gates/sandbox_isolation/test_cutover_inventory.py",
+                "tools/release/gates/sandbox_isolation/test_reconciliation_evidence.py",
+                "tools/release/gates/sandbox_isolation/test_release_gates.py",
+                "tools/release/gates/sandbox_isolation/test_rootfs_inspect.py",
                 "tools/release/test_engine.py",
                 "tools/release/test_suites.py",
             ),
@@ -118,7 +118,7 @@ def deterministic_gates():
         ),
         Gate(
             name="runtime_isolation_static_release_scans",
-            command=("python3", "tools/phase8/release-gates.py", "--static-only"),
+            command=("python3", "tools/release/run.py", "--suite", "sandbox_isolation", "--static-only"),
             cwd=REPO_ROOT,
             category="deterministic",
         ),
@@ -131,7 +131,7 @@ def optional_gates(args):
         gates.append(
             Gate(
                 name="prior_deterministic_release_runner",
-                command=("tools/phase7/release-gates.py",),
+                command=("python3", "tools/release/run.py", "--suite", "control_plane"),
                 cwd=REPO_ROOT,
                 category="compatibility",
             )
@@ -140,7 +140,7 @@ def optional_gates(args):
         gates.append(
             Gate(
                 name="cutover_inventory",
-                command=("tools/phase8/cutover-inventory.py", "--expect-clean", "--require-host-inventory"),
+                command=("tools/release/gates/sandbox_isolation/cutover-inventory.py", "--expect-clean", "--require-host-inventory"),
                 cwd=REPO_ROOT,
                 category="evidence",
             )
@@ -150,7 +150,7 @@ def optional_gates(args):
             Gate(
                 name="runtime_reconciliation_evidence",
                 command=(
-                    "tools/phase8/reconciliation-evidence.py",
+                    "tools/release/gates/sandbox_isolation/reconciliation-evidence.py",
                     "--expect-clean",
                     "--require-runtime-table",
                     "--require-host-inventory",
@@ -164,7 +164,7 @@ def optional_gates(args):
         gates.append(
             Gate(
                 name="rootfs_image_inspection",
-                command=("tools/phase8/rootfs-inspect.py",),
+                command=("tools/release/gates/sandbox_isolation/rootfs-inspect.py",),
                 cwd=REPO_ROOT,
                 category="evidence",
             )
@@ -181,8 +181,8 @@ def optional_gates(args):
     if args.include_adversarial_lab:
         gates.append(
             Gate(
-                name="phase8_adversarial_lab",
-                command=("tools/phase8/adversarial-lab.py", "--report", args.adversarial_lab_report),
+                name="sandbox_adversarial_lab",
+                command=("tools/release/gates/sandbox_isolation/adversarial-lab.py", "--report", args.adversarial_lab_report),
                 cwd=REPO_ROOT,
                 category="evidence",
             )
@@ -191,7 +191,7 @@ def optional_gates(args):
         gates.append(
             Gate(
                 name="gvisor_bridge_durability_lab",
-                command=("tools/phase7/bridge-durability-lab.sh",),
+                command=("tools/release/gates/control_plane/bridge-durability-lab.sh",),
                 cwd=REPO_ROOT,
                 category="external",
             )
@@ -200,7 +200,7 @@ def optional_gates(args):
         gates.append(
             Gate(
                 name="live_turn_start_latency",
-                command=("tools/phase7/live-turn-start-latency.py",),
+                command=("tools/release/gates/control_plane/live-turn-start-latency.py",),
                 cwd=REPO_ROOT,
                 category="external",
             )
@@ -310,9 +310,9 @@ def supplied_evidence_from_gate_results(results, context=None):
                 "status": payload.get("status", ""),
                 "payload": payload,
             }
-        elif result["name"] == "phase8_adversarial_lab":
+        elif result["name"] == "sandbox_adversarial_lab":
             supplied["adversarial_lab"] = {
-                "path": "gate:phase8_adversarial_lab",
+                "path": "gate:sandbox_adversarial_lab",
                 "digest": "",
                 "bytes": 0,
                 "status": payload.get("status", ""),

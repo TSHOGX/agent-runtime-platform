@@ -14,18 +14,18 @@ from pathlib import Path
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Validate the Phase 7 rootful secret permission model.")
-    parser.add_argument("--config", default=os.environ.get("PHASE7_CONFIG", "config/harness.yaml"))
-    parser.add_argument("--secrets-root", default=os.environ.get("PHASE7_SECRETS_ROOT", ""))
-    parser.add_argument("--readers-gid", type=int, default=int(os.environ.get("PHASE7_SECRET_READERS_GID", "0")))
-    parser.add_argument("--owner-user", default=os.environ.get("PHASE7_SECRET_OWNER", "orchestrator"))
-    parser.add_argument("--readers-group", default=os.environ.get("PHASE7_SECRET_READERS_GROUP", "harness-secret-readers"))
-    parser.add_argument("--agent-uid", type=int, default=int(os.environ.get("PHASE7_AGENT_UID", "65534")))
-    parser.add_argument("--agent-gid", type=int, default=int(os.environ.get("PHASE7_AGENT_GID", "65534")))
-    parser.add_argument("--other-uid", type=int, default=int(os.environ.get("PHASE7_SECRET_OTHER_UID", "65533")))
-    parser.add_argument("--other-gid", type=int, default=int(os.environ.get("PHASE7_SECRET_OTHER_GID", "65533")))
+    parser = argparse.ArgumentParser(description="Validate the rootful secret permission model.")
+    parser.add_argument("--config", default=os.environ.get("HARNESS_CONFIG", "config/harness.yaml"))
+    parser.add_argument("--secrets-root", default=os.environ.get("HARNESS_SECRETS_ROOT", ""))
+    parser.add_argument("--readers-gid", type=int, default=int(os.environ.get("HARNESS_SECRET_READERS_GID", "0")))
+    parser.add_argument("--owner-user", default=os.environ.get("HARNESS_SECRET_OWNER", "orchestrator"))
+    parser.add_argument("--readers-group", default=os.environ.get("HARNESS_SECRET_READERS_GROUP", "harness-secret-readers"))
+    parser.add_argument("--agent-uid", type=int, default=int(os.environ.get("HARNESS_AGENT_UID", "65534")))
+    parser.add_argument("--agent-gid", type=int, default=int(os.environ.get("HARNESS_AGENT_GID", "65534")))
+    parser.add_argument("--other-uid", type=int, default=int(os.environ.get("HARNESS_SECRET_OTHER_UID", "65533")))
+    parser.add_argument("--other-gid", type=int, default=int(os.environ.get("HARNESS_SECRET_OTHER_GID", "65533")))
     parser.add_argument("--runsc", default=os.environ.get("RUNSC", "runsc"))
-    parser.add_argument("--rootfs", default=os.environ.get("PHASE7_LAB_ROOTFS", "sandbox-image/rootfs"))
+    parser.add_argument("--rootfs", default=os.environ.get("HARNESS_LAB_ROOTFS", "sandbox-image/rootfs"))
     parser.add_argument("--skip-sandbox", action="store_true")
     return parser.parse_args()
 
@@ -124,7 +124,7 @@ def run_checked(command, expect_success=True, cwd=None):
 
 
 def write_lab_secret(secrets_root, owner_uid, readers_gid):
-    secret_id = "phase7_permission_lab_" + uuid.uuid4().hex
+    secret_id = "secret_permission_lab_" + uuid.uuid4().hex
     version = "local"
     secret_dir = Path(secrets_root) / secret_id
     secret_path = secret_dir / version
@@ -133,7 +133,7 @@ def write_lab_secret(secrets_root, owner_uid, readers_gid):
     os.chmod(secret_dir, 0o750)
     fd = os.open(secret_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o440)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write("phase7-secret-lab\n")
+        handle.write("secret-permission-lab\n")
         handle.flush()
         os.fsync(handle.fileno())
     os.chown(secret_path, owner_uid, readers_gid)
@@ -179,7 +179,7 @@ def verify_sandbox_access(args, secrets_root, secret_id, version, readers_gid):
     rootfs = Path(args.rootfs).resolve()
     if not rootfs.is_dir():
         raise RuntimeError(f"rootfs not found: {rootfs}")
-    with tempfile.TemporaryDirectory(prefix="harness-phase7-secret-lab.") as workdir:
+    with tempfile.TemporaryDirectory(prefix="harness-secret-permission-lab.") as workdir:
         bundle = Path(workdir) / "bundle"
         runsc_root = Path(workdir) / "runsc-root"
         bundle.mkdir()
@@ -206,7 +206,7 @@ def verify_sandbox_access(args, secrets_root, secret_id, version, readers_gid):
                 "noNewPrivileges": True,
             },
             "root": {"path": str(rootfs), "readonly": False},
-            "hostname": "phase7-secret-lab",
+            "hostname": "secret-permission-lab",
             "mounts": [
                 {"destination": "/proc", "type": "proc", "source": "proc"},
                 {
@@ -226,7 +226,7 @@ def verify_sandbox_access(args, secrets_root, secret_id, version, readers_gid):
             },
         }
         (bundle / "config.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
-        cid = "phase7-secret-lab-" + uuid.uuid4().hex
+        cid = "secret-permission-lab-" + uuid.uuid4().hex
         try:
             run_checked([runsc, "--root", str(runsc_root), "run", cid], cwd=bundle)
         finally:
@@ -286,5 +286,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as err:
-        print(f"phase7 secret permission lab failed: {err}", file=sys.stderr)
+        print(f"secret permission lab failed: {err}", file=sys.stderr)
         raise SystemExit(1)

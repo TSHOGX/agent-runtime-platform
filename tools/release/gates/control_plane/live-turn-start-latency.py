@@ -21,31 +21,31 @@ def env_default(name, fallback):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Measure Phase 7 live POST-to-ack_turn_started latency for prewarmed bridge sessions."
+        description="Measure live POST-to-ack_turn_started latency for prewarmed bridge sessions."
     )
-    parser.add_argument("--url", default=env_default("PHASE7_ORCHESTRATOR_URL", "http://127.0.0.1:8090"))
-    parser.add_argument("--db", default=env_default("PHASE7_DB", "/var/lib/harness/sessions/orchestrator.db"))
+    parser.add_argument("--url", default=env_default("HARNESS_ORCHESTRATOR_URL", "http://127.0.0.1:8090"))
+    parser.add_argument("--db", default=env_default("HARNESS_DB", "/var/lib/harness/sessions/orchestrator.db"))
     parser.add_argument(
         "--session-ids",
-        default=env_default("PHASE7_LATENCY_SESSION_IDS", env_default("PHASE7_LATENCY_SESSION_ID", "")),
-        help="Comma-separated prewarmed session ids. Env: PHASE7_LATENCY_SESSION_IDS.",
+        default=env_default("HARNESS_LATENCY_SESSION_IDS", env_default("HARNESS_LATENCY_SESSION_ID", "")),
+        help="Comma-separated prewarmed session ids. Env: HARNESS_LATENCY_SESSION_IDS.",
     )
-    parser.add_argument("--budget-ms", type=float, default=float(env_default("PHASE7_LATENCY_BUDGET_MS", "50")))
-    parser.add_argument("--timeout-s", type=float, default=float(env_default("PHASE7_LATENCY_TIMEOUT_S", "5")))
-    parser.add_argument("--poll-ms", type=float, default=float(env_default("PHASE7_LATENCY_POLL_MS", "5")))
+    parser.add_argument("--budget-ms", type=float, default=float(env_default("HARNESS_LATENCY_BUDGET_MS", "50")))
+    parser.add_argument("--timeout-s", type=float, default=float(env_default("HARNESS_LATENCY_TIMEOUT_S", "5")))
+    parser.add_argument("--poll-ms", type=float, default=float(env_default("HARNESS_LATENCY_POLL_MS", "5")))
     parser.add_argument(
         "--content-template",
-        default=env_default("PHASE7_LATENCY_CONTENT", "phase7 latency probe {nonce}"),
+        default=env_default("HARNESS_LATENCY_CONTENT", "latency probe {nonce}"),
         help="Message content. {session_id} and {nonce} are replaced per sample.",
     )
     parser.add_argument(
         "--shared-secret",
-        default=os.environ.get("PHASE7_SHARED_SECRET", ""),
+        default=os.environ.get("HARNESS_SHARED_SECRET", ""),
         help="Optional login password when orchestrator auth is enabled.",
     )
     parser.add_argument(
         "--cookie",
-        default=os.environ.get("PHASE7_AUTH_COOKIE", ""),
+        default=os.environ.get("HARNESS_AUTH_COOKIE", ""),
         help="Optional raw Cookie header when orchestrator auth is enabled.",
     )
     return parser.parse_args()
@@ -171,7 +171,7 @@ def main():
     args = parse_args()
     session_ids = [part.strip() for part in args.session_ids.split(",") if part.strip()]
     if not session_ids:
-        raise SystemExit("provide --session-ids or PHASE7_LATENCY_SESSION_IDS")
+        raise SystemExit("provide --session-ids or HARNESS_LATENCY_SESSION_IDS")
     base_url = args.url.rstrip("/")
 
     jar = http.cookiejar.CookieJar()
@@ -215,5 +215,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as err:
-        print(f"phase7 latency gate failed: {err}", file=sys.stderr)
+        print(f"latency gate failed: {err}", file=sys.stderr)
         raise SystemExit(1)

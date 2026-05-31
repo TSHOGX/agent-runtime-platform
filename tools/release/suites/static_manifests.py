@@ -55,7 +55,7 @@ def _phase10_checks():
 
 
 def sandbox_isolation_checks():
-    """All 8 static checks, in the order the phase8 harness emitted them."""
+    """All 8 static checks, in the order the runtime-isolation harness emitted them."""
     return [
         {
             "name": "current_docs_do_not_claim_parent_session_mounts",

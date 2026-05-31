@@ -12,7 +12,7 @@ SPEC.loader.exec_module(MODULE)
 
 
 class SecretPermissionLabTest(unittest.TestCase):
-    def test_load_secret_config_reads_phase7_yaml_section(self):
+    def test_load_secret_config_reads_harness_yaml_section(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "harness.yaml"
             config.write_text(

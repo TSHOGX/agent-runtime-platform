@@ -1,15 +1,9 @@
-#!/usr/bin/env python3
-import importlib.util
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
-
-MODULE_PATH = Path(__file__).with_name("release-gates.py")
-SPEC = importlib.util.spec_from_file_location("phase7_release_gates", MODULE_PATH)
-MODULE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(MODULE)
+from tools.release.suites import control_plane as MODULE
 
 
 class ReleaseGatesTest(unittest.TestCase):
@@ -28,12 +22,12 @@ class ReleaseGatesTest(unittest.TestCase):
         gates = MODULE.selected_gates(args)
 
         self.assertEqual([gate.name for gate in gates], [
-            "go_phase7_packages",
-            "go_phase7_turn_start_latency_bench",
-            "python_phase7_tools_and_sandbox",
+            "go_orchestrator_packages",
+            "go_turn_start_latency_bench",
+            "python_control_plane_tools_and_sandbox",
         ])
         self.assertEqual({gate.category for gate in gates}, {"deterministic"})
-        self.assertIn("tools/phase7/test_release_gates.py", gates[2].command)
+        self.assertIn("tools/release/gates/control_plane/test_release_gates.py", gates[2].command)
 
     def test_optional_flags_add_external_gates(self):
         args = type(
@@ -88,13 +82,13 @@ class ReleaseGatesTest(unittest.TestCase):
                 {"name": "bad", "status": "failed"},
             ],
             commit="abc123",
-            context={"git": {"commit": "abc123"}, "phase7_config": {}},
+            context={"git": {"commit": "abc123"}, "harness_config": {}},
         )
 
         self.assertEqual(payload["result"], "failed")
         self.assertEqual(payload["commit"], "abc123")
         self.assertEqual(payload["context"]["git"]["commit"], "abc123")
-        self.assertIn("phase7_config", payload["context"])
+        self.assertIn("harness_config", payload["context"])
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "evidence.json"
             MODULE.write_output(output, payload)
@@ -132,7 +126,7 @@ harness:
             self.assertEqual(values["harness.secrets.readers_gid"], "65501")
 
     def test_attach_structured_output_reads_bridge_lab_evidence(self):
-        with tempfile.TemporaryDirectory(prefix="harness-phase7-bridge-lab.") as tmp:
+        with tempfile.TemporaryDirectory(prefix="harness-bridge-durability-lab.") as tmp:
             evidence = Path(tmp) / "evidence.json"
             evidence.write_text(json.dumps({"result": "passed", "workdir": tmp}), encoding="utf-8")
             result = {

@@ -43,15 +43,15 @@ class AccountState:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Bootstrap the Phase 7 host secret permission model.")
-    parser.add_argument("--config", default=os.environ.get("PHASE7_CONFIG", "config/harness.yaml"))
-    parser.add_argument("--secrets-root", default=os.environ.get("PHASE7_SECRETS_ROOT", ""))
-    parser.add_argument("--readers-gid", type=int, default=int(os.environ.get("PHASE7_SECRET_READERS_GID", "0")))
-    parser.add_argument("--owner-user", default=os.environ.get("PHASE7_SECRET_OWNER", "orchestrator"))
-    parser.add_argument("--owner-home", default=os.environ.get("PHASE7_SECRET_OWNER_HOME", "/var/lib/harness"))
-    parser.add_argument("--readers-group", default=os.environ.get("PHASE7_SECRET_READERS_GROUP", "harness-secret-readers"))
-    parser.add_argument("--agent-uid", type=int, default=int(os.environ.get("PHASE7_AGENT_UID", "65534")))
-    parser.add_argument("--agent-user", default=os.environ.get("PHASE7_AGENT_USER", ""))
+    parser = argparse.ArgumentParser(description="Bootstrap the host secret permission model.")
+    parser.add_argument("--config", default=os.environ.get("HARNESS_CONFIG", "config/harness.yaml"))
+    parser.add_argument("--secrets-root", default=os.environ.get("HARNESS_SECRETS_ROOT", ""))
+    parser.add_argument("--readers-gid", type=int, default=int(os.environ.get("HARNESS_SECRET_READERS_GID", "0")))
+    parser.add_argument("--owner-user", default=os.environ.get("HARNESS_SECRET_OWNER", "orchestrator"))
+    parser.add_argument("--owner-home", default=os.environ.get("HARNESS_SECRET_OWNER_HOME", "/var/lib/harness"))
+    parser.add_argument("--readers-group", default=os.environ.get("HARNESS_SECRET_READERS_GROUP", "harness-secret-readers"))
+    parser.add_argument("--agent-uid", type=int, default=int(os.environ.get("HARNESS_AGENT_UID", "65534")))
+    parser.add_argument("--agent-user", default=os.environ.get("HARNESS_AGENT_USER", ""))
     parser.add_argument("--apply", action="store_true")
     return parser.parse_args()
 
@@ -245,5 +245,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as err:
-        print(f"phase7 secret permission bootstrap failed: {err}", file=sys.stderr)
+        print(f"secret permission bootstrap failed: {err}", file=sys.stderr)
         raise SystemExit(1)

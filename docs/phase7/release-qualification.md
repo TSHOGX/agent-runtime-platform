@@ -14,45 +14,45 @@ Run from `orchestrator/`:
 
 ```bash
 go test -count=1 ./internal/config ./internal/store ./internal/runtime ./internal/bridge ./internal/server ./internal/events
-go test -tags phase7bench -count=1 ./internal/server -run TestPhase7TurnStartLatencyGate
+go test -tags controlplanebench -count=1 ./internal/server -run TestTurnStartLatencyGate
 ```
 
 Run from the repository root:
 
 ```bash
 python3 -m unittest sandbox-image/tests/test_harness_bridge_client.py
-python3 -m unittest tools/phase7/test_live_turn_start_latency.py
-python3 -m unittest tools/phase7/test_release_gates.py
-python3 -m unittest tools/phase7/test_secret_permission_bootstrap.py
-python3 -m unittest tools/phase7/test_secret_permission_lab.py
+python3 -m unittest tools/release/gates/control_plane/test_live_turn_start_latency.py
+python3 -m unittest tools/release/gates/control_plane/test_release_gates.py
+python3 -m unittest tools/release/gates/control_plane/test_secret_permission_bootstrap.py
+python3 -m unittest tools/release/gates/control_plane/test_secret_permission_lab.py
 ```
 
-The `phase7bench` gate measures the in-repo control-plane path from HTTP enqueue to committed `ack_turn_started` with a connected and probed bridge. It is not a replacement for the live lab load measurement below.
+The `controlplanebench` gate measures the in-repo control-plane path from HTTP enqueue to committed `ack_turn_started` with a connected and probed bridge. It is not a replacement for the live lab load measurement below.
 
 The deterministic gates can also be run through the evidence-producing wrapper:
 
 ```bash
-tools/phase7/release-gates.py --output /tmp/harness-phase7-release-gates.json
+python3 tools/release/run.py --suite control_plane --output /tmp/harness-control-plane-release-gates.json
 ```
 
-The wrapper records the candidate commit, dirty worktree status, selected Phase 7 config values, `runsc --version`, and the pinned proxy checkout commit. For external gates that emit JSON or evidence files, the wrapper embeds that structured evidence in the gate result.
+The wrapper records the candidate commit, dirty worktree status, selected harness config values, `runsc --version`, and the pinned proxy checkout commit. For external gates that emit JSON or evidence files, the wrapper embeds that structured evidence in the gate result.
 
 External gates are opt-in so the wrapper never touches live lab state by default:
 
 ```bash
-tools/phase7/release-gates.py \
+python3 tools/release/run.py --suite control_plane \
   --include-proxy \
   --include-bridge-lab \
   --include-secret-lab \
   --include-live-latency \
-  --output /tmp/harness-phase7-external-gates.json
+  --output /tmp/harness-control-plane-external-gates.json
 ```
 
-`--include-live-latency` requires `PHASE7_LATENCY_SESSION_IDS` to name one or more prewarmed `running_idle` sessions. Without that environment variable, run only the deterministic/proxy/bridge/secret gates or prewarm a session first.
+`--include-live-latency` requires `HARNESS_LATENCY_SESSION_IDS` to name one or more prewarmed `running_idle` sessions. Without that environment variable, run only the deterministic/proxy/bridge/secret gates or prewarm a session first.
 
 ## Latest Lab Evidence
 
-The latest qualified lab evidence on this host is `/tmp/harness-phase7-external-gates.json`.
+The latest qualified lab evidence on this host is `/tmp/harness-control-plane-external-gates.json`.
 
 Last observed result:
 
@@ -79,7 +79,7 @@ Required behavior:
 - `POST /v1/messages` with a wrong key returns `401`.
 - `POST /v1/messages` with the configured key and malformed JSON returns `400`.
 
-Any proxy behavior drift blocks the release until the proxy is re-pinned or the Phase 7 probe contract is deliberately changed.
+Any proxy behavior drift blocks the release until the proxy is re-pinned or the probe contract is deliberately changed.
 
 ## gVisor Bridge Durability Lab
 
@@ -88,7 +88,7 @@ This gate must run on the target lab host with the pinned `runsc` build. It veri
 Run from the repository root:
 
 ```bash
-tools/phase7/bridge-durability-lab.sh
+tools/release/gates/control_plane/bridge-durability-lab.sh
 ```
 
 The script writes an OCI bundle under a temporary workdir, starts a minimal `runsc` sandbox, writes one bridge heartbeat envelope from inside the sandbox using file `fsync`, rename into `outbox/`, and directory `fsync`, then starts the host-side bridge queue reader after the sandbox writer exits. This models a host bridge process restart before the message is read and leaves `evidence.json`, sandbox stdout/stderr, and host-reader logs in the workdir.
@@ -112,28 +112,28 @@ This gate must run as root on the target lab host. It verifies the rootful deplo
 Run from the repository root:
 
 ```bash
-tools/phase7/secret-permission-lab.py
+tools/release/gates/control_plane/secret-permission-lab.py
 ```
 
 If the target host has not been bootstrapped yet, preview the required system changes first:
 
 ```bash
-tools/phase7/bootstrap-secret-permissions.py
+tools/release/gates/control_plane/bootstrap-secret-permissions.py
 ```
 
 Apply them only during a maintenance window, then rerun the lab:
 
 ```bash
-tools/phase7/bootstrap-secret-permissions.py --apply
-tools/phase7/secret-permission-lab.py
+tools/release/gates/control_plane/bootstrap-secret-permissions.py --apply
+tools/release/gates/control_plane/secret-permission-lab.py
 ```
 
 Useful overrides:
 
-- `PHASE7_SECRET_OWNER` defaults to `orchestrator`.
-- `PHASE7_SECRET_READERS_GROUP` defaults to `harness-secret-readers`.
-- `PHASE7_SECRET_READERS_GID` and `PHASE7_SECRETS_ROOT` override `config/harness.yaml`.
-- `PHASE7_LAB_ROOTFS` defaults to `sandbox-image/rootfs`.
+- `HARNESS_SECRET_OWNER` defaults to `orchestrator`.
+- `HARNESS_SECRET_READERS_GROUP` defaults to `harness-secret-readers`.
+- `HARNESS_SECRET_READERS_GID` and `HARNESS_SECRETS_ROOT` override `config/harness.yaml`.
+- `HARNESS_LAB_ROOTFS` defaults to `sandbox-image/rootfs`.
 
 Passing condition: the tool prints `{"result": "passed", ...}`. A missing user/group, wrong mode/owner/group, extra readers-group member, failed UID `65534` read, successful unrelated-UID read, or failed sandbox read blocks the release.
 
@@ -144,16 +144,16 @@ The live release benchmark measures `POST /api/sessions/{id}/messages` enqueue t
 Run from the repository root with one or more prewarmed `running_idle` sessions. When multiple session IDs are provided, the tool posts to them concurrently and reports per-session samples plus p50/p95/p99/max:
 
 ```bash
-PHASE7_LATENCY_SESSION_IDS=sess_a,sess_b tools/phase7/live-turn-start-latency.py
+HARNESS_LATENCY_SESSION_IDS=sess_a,sess_b tools/release/gates/control_plane/live-turn-start-latency.py
 ```
 
 Useful overrides:
 
-- `PHASE7_ORCHESTRATOR_URL` defaults to `http://127.0.0.1:8090`.
-- `PHASE7_DB` defaults to `/var/lib/harness/sessions/orchestrator.db`.
-- `PHASE7_SHARED_SECRET` logs in through `/login` when orchestrator auth is enabled.
-- `PHASE7_AUTH_COOKIE` sends an existing raw `Cookie` header instead of logging in.
-- `PHASE7_LATENCY_CONTENT` changes the message body; `{session_id}` and `{nonce}` are replaced per sample.
+- `HARNESS_ORCHESTRATOR_URL` defaults to `http://127.0.0.1:8090`.
+- `HARNESS_DB` defaults to `/var/lib/harness/sessions/orchestrator.db`.
+- `HARNESS_SHARED_SECRET` logs in through `/login` when orchestrator auth is enabled.
+- `HARNESS_AUTH_COOKIE` sends an existing raw `Cookie` header instead of logging in.
+- `HARNESS_LATENCY_CONTENT` changes the message body; `{session_id}` and `{nonce}` are replaced per sample.
 
 Required evidence:
 

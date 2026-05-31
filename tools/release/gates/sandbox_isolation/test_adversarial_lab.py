@@ -80,14 +80,14 @@ class AdversarialLabTest(unittest.TestCase):
             payload = MODULE.inspect_generated_report(
                 release_path,
                 output_report=report_path,
-                target_host="phase8-lab-host",
+                target_host="sandbox-lab-host",
             )
 
             self.assertEqual(payload["status"], "passed")
             self.assertEqual(payload["required_total"], payload["reported_total"])
             self.assertEqual(payload["required_total"], payload["passed_total"])
             report = json.loads(report_path.read_text(encoding="utf-8"))
-            self.assertEqual(report["target_host"], "phase8-lab-host")
+            self.assertEqual(report["target_host"], "sandbox-lab-host")
             self.assertTrue(report["source_release_evidence"]["digest"].startswith("sha256:"))
             self.assertEqual(report["gates"]["root_and_mount_gates_027"]["status"], "passed")
             self.assertIn("rootfs_image", report["gates"]["root_and_mount_gates_027"]["evidence"])
@@ -99,7 +99,7 @@ class AdversarialLabTest(unittest.TestCase):
             release_path = Path(tmp) / "release.json"
             release_path.write_text(json.dumps(release), encoding="utf-8")
 
-            payload = MODULE.inspect_generated_report(release_path, target_host="phase8-lab-host")
+            payload = MODULE.inspect_generated_report(release_path, target_host="sandbox-lab-host")
 
             self.assertEqual(payload["status"], "failed")
             self.assertIn("missing_supplied_evidence", {item["kind"] for item in payload["issues"]})
@@ -109,7 +109,7 @@ def valid_report():
     return {
         "contract": MODULE.CONTRACT,
         "qualification": "adversarial-lab",
-        "target_host": "phase8-lab-host",
+        "target_host": "sandbox-lab-host",
         "generated_at": "2026-05-28T00:00:00Z",
         "proxy_commit": "c74d5e0485b8457de68c2e5ac2b32877fbbb3932",
         "runsc": {

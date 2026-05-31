@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[4]
 CONTRACT = "sandbox-isolation-v1"
 sys.path.insert(0, str(REPO_ROOT))
 from tools.release.suites import sandbox_isolation as RELEASE_GATES  # noqa: E402
@@ -17,7 +17,7 @@ REQUIRED_RUNSC_FIELDS = ("platform", "version", "binary_path", "binary_digest")
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Validate Phase 8 target-lab adversarial evidence coverage.")
+    parser = argparse.ArgumentParser(description="Validate runtime-isolation target-lab adversarial evidence coverage.")
     parser.add_argument("--report", default="", help="Path to the target-lab adversarial JSON report.")
     parser.add_argument(
         "--from-release-evidence",

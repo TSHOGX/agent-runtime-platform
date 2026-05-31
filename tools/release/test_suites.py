@@ -21,15 +21,15 @@ class ControlPlaneSuiteTest(unittest.TestCase):
         gates = control_plane.selected_gates(args)
         self.assertEqual(
             [g.name for g in gates],
-            ["go_phase7_packages", "go_phase7_turn_start_latency_bench", "python_phase7_tools_and_sandbox"],
+            ["go_orchestrator_packages", "go_turn_start_latency_bench", "python_control_plane_tools_and_sandbox"],
         )
         self.assertEqual({g.category for g in gates}, {"deterministic"})
 
-    def test_evidence_envelope_uses_phase_key(self):
+    def test_evidence_envelope_uses_qualification_key(self):
         payload = control_plane.evidence(
-            [{"name": "ok", "status": "passed"}], commit="abc", context={"git": {"commit": "abc"}, "phase7_config": {}}
+            [{"name": "ok", "status": "passed"}], commit="abc", context={"git": {"commit": "abc"}, "harness_config": {}}
         )
-        self.assertEqual(payload["phase"], "phase7")
+        self.assertEqual(payload["qualification"], "control-plane")
         self.assertEqual(payload["result"], "passed")
         self.assertNotIn("contract", payload)
 

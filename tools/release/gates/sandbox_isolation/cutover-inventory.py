@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_CONFIG = REPO_ROOT / "config" / "harness.yaml"
 
 
@@ -209,7 +209,7 @@ def db_inventory(db_path):
                 "runtime_generation_resources",
                 "SELECT COUNT(*) FROM runtime_generation_resources WHERE checkpoint_path IS NOT NULL AND checkpoint_path != '' AND resource_state != 'destroyed'",
             ),
-            "phase8_contract_rows": ("sandbox_contracts", "SELECT COUNT(*) FROM sandbox_contracts"),
+            "sandbox_contract_rows": ("sandbox_contracts", "SELECT COUNT(*) FROM sandbox_contracts"),
         }
         for name, (table, query) in query_specs.items():
             if table_exists(conn, table):
@@ -272,7 +272,7 @@ def host_inventory(args):
 def blockers_for_inventory(db, roots, host, args):
     blockers = []
     for name, query in db.get("queries", {}).items():
-        if name == "phase8_contract_rows":
+        if name == "sandbox_contract_rows":
             continue
         if query.get("count", 0) > 0:
             blockers.append({"name": name, "kind": "db_rows", "count": query["count"]})

@@ -11,11 +11,10 @@ strips ``--suite NAME`` and forwards the remaining arguments to that suite's
 ``--list`` and a sequential default run).
 
 Suites:
-    control_plane     - durable control-plane gates (ex-phase7); blocking per
-                        PLAN.md guardrail #2.
-    sandbox_isolation - runtime-isolation contract (ex-phase8); the live harness.
-    driver_contract   - phase9 driver/provider (reserved placeholder).
-    agent_capability  - phase10 capability/UX (reserved; static-check view).
+    control_plane     - durable control-plane gates.
+    sandbox_isolation - runtime-isolation contract; the live harness.
+    driver_contract   - driver/provider contract (reserved placeholder).
+    agent_capability  - capability/UX (reserved; static-check view).
 """
 import json
 import sys

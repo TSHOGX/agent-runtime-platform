@@ -1,4 +1,4 @@
-//go:build phase7bench
+//go:build controlplanebench
 
 package server
 
@@ -19,14 +19,14 @@ import (
 	"harness-platform/orchestrator/internal/sessionstate"
 )
 
-func TestPhase7TurnStartLatencyGate(t *testing.T) {
+func TestTurnStartLatencyGate(t *testing.T) {
 	const budget = 50 * time.Millisecond
 
 	ctx := context.Background()
 	dir := t.TempDir()
 	cfg := testServerConfig(dir)
 	st, owner := openServerOwnedStore(t, ctx, dir)
-	session := createServerTestSession(t, ctx, st, dir, "sess_phase7_latency", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
+	session := createServerTestSession(t, ctx, st, dir, "sess_latency", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
 	allocation := prepareServerIdleGeneration(t, ctx, st, cfg, owner.UUID, session.ID)
 	details, err := st.GetRuntimeGenerationDetails(ctx, session.ID, allocation.GenerationID)
 	if err != nil {
@@ -48,8 +48,8 @@ func TestPhase7TurnStartLatencyGate(t *testing.T) {
 	processor := &bridge.Processor{
 		Store:           st,
 		Owner:           allocation.Owner,
-		LeaseTTL:        cfg.Phase7.Bridge.LeaseTTL.Duration,
-		AckStartedGrace: cfg.Phase7.Bridge.AckStartedGrace.Duration,
+		LeaseTTL:        cfg.Harness.Bridge.LeaseTTL.Duration,
+		AckStartedGrace: cfg.Harness.Bridge.AckStartedGrace.Duration,
 		AfterCommit:     srv.handleBridgeCommittedEnvelope,
 	}
 	outbox, err := bridge.OpenQueue(details.BridgeDirPath, bridge.OutboxDir)
@@ -81,7 +81,7 @@ func TestPhase7TurnStartLatencyGate(t *testing.T) {
 		GenerationID: allocation.GenerationID,
 	})
 
-	content := "phase7 latency gate " + time.Now().UTC().Format(time.RFC3339Nano)
+	content := "turn-start latency gate " + time.Now().UTC().Format(time.RFC3339Nano)
 	start := time.Now()
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(fmt.Sprintf(`{"content":%q}`, content)))
 	rec := httptest.NewRecorder()
@@ -144,6 +144,6 @@ WHERE turn_id = ?
 		t.Fatalf("turn start did not commit: status=%s ack_started_at=%q ack_events=%d", status, ackStartedAt, ackEvents)
 	}
 	if elapsed > budget {
-		t.Fatalf("turn-start latency %s exceeded phase7 budget %s", elapsed, budget)
+		t.Fatalf("turn-start latency %s exceeded latency budget %s", elapsed, budget)
 	}
 }

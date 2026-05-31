@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[4]
 CONTRACT = "sandbox-isolation-v1"
 CONTENT_ROOTS = {
     "sessions_root",

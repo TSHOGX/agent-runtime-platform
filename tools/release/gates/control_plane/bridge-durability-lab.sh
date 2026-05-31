@@ -2,14 +2,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 RUNSC="${RUNSC:-runsc}"
-ROOTFS="${PHASE7_LAB_ROOTFS:-$REPO_ROOT/sandbox-image/rootfs}"
-WORKDIR="${PHASE7_BRIDGE_LAB_WORKDIR:-$(mktemp -d /tmp/harness-phase7-bridge-lab.XXXXXX)}"
+ROOTFS="${HARNESS_LAB_ROOTFS:-$REPO_ROOT/sandbox-image/rootfs}"
+WORKDIR="${HARNESS_BRIDGE_LAB_WORKDIR:-$(mktemp -d /tmp/harness-bridge-durability-lab.XXXXXX)}"
 BUNDLE_DIR="$WORKDIR/bundle"
 BRIDGE_DIR="$WORKDIR/bridge"
 RUNSC_ROOT="$WORKDIR/runsc-root"
-CID="phase7-bridge-lab-$$"
+CID="bridge-durability-lab-$$"
 
 cleanup() {
   "$RUNSC" --root "$RUNSC_ROOT" delete -f "$CID" >/dev/null 2>&1 || true
@@ -44,11 +44,11 @@ for name in ("tmp", "outbox", "inbox", "heartbeat"):
     (root / name).mkdir(parents=True, exist_ok=True)
 
 envelope = {
-    "message_id": "phase7-durability-" + uuid.uuid4().hex,
-    "request_id": "phase7-durability",
+    "message_id": "bridge-durability-" + uuid.uuid4().hex,
+    "request_id": "bridge-durability",
     "type": "heartbeat",
-    "session_id": "sess_phase7_lab",
-    "generation_id": "gen_phase7_lab",
+    "session_id": "sess_bridge_lab",
+    "generation_id": "gen_bridge_lab",
     "payload": {
         "writer": "sandbox",
         "pid": os.getpid(),
@@ -91,7 +91,7 @@ config = {
         "noNewPrivileges": True,
     },
     "root": {"path": rootfs, "readonly": False},
-    "hostname": "phase7-bridge-lab",
+    "hostname": "bridge-durability-lab",
     "mounts": [
         {"destination": "/proc", "type": "proc", "source": "proc"},
         {
@@ -148,7 +148,7 @@ PY
 COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 RUNSC_VERSION="$("$RUNSC" --version | tr '\n' ' ')"
 
-echo "phase7 bridge durability lab"
+echo "bridge durability lab"
 echo "commit: $COMMIT"
 echo "runsc: $RUNSC_VERSION"
 echo "workdir: $WORKDIR"
@@ -165,7 +165,7 @@ cat "$WORKDIR/runsc.stdout"
 echo "starting host reader after sandbox writer exit"
 (
   cd "$REPO_ROOT/orchestrator"
-  PHASE7_BRIDGE_LAB_DIR="$BRIDGE_DIR" go test -tags phase7lab -count=1 ./internal/bridge -run TestPhase7BridgeDurabilityLabReadsSandboxFsyncedMessage -v
+  HARNESS_BRIDGE_LAB_DIR="$BRIDGE_DIR" go test -tags bridgelab -count=1 ./internal/bridge -run TestBridgeDurabilityLabReadsSandboxFsyncedMessage -v
 ) | tee "$WORKDIR/host-reader.log"
 
 python3 - "$WORKDIR/evidence.json" "$COMMIT" "$RUNSC_VERSION" "$BUNDLE_DIR/config.json" "$BRIDGE_DIR" "$WORKDIR" <<'PY'

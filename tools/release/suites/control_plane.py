@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Control-plane release suite (formerly the Phase 7 release gates).
+"""Control-plane release suite.
 
 Owns the durable control-plane qualification gates: orchestrator package
 tests, the turn-start latency bench, the pinned proxy contract, the gVisor
 bridge durability lab, the secret-permission lab, and live latency. Per
-PLAN.md guardrail #2 these gates remain blocking until explicitly retired;
-this suite carries them verbatim.
+PLAN.md guardrail #2 these gates remain blocking until explicitly retired.
 """
 import argparse
 import json
@@ -20,14 +19,14 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 PROXY_ROOT = Path("/root/claude-code-proxy")
 
 SUITE = "control_plane"
-FAILURE_BANNER = "phase7 release gates failed"
+FAILURE_BANNER = "control-plane release gates failed"
 
 JSON_OUTPUT_GATES = {"secret_permission_lab", "live_turn_start_latency"}
 EVIDENCE_FILE_GATES = {"gvisor_bridge_durability_lab"}
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="Run Phase 7 release qualification gates and emit JSON evidence.")
+    parser = argparse.ArgumentParser(description="Run control-plane release qualification gates and emit JSON evidence.")
     parser.add_argument("--include-proxy", action="store_true", help="Run the pinned claude-code-proxy contract gate.")
     parser.add_argument("--include-bridge-lab", action="store_true", help="Run the gVisor bridge durability lab.")
     parser.add_argument("--include-secret-lab", action="store_true", help="Run the rootful secret permission lab.")
@@ -40,7 +39,7 @@ def parse_args(argv=None):
 def deterministic_gates():
     return [
         Gate(
-            name="go_phase7_packages",
+            name="go_orchestrator_packages",
             command=(
                 "go",
                 "test",
@@ -56,22 +55,22 @@ def deterministic_gates():
             category="deterministic",
         ),
         Gate(
-            name="go_phase7_turn_start_latency_bench",
+            name="go_turn_start_latency_bench",
             command=(
                 "go",
                 "test",
                 "-tags",
-                "phase7bench",
+                "controlplanebench",
                 "-count=1",
                 "./internal/server",
                 "-run",
-                "TestPhase7TurnStartLatencyGate",
+                "TestTurnStartLatencyGate",
             ),
             cwd=REPO_ROOT / "orchestrator",
             category="deterministic",
         ),
         Gate(
-            name="python_phase7_tools_and_sandbox",
+            name="python_control_plane_tools_and_sandbox",
             command=(
                 "python3",
                 "-W",
@@ -79,10 +78,10 @@ def deterministic_gates():
                 "-m",
                 "unittest",
                 "sandbox-image/tests/test_harness_bridge_client.py",
-                "tools/phase7/test_live_turn_start_latency.py",
-                "tools/phase7/test_release_gates.py",
-                "tools/phase7/test_secret_permission_bootstrap.py",
-                "tools/phase7/test_secret_permission_lab.py",
+                "tools/release/gates/control_plane/test_live_turn_start_latency.py",
+                "tools/release/gates/control_plane/test_release_gates.py",
+                "tools/release/gates/control_plane/test_secret_permission_bootstrap.py",
+                "tools/release/gates/control_plane/test_secret_permission_lab.py",
             ),
             cwd=REPO_ROOT,
             category="deterministic",
@@ -105,7 +104,7 @@ def optional_gates(args):
         gates.append(
             Gate(
                 name="gvisor_bridge_durability_lab",
-                command=("tools/phase7/bridge-durability-lab.sh",),
+                command=("tools/release/gates/control_plane/bridge-durability-lab.sh",),
                 cwd=REPO_ROOT,
                 category="external",
             )
@@ -114,7 +113,7 @@ def optional_gates(args):
         gates.append(
             Gate(
                 name="secret_permission_lab",
-                command=("tools/phase7/secret-permission-lab.py",),
+                command=("tools/release/gates/control_plane/secret-permission-lab.py",),
                 cwd=REPO_ROOT,
                 category="external",
             )
@@ -123,7 +122,7 @@ def optional_gates(args):
         gates.append(
             Gate(
                 name="live_turn_start_latency",
-                command=("tools/phase7/live-turn-start-latency.py",),
+                command=("tools/release/gates/control_plane/live-turn-start-latency.py",),
                 cwd=REPO_ROOT,
                 category="external",
             )
@@ -180,7 +179,7 @@ def release_context(commit=None):
     return {
         "repo_root": str(REPO_ROOT),
         "git": engine.git_context(REPO_ROOT, commit),
-        "phase7_config": load_release_config(),
+        "harness_config": load_release_config(),
         "runsc_version": engine.command_output(("runsc", "--version"), REPO_ROOT),
         "proxy": proxy_context(),
     }
@@ -206,7 +205,7 @@ def evidence(results, commit=None, context=None):
     commit = commit or engine.git_commit(REPO_ROOT)
     status = "passed" if all(result["status"] == "passed" for result in results) else "failed"
     return {
-        "phase": "phase7",
+        "qualification": "control-plane",
         "result": status,
         "commit": commit,
         "generated_at": engine.utc_now(),

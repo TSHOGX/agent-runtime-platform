@@ -1,4 +1,4 @@
-//go:build phase7lab
+//go:build bridgelab
 
 package bridge
 
@@ -8,10 +8,10 @@ import (
 	"testing"
 )
 
-func TestPhase7BridgeDurabilityLabReadsSandboxFsyncedMessage(t *testing.T) {
-	root := strings.TrimSpace(os.Getenv("PHASE7_BRIDGE_LAB_DIR"))
+func TestBridgeDurabilityLabReadsSandboxFsyncedMessage(t *testing.T) {
+	root := strings.TrimSpace(os.Getenv("HARNESS_BRIDGE_LAB_DIR"))
 	if root == "" {
-		t.Skip("PHASE7_BRIDGE_LAB_DIR is required for the Phase 7 gVisor durability lab")
+		t.Skip("HARNESS_BRIDGE_LAB_DIR is required for the gVisor bridge durability lab")
 	}
 	outbox, err := OpenQueue(root, OutboxDir)
 	if err != nil {
@@ -29,9 +29,9 @@ func TestPhase7BridgeDurabilityLabReadsSandboxFsyncedMessage(t *testing.T) {
 		t.Fatalf("outbox sequence=%d want 1", file.Seq)
 	}
 	if file.Envelope.Type != TypeHeartbeat ||
-		file.Envelope.SessionID != "sess_phase7_lab" ||
-		file.Envelope.GenerationID != "gen_phase7_lab" ||
-		!strings.HasPrefix(file.Envelope.MessageID, "phase7-durability-") {
+		file.Envelope.SessionID != "sess_bridge_lab" ||
+		file.Envelope.GenerationID != "gen_bridge_lab" ||
+		!strings.HasPrefix(file.Envelope.MessageID, "bridge-durability-") {
 		t.Fatalf("unexpected durability envelope: %+v", file.Envelope)
 	}
 	if err := file.Unlink(); err != nil {
