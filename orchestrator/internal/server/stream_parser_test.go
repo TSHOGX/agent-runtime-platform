@@ -335,18 +335,55 @@ func TestPiOutputNormalizerAcceptsRetryLifecycleEvents(t *testing.T) {
 	}
 }
 
-func TestPiOutputNormalizerRejectsUnknownType(t *testing.T) {
-	srv, _ := newParserTestServer(t)
+func TestPiOutputNormalizerToleratesUnknownType(t *testing.T) {
+	srv, st := newParserTestServer(t)
 	parser := newStreamParser(srv, "sess_1", "pi")
 
-	parser.handle(runtime.Output{Stream: "stdout", Line: `{"type":"future_event"}`})
+	// The producer forwards every pi stdout line, so an unknown but well-formed
+	// event (e.g. a future usage/token event) must not abort the turn. A real
+	// assistant message before/after it should still be persisted normally.
+	lines := []string{
+		`{"type":"message_update","messageId":"msg_1","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"hello"}}`,
+		`{"type":"future_event","tokens":42}`,
+		`{"type":"message_end","messageId":"msg_1","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}`,
+		`{"type":"turn_end","status":"completed"}`,
+	}
+	for _, line := range lines {
+		parser.handle(runtime.Output{Stream: "stdout", Line: line})
+	}
 
 	select {
 	case <-parser.Done():
 	case <-time.After(time.Second):
-		t.Fatal("parser did not complete after unknown pi event")
+		t.Fatal("parser did not complete after turn_end")
 	}
-	if err := parser.Err(); err == nil || err.Error() != `unsupported pi event type "future_event"` {
+	if err := parser.Err(); err != nil {
+		t.Fatalf("unknown pi event type should be tolerated, got error: %v", err)
+	}
+
+	messages, err := st.ListMessages(context.Background(), "sess_1")
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	if len(messages) != 1 || messages[0].Role != "assistant" || messages[0].Content != "hello" {
+		t.Fatalf("expected the surrounding assistant message to persist, got %+v", messages)
+	}
+}
+
+func TestPiOutputNormalizerRejectsMissingType(t *testing.T) {
+	srv, _ := newParserTestServer(t)
+	parser := newStreamParser(srv, "sess_1", "pi")
+
+	// A well-formed pi event always carries a type; an empty/missing type is
+	// malformed input and stays fatal.
+	parser.handle(runtime.Output{Stream: "stdout", Line: `{"foo":"bar"}`})
+
+	select {
+	case <-parser.Done():
+	case <-time.After(time.Second):
+		t.Fatal("parser did not complete after malformed pi event")
+	}
+	if err := parser.Err(); err == nil || err.Error() != "pi event missing type" {
 		t.Fatalf("unexpected pi parser error: %v", err)
 	}
 }
@@ -364,6 +401,74 @@ func TestPiOutputNormalizerRejectsUnknownAssistantEventType(t *testing.T) {
 	}
 	if err := parser.Err(); err == nil || err.Error() != `unsupported pi assistant message event type "future_delta"` {
 		t.Fatalf("unexpected pi parser error: %v", err)
+	}
+}
+
+func TestPiOutputNormalizerFlushPreservesInsertionOrder(t *testing.T) {
+	srv, st := newParserTestServer(t)
+	parser := newStreamParser(srv, "sess_1", "pi")
+
+	// Two builders buffered under ids whose insertion order ("zzz" then "aaa")
+	// is the reverse of their lexical order. turn_end salvages them via flush();
+	// the result must follow chronological insertion order, not map/lexical
+	// order, so randomized map iteration cannot scramble the assembled text.
+	lines := []string{
+		`{"type":"message_update","messageId":"msg_zzz","assistantMessageEvent":{"type":"text_delta","delta":"first"}}`,
+		`{"type":"message_update","messageId":"msg_aaa","assistantMessageEvent":{"type":"text_delta","delta":"second"}}`,
+		`{"type":"turn_end","status":"completed"}`,
+	}
+	for _, line := range lines {
+		parser.handle(runtime.Output{Stream: "stdout", Line: line})
+	}
+
+	select {
+	case <-parser.Done():
+	case <-time.After(time.Second):
+		t.Fatal("parser did not complete after turn_end")
+	}
+
+	messages, err := st.ListMessages(context.Background(), "sess_1")
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	if len(messages) != 1 || messages[0].Content != "firstsecond" {
+		t.Fatalf("expected insertion-order salvage \"firstsecond\", got %+v", messages)
+	}
+}
+
+func TestPiOutputNormalizerDrainsFallbackKeyAtMessageEnd(t *testing.T) {
+	srv, st := newParserTestServer(t)
+	parser := newStreamParser(srv, "sess_1", "pi")
+
+	// Deltas arrive without a messageId so they buffer under the
+	// "pi_assistant_pending" fallback key. message_end then arrives with a real
+	// id but no inline text. The fallback text must be emitted as this
+	// message's assistant.message at message_end rather than only being
+	// salvaged in bulk at turn_end.
+	lines := []string{
+		`{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"buffered text"}}`,
+		`{"type":"message_end","messageId":"msg_1","message":{"role":"assistant","content":[]}}`,
+	}
+	for _, line := range lines {
+		parser.handle(runtime.Output{Stream: "stdout", Line: line})
+	}
+
+	messages, err := st.ListMessages(context.Background(), "sess_1")
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	if len(messages) != 1 || messages[0].Role != "assistant" || messages[0].Content != "buffered text" {
+		t.Fatalf("expected fallback-key text persisted at message_end, got %+v", messages)
+	}
+
+	// A following turn_end must not re-emit the already-drained fallback text.
+	parser.handle(runtime.Output{Stream: "stdout", Line: `{"type":"turn_end","status":"completed"}`})
+	messages, err = st.ListMessages(context.Background(), "sess_1")
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("expected no duplicate message after turn_end, got %+v", messages)
 	}
 }
 

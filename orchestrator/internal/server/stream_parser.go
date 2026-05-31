@@ -23,8 +23,11 @@ type streamParser struct {
 	normalizer outputNormalizer
 	// pending text chunks per assistant message id, flushed when we see the
 	// matching "assistant" full message (or when the runtime exits).
-	pending map[string]*strings.Builder
-	done    chan struct{}
+	// pendingOrder records the order ids were first buffered so salvaged text
+	// is reassembled chronologically rather than in randomized map order.
+	pending      map[string]*strings.Builder
+	pendingOrder []string
+	done         chan struct{}
 	once    sync.Once
 	err     error
 	last    string
@@ -95,6 +98,59 @@ func (p *streamParser) Err() error {
 
 func (p *streamParser) complete() {
 	p.once.Do(func() { close(p.done) })
+}
+
+// bufferPending returns the builder for id, creating it (and recording its
+// insertion order) the first time the id is seen.
+func (p *streamParser) bufferPending(id string) *strings.Builder {
+	sb, ok := p.pending[id]
+	if !ok {
+		sb = &strings.Builder{}
+		p.pending[id] = sb
+		p.pendingOrder = append(p.pendingOrder, id)
+	}
+	return sb
+}
+
+// dropPending removes id from both the pending map and the order slice so a
+// finalized message is never re-flushed.
+func (p *streamParser) dropPending(id string) {
+	if _, ok := p.pending[id]; !ok {
+		return
+	}
+	delete(p.pending, id)
+	for i, key := range p.pendingOrder {
+		if key == id {
+			p.pendingOrder = append(p.pendingOrder[:i], p.pendingOrder[i+1:]...)
+			break
+		}
+	}
+}
+
+// drainPending concatenates the builders for the given ids in the order they
+// were first buffered and removes them, returning the salvaged text. It lets a
+// message_end finalize text that may have landed under a real id and/or the
+// empty-id fallback key.
+func (p *streamParser) drainPending(ids ...string) string {
+	want := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if _, ok := p.pending[id]; ok {
+			want[id] = true
+		}
+	}
+	if len(want) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, key := range p.pendingOrder {
+		if want[key] {
+			b.WriteString(p.pending[key].String())
+		}
+	}
+	for id := range want {
+		p.dropPending(id)
+	}
+	return b.String()
 }
 
 func (p *streamParser) handle(output runtime.Output) {
@@ -277,8 +333,17 @@ func (piOutputNormalizer) Handle(p *streamParser, output normalizerBridgeOutput)
 		p.publish("agent.output", event)
 		p.complete()
 	default:
-		p.err = fmt.Errorf("unsupported pi event type %q", eventType)
-		p.complete()
+		if eventType == "" {
+			// A well-formed pi event always carries a type; an empty type is
+			// malformed input and stays fatal, matching the decode-error path.
+			p.err = fmt.Errorf("pi event missing type")
+			p.complete()
+			return
+		}
+		// Unknown but well-formed pi event: the producer forwards every pi
+		// stdout line, so a forward-compatible event (future usage/token/etc.)
+		// must not abort an otherwise-successful turn. Ignore it.
+		p.srv.log.Info("ignoring unknown pi event type", "session_id", p.sessionID, "event_type", eventType)
 	}
 }
 
@@ -297,10 +362,7 @@ func (p *streamParser) handlePiMessageUpdate(event map[string]any) {
 		if id == "" {
 			id = "pi_assistant_pending"
 		}
-		if _, ok := p.pending[id]; !ok {
-			p.pending[id] = &strings.Builder{}
-		}
-		p.pending[id].WriteString(text)
+		p.bufferPending(id).WriteString(text)
 		p.publish("agent.delta", map[string]any{
 			"message_id": id,
 			"text":       text,
@@ -317,21 +379,22 @@ func (p *streamParser) handlePiMessageEnd(event map[string]any) {
 		p.publish("system.status", event)
 		return
 	}
+	id := stringFromMap(event, "messageId")
 	text := piMessageText(event["message"])
 	if text == "" {
-		id := stringFromMap(event, "messageId")
-		if id == "" {
-			p.flush()
-			return
-		}
-		if pending, ok := p.pending[id]; ok {
-			delete(p.pending, id)
-			p.persistAssistant(pending.String())
+		// No authoritative inline text: salvage whatever streamed in under the
+		// real id and the empty-id fallback key, emitting it as this message's
+		// assistant.message rather than deferring to the turn_end bulk flush.
+		if salvaged := p.drainPending(id, "pi_assistant_pending"); salvaged != "" {
+			p.persistAssistant(salvaged)
 		}
 		return
 	}
-	delete(p.pending, stringFromMap(event, "messageId"))
-	delete(p.pending, "pi_assistant_pending")
+	// Inline text is authoritative; drop the buffered deltas for both the real
+	// id and the fallback key (mirrors the claude path) so they are neither
+	// re-emitted here nor salvaged again at turn_end.
+	p.dropPending(id)
+	p.dropPending("pi_assistant_pending")
 	p.persistAssistant(text)
 }
 
@@ -436,10 +499,7 @@ func (p *streamParser) handleStreamEvent(raw json.RawMessage) {
 	if id == "" {
 		id = "assistant_pending"
 	}
-	if _, ok := p.pending[id]; !ok {
-		p.pending[id] = &strings.Builder{}
-	}
-	p.pending[id].WriteString(text)
+	p.bufferPending(id).WriteString(text)
 	p.srv.hub.Publish(events.Event{
 		Type:      "agent.delta",
 		SessionID: p.sessionID,
@@ -490,8 +550,8 @@ func (p *streamParser) handleAssistantMessage(raw json.RawMessage) {
 	if text == "" {
 		return
 	}
-	delete(p.pending, msg.ID)
-	delete(p.pending, "assistant_pending")
+	p.dropPending(msg.ID)
+	p.dropPending("assistant_pending")
 	p.persistAssistant(text)
 }
 
@@ -560,14 +620,20 @@ func (p *streamParser) persistShellOutput(text string) {
 func (p *streamParser) flush() {
 	// If the runtime exited mid-stream without ever delivering an "assistant"
 	// or "result" event, salvage whatever we buffered into a final message.
+	// Iterate in insertion order so multi-builder text (multiple messageIds or
+	// a real id plus the fallback key) is reassembled chronologically rather
+	// than in randomized map order.
 	if len(p.pending) == 0 {
 		return
 	}
 	var b strings.Builder
-	for _, sb := range p.pending {
-		b.WriteString(sb.String())
+	for _, id := range p.pendingOrder {
+		if sb, ok := p.pending[id]; ok {
+			b.WriteString(sb.String())
+		}
 	}
 	p.pending = map[string]*strings.Builder{}
+	p.pendingOrder = nil
 	if text := strings.TrimSpace(b.String()); text != "" {
 		p.persistAssistant(text)
 	}
