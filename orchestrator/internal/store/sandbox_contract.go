@@ -95,7 +95,12 @@ func SandboxContractDigest(canonicalPayload []byte) string {
 	return "sha256:" + fmt.Sprintf("%x", sum[:])
 }
 
-func runtimeConfigInputDigest(canonicalPreimage []byte) string {
+// RuntimeConfigInputDigest is the single source of truth for the runtime
+// config digest: sha256 over the versioned prefix plus the canonical preimage
+// bytes. Callers outside the store (e.g. the deployment preimage builder) must
+// route through this so the digest stays byte-for-byte identical to what is
+// persisted and re-validated here.
+func RuntimeConfigInputDigest(canonicalPreimage []byte) string {
 	sum := sha256.Sum256(append([]byte(runtimeConfigDigestPrefix), canonicalPreimage...))
 	return "sha256:" + fmt.Sprintf("%x", sum[:])
 }
@@ -231,9 +236,9 @@ func recordSandboxContractInputEvidenceTx(ctx context.Context, tx *sql.Tx, p Sto
 	}
 	runtimeDigest := strings.TrimSpace(p.RuntimeConfigDigest)
 	if runtimeDigest == "" {
-		runtimeDigest = runtimeConfigInputDigest(runtimePreimage)
+		runtimeDigest = RuntimeConfigInputDigest(runtimePreimage)
 	}
-	if want := runtimeConfigInputDigest(runtimePreimage); runtimeDigest != want {
+	if want := RuntimeConfigInputDigest(runtimePreimage); runtimeDigest != want {
 		return fmt.Errorf("runtime config input evidence digest mismatch: got %s want %s", runtimeDigest, want)
 	}
 	agentManifestPayload, err := CanonicalSandboxContractPayload(p.AgentManifestPayload)

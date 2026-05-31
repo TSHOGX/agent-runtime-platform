@@ -16,7 +16,6 @@ import (
 	"harness-platform/orchestrator/internal/store"
 )
 
-const runtimeConfigDigestPrefix = "runtime_config_digest_v1\n"
 
 type deploymentResolution struct {
 	Mode                    string
@@ -575,8 +574,7 @@ func runtimeConfigDigest(preimage map[string]any) string {
 	if err != nil {
 		return "sha256:invalid"
 	}
-	sum := sha256.Sum256(append([]byte(runtimeConfigDigestPrefix), canonical...))
-	return fmt.Sprintf("sha256:%x", sum[:])
+	return store.RuntimeConfigInputDigest(canonical)
 }
 
 func nullableString(value string) any {
