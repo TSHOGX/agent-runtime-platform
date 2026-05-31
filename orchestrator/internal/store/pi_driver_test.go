@@ -17,30 +17,14 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func TestPhase9CutoverSchemaAcceptsPiDriver(t *testing.T) {
+func TestFreshSchemaAcceptsPiDriver(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := sql.Open("sqlite", filepath.Join(dir, "phase9f.db"))
+	st, err := OpenWithOptions(ctx, filepath.Join(dir, "pi-driver.db"), Options{AgentHomesRoot: filepath.Join(dir, "agent-homes")})
 	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
+		t.Fatalf("open store: %v", err)
 	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	t.Cleanup(func() { _ = db.Close() })
-
-	st := &Store{db: db, options: Options{AgentHomesRoot: filepath.Join(dir, "agent-homes")}}
-	if _, err := st.db.ExecContext(ctx, `PRAGMA foreign_keys=ON`); err != nil {
-		t.Fatalf("enable foreign keys: %v", err)
-	}
-	if err := st.runMigrations(ctx, defaultMigrations(st.options)); err != nil {
-		t.Fatalf("run base migrations: %v", err)
-	}
-	if err := st.runPhase9Cutover(ctx); err != nil {
-		t.Fatalf("run phase9 cutover: %v", err)
-	}
-	if err := st.ensurePhase9ModeSchema(ctx); err != nil {
-		t.Fatalf("ensure mode schema: %v", err)
-	}
+	t.Cleanup(func() { _ = st.Close() })
 
 	if err := st.EnsureUser(ctx, "lab", "Lab"); err != nil {
 		t.Fatalf("ensure user: %v", err)
@@ -56,10 +40,10 @@ func TestPhase9CutoverSchemaAcceptsPiDriver(t *testing.T) {
 
 	baseCfg := testAllocatorConfig(t)
 	baseCfg.CIDRPool = netip.MustParsePrefix("10.240.0.0/28")
-	createAllocatedPhase9Session(t, ctx, st, owner.UUID, baseCfg, "sess_pi_widen_claude", "claude_code", "stream-json")
-	createAllocatedPhase9Session(t, ctx, st, owner.UUID, baseCfg, "sess_pi_widen_shell", "sh", "shell_pty")
-	addPhase9UserRows(t, ctx, st, "sess_pi_widen_claude")
-	addPhase9UserRows(t, ctx, st, "sess_pi_widen_shell")
+	createAllocatedDriverSession(t, ctx, st, owner.UUID, baseCfg, "sess_pi_widen_claude", "claude_code", "stream-json")
+	createAllocatedDriverSession(t, ctx, st, owner.UUID, baseCfg, "sess_pi_widen_shell", "sh", "shell_pty")
+	addDriverUserRows(t, ctx, st, "sess_pi_widen_claude")
+	addDriverUserRows(t, ctx, st, "sess_pi_widen_shell")
 
 	assertForeignKeyCheckClean(t, ctx, st.db)
 
@@ -78,7 +62,7 @@ func TestPhase9CutoverSchemaAcceptsPiDriver(t *testing.T) {
 		t.Fatalf("shell driver state was not preserved: %s", state)
 	}
 
-	pi := createAllocatedPhase9Session(t, ctx, st, owner.UUID, baseCfg, "sess_pi_widen_pi", "pi", "pi_rpc_events_v1.0")
+	pi := createAllocatedDriverSession(t, ctx, st, owner.UUID, baseCfg, "sess_pi_widen_pi", "pi", "pi_rpc_events_v1.0")
 	state := driverStatePayloadForTest(t, ctx, st, "sess_pi_widen_pi", "pi")
 	if !strings.Contains(state, `"state_kind":"pi_uninitialized"`) ||
 		!strings.Contains(state, `"session_dir":"/agent-home/.pi/agent/sessions"`) ||
@@ -274,7 +258,7 @@ WHERE session_id = ?
 	}
 }
 
-func createAllocatedPhase9Session(t *testing.T, ctx context.Context, st *Store, ownerUUID string, cfg ResourceAllocatorConfig, sessionID, driverID, outputFormat string) GenerationAllocation {
+func createAllocatedDriverSession(t *testing.T, ctx context.Context, st *Store, ownerUUID string, cfg ResourceAllocatorConfig, sessionID, driverID, outputFormat string) GenerationAllocation {
 	t.Helper()
 	createStoreSessionWithAgent(t, ctx, st, sessionID, driverID)
 	cfg.Agent = driverID
@@ -295,7 +279,7 @@ func createAllocatedPhase9Session(t *testing.T, ctx context.Context, st *Store, 
 	return allocation
 }
 
-func addPhase9UserRows(t *testing.T, ctx context.Context, st *Store, sessionID string) {
+func addDriverUserRows(t *testing.T, ctx context.Context, st *Store, sessionID string) {
 	t.Helper()
 	if _, err := st.AddMessage(ctx, sessionID, "user", "hello "+sessionID); err != nil {
 		t.Fatalf("add message %s: %v", sessionID, err)
@@ -367,7 +351,7 @@ func createPiRuntimeResourceLiveForTest(t *testing.T, ctx context.Context, st *S
 	t.Helper()
 	contractID := "contract_" + allocation.GenerationID
 	payload := testSandboxContractPayload(t, sessionID, allocation)
-	payload["contract_gate_version"] = SandboxContractGatePhase9C
+	payload["contract_gate_version"] = SandboxContractGateDriverManifest
 	driver := payload["driver"].(map[string]any)
 	driver["bridge_protocol"] = "harness_bridge_v2"
 	driver["bridge_protocol_version"] = 2
@@ -401,7 +385,7 @@ func createPiRuntimeResourceLiveForTest(t *testing.T, ctx context.Context, st *S
 		GenerationID:           allocation.GenerationID,
 		Owner:                  allocation.Owner,
 		SandboxContractVersion: SandboxContractVersion,
-		ContractGateVersion:    SandboxContractGatePhase9C,
+		ContractGateVersion:    SandboxContractGateDriverManifest,
 		DriverState:            allocation.DriverState,
 		Payload:                payload,
 		Now:                    now,

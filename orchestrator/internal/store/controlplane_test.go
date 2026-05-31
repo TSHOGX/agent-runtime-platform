@@ -15,33 +15,21 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func TestPhase9CutoverDeletesLegacySessionsAndRebuildsSchema(t *testing.T) {
+func TestFreshSchemaCreatesCurrentRuntimeTables(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "legacy.db")
-	agentHomes := filepath.Join(dir, "agent-homes")
-
-	createLegacyPhase6DB(t, dbPath, []legacySession{
-		{id: "sess_created", status: string(sessionstate.Created)},
-		{id: "sess_running", status: string(sessionstate.RunningActive)},
-		{id: "sess_checkpointed", status: string(sessionstate.Checkpointed), checkpointPath: filepath.Join(dir, "cp")},
-	})
-
-	st, err := OpenWithOptions(ctx, dbPath, Options{AgentHomesRoot: agentHomes})
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "fresh.db"))
 	if err != nil {
-		t.Fatalf("open migrated store: %v", err)
+		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	assertMigrationVersions(t, st.db, 14)
 	for _, table := range []string{
 		"runtime_generations", "runtime_generation_resources", "turns", "events",
 		"active_model_request_contexts", "network_profiles", "agent_runtime_profiles",
 		"egress_policies", "orchestrator_owner", "sandbox_contracts",
 		"sandbox_contract_artifacts", "sandbox_contract_input_evidence",
 		"session_workspaces", "session_driver_homes",
-		"runtime_resource_instances", "phase9_cutover_state", "session_driver_states",
-		"runtime_resource_quarantine_tombstones",
+		"runtime_resource_instances", "session_driver_states",
 	} {
 		assertTableExists(t, st.db, table)
 	}
@@ -79,32 +67,12 @@ func TestPhase9CutoverDeletesLegacySessionsAndRebuildsSchema(t *testing.T) {
 	for _, column := range []string{"contract_id", "sandbox_contract_version", "state", "runsc_container_id", "runsc_binary_digest", "sandbox_ip", "resource_identity_payload", "resource_identity_digest", "evidence_json", "evidence_digest", "verified_at"} {
 		assertColumnExists(t, st.db, "runtime_resource_instances", column)
 	}
-	for _, index := range []string{"events_proxy_started_request_uq", "events_proxy_finished_request_uq", "events_created_at_idx", "runtime_generations_sandbox_contract_id_uq", "runtime_generation_resources_contract_id_uq", "session_driver_homes_session_idx", "runtime_resource_instances_runsc_container_id_active_uq", "runtime_resource_instances_sandbox_ip_active_uq", "agent_runtime_profiles_tuple_uq", "runtime_resource_quarantine_active_uq"} {
+	for _, index := range []string{"events_proxy_started_request_uq", "events_proxy_finished_request_uq", "events_created_at_idx", "runtime_generations_sandbox_contract_id_uq", "runtime_generation_resources_contract_id_uq", "session_driver_homes_session_idx", "runtime_resource_instances_runsc_container_id_active_uq", "runtime_resource_instances_sandbox_ip_active_uq", "agent_runtime_profiles_tuple_uq"} {
 		assertIndexExists(t, st.db, index)
-	}
-
-	var cutoverMarker string
-	if err := st.db.QueryRowContext(ctx, `SELECT key FROM phase9_cutover_state WHERE key = 'phase9a_clean_schema'`).Scan(&cutoverMarker); err != nil {
-		t.Fatalf("phase9 cutover marker missing: %v", err)
-	}
-	var legacyRows int
-	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions`).Scan(&legacyRows); err != nil {
-		t.Fatalf("count sessions: %v", err)
-	}
-	if legacyRows != 0 {
-		t.Fatalf("phase9 cutover should delete legacy sessions, got %d", legacyRows)
-	}
-
-	var generations int
-	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_generations`).Scan(&generations); err != nil {
-		t.Fatalf("count runtime generations: %v", err)
-	}
-	if generations != 0 {
-		t.Fatalf("legacy migration must not synthesize runtime generations, got %d", generations)
 	}
 }
 
-func TestPhase7MigrationsAreIdempotent(t *testing.T) {
+func TestFreshSchemaIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "test.db")
 	st, err := Open(ctx, path)
@@ -114,7 +82,6 @@ func TestPhase7MigrationsAreIdempotent(t *testing.T) {
 	if err := st.migrate(ctx); err != nil {
 		t.Fatalf("rerun migrate: %v", err)
 	}
-	assertMigrationVersions(t, st.db, 14)
 	_ = st.Close()
 
 	st, err = Open(ctx, path)
@@ -122,45 +89,6 @@ func TestPhase7MigrationsAreIdempotent(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	assertMigrationVersions(t, st.db, 14)
-}
-
-func TestPhase7EventTimeMigrationNormalizesLegacyTimestamps(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	db, err := sql.Open("sqlite", filepath.Join(dir, "legacy-events.db"))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	t.Cleanup(func() { _ = db.Close() })
-
-	st := &Store{db: db, options: Options{AgentHomesRoot: filepath.Join(dir, "agent-homes")}}
-	migrations := defaultMigrations(st.options)
-	if err := st.runMigrations(ctx, migrations[:7]); err != nil {
-		t.Fatalf("run migrations through v7: %v", err)
-	}
-	legacyTime := "2026-05-25T10:00:00.1Z"
-	if _, err := st.db.ExecContext(ctx, `
-INSERT INTO events (type, payload, created_at)
-VALUES ('legacy.event', '{}', ?)`, legacyTime); err != nil {
-		t.Fatalf("insert legacy event: %v", err)
-	}
-	if err := st.runMigration(ctx, migrations[7]); err != nil {
-		t.Fatalf("run v8 migration: %v", err)
-	}
-
-	var createdAt string
-	if err := st.db.QueryRowContext(ctx, `SELECT created_at FROM events WHERE type = 'legacy.event'`).Scan(&createdAt); err != nil {
-		t.Fatalf("query normalized event time: %v", err)
-	}
-	want := formatEventTime(parseTime(legacyTime))
-	if createdAt != want {
-		t.Fatalf("created_at=%q want %q", createdAt, want)
-	}
-	assertIndexExists(t, st.db, "events_created_at_idx")
-	assertMigrationVersions(t, st.db, 8)
 }
 
 func TestPruneEventsAppliesRetentionWindowAndRows(t *testing.T) {
@@ -1446,85 +1374,6 @@ VALUES ('gen_b', 'sess_cas', 'idle', 'owner', ?)`, formatTime(now.Add(time.Minut
 	}
 }
 
-type legacySession struct {
-	id             string
-	status         string
-	checkpointPath string
-}
-
-func createLegacyPhase6DB(t *testing.T, path string, sessions []legacySession) {
-	t.Helper()
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatalf("open legacy db: %v", err)
-	}
-	defer db.Close()
-	ctx := context.Background()
-	if _, err := db.ExecContext(ctx, `
-CREATE TABLE users (
-  id TEXT PRIMARY KEY,
-  display_name TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-CREATE TABLE sessions (
-  id TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL,
-  status TEXT NOT NULL,
-  agent TEXT NOT NULL,
-  workspace TEXT NOT NULL,
-  restore_id TEXT NOT NULL,
-  restore_ms INTEGER,
-  claude_session_uuid TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  expires_at TEXT,
-  ended_at TEXT,
-  last_activity_at TEXT,
-  checkpoint_path TEXT
-);
-CREATE TABLE messages (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id TEXT NOT NULL,
-  role TEXT NOT NULL,
-  content TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-CREATE TABLE artifacts (
-  session_id TEXT NOT NULL,
-  path TEXT NOT NULL,
-  size INTEGER NOT NULL,
-  mod_time TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  PRIMARY KEY(session_id, path)
-);`); err != nil {
-		t.Fatalf("create legacy schema: %v", err)
-	}
-	now := formatTime(time.Now().UTC())
-	for _, session := range sessions {
-		if _, err := db.ExecContext(ctx, `
-INSERT INTO sessions (
-  id, user_id, status, agent, workspace, restore_id, claude_session_uuid,
-  created_at, updated_at, checkpoint_path
-) VALUES (?, 'lab', ?, 'claude', ?, ?, ?, ?, ?, ?)`,
-			session.id, session.status, filepath.Join(filepath.Dir(path), "sessions", session.id),
-			"phase3-"+session.id, "11111111-2222-3333-4444-555555555555", now, now, nullableString(session.checkpointPath)); err != nil {
-			t.Fatalf("insert legacy session %s: %v", session.id, err)
-		}
-	}
-}
-
-func assertMigrationVersions(t *testing.T, db *sql.DB, wantMax int) {
-	t.Helper()
-	var count, maxVersion int
-	if err := db.QueryRow(`SELECT COUNT(*), COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&count, &maxVersion); err != nil {
-		t.Fatalf("schema migrations: %v", err)
-	}
-	if count != wantMax || maxVersion != wantMax {
-		t.Fatalf("schema migrations count/max = %d/%d, want %d/%d", count, maxVersion, wantMax, wantMax)
-	}
-}
-
 func assertTableExists(t *testing.T, db *sql.DB, table string) {
 	t.Helper()
 	var name string
@@ -1660,7 +1509,7 @@ INSERT INTO runtime_generations (
 		generationID, sessionID, networkProfileID, agentRuntimeProfileID, SandboxContractVersion, owner, formatTime(expires), formatTime(now)); err != nil {
 		t.Fatalf("insert generation: %v", err)
 	}
-	payload, digest, err := canonicalBootstrapDriverState("claude_code", "phase9a-"+sessionID)
+	payload, digest, err := canonicalBootstrapDriverState("claude_code", "bootstrap-"+sessionID)
 	if err != nil {
 		t.Fatalf("build driver state: %v", err)
 	}

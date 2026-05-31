@@ -51,7 +51,6 @@ Useful environment variables:
   lab config defaults Agent mode to `pi`.
 - `HARNESS_MAX_SESSIONS` defaults to `30` and caps non-terminal sessions, not live `/30` slots.
 - `RUNSC_ROOT` defaults to `/var/lib/harness/runsc`.
-- `HARNESS_RESTORE_SCRIPT` is loaded for compatibility, but the current direct `runsc` path does not execute it.
 
 `HARNESS_SESSION_TTL` is obsolete and fails startup if present; use `HARNESS_SESSION_RETENTION`.
 
@@ -165,9 +164,8 @@ across turns. Each generation gets its own network profile, netns/veth pair,
 Automatic idle checkpointing is a per-session policy. The checked-in default is
 off; `HARNESS_AUTO_CHECKPOINT_ENABLED=true` enables it for newly created
 sessions. Only the next idle generation with an empty turn queue plus fresh
-bridge heartbeat/checkpoint-ready markers can checkpoint. The legacy
-`bundle/bake-bundle.sh` and `bundle/restore-sandbox.sh` smoke tools fail closed
-and are not Phase 8 release evidence.
+bridge heartbeat/checkpoint-ready markers can checkpoint. Legacy Phase 2
+bundle/restore smoke tooling has been removed from the runtime surface.
 
 ## Event Streams
 

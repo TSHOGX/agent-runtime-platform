@@ -59,7 +59,7 @@ func runStartupRuntimeRecovery(ctx context.Context, cfg config.Config, ownerUUID
 	}
 	reaped, err := hooks.ReapResources(ctx, store.ReaperParams{
 		OwnerUUID:       ownerUUID,
-		FailedRetention: cfg.Phase7.Reaper.FailedRetention.Duration,
+		FailedRetention: cfg.Harness.Reaper.FailedRetention.Duration,
 		Now:             now(),
 	})
 	if err != nil {

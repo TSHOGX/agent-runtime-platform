@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func TestLoadProjectConfigUsesPhase7HarnessSchema(t *testing.T) {
+func TestLoadProjectConfigUsesHarnessSchema(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "harness.yaml")
 	if err := os.WriteFile(path, []byte(`harness:
@@ -70,59 +70,59 @@ func TestLoadProjectConfigUsesPhase7HarnessSchema(t *testing.T) {
 		t.Fatalf("load project config: %v", err)
 	}
 
-	phase7 := cfg.Phase7
-	if phase7.RunDir != "/tmp/harness-run" {
-		t.Fatalf("run_dir: %q", phase7.RunDir)
+	harness := cfg.Harness
+	if harness.RunDir != "/tmp/harness-run" {
+		t.Fatalf("run_dir: %q", harness.RunDir)
 	}
-	if phase7.ModelProxy.BindURL != "http://0.0.0.0:8083" ||
-		phase7.ModelProxy.BindPort != 8083 ||
-		phase7.ModelProxy.SandboxBaseURL != "http://harness-model-proxy.internal:8083" {
-		t.Fatalf("unexpected model proxy config: %+v", phase7.ModelProxy)
+	if harness.ModelProxy.BindURL != "http://0.0.0.0:8083" ||
+		harness.ModelProxy.BindPort != 8083 ||
+		harness.ModelProxy.SandboxBaseURL != "http://harness-model-proxy.internal:8083" {
+		t.Fatalf("unexpected model proxy config: %+v", harness.ModelProxy)
 	}
-	if cfg.Claude.ProxyBindURL != phase7.ModelProxy.BindURL ||
-		cfg.Claude.SandboxBaseURL != phase7.ModelProxy.SandboxBaseURL {
-		t.Fatalf("claude legacy proxy fields not mirrored from model proxy: claude=%+v model_proxy=%+v", cfg.Claude, phase7.ModelProxy)
+	if cfg.Claude.ProxyBindURL != harness.ModelProxy.BindURL ||
+		cfg.Claude.SandboxBaseURL != harness.ModelProxy.SandboxBaseURL {
+		t.Fatalf("claude legacy proxy fields not mirrored from model proxy: claude=%+v model_proxy=%+v", cfg.Claude, harness.ModelProxy)
 	}
-	if phase7.SessionRetention.Duration != 3*time.Hour || phase7.MaxSessions != 10 {
-		t.Fatalf("unexpected retention/max: %s %d", phase7.SessionRetention.Duration, phase7.MaxSessions)
+	if harness.SessionRetention.Duration != 3*time.Hour || harness.MaxSessions != 10 {
+		t.Fatalf("unexpected retention/max: %s %d", harness.SessionRetention.Duration, harness.MaxSessions)
 	}
-	if phase7.SandboxIdentity.UID != 7000 ||
-		phase7.SandboxIdentity.GID != 7001 ||
-		!sameInts(phase7.SandboxIdentity.SupplementalGIDs, []int{43, 44}) {
-		t.Fatalf("unexpected sandbox identity: %+v", phase7.SandboxIdentity)
+	if harness.SandboxIdentity.UID != 7000 ||
+		harness.SandboxIdentity.GID != 7001 ||
+		!sameInts(harness.SandboxIdentity.SupplementalGIDs, []int{43, 44}) {
+		t.Fatalf("unexpected sandbox identity: %+v", harness.SandboxIdentity)
 	}
-	if phase7.ProxyServiceIdentity.UID != 7100 || phase7.ProxyServiceIdentity.GID != 7101 {
-		t.Fatalf("unexpected proxy service identity: %+v", phase7.ProxyServiceIdentity)
+	if harness.ProxyServiceIdentity.UID != 7100 || harness.ProxyServiceIdentity.GID != 7101 {
+		t.Fatalf("unexpected proxy service identity: %+v", harness.ProxyServiceIdentity)
 	}
-	if got := phase7.Network.CIDRPool.String(); got != "10.210.0.0/24" {
+	if got := harness.Network.CIDRPool.String(); got != "10.210.0.0/24" {
 		t.Fatalf("cidr_pool: %q", got)
 	}
-	if !sameStrings(phase7.Network.Egress.DorisFEHosts, []string{"172.16.0.138"}) ||
-		!sameStrings(phase7.Network.Egress.DorisBEHosts, []string{"172.16.0.139"}) ||
-		!sameInts(phase7.Network.Egress.DorisPorts, []int{9030, 8040}) {
-		t.Fatalf("unexpected egress: %+v", phase7.Network.Egress)
+	if !sameStrings(harness.Network.Egress.DorisFEHosts, []string{"172.16.0.138"}) ||
+		!sameStrings(harness.Network.Egress.DorisBEHosts, []string{"172.16.0.139"}) ||
+		!sameInts(harness.Network.Egress.DorisPorts, []int{9030, 8040}) {
+		t.Fatalf("unexpected egress: %+v", harness.Network.Egress)
 	}
-	if phase7.Network.Egress.DNSPolicy != DNSPolicyHostnamesOnly {
-		t.Fatalf("dns policy: %q", phase7.Network.Egress.DNSPolicy)
+	if harness.Network.Egress.DNSPolicy != DNSPolicyHostnamesOnly {
+		t.Fatalf("dns policy: %q", harness.Network.Egress.DNSPolicy)
 	}
-	if phase7.Events.RetentionRows != 500 || phase7.Events.RetentionWindow.Duration != 12*time.Hour {
-		t.Fatalf("unexpected events config: %+v", phase7.Events)
+	if harness.Events.RetentionRows != 500 || harness.Events.RetentionWindow.Duration != 12*time.Hour {
+		t.Fatalf("unexpected events config: %+v", harness.Events)
 	}
-	if !sameInts(phase7.Probe.AcceptStatus.GetHealthz, []int{200, 204}) ||
-		!sameInts(phase7.Probe.AcceptStatus.PostV1Messages.Unauthorized, []int{401, 403}) ||
-		!sameInts(phase7.Probe.AcceptStatus.PostV1Messages.MalformedAuthenticated, []int{400, 422}) {
-		t.Fatalf("unexpected probe statuses: %+v", phase7.Probe.AcceptStatus)
+	if !sameInts(harness.Probe.AcceptStatus.GetHealthz, []int{200, 204}) ||
+		!sameInts(harness.Probe.AcceptStatus.PostV1Messages.Unauthorized, []int{401, 403}) ||
+		!sameInts(harness.Probe.AcceptStatus.PostV1Messages.MalformedAuthenticated, []int{400, 422}) {
+		t.Fatalf("unexpected probe statuses: %+v", harness.Probe.AcceptStatus)
 	}
-	if phase7.Bridge.HeartbeatInterval.Duration != 20*time.Second ||
-		phase7.Bridge.ReconnectGrace.Duration != 25*time.Second ||
-		phase7.Reaper.FailedRetention.Duration != 0 ||
-		phase7.Reaper.CheckpointImageRetention.Duration != 720*time.Hour {
-		t.Fatalf("unexpected bridge/reaper config: bridge=%+v reaper=%+v", phase7.Bridge, phase7.Reaper)
+	if harness.Bridge.HeartbeatInterval.Duration != 20*time.Second ||
+		harness.Bridge.ReconnectGrace.Duration != 25*time.Second ||
+		harness.Reaper.FailedRetention.Duration != 0 ||
+		harness.Reaper.CheckpointImageRetention.Duration != 720*time.Hour {
+		t.Fatalf("unexpected bridge/reaper config: bridge=%+v reaper=%+v", harness.Bridge, harness.Reaper)
 	}
-	if !phase7.Checkpoint.AutoEnabled ||
-		phase7.Checkpoint.IdleThreshold.Duration != 7*time.Minute ||
-		phase7.Checkpoint.MonitorInterval.Duration != 11*time.Second {
-		t.Fatalf("unexpected checkpoint config: %+v", phase7.Checkpoint)
+	if !harness.Checkpoint.AutoEnabled ||
+		harness.Checkpoint.IdleThreshold.Duration != 7*time.Minute ||
+		harness.Checkpoint.MonitorInterval.Duration != 11*time.Second {
+		t.Fatalf("unexpected checkpoint config: %+v", harness.Checkpoint)
 	}
 	if !cfg.Claude.DisableNonessentialTraffic {
 		t.Fatalf("expected default nonessential traffic setting to be true")
@@ -143,9 +143,9 @@ func TestLoadProjectConfigDerivesModelProxySandboxBaseURLPort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load project config: %v", err)
 	}
-	if cfg.Phase7.ModelProxy.BindPort != 8083 ||
-		cfg.Phase7.ModelProxy.SandboxBaseURL != "http://harness-model-proxy.internal:8083" {
-		t.Fatalf("model proxy sandbox base URL was not derived from bind port: %+v", cfg.Phase7.ModelProxy)
+	if cfg.Harness.ModelProxy.BindPort != 8083 ||
+		cfg.Harness.ModelProxy.SandboxBaseURL != "http://harness-model-proxy.internal:8083" {
+		t.Fatalf("model proxy sandbox base URL was not derived from bind port: %+v", cfg.Harness.ModelProxy)
 	}
 	if cfg.Claude.SandboxBaseURL != "http://harness-model-proxy.internal:8083" {
 		t.Fatalf("legacy claude sandbox base URL was not synchronized: %+v", cfg.Claude)
@@ -193,16 +193,16 @@ func TestLoadProjectConfigUsesGenericDeploymentConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load project config: %v", err)
 	}
-	if cfg.Phase7.DefaultAgent != "pi" {
-		t.Fatalf("default agent = %q", cfg.Phase7.DefaultAgent)
+	if cfg.Harness.DefaultAgent != "pi" {
+		t.Fatalf("default agent = %q", cfg.Harness.DefaultAgent)
 	}
-	if agent := cfg.Phase7.Agents["pi"]; agent.DriverID != "pi" ||
+	if agent := cfg.Harness.Agents["pi"]; agent.DriverID != "pi" ||
 		agent.ModelProfile != "anthropic_default" ||
 		agent.RuntimeProvider != "local_runsc" ||
 		agent.Enabled == nil || !*agent.Enabled {
 		t.Fatalf("unexpected pi agent config: %+v", agent)
 	}
-	if profile := cfg.Phase7.ModelProfiles["anthropic_default"]; profile.Model != "opus" ||
+	if profile := cfg.Harness.ModelProfiles["anthropic_default"]; profile.Model != "opus" ||
 		profile.ProxyRef != "model_proxy" ||
 		profile.Enabled == nil || !*profile.Enabled {
 		t.Fatalf("unexpected model profile: %+v", profile)
@@ -443,85 +443,85 @@ func TestLoadProjectConfigRejectsLegacySecretsConfig(t *testing.T) {
 	}
 }
 
-func TestValidatePhase7Config(t *testing.T) {
+func TestValidateHarnessConfig(t *testing.T) {
 	tests := []struct {
 		name   string
-		mutate func(*Phase7Config)
+		mutate func(*HarnessConfig)
 		want   string
 	}{
 		{
 			name: "run dir",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.RunDir = ""
 			},
 			want: "harness.run_dir is required",
 		},
 		{
 			name: "session retention",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.SessionRetention.Duration = -time.Second
 			},
 			want: "harness.session_retention must be >= 0",
 		},
 		{
 			name: "max sessions",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.MaxSessions = 0
 			},
 			want: "harness.max_sessions must be > 0",
 		},
 		{
 			name: "missing cidr",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Network.CIDRPool.Prefix = netip.Prefix{}
 			},
 			want: "harness.network.cidr_pool is required",
 		},
 		{
 			name: "ipv6 cidr",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Network.CIDRPool.Prefix = netip.MustParsePrefix("fd00::/120")
 			},
 			want: "harness.network.cidr_pool must be IPv4",
 		},
 		{
 			name: "too narrow cidr",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Network.CIDRPool.Prefix = netip.MustParsePrefix("10.0.0.0/31")
 			},
 			want: "harness.network.cidr_pool prefix length must be <= 30",
 		},
 		{
 			name: "missing doris hosts",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Network.Egress.DorisFEHosts = nil
 			},
 			want: "doris_fe_hosts must be non-empty",
 		},
 		{
 			name: "missing doris be hosts",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Network.Egress.DorisBEHosts = nil
 			},
 			want: "doris_be_hosts must be non-empty",
 		},
 		{
 			name: "missing doris ports",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Network.Egress.DorisPorts = nil
 			},
 			want: "doris_ports must be non-empty",
 		},
 		{
 			name: "invalid doris port",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Network.Egress.DorisPorts = []int{0}
 			},
 			want: "doris_ports contains invalid port 0",
 		},
 		{
 			name: "hostname needs dns",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Network.Egress.DorisFEHosts = []string{"doris-fe.local"}
 				cfg.Network.Egress.DNSPolicy = DNSPolicyOff
 			},
@@ -529,63 +529,63 @@ func TestValidatePhase7Config(t *testing.T) {
 		},
 		{
 			name: "probe statuses",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Probe.AcceptStatus.GetHealthz = nil
 			},
 			want: "get_healthz must be non-empty",
 		},
 		{
 			name: "missing unauthorized probe statuses",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Probe.AcceptStatus.PostV1Messages.Unauthorized = nil
 			},
 			want: "post_v1_messages.unauthorized must be non-empty",
 		},
 		{
 			name: "missing malformed probe statuses",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Probe.AcceptStatus.PostV1Messages.MalformedAuthenticated = nil
 			},
 			want: "post_v1_messages.malformed_authenticated must be non-empty",
 		},
 		{
 			name: "pre start attempts",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Probe.PreStartAttempts = 0
 			},
 			want: "pre_start_attempts must be > 0",
 		},
 		{
 			name: "pre start interval",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Probe.PreStartInterval.Duration = 0
 			},
 			want: "pre_start_interval must be > 0",
 		},
 		{
 			name: "post start attempts",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Probe.PostStartAttempts = 0
 			},
 			want: "post_start_attempts must be > 0",
 		},
 		{
 			name: "post start interval",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Probe.PostStartInterval.Duration = 0
 			},
 			want: "post_start_interval must be > 0",
 		},
 		{
 			name: "lease ttl",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Bridge.LeaseTTL.Duration = 0
 			},
 			want: "lease_ttl must be > 0",
 		},
 		{
 			name: "heartbeat lease",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Bridge.LeaseTTL.Duration = 30 * time.Second
 				cfg.Bridge.HeartbeatInterval.Duration = 30 * time.Second
 			},
@@ -593,28 +593,28 @@ func TestValidatePhase7Config(t *testing.T) {
 		},
 		{
 			name: "poll interval",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Bridge.PollInterval.Duration = 0
 			},
 			want: "poll_interval must be > 0",
 		},
 		{
 			name: "ack grace positive",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Bridge.AckStartedGrace.Duration = 0
 			},
 			want: "ack_started_grace must be > 0",
 		},
 		{
 			name: "reconnect grace",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Bridge.ReconnectGrace.Duration = -time.Second
 			},
 			want: "reconnect_grace must be >= 0",
 		},
 		{
 			name: "ack reconnect grace",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Bridge.AckStartedGrace.Duration = 10 * time.Second
 				cfg.Bridge.ReconnectGrace.Duration = 20 * time.Second
 			},
@@ -622,7 +622,7 @@ func TestValidatePhase7Config(t *testing.T) {
 		},
 		{
 			name: "events bounds",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Events.RetentionWindow.Duration = 0
 				cfg.Events.RetentionRows = 0
 			},
@@ -630,126 +630,126 @@ func TestValidatePhase7Config(t *testing.T) {
 		},
 		{
 			name: "negative event retention window",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Events.RetentionWindow.Duration = -time.Second
 			},
 			want: "retention_window must be >= 0",
 		},
 		{
 			name: "negative event retention rows",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Events.RetentionRows = -1
 			},
 			want: "retention_rows must be >= 0",
 		},
 		{
 			name: "emit output batch rows",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Events.EmitOutputBatchMaxRows = 0
 			},
 			want: "emit_output_batch_max_rows must be > 0",
 		},
 		{
 			name: "emit output batch age",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Events.EmitOutputBatchMaxAge.Duration = 0
 			},
 			want: "emit_output_batch_max_age must be > 0",
 		},
 		{
 			name: "checkpoint monitor",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Checkpoint.MonitorInterval.Duration = 0
 			},
 			want: "monitor_interval must be > 0",
 		},
 		{
 			name: "checkpoint idle threshold",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Checkpoint.IdleThreshold.Duration = -time.Second
 			},
 			want: "idle_threshold must be >= 0",
 		},
 		{
 			name: "negative reaper",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Reaper.FailedRetention.Duration = -time.Second
 			},
 			want: "failed_retention must be >= 0",
 		},
 		{
 			name: "zero checkpoint image retention",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Reaper.CheckpointImageRetention.Duration = 0
 			},
 			want: "",
 		},
 		{
 			name: "negative checkpoint image retention",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.Reaper.CheckpointImageRetention.Duration = -time.Second
 			},
 			want: "checkpoint_image_retention must be >= 0",
 		},
 		{
 			name: "sandbox uid",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.SandboxIdentity.UID = 0
 			},
 			want: "sandbox_identity.uid must be > 0",
 		},
 		{
 			name: "sandbox gid",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.SandboxIdentity.GID = 0
 			},
 			want: "sandbox_identity.gid must be > 0",
 		},
 		{
 			name: "sandbox supplemental root gid",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.SandboxIdentity.SupplementalGIDs = []int{0}
 			},
 			want: "supplemental_gids must contain only positive non-root gids",
 		},
 		{
 			name: "sandbox supplemental duplicate",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.SandboxIdentity.SupplementalGIDs = []int{1234, 1234}
 			},
 			want: "supplemental_gids contains duplicate gid 1234",
 		},
 		{
 			name: "missing model proxy bind port",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.ModelProxy.BindURL = "http://0.0.0.0"
 			},
 			want: "model_proxy.bind_url must include an explicit port",
 		},
 		{
 			name: "invalid model proxy bind port",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.ModelProxy.BindURL = "http://0.0.0.0:70000"
 			},
 			want: "model_proxy.bind_url contains invalid port",
 		},
 		{
 			name: "model proxy bind scheme",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.ModelProxy.BindURL = "https://0.0.0.0:8082"
 			},
 			want: "model_proxy.bind_url must use http scheme",
 		},
 		{
 			name: "model proxy bind host",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.ModelProxy.BindURL = "http://192.0.2.1:8082"
 			},
 			want: "model_proxy.bind_url host must be an unspecified address",
 		},
 		{
 			name: "model proxy loopback bind host",
-			mutate: func(cfg *Phase7Config) {
+			mutate: func(cfg *HarnessConfig) {
 				cfg.ModelProxy.BindURL = "http://127.0.0.1:8082"
 			},
 			want: "model_proxy.bind_url host must be an unspecified address",
@@ -758,10 +758,10 @@ func TestValidatePhase7Config(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := defaultPhase7Config()
+			cfg := defaultHarnessConfig()
 			tt.mutate(&cfg)
 
-			err := validatePhase7Config(cfg)
+			err := validateHarnessConfig(cfg)
 			if tt.want == "" {
 				if err != nil {
 					t.Fatalf("expected valid config, got %v", err)
@@ -786,21 +786,21 @@ func TestNormalizeSandboxIdentitySortsSupplementalGIDs(t *testing.T) {
 	}
 }
 
-func TestValidatePhase7ConfigAllowsZeroSessionRetention(t *testing.T) {
-	cfg := defaultPhase7Config()
+func TestValidateHarnessConfigAllowsZeroSessionRetention(t *testing.T) {
+	cfg := defaultHarnessConfig()
 	cfg.SessionRetention.Duration = 0
 
-	if err := validatePhase7Config(cfg); err != nil {
+	if err := validateHarnessConfig(cfg); err != nil {
 		t.Fatalf("zero session retention should be valid: %v", err)
 	}
 }
 
-func TestValidatePhase8IsolationRootsAllowsReservedSubroots(t *testing.T) {
-	roots := phase8RootsForTest(t)
+func TestValidateIsolationRootsAllowsReservedSubroots(t *testing.T) {
+	roots := isolationRootsForTest(t)
 
-	canonical, err := ValidatePhase8IsolationRoots(roots)
+	canonical, err := ValidateIsolationRoots(roots)
 	if err != nil {
-		t.Fatalf("validate phase8 roots: %v", err)
+		t.Fatalf("validate isolation roots: %v", err)
 	}
 	if canonical.DataVolumeEvidenceRoot != filepath.Clean(roots.DataVolumeEvidenceRoot) ||
 		canonical.ProxyInternalRoot != filepath.Clean(roots.ProxyInternalRoot) ||
@@ -809,52 +809,52 @@ func TestValidatePhase8IsolationRootsAllowsReservedSubroots(t *testing.T) {
 	}
 }
 
-func TestValidatePhase8IsolationRootsRejectsDBUnderSandboxRoot(t *testing.T) {
-	roots := phase8RootsForTest(t)
+func TestValidateIsolationRootsRejectsDBUnderSandboxRoot(t *testing.T) {
+	roots := isolationRootsForTest(t)
 	roots.DBPath = filepath.Join(roots.SessionsRoot, "orchestrator.db")
 
-	_, err := ValidatePhase8IsolationRoots(roots)
+	_, err := ValidateIsolationRoots(roots)
 	if err == nil || !strings.Contains(err.Error(), "overlaps") {
 		t.Fatalf("expected overlapping db root rejection, got %v", err)
 	}
 }
 
-func TestValidatePhase8IsolationRootsRejectsProxyInternalUnderControlRoot(t *testing.T) {
-	roots := phase8RootsForTest(t)
+func TestValidateIsolationRootsRejectsProxyInternalUnderControlRoot(t *testing.T) {
+	roots := isolationRootsForTest(t)
 	roots.ProxyInternalRoot = filepath.Join(roots.RunDir, "control", "proxy-internal")
 
-	_, err := ValidatePhase8IsolationRoots(roots)
+	_, err := ValidateIsolationRoots(roots)
 	if err == nil || !strings.Contains(err.Error(), "overlaps sandbox-bindable run control root") {
 		t.Fatalf("expected proxy internal overlap rejection, got %v", err)
 	}
 }
 
-func TestValidatePhase8IsolationRootsRejectsEvidenceUnderSandboxRoot(t *testing.T) {
-	roots := phase8RootsForTest(t)
+func TestValidateIsolationRootsRejectsEvidenceUnderSandboxRoot(t *testing.T) {
+	roots := isolationRootsForTest(t)
 	roots.DataVolumeEvidenceRoot = filepath.Join(roots.AgentHomesRoot, "evidence")
 
-	_, err := ValidatePhase8IsolationRoots(roots)
+	_, err := ValidateIsolationRoots(roots)
 	if err == nil || !strings.Contains(err.Error(), "overlaps") {
 		t.Fatalf("expected evidence overlap rejection, got %v", err)
 	}
 }
 
-func TestValidatePhase8IsolationRootsRejectsRelativeRoot(t *testing.T) {
-	roots := phase8RootsForTest(t)
+func TestValidateIsolationRootsRejectsRelativeRoot(t *testing.T) {
+	roots := isolationRootsForTest(t)
 	roots.RootFSPath = "relative/rootfs"
 
-	_, err := ValidatePhase8IsolationRoots(roots)
+	_, err := ValidateIsolationRoots(roots)
 	if err == nil || !strings.Contains(err.Error(), "must be absolute") {
 		t.Fatalf("expected absolute path rejection, got %v", err)
 	}
 }
 
-func TestValidatePhase7ConfigAllowsMaxSessionsAboveCIDRCapacity(t *testing.T) {
-	cfg := defaultPhase7Config()
+func TestValidateHarnessConfigAllowsMaxSessionsAboveCIDRCapacity(t *testing.T) {
+	cfg := defaultHarnessConfig()
 	cfg.MaxSessions = 10
 	cfg.Network.CIDRPool.Prefix = netip.MustParsePrefix("10.0.0.0/30")
 
-	if err := validatePhase7Config(cfg); err != nil {
+	if err := validateHarnessConfig(cfg); err != nil {
 		t.Fatalf("max_sessions should be independent from /30 capacity: %v", err)
 	}
 }
@@ -989,11 +989,11 @@ func TestLoadDefaultDBPathIsOutsideSessionsRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	if phase8PathWithin(cfg.DBPath, cfg.SessionsRoot) {
+	if isolationPathWithin(cfg.DBPath, cfg.SessionsRoot) {
 		t.Fatalf("default DB path %q must not be under sessions root %q", cfg.DBPath, cfg.SessionsRoot)
 	}
-	if _, err := ValidatePhase8IsolationRoots(cfg.Phase8IsolationRoots()); err != nil {
-		t.Fatalf("default roots should satisfy phase8 validation: %v", err)
+	if _, err := ValidateIsolationRoots(cfg.IsolationRoots()); err != nil {
+		t.Fatalf("default roots should satisfy isolation validation: %v", err)
 	}
 }
 
@@ -1008,18 +1008,18 @@ func TestLoadProjectConfigMissingFileUsesDefaults(t *testing.T) {
 	if cfg.Claude.SandboxBaseURL != "http://harness-model-proxy.internal:8082" {
 		t.Fatalf("default sandbox base URL = %q", cfg.Claude.SandboxBaseURL)
 	}
-	if cfg.Phase7.ModelProxy.BindURL != "http://0.0.0.0:8082" ||
-		cfg.Phase7.ModelProxy.BindPort != 8082 ||
-		cfg.Phase7.ModelProxy.SandboxBaseURL != "http://harness-model-proxy.internal:8082" {
-		t.Fatalf("default model proxy config = %+v", cfg.Phase7.ModelProxy)
+	if cfg.Harness.ModelProxy.BindURL != "http://0.0.0.0:8082" ||
+		cfg.Harness.ModelProxy.BindPort != 8082 ||
+		cfg.Harness.ModelProxy.SandboxBaseURL != "http://harness-model-proxy.internal:8082" {
+		t.Fatalf("default model proxy config = %+v", cfg.Harness.ModelProxy)
 	}
-	if cfg.Phase7.ControlRoot() != "/var/lib/harness/run/control" ||
-		cfg.Phase7.BundleRoot() != "/var/lib/harness/run/runtime" ||
-		cfg.Phase7.BridgeRoot() != "/var/lib/harness/run/bridge" {
-		t.Fatalf("unexpected derived roots: control=%s bundle=%s bridge=%s", cfg.Phase7.ControlRoot(), cfg.Phase7.BundleRoot(), cfg.Phase7.BridgeRoot())
+	if cfg.Harness.ControlRoot() != "/var/lib/harness/run/control" ||
+		cfg.Harness.BundleRoot() != "/var/lib/harness/run/runtime" ||
+		cfg.Harness.BridgeRoot() != "/var/lib/harness/run/bridge" {
+		t.Fatalf("unexpected derived roots: control=%s bundle=%s bridge=%s", cfg.Harness.ControlRoot(), cfg.Harness.BundleRoot(), cfg.Harness.BridgeRoot())
 	}
-	if cfg.Phase7.Reaper.CheckpointImageRetention.Duration != 720*time.Hour {
-		t.Fatalf("checkpoint image retention default=%s want 720h", cfg.Phase7.Reaper.CheckpointImageRetention.Duration)
+	if cfg.Harness.Reaper.CheckpointImageRetention.Duration != 720*time.Hour {
+		t.Fatalf("checkpoint image retention default=%s want 720h", cfg.Harness.Reaper.CheckpointImageRetention.Duration)
 	}
 }
 
@@ -1069,10 +1069,10 @@ func unsetEnvForTest(t *testing.T, key string) {
 	})
 }
 
-func phase8RootsForTest(t *testing.T) Phase8IsolationRoots {
+func isolationRootsForTest(t *testing.T) IsolationRoots {
 	t.Helper()
 	base := t.TempDir()
-	roots := Phase8IsolationRoots{
+	roots := IsolationRoots{
 		SessionsRoot:           filepath.Join(base, "sessions"),
 		AgentHomesRoot:         filepath.Join(base, "agent-homes"),
 		RunDir:                 filepath.Join(base, "run"),
@@ -1095,7 +1095,7 @@ func phase8RootsForTest(t *testing.T) Phase8IsolationRoots {
 		roots.SchemaPackRoot,
 	} {
 		if err := os.MkdirAll(path, 0o755); err != nil {
-			t.Fatalf("mkdir phase8 test root %s: %v", path, err)
+			t.Fatalf("mkdir isolation test root %s: %v", path, err)
 		}
 	}
 	return roots
@@ -1106,12 +1106,12 @@ func TestCheckedInHarnessConfigLoads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load checked-in harness config: %v", err)
 	}
-	if err := validatePhase7Config(cfg.Phase7); err != nil {
+	if err := validateHarnessConfig(cfg.Harness); err != nil {
 		t.Fatalf("validate checked-in harness config: %v", err)
 	}
 }
 
-func TestLoadValidatesMergedPhase7Config(t *testing.T) {
+func TestLoadValidatesMergedHarnessConfig(t *testing.T) {
 	repo := t.TempDir()
 	configDir := filepath.Join(repo, "config")
 	if err := os.Mkdir(configDir, 0o755); err != nil {
@@ -1174,8 +1174,8 @@ func TestLoadAutoCheckpointEnvOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	if !cfg.Phase7.Checkpoint.AutoEnabled {
-		t.Fatalf("expected env override to enable checkpoint policy: %+v", cfg.Phase7.Checkpoint)
+	if !cfg.Harness.Checkpoint.AutoEnabled {
+		t.Fatalf("expected env override to enable checkpoint policy: %+v", cfg.Harness.Checkpoint)
 	}
 }
 

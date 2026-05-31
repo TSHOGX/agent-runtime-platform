@@ -40,7 +40,7 @@ func TestBuildSandboxMountPlanUsesExactSandboxSurface(t *testing.T) {
 	}
 	assertMount(t, mounts, "/etc/hosts", filepath.Join(dir, "run", "network", "gen-1", "hosts"), "ro", true)
 	if mountByDestination(mounts, "/schema-pack") != nil {
-		t.Fatalf("phase9 v2 mount plan must not auto-mount schema-pack: %+v", mounts)
+		t.Fatalf("sandbox v2 mount plan must not auto-mount schema-pack: %+v", mounts)
 	}
 
 	forbidden := []string{"/sessions", "/agent-homes", "/harness-secrets"}

@@ -263,7 +263,7 @@ WHERE g.session_id = ?
 		return DriverStateToken{}, fmt.Errorf("missing driver state for existing %s session", driverID)
 	}
 	if agents.ID(driverID) == agents.ClaudeCode && strings.TrimSpace(claudeSessionUUID) == "" {
-		claudeSessionUUID = "phase9a-" + strings.TrimSpace(sessionID)
+		claudeSessionUUID = "bootstrap-" + strings.TrimSpace(sessionID)
 	}
 	payload, digest, err := canonicalBootstrapDriverState(driverID, claudeSessionUUID)
 	if err != nil {

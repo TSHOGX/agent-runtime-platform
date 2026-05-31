@@ -28,7 +28,6 @@ import (
 )
 
 type Config struct {
-	RestoreScript           string
 	RunscRoot               string
 	RunscNetwork            string
 	RunscOverlay2           string

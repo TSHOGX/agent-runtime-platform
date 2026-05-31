@@ -530,7 +530,7 @@ func testSandboxContractPayload(t *testing.T, sessionID string, allocation Gener
 		"session_id":               sessionID,
 		"network_profile_id":       allocation.NetworkProfileID,
 		"contract_schema_version":  SandboxContractSchemaVersion,
-		"contract_gate_version":    SandboxContractGatePhase9A,
+		"contract_gate_version":    SandboxContractGateDriverManifest,
 		"generation_id":            allocation.GenerationID,
 		"sandbox_contract_version": SandboxContractVersion,
 		"contract_id":              contractID,
@@ -596,9 +596,9 @@ func testSandboxContractPayload(t *testing.T, sessionID string, allocation Gener
 			"initial_driver_state_digest":   stateDigest,
 		},
 		"input_digests": map[string]any{
-			"runtime_config_digest": nil,
+			"runtime_config_digest": "sha256:runtime-config",
 			"rootfs_image_digest":   nil,
-			"agent_manifest_digest": nil,
+			"agent_manifest_digest": "sha256:agent-manifest",
 		},
 	}
 }

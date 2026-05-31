@@ -18,8 +18,7 @@ import (
 
 const SandboxContractVersion = "sandbox-isolation-v1"
 const SandboxContractSchemaVersion = 2
-const SandboxContractGatePhase9A = "phase9a"
-const SandboxContractGatePhase9C = "phase9c"
+const SandboxContractGateDriverManifest = "driver_manifest_v1"
 const credentialPolicyDigestPrefix = "credential_policy_digest_v1\n"
 const runtimeConfigDigestPrefix = "runtime_config_digest_v1\n"
 
@@ -155,7 +154,7 @@ func (s *Store) StoreSandboxContract(ctx context.Context, p StoreSandboxContract
 		p.ContractSchemaVersion = SandboxContractSchemaVersion
 	}
 	if strings.TrimSpace(p.ContractGateVersion) == "" {
-		p.ContractGateVersion = SandboxContractGatePhase9A
+		p.ContractGateVersion = SandboxContractGateDriverManifest
 	} else {
 		p.ContractGateVersion = strings.TrimSpace(p.ContractGateVersion)
 	}
@@ -437,9 +436,7 @@ func validateSandboxContractPayload(canonicalPayload []byte, p StoreSandboxContr
 	if got, _ := object["contract_gate_version"].(string); got != p.ContractGateVersion {
 		return fmt.Errorf("sandbox contract payload contract_gate_version = %q, want %q", got, p.ContractGateVersion)
 	}
-	switch p.ContractGateVersion {
-	case SandboxContractGatePhase9A, SandboxContractGatePhase9C:
-	default:
+	if p.ContractGateVersion != SandboxContractGateDriverManifest {
 		return fmt.Errorf("unsupported sandbox contract gate version %q", p.ContractGateVersion)
 	}
 	if err := validateSandboxContractV2Semantics(object, p.ContractGateVersion); err != nil {
@@ -591,7 +588,7 @@ func validateLoadedSandboxContract(record SandboxContractRecord) error {
 	if record.ContractSchemaVersion != SandboxContractSchemaVersion {
 		return fmt.Errorf("sandbox contract row schema version = %d, want %d", record.ContractSchemaVersion, SandboxContractSchemaVersion)
 	}
-	if record.ContractGateVersion != SandboxContractGatePhase9A && record.ContractGateVersion != SandboxContractGatePhase9C {
+	if record.ContractGateVersion != SandboxContractGateDriverManifest {
 		return fmt.Errorf("unsupported sandbox contract row gate version %q", record.ContractGateVersion)
 	}
 	object, err := decodeSandboxContractObject(record.CanonicalPayload)
@@ -676,19 +673,13 @@ func validateSandboxContractV2Semantics(object map[string]any, gateVersion strin
 	if !ok {
 		return fmt.Errorf("sandbox contract missing input_digests object")
 	}
-	switch gateVersion {
-	case SandboxContractGatePhase9A:
-		for _, key := range []string{"runtime_config_digest", "rootfs_image_digest", "agent_manifest_digest"} {
-			if value, ok := inputDigests[key]; !ok || value != nil {
-				return fmt.Errorf("phase9a input digest %s must be null", key)
-			}
-		}
-	case SandboxContractGatePhase9C:
-		for _, key := range []string{"runtime_config_digest", "agent_manifest_digest"} {
-			value, _ := inputDigests[key].(string)
-			if !strings.HasPrefix(value, "sha256:") {
-				return fmt.Errorf("phase9c input digest %s is required", key)
-			}
+	if gateVersion != SandboxContractGateDriverManifest {
+		return fmt.Errorf("unsupported sandbox contract gate version %q", gateVersion)
+	}
+	for _, key := range []string{"runtime_config_digest", "agent_manifest_digest"} {
+		value, _ := inputDigests[key].(string)
+		if !strings.HasPrefix(value, "sha256:") {
+			return fmt.Errorf("driver manifest input digest %s is required", key)
 		}
 	}
 	credentialPolicyRaw, ok := object["credential_policy"].(map[string]any)

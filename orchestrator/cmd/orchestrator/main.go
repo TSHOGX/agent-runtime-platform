@@ -35,15 +35,15 @@ func main() {
 		log.Error("failed to load config", "error", err)
 		os.Exit(1)
 	}
-	if _, err := config.ValidatePhase8IsolationRoots(cfg.Phase8IsolationRoots()); err != nil {
-		log.Error("invalid phase8 isolation roots", "error", err)
+	if _, err := config.ValidateIsolationRoots(cfg.IsolationRoots()); err != nil {
+		log.Error("invalid isolation roots", "error", err)
 		os.Exit(1)
 	}
 	for _, warning := range cfg.Warnings {
 		log.Warn("config warning", "warning", warning)
 	}
 
-	owner, err := store.AcquireOwnerLock(cfg.Phase7.RunDir)
+	owner, err := store.AcquireOwnerLock(cfg.Harness.RunDir)
 	if err != nil {
 		log.Error("failed to acquire orchestrator owner lock", "error", err)
 		os.Exit(1)
@@ -66,7 +66,6 @@ func main() {
 		ClearActiveSessionExpiry: db.ClearActiveSessionExpiry,
 		ConstructRuntime: func() error {
 			rt := runtime.New(runtime.Config{
-				RestoreScript:           cfg.RestoreScript,
 				RunscRoot:               cfg.RunscRoot,
 				RunscNetwork:            cfg.RunscNetwork,
 				RunscOverlay2:           cfg.RunscOverlay2,
@@ -76,15 +75,15 @@ func main() {
 				BundleRoot:              cfg.BundleRoot,
 				RootFSPath:              cfg.RootFSPath,
 				DefaultAgent:            cfg.DefaultAgent,
-				SandboxUID:              cfg.Phase7.SandboxIdentity.UID,
-				SandboxGID:              cfg.Phase7.SandboxIdentity.GID,
-				SandboxSupplementalGIDs: append([]int(nil), cfg.Phase7.SandboxIdentity.SupplementalGIDs...),
-				RunDir:                  cfg.Phase7.RunDir,
-				PreStartProbeAttempts:   cfg.Phase7.Probe.PreStartAttempts,
-				PreStartProbeInterval:   cfg.Phase7.Probe.PreStartInterval.Duration,
-				ProbeHealthzStatuses:    cfg.Phase7.Probe.AcceptStatus.GetHealthz,
-				BridgeHeartbeat:         cfg.Phase7.Bridge.HeartbeatInterval.Duration,
-				BridgePollInterval:      cfg.Phase7.Bridge.PollInterval.Duration,
+				SandboxUID:              cfg.Harness.SandboxIdentity.UID,
+				SandboxGID:              cfg.Harness.SandboxIdentity.GID,
+				SandboxSupplementalGIDs: append([]int(nil), cfg.Harness.SandboxIdentity.SupplementalGIDs...),
+				RunDir:                  cfg.Harness.RunDir,
+				PreStartProbeAttempts:   cfg.Harness.Probe.PreStartAttempts,
+				PreStartProbeInterval:   cfg.Harness.Probe.PreStartInterval.Duration,
+				ProbeHealthzStatuses:    cfg.Harness.Probe.AcceptStatus.GetHealthz,
+				BridgeHeartbeat:         cfg.Harness.Bridge.HeartbeatInterval.Duration,
+				BridgePollInterval:      cfg.Harness.Bridge.PollInterval.Duration,
 				Claude: runtime.ClaudeConfig{
 					ProxyBindURL:               cfg.ModelProxy.BindURL,
 					APIKey:                     cfg.Claude.APIKey,
@@ -149,8 +148,8 @@ func main() {
 		}
 	}()
 	go func() {
-		if err := app.RunPhase7Maintenance(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			log.Error("phase7 maintenance stopped", "error", err)
+		if err := app.RunMaintenance(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error("maintenance stopped", "error", err)
 		}
 	}()
 
@@ -194,11 +193,11 @@ func main() {
 }
 
 func dataVolumeProvisionerConfig(cfg config.Config) (store.DataVolumeProvisionerConfig, error) {
-	roots, err := config.ValidatePhase8IsolationRoots(cfg.Phase8IsolationRoots())
+	roots, err := config.ValidateIsolationRoots(cfg.IsolationRoots())
 	if err != nil {
 		return store.DataVolumeProvisionerConfig{}, err
 	}
-	identity := cfg.Phase7.SandboxIdentity
+	identity := cfg.Harness.SandboxIdentity
 	return store.DataVolumeProvisionerConfig{
 		SessionsRoot:   roots.SessionsRoot,
 		AgentHomesRoot: roots.AgentHomesRoot,

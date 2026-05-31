@@ -128,16 +128,7 @@ PRAGMA foreign_keys=ON;
 `); err != nil {
 		return err
 	}
-	if err := s.runMigrations(ctx, defaultMigrations(s.options)); err != nil {
-		return err
-	}
-	if err := s.runPhase9Cutover(ctx); err != nil {
-		return err
-	}
-	if err := s.ensureSandboxContractInputEvidenceSchema(ctx); err != nil {
-		return err
-	}
-	return s.ensurePhase9ModeSchema(ctx)
+	return s.ensureSchema(ctx)
 }
 
 func (s *Store) EnsureUser(ctx context.Context, id, name string) error {

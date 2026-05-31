@@ -15,7 +15,7 @@ func TestRunStartupRuntimeRecoveryOrdersExpiryRuntimeRepairAndReaping(t *testing
 	now := time.Date(2026, 5, 27, 10, 0, 0, 0, time.UTC)
 	cfg := config.Config{
 		SessionRetention: 0,
-		Phase7: config.Phase7Config{
+		Harness: config.HarnessConfig{
 			Reaper: config.ReaperConfig{
 				FailedRetention: config.Duration{Duration: 17 * time.Second},
 			},

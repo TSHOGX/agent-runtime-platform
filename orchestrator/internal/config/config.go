@@ -26,7 +26,6 @@ type Config struct {
 	CookieName           string
 	SessionRetention     time.Duration
 	RepoRoot             string
-	RestoreScript        string
 	RunscRoot            string
 	SessionsRoot         string
 	AgentHomesRoot       string
@@ -45,7 +44,7 @@ type Config struct {
 	RuntimeProviders     map[string]RuntimeProviderConfig
 	Claude               ClaudeConfig
 	ModelProxy           ModelProxyConfig
-	Phase7               Phase7Config
+	Harness              HarnessConfig
 	Warnings             []string
 }
 
@@ -91,7 +90,7 @@ const defaultModelProxyBindURL = "http://0.0.0.0:8082"
 const defaultSandboxModelProxyHost = "harness-model-proxy.internal"
 const defaultSandboxModelProxyBaseURL = "http://harness-model-proxy.internal:8082"
 
-type Phase7Config struct {
+type HarnessConfig struct {
 	DefaultAgent         string                           `yaml:"default_agent"`
 	Agents               map[string]AgentConfig           `yaml:"agents"`
 	ModelProfiles        map[string]ModelProfileConfig    `yaml:"model_profiles"`
@@ -110,15 +109,15 @@ type Phase7Config struct {
 	ModelProxy           ModelProxyConfig                 `yaml:"model_proxy"`
 }
 
-func (c Phase7Config) ControlRoot() string {
+func (c HarnessConfig) ControlRoot() string {
 	return filepath.Join(c.RunDir, "control")
 }
 
-func (c Phase7Config) BundleRoot() string {
+func (c HarnessConfig) BundleRoot() string {
 	return filepath.Join(c.RunDir, "runtime")
 }
 
-func (c Phase7Config) BridgeRoot() string {
+func (c HarnessConfig) BridgeRoot() string {
 	return filepath.Join(c.RunDir, "bridge")
 }
 
@@ -211,7 +210,7 @@ type ProxyServiceIdentity struct {
 	GID int `yaml:"gid"`
 }
 
-type Phase8IsolationRoots struct {
+type IsolationRoots struct {
 	SessionsRoot           string
 	AgentHomesRoot         string
 	RunDir                 string
@@ -225,7 +224,7 @@ type Phase8IsolationRoots struct {
 	ProviderCredentialRoot string
 }
 
-type CanonicalPhase8IsolationRoots struct {
+type CanonicalIsolationRoots struct {
 	SessionsRoot           string
 	AgentHomesRoot         string
 	RunDir                 string
@@ -291,25 +290,24 @@ func Load() (Config, error) {
 	}
 
 	sessionsRoot := getenv("HARNESS_SESSIONS_ROOT", "/var/lib/harness/sessions")
-	sessionRetention, err := sessionRetentionEnv(projectConfig.Phase7.SessionRetention.Duration)
+	sessionRetention, err := sessionRetentionEnv(projectConfig.Harness.SessionRetention.Duration)
 	if err != nil {
 		return Config{}, err
 	}
-	defaultDriver, err := agents.CanonicalDriverID(getenv("HARNESS_DEFAULT_AGENT", projectConfig.Phase7.DefaultAgent))
+	defaultDriver, err := agents.CanonicalDriverID(getenv("HARNESS_DEFAULT_AGENT", projectConfig.Harness.DefaultAgent))
 	if err != nil {
 		return Config{}, fmt.Errorf("HARNESS_DEFAULT_AGENT: %w", err)
 	}
-	if err := validateDefaultAgentDriver(defaultDriver, projectConfig.Phase7.Agents); err != nil {
+	if err := validateDefaultAgentDriver(defaultDriver, projectConfig.Harness.Agents); err != nil {
 		return Config{}, fmt.Errorf("HARNESS_DEFAULT_AGENT: %w", err)
 	}
-	maxSessions := intEnv("HARNESS_MAX_SESSIONS", projectConfig.Phase7.MaxSessions)
+	maxSessions := intEnv("HARNESS_MAX_SESSIONS", projectConfig.Harness.MaxSessions)
 	cfg := Config{
 		Addr:                 getenv("HARNESS_ORCHESTRATOR_ADDR", ":8090"),
 		SharedSecret:         os.Getenv("HARNESS_LAB_PASSWORD"),
 		CookieName:           getenv("HARNESS_COOKIE_NAME", "harness_auth"),
 		SessionRetention:     sessionRetention,
 		RepoRoot:             getenv("HARNESS_REPO_ROOT", repoRoot),
-		RestoreScript:        getenv("HARNESS_RESTORE_SCRIPT", filepath.Join(repoRoot, "bundle", "restore-sandbox.sh")),
 		RunscRoot:            getenv("RUNSC_ROOT", "/var/lib/harness/runsc"),
 		SessionsRoot:         sessionsRoot,
 		AgentHomesRoot:       getenv("HARNESS_AGENT_HOMES_ROOT", "/var/lib/harness/agent-homes"),
@@ -324,27 +322,27 @@ func Load() (Config, error) {
 		RunscNetwork:         "sandbox",
 		RunscOverlay2:        "none",
 		Claude:               projectConfig.Claude,
-		ModelProxy:           projectConfig.Phase7.ModelProxy,
-		Phase7:               projectConfig.Phase7,
+		ModelProxy:           projectConfig.Harness.ModelProxy,
+		Harness:              projectConfig.Harness,
 	}
-	cfg.Phase7.SessionRetention = Duration{Duration: sessionRetention}
-	cfg.Phase7.MaxSessions = maxSessions
-	cfg.Phase7.DefaultAgent = string(defaultDriver)
-	cfg.Phase7 = normalizePhase7Config(cfg.Phase7)
-	cfg.Agents = cloneAgentConfigs(cfg.Phase7.Agents)
-	cfg.ModelProfiles = cloneModelProfileConfigs(cfg.Phase7.ModelProfiles)
-	cfg.RuntimeProviders = cloneRuntimeProviderConfigs(cfg.Phase7.RuntimeProviders)
+	cfg.Harness.SessionRetention = Duration{Duration: sessionRetention}
+	cfg.Harness.MaxSessions = maxSessions
+	cfg.Harness.DefaultAgent = string(defaultDriver)
+	cfg.Harness = normalizeHarnessConfig(cfg.Harness)
+	cfg.Agents = cloneAgentConfigs(cfg.Harness.Agents)
+	cfg.ModelProfiles = cloneModelProfileConfigs(cfg.Harness.ModelProfiles)
+	cfg.RuntimeProviders = cloneRuntimeProviderConfigs(cfg.Harness.RuntimeProviders)
 	if value, ok := boolEnv("HARNESS_AUTO_CHECKPOINT_ENABLED"); ok {
-		cfg.Phase7.Checkpoint.AutoEnabled = value
+		cfg.Harness.Checkpoint.AutoEnabled = value
 	}
-	if err := validatePhase7Config(cfg.Phase7); err != nil {
+	if err := validateHarnessConfig(cfg.Harness); err != nil {
 		return Config{}, err
 	}
-	cfg.ModelProxy = cfg.Phase7.ModelProxy
+	cfg.ModelProxy = cfg.Harness.ModelProxy
 	cfg.Claude = normalizeClaudeConfig(cfg.Claude)
 	cfg.Claude = syncClaudeModelProxy(cfg.Claude, cfg.ModelProxy)
-	cfg.Claude = syncClaudeDeploymentConfig(cfg.Claude, cfg.Phase7)
-	cfg.Warnings = phase7ConfigWarnings(cfg.Phase7)
+	cfg.Claude = syncClaudeDeploymentConfig(cfg.Claude, cfg.Harness)
+	cfg.Warnings = harnessConfigWarnings(cfg.Harness)
 	return cfg, nil
 }
 
@@ -363,14 +361,14 @@ func validateDefaultAgentDriver(driverID agents.ID, agentConfigs map[string]Agen
 }
 
 type projectConfig struct {
-	Phase7 Phase7Config
-	Claude ClaudeConfig
+	Harness HarnessConfig
+	Claude  ClaudeConfig
 }
 
 func loadProjectConfig(path string) (projectConfig, error) {
 	cfg := projectConfig{
-		Phase7: defaultPhase7Config(),
-		Claude: defaultClaudeConfig(),
+		Harness: defaultHarnessConfig(),
+		Claude:  defaultClaudeConfig(),
 	}
 
 	data, err := os.ReadFile(path)
@@ -385,35 +383,35 @@ func loadProjectConfig(path string) (projectConfig, error) {
 	}
 
 	var target struct {
-		Harness Phase7Config `yaml:"harness"`
+		Harness HarnessConfig `yaml:"harness"`
 	}
-	target.Harness = cfg.Phase7
+	target.Harness = cfg.Harness
 	target.Harness.ModelProxy.SandboxBaseURL = ""
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&target); err != nil {
 		return cfg, fmt.Errorf("load %s: %w", path, err)
 	}
-	cfg.Phase7 = target.Harness
+	cfg.Harness = target.Harness
 	return finalizeProjectConfig(path, cfg)
 }
 
 func finalizeProjectConfig(path string, cfg projectConfig) (projectConfig, error) {
 	cfg.Claude = normalizeClaudeConfig(cfg.Claude)
-	cfg.Phase7 = normalizePhase7Config(cfg.Phase7)
-	if err := validateDeploymentConfig(cfg.Phase7); err != nil {
+	cfg.Harness = normalizeHarnessConfig(cfg.Harness)
+	if err := validateDeploymentConfig(cfg.Harness); err != nil {
 		return cfg, fmt.Errorf("load %s: %w", path, err)
 	}
-	if err := validateModelProxyConfig(cfg.Phase7.ModelProxy); err != nil {
+	if err := validateModelProxyConfig(cfg.Harness.ModelProxy); err != nil {
 		return cfg, fmt.Errorf("load %s: %w", path, err)
 	}
-	cfg.Claude = syncClaudeModelProxy(cfg.Claude, cfg.Phase7.ModelProxy)
-	cfg.Claude = syncClaudeDeploymentConfig(cfg.Claude, cfg.Phase7)
+	cfg.Claude = syncClaudeModelProxy(cfg.Claude, cfg.Harness.ModelProxy)
+	cfg.Claude = syncClaudeDeploymentConfig(cfg.Claude, cfg.Harness)
 	return cfg, nil
 }
 
-func defaultPhase7Config() Phase7Config {
-	return Phase7Config{
+func defaultHarnessConfig() HarnessConfig {
+	return HarnessConfig{
 		DefaultAgent:     string(agents.ClaudeCode),
 		Agents:           defaultAgentConfigs(defaultClaudeConfig()),
 		ModelProfiles:    defaultModelProfileConfigs(defaultClaudeConfig()),
@@ -481,7 +479,7 @@ func defaultPhase7Config() Phase7Config {
 	}
 }
 
-func normalizePhase7Config(cfg Phase7Config) Phase7Config {
+func normalizeHarnessConfig(cfg HarnessConfig) HarnessConfig {
 	cfg.DefaultAgent = defaultString(cfg.DefaultAgent, string(agents.ClaudeCode))
 	if canonical, err := agents.CanonicalDriverID(cfg.DefaultAgent); err == nil {
 		cfg.DefaultAgent = string(canonical)
@@ -501,7 +499,7 @@ func NormalizeSandboxIdentity(identity SandboxIdentity) SandboxIdentity {
 	return normalized
 }
 
-func validatePhase7Config(cfg Phase7Config) error {
+func validateHarnessConfig(cfg HarnessConfig) error {
 	if strings.TrimSpace(cfg.RunDir) == "" {
 		return fmt.Errorf("harness.run_dir is required")
 	}
@@ -652,27 +650,27 @@ func ValidateProxyServiceIdentity(identity ProxyServiceIdentity) error {
 	return nil
 }
 
-func (c Config) Phase8IsolationRoots() Phase8IsolationRoots {
+func (c Config) IsolationRoots() IsolationRoots {
 	schemaPackRoot := filepath.Join(c.RepoRoot, "schema-pack")
 	if _, err := os.Stat(schemaPackRoot); err != nil {
 		schemaPackRoot = ""
 	}
-	return Phase8IsolationRoots{
+	return IsolationRoots{
 		SessionsRoot:           c.SessionsRoot,
 		AgentHomesRoot:         c.AgentHomesRoot,
-		RunDir:                 c.Phase7.RunDir,
+		RunDir:                 c.Harness.RunDir,
 		CheckpointsRoot:        c.CheckpointsRoot,
 		PreparedBundleRoot:     c.BundleRoot,
 		RootFSPath:             c.RootFSPath,
 		DBPath:                 c.DBPath,
 		SchemaPackRoot:         schemaPackRoot,
 		DataVolumeEvidenceRoot: filepath.Join(filepath.Dir(c.DBPath), "volume-evidence"),
-		ProxyInternalRoot:      filepath.Join(c.Phase7.RunDir, "proxy-internal"),
+		ProxyInternalRoot:      filepath.Join(c.Harness.RunDir, "proxy-internal"),
 	}
 }
 
-func ValidatePhase8IsolationRoots(roots Phase8IsolationRoots) (CanonicalPhase8IsolationRoots, error) {
-	canonical := CanonicalPhase8IsolationRoots{}
+func ValidateIsolationRoots(roots IsolationRoots) (CanonicalIsolationRoots, error) {
+	canonical := CanonicalIsolationRoots{}
 	required := []struct {
 		label string
 		value string
@@ -686,47 +684,47 @@ func ValidatePhase8IsolationRoots(roots Phase8IsolationRoots) (CanonicalPhase8Is
 		{label: "rootfs path", value: roots.RootFSPath, set: func(path string) { canonical.RootFSPath = path }},
 	}
 	for _, root := range required {
-		path, err := canonicalPhase8Root(root.label, root.value)
+		path, err := canonicalIsolationRoot(root.label, root.value)
 		if err != nil {
-			return CanonicalPhase8IsolationRoots{}, err
+			return CanonicalIsolationRoots{}, err
 		}
 		root.set(path)
 	}
-	dbPath, err := canonicalPhase8Root("db path", roots.DBPath)
+	dbPath, err := canonicalIsolationRoot("db path", roots.DBPath)
 	if err != nil {
-		return CanonicalPhase8IsolationRoots{}, err
+		return CanonicalIsolationRoots{}, err
 	}
 	canonical.DBStateRoot = filepath.Dir(dbPath)
 	if strings.TrimSpace(roots.SchemaPackRoot) != "" {
-		canonical.SchemaPackRoot, err = canonicalPhase8Root("schema pack root", roots.SchemaPackRoot)
+		canonical.SchemaPackRoot, err = canonicalIsolationRoot("schema pack root", roots.SchemaPackRoot)
 		if err != nil {
-			return CanonicalPhase8IsolationRoots{}, err
+			return CanonicalIsolationRoots{}, err
 		}
 	}
 	if strings.TrimSpace(roots.DataVolumeEvidenceRoot) != "" {
-		canonical.DataVolumeEvidenceRoot, err = canonicalPhase8Root("data volume evidence root", roots.DataVolumeEvidenceRoot)
+		canonical.DataVolumeEvidenceRoot, err = canonicalIsolationRoot("data volume evidence root", roots.DataVolumeEvidenceRoot)
 		if err != nil {
-			return CanonicalPhase8IsolationRoots{}, err
+			return CanonicalIsolationRoots{}, err
 		}
 	} else {
 		canonical.DataVolumeEvidenceRoot = filepath.Join(canonical.DBStateRoot, "volume-evidence")
 	}
 	if strings.TrimSpace(roots.ProxyInternalRoot) != "" {
-		canonical.ProxyInternalRoot, err = canonicalPhase8Root("proxy internal root", roots.ProxyInternalRoot)
+		canonical.ProxyInternalRoot, err = canonicalIsolationRoot("proxy internal root", roots.ProxyInternalRoot)
 		if err != nil {
-			return CanonicalPhase8IsolationRoots{}, err
+			return CanonicalIsolationRoots{}, err
 		}
 	} else {
 		canonical.ProxyInternalRoot = filepath.Join(canonical.RunDir, "proxy-internal")
 	}
 	if strings.TrimSpace(roots.ProviderCredentialRoot) != "" {
-		canonical.ProviderCredentialRoot, err = canonicalPhase8Root("provider credential root", roots.ProviderCredentialRoot)
+		canonical.ProviderCredentialRoot, err = canonicalIsolationRoot("provider credential root", roots.ProviderCredentialRoot)
 		if err != nil {
-			return CanonicalPhase8IsolationRoots{}, err
+			return CanonicalIsolationRoots{}, err
 		}
 	}
 
-	topLevel := []phase8Root{
+	topLevel := []isolationRoot{
 		{label: "sessions root", path: canonical.SessionsRoot},
 		{label: "agent homes root", path: canonical.AgentHomesRoot},
 		{label: "run dir", path: canonical.RunDir},
@@ -736,65 +734,65 @@ func ValidatePhase8IsolationRoots(roots Phase8IsolationRoots) (CanonicalPhase8Is
 		{label: "db state root", path: canonical.DBStateRoot},
 	}
 	if canonical.SchemaPackRoot != "" {
-		topLevel = append(topLevel, phase8Root{label: "schema pack root", path: canonical.SchemaPackRoot})
+		topLevel = append(topLevel, isolationRoot{label: "schema pack root", path: canonical.SchemaPackRoot})
 	}
 	if canonical.ProviderCredentialRoot != "" {
-		topLevel = append(topLevel, phase8Root{label: "provider credential root", path: canonical.ProviderCredentialRoot})
+		topLevel = append(topLevel, isolationRoot{label: "provider credential root", path: canonical.ProviderCredentialRoot})
 	}
-	if !phase8PathWithin(canonical.DataVolumeEvidenceRoot, canonical.DBStateRoot) {
-		topLevel = append(topLevel, phase8Root{label: "data volume evidence root", path: canonical.DataVolumeEvidenceRoot})
+	if !isolationPathWithin(canonical.DataVolumeEvidenceRoot, canonical.DBStateRoot) {
+		topLevel = append(topLevel, isolationRoot{label: "data volume evidence root", path: canonical.DataVolumeEvidenceRoot})
 	}
-	if !phase8PathWithin(canonical.ProxyInternalRoot, canonical.RunDir) {
-		topLevel = append(topLevel, phase8Root{label: "proxy internal root", path: canonical.ProxyInternalRoot})
+	if !isolationPathWithin(canonical.ProxyInternalRoot, canonical.RunDir) {
+		topLevel = append(topLevel, isolationRoot{label: "proxy internal root", path: canonical.ProxyInternalRoot})
 	}
-	if err := validatePhase8TopLevelDisjoint(topLevel); err != nil {
-		return CanonicalPhase8IsolationRoots{}, err
+	if err := validateIsolationTopLevelDisjoint(topLevel); err != nil {
+		return CanonicalIsolationRoots{}, err
 	}
 	if err := validateReservedHostRoot("data volume evidence root", canonical.DataVolumeEvidenceRoot, canonical, canonical.DBStateRoot); err != nil {
-		return CanonicalPhase8IsolationRoots{}, err
+		return CanonicalIsolationRoots{}, err
 	}
 	if err := validateReservedHostRoot("proxy internal root", canonical.ProxyInternalRoot, canonical, canonical.RunDir); err != nil {
-		return CanonicalPhase8IsolationRoots{}, err
+		return CanonicalIsolationRoots{}, err
 	}
 	return canonical, nil
 }
 
-type phase8Root struct {
+type isolationRoot struct {
 	label string
 	path  string
 }
 
-func canonicalPhase8Root(label, path string) (string, error) {
+func canonicalIsolationRoot(label, path string) (string, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
-		return "", fmt.Errorf("phase8 %s is required", label)
+		return "", fmt.Errorf("isolation %s is required", label)
 	}
 	if !filepath.IsAbs(path) {
-		return "", fmt.Errorf("phase8 %s %q must be absolute", label, path)
+		return "", fmt.Errorf("isolation %s %q must be absolute", label, path)
 	}
 	absolute, err := filepath.Abs(path)
 	if err != nil {
-		return "", fmt.Errorf("phase8 %s %q must be absolute: %w", label, path, err)
+		return "", fmt.Errorf("isolation %s %q must be absolute: %w", label, path, err)
 	}
 	cleaned := filepath.Clean(absolute)
 	if cleaned == string(filepath.Separator) {
-		return "", fmt.Errorf("phase8 %s must not be filesystem root", label)
+		return "", fmt.Errorf("isolation %s must not be filesystem root", label)
 	}
 	if resolved, err := filepath.EvalSymlinks(cleaned); err == nil {
 		return filepath.Clean(resolved), nil
 	} else if !errors.Is(err, fs.ErrNotExist) {
-		return "", fmt.Errorf("resolve phase8 %s %q: %w", label, cleaned, err)
+		return "", fmt.Errorf("resolve isolation %s %q: %w", label, cleaned, err)
 	}
 	existing, missing, err := deepestExistingRoot(cleaned)
 	if err != nil {
-		return "", fmt.Errorf("resolve phase8 %s %q: %w", label, cleaned, err)
+		return "", fmt.Errorf("resolve isolation %s %q: %w", label, cleaned, err)
 	}
 	if existing == "" {
 		return cleaned, nil
 	}
 	resolved, err := filepath.EvalSymlinks(existing)
 	if err != nil {
-		return "", fmt.Errorf("resolve phase8 %s existing prefix %q: %w", label, existing, err)
+		return "", fmt.Errorf("resolve isolation %s existing prefix %q: %w", label, existing, err)
 	}
 	return filepath.Clean(filepath.Join(append([]string{resolved}, missing...)...)), nil
 }
@@ -818,22 +816,22 @@ func deepestExistingRoot(path string) (string, []string, error) {
 	}
 }
 
-func validatePhase8TopLevelDisjoint(roots []phase8Root) error {
+func validateIsolationTopLevelDisjoint(roots []isolationRoot) error {
 	for i := 0; i < len(roots); i++ {
 		for j := i + 1; j < len(roots); j++ {
-			if phase8RootsOverlap(roots[i].path, roots[j].path) {
-				return fmt.Errorf("phase8 %s %q overlaps %s %q", roots[i].label, roots[i].path, roots[j].label, roots[j].path)
+			if isolationRootsOverlap(roots[i].path, roots[j].path) {
+				return fmt.Errorf("isolation %s %q overlaps %s %q", roots[i].label, roots[i].path, roots[j].label, roots[j].path)
 			}
 		}
 	}
 	return nil
 }
 
-func validateReservedHostRoot(label, path string, roots CanonicalPhase8IsolationRoots, allowedParent string) error {
-	if !phase8PathWithin(path, allowedParent) && phase8RootsOverlap(path, allowedParent) {
-		return fmt.Errorf("phase8 %s %q must not contain reserved parent %q", label, path, allowedParent)
+func validateReservedHostRoot(label, path string, roots CanonicalIsolationRoots, allowedParent string) error {
+	if !isolationPathWithin(path, allowedParent) && isolationRootsOverlap(path, allowedParent) {
+		return fmt.Errorf("isolation %s %q must not contain reserved parent %q", label, path, allowedParent)
 	}
-	sandboxBindable := []phase8Root{
+	sandboxBindable := []isolationRoot{
 		{label: "sessions root", path: roots.SessionsRoot},
 		{label: "agent homes root", path: roots.AgentHomesRoot},
 		{label: "run control root", path: filepath.Join(roots.RunDir, "control")},
@@ -841,24 +839,24 @@ func validateReservedHostRoot(label, path string, roots CanonicalPhase8Isolation
 		{label: "run network root", path: filepath.Join(roots.RunDir, "network")},
 	}
 	if roots.SchemaPackRoot != "" {
-		sandboxBindable = append(sandboxBindable, phase8Root{label: "schema pack root", path: roots.SchemaPackRoot})
+		sandboxBindable = append(sandboxBindable, isolationRoot{label: "schema pack root", path: roots.SchemaPackRoot})
 	}
 	for _, root := range sandboxBindable {
-		if phase8RootsOverlap(path, root.path) {
-			return fmt.Errorf("phase8 %s %q overlaps sandbox-bindable %s %q", label, path, root.label, root.path)
+		if isolationRootsOverlap(path, root.path) {
+			return fmt.Errorf("isolation %s %q overlaps sandbox-bindable %s %q", label, path, root.label, root.path)
 		}
 	}
 	if path == roots.RunDir || path == roots.DBStateRoot {
-		return fmt.Errorf("phase8 %s must be a reserved subroot, got top-level root %q", label, path)
+		return fmt.Errorf("isolation %s must be a reserved subroot, got top-level root %q", label, path)
 	}
 	return nil
 }
 
-func phase8RootsOverlap(a, b string) bool {
-	return phase8PathWithin(a, b) || phase8PathWithin(b, a)
+func isolationRootsOverlap(a, b string) bool {
+	return isolationPathWithin(a, b) || isolationPathWithin(b, a)
 }
 
-func phase8PathWithin(path, root string) bool {
+func isolationPathWithin(path, root string) bool {
 	path = filepath.Clean(path)
 	root = filepath.Clean(root)
 	rel, err := filepath.Rel(root, path)
@@ -868,7 +866,7 @@ func phase8PathWithin(path, root string) bool {
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
-func phase7ConfigWarnings(cfg Phase7Config) []string {
+func harnessConfigWarnings(cfg HarnessConfig) []string {
 	if cfg.Bridge.HeartbeatInterval.Duration >= cfg.Bridge.LeaseTTL.Duration/2 &&
 		cfg.Bridge.HeartbeatInterval.Duration < cfg.Bridge.LeaseTTL.Duration {
 		return []string{"harness.bridge.heartbeat_interval is at least half of harness.bridge.lease_ttl"}
@@ -1082,7 +1080,7 @@ func normalizeRuntimeProviderConfigs(raw map[string]RuntimeProviderConfig) map[s
 	return normalized
 }
 
-func validateDeploymentConfig(cfg Phase7Config) error {
+func validateDeploymentConfig(cfg HarnessConfig) error {
 	defaultDriver, err := agents.CanonicalDriverID(cfg.DefaultAgent)
 	if err != nil {
 		return fmt.Errorf("harness.default_agent: %w", err)
@@ -1138,12 +1136,12 @@ func validateDeploymentConfig(cfg Phase7Config) error {
 	return nil
 }
 
-func syncClaudeDeploymentConfig(claude ClaudeConfig, phase7 Phase7Config) ClaudeConfig {
-	if _, agentCfg, ok := EnabledAgentConfigForDriver(phase7.Agents, string(agents.ClaudeCode)); ok {
+func syncClaudeDeploymentConfig(claude ClaudeConfig, harness HarnessConfig) ClaudeConfig {
+	if _, agentCfg, ok := EnabledAgentConfigForDriver(harness.Agents, string(agents.ClaudeCode)); ok {
 		if agentCfg.DisableNonessentialTraffic != nil {
 			claude.DisableNonessentialTraffic = *agentCfg.DisableNonessentialTraffic
 		}
-		if profile, ok := phase7.ModelProfiles[agentCfg.ModelProfile]; ok && strings.TrimSpace(profile.Model) != "" {
+		if profile, ok := harness.ModelProfiles[agentCfg.ModelProfile]; ok && strings.TrimSpace(profile.Model) != "" {
 			claude.Model = strings.TrimSpace(profile.Model)
 		}
 	}

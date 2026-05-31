@@ -265,8 +265,8 @@ func (s *Store) BridgeProtocolEvidence(ctx context.Context, sessionID, generatio
 	if err != nil {
 		return BridgeProtocolEvidence{}, err
 	}
-	if record.ContractGateVersion != SandboxContractGatePhase9C {
-		return BridgeProtocolEvidence{}, fmt.Errorf("bridge protocol v2 requires phase9c manifest evidence, got %s", record.ContractGateVersion)
+	if record.ContractGateVersion != SandboxContractGateDriverManifest {
+		return BridgeProtocolEvidence{}, fmt.Errorf("bridge protocol v2 requires driver manifest evidence, got %s", record.ContractGateVersion)
 	}
 	object, err := decodeSandboxContractObject(record.CanonicalPayload)
 	if err != nil {

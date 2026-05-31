@@ -964,7 +964,7 @@ func TestProcessorFailsGenerationWhenCompletionCommitFailsAfterOutput(t *testing
 					"schema_version":1,
 					"driver_id":"claude_code",
 					"state_kind":"claude_session",
-					"claude_session_uuid":"phase9d-test-session",
+					"claude_session_uuid":"driver-state-test-session",
 					"initialized":true,
 					"last_completed_turn_id":"1"
 				},
@@ -1248,7 +1248,7 @@ func createBridgeRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 		Payload: map[string]any{
 			"contract_id":              contractID,
 			"contract_schema_version":  store.SandboxContractSchemaVersion,
-			"contract_gate_version":    store.SandboxContractGatePhase9C,
+			"contract_gate_version":    store.SandboxContractGateDriverManifest,
 			"generation_id":            allocation.GenerationID,
 			"session_id":               sessionID,
 			"sandbox_contract_version": store.SandboxContractVersion,
@@ -1299,7 +1299,7 @@ func createBridgeRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 				"agent_manifest_digest": "sha256:agent-manifest",
 			},
 		},
-		ContractGateVersion: store.SandboxContractGatePhase9C,
+		ContractGateVersion: store.SandboxContractGateDriverManifest,
 		Now:                 time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("store sandbox contract: %v", err)

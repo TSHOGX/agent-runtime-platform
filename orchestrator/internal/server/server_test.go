@@ -399,7 +399,7 @@ func TestCreateSessionFailsClosedWhenRequiredManifestMissing(t *testing.T) {
 	}
 }
 
-func TestPhase9CInputDigestsUseSourceConfigAndImageManifest(t *testing.T) {
+func TestDriverManifestInputDigestsUseSourceConfigAndImageManifest(t *testing.T) {
 	dir := t.TempDir()
 	rootfs := filepath.Join(dir, "rootfs")
 	writeServerTestAgentImageManifest(t, rootfs, agents.ClaudeCode, agents.Shell)
@@ -417,7 +417,7 @@ func TestPhase9CInputDigestsUseSourceConfigAndImageManifest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load manifest: %v", err)
 	}
-	digests := srv.phase9CInputDigests(deployment)
+	digests := srv.driverManifestInputDigests(deployment)
 	if digests.AgentManifestDigest != manifest.Digest {
 		t.Fatalf("agent manifest digest = %s want %s", digests.AgentManifestDigest, manifest.Digest)
 	}
@@ -431,7 +431,7 @@ func TestPhase9CInputDigestsUseSourceConfigAndImageManifest(t *testing.T) {
 	if capabilityErr != nil {
 		t.Fatalf("resolve shell deployment with pi default: %v", capabilityErr)
 	}
-	changed := srv.phase9CInputDigests(deploymentWithPiDefault)
+	changed := srv.driverManifestInputDigests(deploymentWithPiDefault)
 	if changed.RuntimeConfigDigest == digests.RuntimeConfigDigest {
 		t.Fatalf("shell runtime config digest should change when deployment default agent changes")
 	}
@@ -524,7 +524,7 @@ func TestCloseSessionReleasesSoftLimitWithoutDeletingHistory(t *testing.T) {
 	cfg := testServerConfig(dir)
 	cfg.SessionRetention = 0
 	cfg.MaxSessions = 1
-	cfg.Phase7.MaxSessions = 1
+	cfg.Harness.MaxSessions = 1
 	now := time.Now().UTC()
 	oldSession := store.Session{
 		ID:                "sess_retained",
@@ -974,9 +974,9 @@ func TestMonitorIdleSessionsCheckpointsEligibleGeneration(t *testing.T) {
 	session := createServerTestSession(t, ctx, st, dir, "sess_auto_checkpoint", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
 	enableSessionAutoCheckpoint(t, ctx, st, session.ID)
 	cfg := testServerConfig(dir)
-	cfg.Phase7.Checkpoint.AutoEnabled = true
-	cfg.Phase7.Checkpoint.IdleThreshold = config.Duration{Duration: time.Nanosecond}
-	cfg.Phase7.Checkpoint.MonitorInterval = config.Duration{Duration: time.Hour}
+	cfg.Harness.Checkpoint.AutoEnabled = true
+	cfg.Harness.Checkpoint.IdleThreshold = config.Duration{Duration: time.Nanosecond}
+	cfg.Harness.Checkpoint.MonitorInterval = config.Duration{Duration: time.Hour}
 	allocation := prepareServerIdleGeneration(t, ctx, st, cfg, owner.UUID, session.ID)
 	details, err := st.GetRuntimeGenerationDetails(ctx, session.ID, allocation.GenerationID)
 	if err != nil {
@@ -1053,9 +1053,9 @@ func TestMonitorIdleSessionsAbortsFailedCheckpoint(t *testing.T) {
 	session := createServerTestSession(t, ctx, st, dir, "sess_auto_checkpoint_fail", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
 	enableSessionAutoCheckpoint(t, ctx, st, session.ID)
 	cfg := testServerConfig(dir)
-	cfg.Phase7.Checkpoint.AutoEnabled = true
-	cfg.Phase7.Checkpoint.IdleThreshold = config.Duration{Duration: time.Nanosecond}
-	cfg.Phase7.Checkpoint.MonitorInterval = config.Duration{Duration: time.Hour}
+	cfg.Harness.Checkpoint.AutoEnabled = true
+	cfg.Harness.Checkpoint.IdleThreshold = config.Duration{Duration: time.Nanosecond}
+	cfg.Harness.Checkpoint.MonitorInterval = config.Duration{Duration: time.Hour}
 	allocation := prepareServerIdleGeneration(t, ctx, st, cfg, owner.UUID, session.ID)
 	details, err := st.GetRuntimeGenerationDetails(ctx, session.ID, allocation.GenerationID)
 	if err != nil {
@@ -1253,7 +1253,7 @@ func TestSendMessageColdFallbackAllocatesReplacementGeneration(t *testing.T) {
 	st, owner := openServerOwnedStore(t, ctx, dir)
 	session := createServerTestSession(t, ctx, st, dir, "sess_send_fallback", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
 	cfg := testServerConfig(dir)
-	cfg.Phase7.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
+	cfg.Harness.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
 	leaseOwner := store.GenerationLeaseOwner(owner.UUID)
 	old, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
 		SessionID: session.ID,
@@ -1454,7 +1454,7 @@ func TestSendMessageFallsBackWhenCheckpointRestoreFails(t *testing.T) {
 	st, owner := openServerOwnedStore(t, ctx, dir)
 	session := createServerTestSession(t, ctx, st, dir, "sess_restore_fallback", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
 	cfg := testServerConfig(dir)
-	cfg.Phase7.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
+	cfg.Harness.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
 	leaseOwner := store.GenerationLeaseOwner(owner.UUID)
 	old, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
 		SessionID: session.ID,
@@ -1573,7 +1573,7 @@ func TestSendMessageRestoreFallbackColdStartFailureLeavesSessionRetryable(t *tes
 	st, owner := openServerOwnedStore(t, ctx, dir)
 	session := createServerTestSession(t, ctx, st, dir, "sess_restore_fallback_start_fail", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
 	cfg := testServerConfig(dir)
-	cfg.Phase7.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
+	cfg.Harness.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
 	leaseOwner := store.GenerationLeaseOwner(owner.UUID)
 	old, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
 		SessionID: session.ID,
@@ -1669,7 +1669,7 @@ func TestSendMessageRestoreLiveCASFailureDestroysRunscContainerIDBeforeFallback(
 	st, owner := openServerOwnedStore(t, ctx, dir)
 	session := createServerTestSession(t, ctx, st, dir, "sess_restore_live_cas", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
 	cfg := testServerConfig(dir)
-	cfg.Phase7.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
+	cfg.Harness.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
 	leaseOwner := store.GenerationLeaseOwner(owner.UUID)
 	old, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
 		SessionID: session.ID,
@@ -1748,7 +1748,7 @@ func TestSendMessageRestoreLiveCASFailureDoesNotRetireWhenDestroyFails(t *testin
 	st, owner := openServerOwnedStore(t, ctx, dir)
 	session := createServerTestSession(t, ctx, st, dir, "sess_restore_destroy_fail", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
 	cfg := testServerConfig(dir)
-	cfg.Phase7.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
+	cfg.Harness.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
 	leaseOwner := store.GenerationLeaseOwner(owner.UUID)
 	old, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
 		SessionID: session.ID,
@@ -1834,7 +1834,7 @@ func TestSendMessageFallsBackWhenCheckpointImageManifestInvalid(t *testing.T) {
 	session.Agent = "sh"
 	session.Mode = "shell"
 	cfg := testServerConfig(dir)
-	cfg.Phase7.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
+	cfg.Harness.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
 	leaseOwner := store.GenerationLeaseOwner(owner.UUID)
 	old, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
 		SessionID: session.ID,
@@ -1881,12 +1881,12 @@ WHERE generation_id = ?`, checkpointPath, old.GenerationID); err != nil {
 		BundleRoot:      filepath.Join(dir, "run", "runtime"),
 		RunscNetwork:    "host",
 		RunscOverlay2:   "none",
-		RunDir:          cfg.Phase7.RunDir,
+		RunDir:          cfg.Harness.RunDir,
 		CommandRunner:   serverCommandRunner{outputs: map[string][]byte{"runsc --version": []byte("runsc test")}},
 		BridgeMode:      "claim-loop",
 		BridgeHeartbeat: time.Second,
-		SandboxUID:      cfg.Phase7.SandboxIdentity.UID,
-		SandboxGID:      cfg.Phase7.SandboxIdentity.GID,
+		SandboxUID:      cfg.Harness.SandboxIdentity.UID,
+		SandboxGID:      cfg.Harness.SandboxIdentity.GID,
 	})
 	rt := &restoreValidationRuntime{restore: realRuntime}
 	srv := &Server{
@@ -1969,7 +1969,7 @@ func TestColdFallbackMaintenanceStartsReplacementForQueuedTurn(t *testing.T) {
 	st, owner := openServerOwnedStore(t, ctx, dir)
 	session := createServerTestSession(t, ctx, st, dir, "sess_maintenance_fallback", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
 	cfg := testServerConfig(dir)
-	cfg.Phase7.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
+	cfg.Harness.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
 	leaseOwner := store.GenerationLeaseOwner(owner.UUID)
 	old, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
 		SessionID: session.ID,
@@ -2048,7 +2048,7 @@ func TestColdFallbackMaintenanceStartFailureKeepsSessionInputBlocking(t *testing
 	st, owner := openServerOwnedStore(t, ctx, dir)
 	session := createServerTestSession(t, ctx, st, dir, "sess_maintenance_fallback_fail", string(sessionstate.RunningActive), time.Now().UTC(), nil)
 	cfg := testServerConfig(dir)
-	cfg.Phase7.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
+	cfg.Harness.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
 	leaseOwner := store.GenerationLeaseOwner(owner.UUID)
 	old, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
 		SessionID: session.ID,
@@ -2145,14 +2145,14 @@ WHERE id = ?`, turnID).Scan(&queuedStatus); err != nil {
 	}
 }
 
-func TestRunPhase7MaintenanceRetiresExpiredCheckpoint(t *testing.T) {
+func TestRunMaintenanceRetiresExpiredCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	st, owner := openServerOwnedStore(t, ctx, dir)
 	session := createServerTestSession(t, ctx, st, dir, "sess_retire_checkpoint", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
 	cfg := testServerConfig(dir)
-	cfg.Phase7.Reaper.CheckpointImageRetention = config.Duration{Duration: 0}
-	cfg.Phase7.Reaper.FailedRetention = config.Duration{Duration: time.Hour}
+	cfg.Harness.Reaper.CheckpointImageRetention = config.Duration{Duration: 0}
+	cfg.Harness.Reaper.FailedRetention = config.Duration{Duration: time.Hour}
 	allocation := prepareServerIdleGeneration(t, ctx, st, cfg, owner.UUID, session.ID)
 	checkpointedAt := time.Now().UTC().Add(-2 * time.Hour)
 	markServerGenerationCheckpointed(t, ctx, st, session.ID, allocation.GenerationID, checkpointedAt)
@@ -2188,7 +2188,7 @@ WHERE generation_id = ?`, checkpointPath, allocation.GenerationID); err != nil {
 	runCtx, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() {
-		done <- srv.RunPhase7Maintenance(runCtx)
+		done <- srv.RunMaintenance(runCtx)
 	}()
 	event := waitForHubEvent(t, eventsCh, "session.checkpoint_retired")
 	waitForGenerationResourceStates(t, runCtx, st, allocation.GenerationID, "destroyed", "destroyed")
@@ -2233,7 +2233,7 @@ func TestEnsureActiveGenerationColdStartsAfterCheckpointRetirement(t *testing.T)
 	st, owner := openServerOwnedStore(t, ctx, dir)
 	session := createServerTestSession(t, ctx, st, dir, "sess_retire_then_send", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
 	cfg := testServerConfig(dir)
-	cfg.Phase7.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
+	cfg.Harness.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
 	allocation := prepareServerIdleGeneration(t, ctx, st, cfg, owner.UUID, session.ID)
 	checkpointedAt := time.Now().UTC().Add(-2 * time.Hour)
 	markServerGenerationCheckpointed(t, ctx, st, session.ID, allocation.GenerationID, checkpointedAt)
@@ -2286,20 +2286,20 @@ func TestGetQuotaReportsSessionAndPoolCeilings(t *testing.T) {
 	createServerTestSession(t, ctx, st, dir, "sess_quota", string(sessionstate.Created), time.Now().UTC(), nil)
 	cfg := testServerConfig(dir)
 	cfg.MaxSessions = 3
-	cfg.Phase7.MaxSessions = 3
-	cfg.Phase7.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.242.0.0/29")}
+	cfg.Harness.MaxSessions = 3
+	cfg.Harness.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.242.0.0/29")}
 	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
 		SessionID: "sess_quota",
 		Owner:     store.GenerationLeaseOwner(owner.UUID),
 		LeaseTTL:  time.Minute,
 		Now:       time.Now().UTC(),
 		Config: store.ResourceAllocatorConfig{
-			RunDir:             cfg.Phase7.RunDir,
-			CIDRPool:           cfg.Phase7.Network.CIDRPool.Prefix,
-			EgressDorisFEHosts: cfg.Phase7.Network.Egress.DorisFEHosts,
-			EgressDorisBEHosts: cfg.Phase7.Network.Egress.DorisBEHosts,
-			EgressDorisPorts:   cfg.Phase7.Network.Egress.DorisPorts,
-			EgressDNSPolicy:    string(cfg.Phase7.Network.Egress.DNSPolicy),
+			RunDir:             cfg.Harness.RunDir,
+			CIDRPool:           cfg.Harness.Network.CIDRPool.Prefix,
+			EgressDorisFEHosts: cfg.Harness.Network.Egress.DorisFEHosts,
+			EgressDorisBEHosts: cfg.Harness.Network.Egress.DorisBEHosts,
+			EgressDorisPorts:   cfg.Harness.Network.Egress.DorisPorts,
+			EgressDNSPolicy:    string(cfg.Harness.Network.Egress.DNSPolicy),
 			HostProxyBindURL:   cfg.ModelProxy.BindURL,
 			ProxyPort:          cfg.ModelProxy.BindPort,
 			Agent:              "claude_code",
@@ -2347,7 +2347,7 @@ func TestSendMessagePoolExhaustionDoesNotQueueTurn(t *testing.T) {
 	dir := t.TempDir()
 	st, owner := openServerOwnedStore(t, ctx, dir)
 	cfg := testServerConfig(dir)
-	cfg.Phase7.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.242.0.0/30")}
+	cfg.Harness.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.242.0.0/30")}
 	createServerTestSession(t, ctx, st, dir, "sess_pool_used", string(sessionstate.Created), time.Now().UTC(), nil)
 	target := createServerTestSession(t, ctx, st, dir, "sess_pool_target", string(sessionstate.Created), time.Now().UTC(), nil)
 	if _, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
@@ -2540,12 +2540,12 @@ func TestStartEnsuredGenerationRenewsLeaseDuringSlowPrepare(t *testing.T) {
 	st, owner := openServerOwnedStore(t, ctx, dir)
 	session := createServerTestSession(t, ctx, st, dir, "sess_slow_start", string(sessionstate.Created), time.Now().UTC(), nil)
 	cfg := testServerConfig(dir)
-	cfg.Phase7.Bridge.LeaseTTL = config.Duration{Duration: 40 * time.Millisecond}
+	cfg.Harness.Bridge.LeaseTTL = config.Duration{Duration: 40 * time.Millisecond}
 	now := time.Now().UTC()
 	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
 		SessionID: session.ID,
 		Owner:     store.GenerationLeaseOwner(owner.UUID),
-		LeaseTTL:  cfg.Phase7.Bridge.LeaseTTL.Duration,
+		LeaseTTL:  cfg.Harness.Bridge.LeaseTTL.Duration,
 		Now:       now,
 		Config:    serverTestAllocatorConfig(cfg, session.Agent),
 	})
@@ -2635,15 +2635,15 @@ func TestStartEnsuredGenerationRenewsLeaseDuringSlowPrepare(t *testing.T) {
 	}
 	if contract.SandboxContractVersion != store.SandboxContractVersion ||
 		contract.ContractID != sandboxContractID(allocation.GenerationID) ||
-		contract.ContractGateVersion != store.SandboxContractGatePhase9C {
+		contract.ContractGateVersion != store.SandboxContractGateDriverManifest {
 		t.Fatalf("unexpected sandbox contract: %+v", contract)
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(contract.CanonicalPayload, &payload); err != nil {
 		t.Fatalf("decode sandbox contract payload: %v", err)
 	}
-	if payload["contract_gate_version"] != store.SandboxContractGatePhase9C {
-		t.Fatalf("sandbox contract gate version should be phase9c: %s", contract.CanonicalPayload)
+	if payload["contract_gate_version"] != store.SandboxContractGateDriverManifest {
+		t.Fatalf("sandbox contract gate version should be driver_manifest_v1: %s", contract.CanonicalPayload)
 	}
 	inputDigests, ok := payload["input_digests"].(map[string]any)
 	if !ok {
@@ -2752,7 +2752,7 @@ func TestSandboxContractPayloadRecordsPiMaterializedConfig(t *testing.T) {
 		Agent:     "pi",
 		Mode:      "agent",
 		Workspace: filepath.Join(dir, "sessions", "sess_pi_contract"),
-		RestoreID: "phase9f-pi",
+		RestoreID: "pi-driver",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -2861,7 +2861,7 @@ func TestSandboxContractPayloadRecordsPiMaterializedConfig(t *testing.T) {
 		Owner:                  store.GenerationLeaseOwner(owner.UUID),
 		SandboxContractVersion: store.SandboxContractVersion,
 		ContractSchemaVersion:  store.SandboxContractSchemaVersion,
-		ContractGateVersion:    store.SandboxContractGatePhase9C,
+		ContractGateVersion:    store.SandboxContractGateDriverManifest,
 		DriverState:            allocation.DriverState,
 		Payload:                payload,
 		Now:                    now,
@@ -3322,25 +3322,25 @@ WHERE session_id = ?
 	}
 }
 
-func TestRunPhase7MaintenancePollsBridgeOutbox(t *testing.T) {
+func TestRunMaintenancePollsBridgeOutbox(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	st, owner := openServerOwnedStore(t, ctx, dir)
 	session := createServerTestSession(t, ctx, st, dir, "sess_bridge_poll", string(sessionstate.Created), time.Now().UTC(), nil)
 	cfg := testServerConfig(dir)
-	cfg.Phase7.Bridge.PollInterval = config.Duration{Duration: 10 * time.Millisecond}
+	cfg.Harness.Bridge.PollInterval = config.Duration{Duration: 10 * time.Millisecond}
 	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
 		SessionID: session.ID,
 		Owner:     store.GenerationLeaseOwner(owner.UUID),
 		LeaseTTL:  time.Minute,
 		Now:       time.Now().UTC(),
 		Config: store.ResourceAllocatorConfig{
-			RunDir:             cfg.Phase7.RunDir,
-			CIDRPool:           cfg.Phase7.Network.CIDRPool.Prefix,
-			EgressDorisFEHosts: cfg.Phase7.Network.Egress.DorisFEHosts,
-			EgressDorisBEHosts: cfg.Phase7.Network.Egress.DorisBEHosts,
-			EgressDorisPorts:   cfg.Phase7.Network.Egress.DorisPorts,
-			EgressDNSPolicy:    string(cfg.Phase7.Network.Egress.DNSPolicy),
+			RunDir:             cfg.Harness.RunDir,
+			CIDRPool:           cfg.Harness.Network.CIDRPool.Prefix,
+			EgressDorisFEHosts: cfg.Harness.Network.Egress.DorisFEHosts,
+			EgressDorisBEHosts: cfg.Harness.Network.Egress.DorisBEHosts,
+			EgressDorisPorts:   cfg.Harness.Network.Egress.DorisPorts,
+			EgressDNSPolicy:    string(cfg.Harness.Network.Egress.DNSPolicy),
 			HostProxyBindURL:   cfg.ModelProxy.BindURL,
 			ProxyPort:          cfg.ModelProxy.BindPort,
 			Agent:              "claude_code",
@@ -3387,7 +3387,7 @@ func TestRunPhase7MaintenancePollsBridgeOutbox(t *testing.T) {
 	srv.SetOwnerUUID(owner.UUID)
 	done := make(chan error, 1)
 	go func() {
-		done <- srv.RunPhase7Maintenance(runCtx)
+		done <- srv.RunMaintenance(runCtx)
 	}()
 
 	response := waitForBridgeInboxResponse(t, runCtx, details.BridgeDirPath, bridge.TypeHelloAck, "req_hello")
@@ -3404,14 +3404,14 @@ func TestRunPhase7MaintenancePollsBridgeOutbox(t *testing.T) {
 	}
 }
 
-func TestRunPhase7MaintenanceRecoversGenerationThatExpiresAfterStartup(t *testing.T) {
+func TestRunMaintenanceRecoversGenerationThatExpiresAfterStartup(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	st, owner := openServerOwnedStore(t, ctx, dir)
 	session := createServerTestSession(t, ctx, st, dir, "sess_expiring_generation", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
 	cfg := testServerConfig(dir)
-	cfg.Phase7.Bridge.HeartbeatInterval = config.Duration{Duration: 10 * time.Millisecond}
-	cfg.Phase7.Bridge.ReconnectGrace = config.Duration{Duration: 20 * time.Millisecond}
+	cfg.Harness.Bridge.HeartbeatInterval = config.Duration{Duration: 10 * time.Millisecond}
+	cfg.Harness.Bridge.ReconnectGrace = config.Duration{Duration: 20 * time.Millisecond}
 	leaseOwner := store.GenerationLeaseOwner(owner.UUID)
 	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
 		SessionID: session.ID,
@@ -3455,7 +3455,7 @@ WHERE generation_id = ?`,
 	srv.SetOwnerUUID(owner.UUID)
 	done := make(chan error, 1)
 	go func() {
-		done <- srv.RunPhase7Maintenance(runCtx)
+		done <- srv.RunMaintenance(runCtx)
 	}()
 
 	waitForGenerationStatus(t, runCtx, st, allocation.GenerationID, "failed")
@@ -3665,7 +3665,7 @@ func TestDestroyReclaimableGenerationResourcesRemovesFilesystemWithRealRuntime(t
 		RunscNetwork:    "sandbox",
 		RunscOverlay2:   "none",
 		RunscRoot:       filepath.Join(dir, "runsc-root"),
-		RunDir:          cfg.Phase7.RunDir,
+		RunDir:          cfg.Harness.RunDir,
 		CheckpointsRoot: filepath.Join(dir, "checkpoints"),
 		CommandRunner: serverCommandRunner{fail: map[string]error{
 			"runsc -root " + filepath.Join(dir, "runsc-root") + " state " + details.RunscContainerID: errors.New("not found"),
@@ -3701,7 +3701,7 @@ WHERE n.generation_id = ?`, allocation.GenerationID).Scan(&networkState, &resour
 	}
 }
 
-func TestRunPhase7MaintenancePublishesBridgeOutputAndCompletion(t *testing.T) {
+func TestRunMaintenancePublishesBridgeOutputAndCompletion(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	st, owner := openServerOwnedStore(t, ctx, dir)
@@ -3712,7 +3712,7 @@ func TestRunPhase7MaintenancePublishesBridgeOutputAndCompletion(t *testing.T) {
 	session.Agent = "sh"
 	session.Mode = "shell"
 	cfg := testServerConfig(dir)
-	cfg.Phase7.Bridge.PollInterval = config.Duration{Duration: 10 * time.Millisecond}
+	cfg.Harness.Bridge.PollInterval = config.Duration{Duration: 10 * time.Millisecond}
 	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
 		SessionID: session.ID,
 		Owner:     store.GenerationLeaseOwner(owner.UUID),
@@ -3798,7 +3798,7 @@ func TestRunPhase7MaintenancePublishesBridgeOutputAndCompletion(t *testing.T) {
 	srv.SetOwnerUUID(owner.UUID)
 	done := make(chan error, 1)
 	go func() {
-		done <- srv.RunPhase7Maintenance(runCtx)
+		done <- srv.RunMaintenance(runCtx)
 	}()
 	waitForSessionStatus(t, runCtx, st, session.ID, string(sessionstate.RunningIdle))
 	waitForHubEvent(t, eventsCh, bridge.TypeAckTurnCompleted)
@@ -3940,7 +3940,7 @@ func TestBridgeFailedCompletionDoesNotFailSession(t *testing.T) {
 	}
 }
 
-func TestRunPhase7MaintenancePrunesRetainedEvents(t *testing.T) {
+func TestRunMaintenancePrunesRetainedEvents(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	st, owner := openServerOwnedStore(t, ctx, dir)
@@ -3976,8 +3976,8 @@ func TestRunPhase7MaintenancePrunesRetainedEvents(t *testing.T) {
 	}
 
 	cfg := testServerConfig(dir)
-	cfg.Phase7.Events.RetentionWindow = config.Duration{Duration: time.Hour}
-	cfg.Phase7.Events.RetentionRows = 2
+	cfg.Harness.Events.RetentionWindow = config.Duration{Duration: time.Hour}
+	cfg.Harness.Events.RetentionRows = 2
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	srv := &Server{
@@ -3991,7 +3991,7 @@ func TestRunPhase7MaintenancePrunesRetainedEvents(t *testing.T) {
 	srv.SetOwnerUUID(owner.UUID)
 	done := make(chan error, 1)
 	go func() {
-		done <- srv.RunPhase7Maintenance(runCtx)
+		done <- srv.RunMaintenance(runCtx)
 	}()
 	waitForEventIDs(t, runCtx, st, []int64{secondID, thirdID})
 	cancel()
@@ -4078,7 +4078,7 @@ func TestProxyCorrelationUnixSocketPublishesDurableEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen proxy correlation: %v", err)
 	}
-	assertProxyCorrelationSocketPermissions(t, socketPath, cfg.Phase7.ProxyServiceIdentity.GID)
+	assertProxyCorrelationSocketPermissions(t, socketPath, cfg.Harness.ProxyServiceIdentity.GID)
 	proxyServer := srv.ProxyCorrelationServer()
 	errCh := make(chan error, 1)
 	go func() { errCh <- proxyServer.Serve(listener) }()
@@ -5059,7 +5059,7 @@ func createServerRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 		Payload: map[string]any{
 			"sandbox_contract_version": store.SandboxContractVersion,
 			"contract_schema_version":  store.SandboxContractSchemaVersion,
-			"contract_gate_version":    store.SandboxContractGatePhase9C,
+			"contract_gate_version":    store.SandboxContractGateDriverManifest,
 			"contract_id":              contractID,
 			"session_id":               sessionID,
 			"generation_id":            allocation.GenerationID,
@@ -5110,7 +5110,7 @@ func createServerRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 				"agent_manifest_digest": "sha256:agent-manifest",
 			},
 		},
-		ContractGateVersion: store.SandboxContractGatePhase9C,
+		ContractGateVersion: store.SandboxContractGateDriverManifest,
 		Now:                 now,
 	}); err != nil {
 		t.Fatalf("store sandbox contract: %v", err)
@@ -5498,7 +5498,7 @@ func testServerConfig(dir string) config.Config {
 			SandboxBaseURL: "http://harness-model-proxy.internal:8082",
 			BindPort:       8082,
 		},
-		Phase7: config.Phase7Config{
+		Harness: config.HarnessConfig{
 			RunDir: filepath.Join(dir, "run"),
 			Network: config.NetworkConfig{
 				CIDRPool: config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/29")},
@@ -5565,8 +5565,8 @@ func TestResourceAllocatorConfigUsesHostOnlyClaudeCredentials(t *testing.T) {
 	if claudeConfig.SandboxModelProxyBaseURL != "http://harness-model-proxy.internal:8082" {
 		t.Fatalf("claude sandbox model proxy base url = %q", claudeConfig.SandboxModelProxyBaseURL)
 	}
-	if claudeConfig.SandboxUID != cfg.Phase7.SandboxIdentity.UID ||
-		claudeConfig.SandboxGID != cfg.Phase7.SandboxIdentity.GID {
+	if claudeConfig.SandboxUID != cfg.Harness.SandboxIdentity.UID ||
+		claudeConfig.SandboxGID != cfg.Harness.SandboxIdentity.GID {
 		t.Fatalf("claude allocator sandbox identity = %+v", claudeConfig)
 	}
 
@@ -5601,21 +5601,21 @@ func serverTestAllocatorConfig(cfg config.Config, agent string) store.ResourceAl
 		modelAccess = spec.ModelAccess
 	}
 	return store.ResourceAllocatorConfig{
-		RunDir:                      cfg.Phase7.RunDir,
-		CIDRPool:                    cfg.Phase7.Network.CIDRPool.Prefix,
-		EgressDorisFEHosts:          cfg.Phase7.Network.Egress.DorisFEHosts,
-		EgressDorisBEHosts:          cfg.Phase7.Network.Egress.DorisBEHosts,
-		EgressDorisPorts:            cfg.Phase7.Network.Egress.DorisPorts,
-		EgressDNSPolicy:             string(cfg.Phase7.Network.Egress.DNSPolicy),
+		RunDir:                      cfg.Harness.RunDir,
+		CIDRPool:                    cfg.Harness.Network.CIDRPool.Prefix,
+		EgressDorisFEHosts:          cfg.Harness.Network.Egress.DorisFEHosts,
+		EgressDorisBEHosts:          cfg.Harness.Network.Egress.DorisBEHosts,
+		EgressDorisPorts:            cfg.Harness.Network.Egress.DorisPorts,
+		EgressDNSPolicy:             string(cfg.Harness.Network.Egress.DNSPolicy),
 		HostProxyBindURL:            cfg.ModelProxy.BindURL,
 		ProxyPort:                   cfg.ModelProxy.BindPort,
 		Agent:                       agent,
 		AgentModel:                  cfg.Claude.Model,
 		AgentOutputFormat:           outputFormat,
 		DisableNonessentialTraffic:  cfg.Claude.DisableNonessentialTraffic,
-		SandboxUID:                  cfg.Phase7.SandboxIdentity.UID,
-		SandboxGID:                  cfg.Phase7.SandboxIdentity.GID,
-		SandboxSupplementalGIDs:     cfg.Phase7.SandboxIdentity.SupplementalGIDs,
+		SandboxUID:                  cfg.Harness.SandboxIdentity.UID,
+		SandboxGID:                  cfg.Harness.SandboxIdentity.GID,
+		SandboxSupplementalGIDs:     cfg.Harness.SandboxIdentity.SupplementalGIDs,
 		ProviderCredentialsHostOnly: modelAccess,
 		SandboxModelProxyBaseURL:    cfg.ModelProxy.SandboxBaseURL,
 	}

@@ -206,7 +206,7 @@ func (s *Server) ProxyCorrelationServer() *http.Server {
 }
 
 func (s *Server) ListenProxyCorrelation() (net.Listener, string, error) {
-	roots, err := config.ValidatePhase8IsolationRoots(s.cfg.Phase8IsolationRoots())
+	roots, err := config.ValidateIsolationRoots(s.cfg.IsolationRoots())
 	if err != nil {
 		return nil, "", err
 	}
@@ -214,7 +214,7 @@ func (s *Server) ListenProxyCorrelation() (net.Listener, string, error) {
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0o750); err != nil {
 		return nil, "", fmt.Errorf("create proxy correlation socket root: %w", err)
 	}
-	if err := chownProxyCorrelationPath(filepath.Dir(socketPath), s.cfg.Phase7.ProxyServiceIdentity.GID); err != nil {
+	if err := chownProxyCorrelationPath(filepath.Dir(socketPath), s.cfg.Harness.ProxyServiceIdentity.GID); err != nil {
 		return nil, "", fmt.Errorf("chown proxy correlation socket root: %w", err)
 	}
 	if err := os.Chmod(filepath.Dir(socketPath), 0o750); err != nil {
@@ -238,7 +238,7 @@ func (s *Server) ListenProxyCorrelation() (net.Listener, string, error) {
 		_ = listener.Close()
 		return nil, "", fmt.Errorf("chmod proxy correlation socket: %w", err)
 	}
-	if err := chownProxyCorrelationPath(socketPath, s.cfg.Phase7.ProxyServiceIdentity.GID); err != nil {
+	if err := chownProxyCorrelationPath(socketPath, s.cfg.Harness.ProxyServiceIdentity.GID); err != nil {
 		_ = listener.Close()
 		return nil, "", fmt.Errorf("chown proxy correlation socket: %w", err)
 	}
@@ -356,7 +356,7 @@ func (s *Server) getQuota(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	poolCeiling := cidrPool30Capacity(s.cfg.Phase7.Network.CIDRPool.Prefix)
+	poolCeiling := cidrPool30Capacity(s.cfg.Harness.Network.CIDRPool.Prefix)
 	remainingPoolSlots := poolCeiling - resourceQuota.AllocatedPoolSlots
 	if remainingPoolSlots < 0 {
 		remainingPoolSlots = 0
@@ -452,7 +452,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		Workspace:             filepath.Join(s.cfg.SessionsRoot, id),
 		RestoreID:             "unused-" + id,
 		ClaudeSessionUUID:     uuid.NewString(),
-		AutoCheckpointEnabled: s.cfg.Phase7.Checkpoint.AutoEnabled,
+		AutoCheckpointEnabled: s.cfg.Harness.Checkpoint.AutoEnabled,
 		CreatedAt:             now,
 		UpdatedAt:             now,
 		ExpiresAt:             expiresAt,
@@ -677,7 +677,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			GenerationID:           allocation.GenerationID,
 			Owner:                  allocation.Owner,
 			SandboxContractVersion: store.SandboxContractVersion,
-			ContractGateVersion:    store.SandboxContractGatePhase9C,
+			ContractGateVersion:    store.SandboxContractGateDriverManifest,
 			DriverState:            allocation.DriverState,
 			Payload:                contractPayload,
 			RuntimeConfigDigest:    inputEvidence.RuntimeConfigDigest,
@@ -736,7 +736,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			GenerationID:     allocation.GenerationID,
 			WorkerID:         resourceWorkerID,
 			HostID:           resourceHostID,
-			LeaseExpiresAt:   materializeNow.Add(s.cfg.Phase7.Bridge.LeaseTTL.Duration),
+			LeaseExpiresAt:   materializeNow.Add(s.cfg.Harness.Bridge.LeaseTTL.Duration),
 			IdempotencyToken: "start:" + allocation.GenerationID,
 			Now:              materializeNow,
 		}); err != nil {
@@ -782,7 +782,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		}
 	}
 	if ensured.RestoreFromCheckpoint {
-		instance, resourceTracked, err := s.prepareRuntimeResourceRestore(ctx, allocation.GenerationID, resourceWorkerID, resourceHostID, s.cfg.Phase7.Bridge.LeaseTTL.Duration)
+		instance, resourceTracked, err := s.prepareRuntimeResourceRestore(ctx, allocation.GenerationID, resourceWorkerID, resourceHostID, s.cfg.Harness.Bridge.LeaseTTL.Duration)
 		if err != nil {
 			if retireErr := s.retireGenerationForRestoreFallback(session.ID, allocation.GenerationID, allocation.Owner, err); retireErr != nil {
 				return retireErr
@@ -844,7 +844,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 				GenerationID:   allocation.GenerationID,
 				WorkerID:       resourceWorkerID,
 				HostID:         resourceHostID,
-				LeaseExpiresAt: now.Add(s.cfg.Phase7.Bridge.LeaseTTL.Duration),
+				LeaseExpiresAt: now.Add(s.cfg.Harness.Bridge.LeaseTTL.Duration),
 				Now:            now,
 			})
 		}
@@ -1061,7 +1061,7 @@ func noopStartLeaseKeeper() *startLeaseKeeper {
 
 func (s *Server) beginGenerationStartLease(ctx context.Context, sessionID, generationID, owner string) (context.Context, *startLeaseKeeper, error) {
 	startCtx, cancel := context.WithCancel(ctx)
-	ttl := s.cfg.Phase7.Bridge.LeaseTTL.Duration
+	ttl := s.cfg.Harness.Bridge.LeaseTTL.Duration
 	keeper := &startLeaseKeeper{
 		cancel: cancel,
 		done:   make(chan struct{}),
@@ -1226,7 +1226,7 @@ func (s *Server) ensureActiveGenerationWithRestoreRefetch(ctx context.Context, s
 				SessionID:    session.ID,
 				GenerationID: activeGenerationID,
 				Owner:        owner,
-				LeaseTTL:     s.cfg.Phase7.Bridge.LeaseTTL.Duration,
+				LeaseTTL:     s.cfg.Harness.Bridge.LeaseTTL.Duration,
 				Now:          time.Now().UTC(),
 			})
 			if err != nil {
@@ -1263,7 +1263,7 @@ func (s *Server) ensureActiveGenerationWithRestoreRefetch(ctx context.Context, s
 			SessionID:            session.ID,
 			ExpectedGenerationID: sql.NullString{String: activeGenerationID, Valid: true},
 			Owner:                owner,
-			LeaseTTL:             s.cfg.Phase7.Bridge.LeaseTTL.Duration,
+			LeaseTTL:             s.cfg.Harness.Bridge.LeaseTTL.Duration,
 			Now:                  time.Now().UTC(),
 			Config:               s.resourceAllocatorConfig(session.Agent),
 		})
@@ -1278,7 +1278,7 @@ func (s *Server) ensureActiveGenerationWithRestoreRefetch(ctx context.Context, s
 	allocation, err := s.store.AllocateGeneration(ctx, store.AllocateGenerationParams{
 		SessionID: session.ID,
 		Owner:     owner,
-		LeaseTTL:  s.cfg.Phase7.Bridge.LeaseTTL.Duration,
+		LeaseTTL:  s.cfg.Harness.Bridge.LeaseTTL.Duration,
 		Now:       time.Now().UTC(),
 		Config:    s.resourceAllocatorConfig(session.Agent),
 	})
@@ -1318,21 +1318,21 @@ func (s *Server) resourceAllocatorConfig(agent string) store.ResourceAllocatorCo
 		}
 	}
 	return store.ResourceAllocatorConfig{
-		RunDir:                      s.cfg.Phase7.RunDir,
-		CIDRPool:                    s.cfg.Phase7.Network.CIDRPool.Prefix,
-		EgressDorisFEHosts:          s.cfg.Phase7.Network.Egress.DorisFEHosts,
-		EgressDorisBEHosts:          s.cfg.Phase7.Network.Egress.DorisBEHosts,
-		EgressDorisPorts:            s.cfg.Phase7.Network.Egress.DorisPorts,
-		EgressDNSPolicy:             string(s.cfg.Phase7.Network.Egress.DNSPolicy),
+		RunDir:                      s.cfg.Harness.RunDir,
+		CIDRPool:                    s.cfg.Harness.Network.CIDRPool.Prefix,
+		EgressDorisFEHosts:          s.cfg.Harness.Network.Egress.DorisFEHosts,
+		EgressDorisBEHosts:          s.cfg.Harness.Network.Egress.DorisBEHosts,
+		EgressDorisPorts:            s.cfg.Harness.Network.Egress.DorisPorts,
+		EgressDNSPolicy:             string(s.cfg.Harness.Network.Egress.DNSPolicy),
 		HostProxyBindURL:            s.cfg.ModelProxy.BindURL,
 		ProxyPort:                   s.cfg.ModelProxy.BindPort,
 		Agent:                       agent,
 		AgentModel:                  model,
 		AgentOutputFormat:           driverSpec.OutputFormat,
 		DisableNonessentialTraffic:  disableNonessentialTraffic,
-		SandboxUID:                  s.cfg.Phase7.SandboxIdentity.UID,
-		SandboxGID:                  s.cfg.Phase7.SandboxIdentity.GID,
-		SandboxSupplementalGIDs:     s.cfg.Phase7.SandboxIdentity.SupplementalGIDs,
+		SandboxUID:                  s.cfg.Harness.SandboxIdentity.UID,
+		SandboxGID:                  s.cfg.Harness.SandboxIdentity.GID,
+		SandboxSupplementalGIDs:     s.cfg.Harness.SandboxIdentity.SupplementalGIDs,
 		ProviderCredentialsHostOnly: driverSpec.ModelAccess,
 		SandboxModelProxyBaseURL:    s.cfg.ModelProxy.SandboxBaseURL,
 	}
@@ -1528,10 +1528,10 @@ func (s *Server) sandboxContractPayload(session store.Session, details store.Run
 	providerSpec := deployment.ProviderSpec
 	initialDriverStateDigest := strings.TrimSpace(details.DriverStateDigest)
 	if initialDriverStateDigest == "" {
-		initialDriverStateDigest = phase9ContractDigest(map[string]any{
+		initialDriverStateDigest = sandboxContractDigestForPayload(map[string]any{
 			"schema_version": 1,
 			"driver_id":      driverID,
-			"state_kind":     "phase9a_missing_driver_state",
+			"state_kind":     "missing_driver_state",
 		})
 	}
 	sandboxIP, err := runtimeResourceSandboxIP(details.SandboxIPCIDR)
@@ -1566,19 +1566,19 @@ func (s *Server) sandboxContractPayload(session store.Session, details store.Run
 	if len(materializedDriverConfig) > 0 {
 		driverConfigPreimage["materialized_driver_config"] = materializedDriverConfig
 	}
-	driverConfigDigest := phase9ContractDigest(driverConfigPreimage)
-	commandDigest := phase9ContractDigest(map[string]any{
+	driverConfigDigest := sandboxContractDigestForPayload(driverConfigPreimage)
+	commandDigest := sandboxContractDigestForPayload(map[string]any{
 		"driver_id":    driverID,
 		"protocol":     details.OutputFormat,
 		"resume_field": "driver_state",
 	})
-	driverCapabilitiesDigest := phase9ContractDigest(map[string]any{
+	driverCapabilitiesDigest := sandboxContractDigestForPayload(map[string]any{
 		"driver_id":     driverID,
 		"capabilities":  driverSpec.RequiredRuntimeCapabilities,
 		"registry_kind": string(driverSpec.Kind),
 	})
 	providerCapabilitiesDigest := agents.CapabilityDigest(providerSpec)
-	runtimeTemplateDigest := phase9ContractDigest(map[string]any{
+	runtimeTemplateDigest := sandboxContractDigestForPayload(map[string]any{
 		"provider_id":          providerSpec.ID,
 		"runsc_platform":       runscPlatform,
 		"runsc_overlay2":       details.RunscOverlay2,
@@ -1607,11 +1607,11 @@ func (s *Server) sandboxContractPayload(session store.Session, details store.Run
 	if err != nil {
 		return nil, err
 	}
-	inputDigests := s.phase9CInputDigests(deployment)
+	inputDigests := s.driverManifestInputDigests(deployment)
 	payload := map[string]any{
 		"sandbox_contract_version": store.SandboxContractVersion,
 		"contract_schema_version":  store.SandboxContractSchemaVersion,
-		"contract_gate_version":    store.SandboxContractGatePhase9C,
+		"contract_gate_version":    store.SandboxContractGateDriverManifest,
 		"contract_id":              sandboxContractID(details.GenerationID),
 		"session_id":               details.SessionID,
 		"generation_id":            details.GenerationID,
@@ -1764,12 +1764,12 @@ func (s *Server) sandboxContractPayload(session store.Session, details store.Run
 	return payload, nil
 }
 
-type phase9CInputDigests struct {
+type driverManifestInputDigests struct {
 	RuntimeConfigDigest string
 	AgentManifestDigest string
 }
 
-func (s *Server) phase9CInputDigests(deployment deploymentResolution) phase9CInputDigests {
+func (s *Server) driverManifestInputDigests(deployment deploymentResolution) driverManifestInputDigests {
 	defaultAgent := strings.TrimSpace(s.cfg.DefaultAgent)
 	if defaultAgent == "" {
 		defaultAgent = string(agents.ClaudeCode)
@@ -1778,7 +1778,7 @@ func (s *Server) phase9CInputDigests(deployment deploymentResolution) phase9CInp
 		defaultAgent = string(canonical)
 	}
 	runtimeConfigDigest := runtimeConfigDigest(deployment.runtimeConfigPreimage(defaultAgent))
-	return phase9CInputDigests{
+	return driverManifestInputDigests{
 		RuntimeConfigDigest: runtimeConfigDigest,
 		AgentManifestDigest: deployment.AgentManifest.Digest,
 	}
@@ -1795,7 +1795,7 @@ func effectiveString(value, fallback string) string {
 func driverInstallDigest(driverID agents.ID) string {
 	switch driverID {
 	case agents.Pi:
-		return phase9ContractDigest(map[string]any{
+		return sandboxContractDigestForPayload(map[string]any{
 			"driver_id":         string(driverID),
 			"path":              "/usr/local/bin/pi",
 			"package":           agents.PiPackageName,
@@ -1805,12 +1805,12 @@ func driverInstallDigest(driverID agents.ID) string {
 			"event_schema":      agents.PiEventSchemaVersion,
 		})
 	case agents.Shell:
-		return phase9ContractDigest(map[string]any{
+		return sandboxContractDigestForPayload(map[string]any{
 			"driver_id": string(driverID),
 			"path":      "/usr/local/bin/harness-shell-agent",
 		})
 	default:
-		return phase9ContractDigest(map[string]any{
+		return sandboxContractDigestForPayload(map[string]any{
 			"driver_id": string(driverID),
 			"path":      "/usr/local/bin/claude",
 			"package":   "@anthropic-ai/claude-code",
@@ -1818,7 +1818,7 @@ func driverInstallDigest(driverID agents.ID) string {
 	}
 }
 
-func phase9ContractDigest(value any) string {
+func sandboxContractDigestForPayload(value any) string {
 	payload, err := store.CanonicalSandboxContractPayload(value)
 	if err != nil {
 		return "sha256:invalid"
@@ -2100,11 +2100,11 @@ type bridgeHelloAckPayload struct {
 }
 
 func (s *Server) waitForBridgeStartupReadiness(ctx context.Context, allocation store.GenerationAllocation, instance store.RuntimeResourceInstance) (string, error) {
-	attempts := s.cfg.Phase7.Probe.PostStartAttempts
+	attempts := s.cfg.Harness.Probe.PostStartAttempts
 	if attempts <= 0 {
 		attempts = 5
 	}
-	interval := s.cfg.Phase7.Probe.PostStartInterval.Duration
+	interval := s.cfg.Harness.Probe.PostStartInterval.Duration
 	if interval <= 0 {
 		interval = time.Second
 	}
@@ -2359,11 +2359,11 @@ func runtimeResourceIdentifier(value string) string {
 }
 
 func (s *Server) runtimeResourceRootPrefixes() map[string]string {
-	roots := s.cfg.Phase8IsolationRoots()
+	roots := s.cfg.IsolationRoots()
 	if strings.TrimSpace(s.cfg.DBPath) == "" {
 		roots.DataVolumeEvidenceRoot = ""
 	}
-	if strings.TrimSpace(s.cfg.Phase7.RunDir) == "" {
+	if strings.TrimSpace(s.cfg.Harness.RunDir) == "" {
 		roots.ProxyInternalRoot = ""
 	}
 	values := map[string]string{
@@ -2479,7 +2479,7 @@ func (s *Server) startColdFallbackSessions(ctx context.Context, owner string) {
 	fallbacks, err := s.store.ListColdFallbackSessions(ctx)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
-			s.log.Warn("phase7 cold fallback session list failed", "error", err)
+			s.log.Warn("cold fallback session list failed", "error", err)
 		}
 		return
 	}
@@ -2487,11 +2487,11 @@ func (s *Server) startColdFallbackSessions(ctx context.Context, owner string) {
 		ensured, err := s.ensureActiveGeneration(ctx, fallback.Session, owner)
 		if err != nil {
 			if errors.Is(err, store.ErrPoolExhausted) {
-				s.log.Warn("phase7 cold fallback pool exhausted", "session_id", fallback.Session.ID, "old_generation_id", fallback.OldGeneration, "queued_turns", fallback.QueuedTurns)
+				s.log.Warn("cold fallback pool exhausted", "session_id", fallback.Session.ID, "old_generation_id", fallback.OldGeneration, "queued_turns", fallback.QueuedTurns)
 				return
 			}
 			if !errors.Is(err, context.Canceled) {
-				s.log.Warn("phase7 cold fallback allocation failed", "session_id", fallback.Session.ID, "old_generation_id", fallback.OldGeneration, "error", err)
+				s.log.Warn("cold fallback allocation failed", "session_id", fallback.Session.ID, "old_generation_id", fallback.OldGeneration, "error", err)
 			}
 			continue
 		}
@@ -2500,13 +2500,13 @@ func (s *Server) startColdFallbackSessions(ctx context.Context, owner string) {
 		}
 		if err := s.startEnsuredGeneration(ctx, fallback.Session, ensured, startFailureInputBlocking); err != nil {
 			if !errors.Is(err, context.Canceled) {
-				s.log.Warn("phase7 cold fallback start failed", "session_id", fallback.Session.ID, "old_generation_id", fallback.OldGeneration, "new_generation_id", ensured.Allocation.GenerationID, "error", err)
+				s.log.Warn("cold fallback start failed", "session_id", fallback.Session.ID, "old_generation_id", fallback.OldGeneration, "new_generation_id", ensured.Allocation.GenerationID, "error", err)
 			}
 			continue
 		}
 		if err := s.store.UpdateSessionStatusAndActivity(ctx, fallback.Session.ID, string(sessionstate.RunningActive), nil, time.Now().UTC()); err != nil {
 			if !errors.Is(err, context.Canceled) {
-				s.log.Warn("phase7 cold fallback status update failed", "session_id", fallback.Session.ID, "new_generation_id", ensured.Allocation.GenerationID, "error", err)
+				s.log.Warn("cold fallback status update failed", "session_id", fallback.Session.ID, "new_generation_id", ensured.Allocation.GenerationID, "error", err)
 			}
 			continue
 		}
@@ -2514,15 +2514,15 @@ func (s *Server) startColdFallbackSessions(ctx context.Context, owner string) {
 	}
 }
 
-func (s *Server) RunPhase7Maintenance(ctx context.Context) error {
+func (s *Server) RunMaintenance(ctx context.Context) error {
 	if strings.TrimSpace(s.ownerUUID) == "" {
-		return fmt.Errorf("phase7 maintenance requires owner uuid")
+		return fmt.Errorf("maintenance requires owner uuid")
 	}
-	heartbeatInterval := s.cfg.Phase7.Bridge.HeartbeatInterval.Duration
+	heartbeatInterval := s.cfg.Harness.Bridge.HeartbeatInterval.Duration
 	if heartbeatInterval <= 0 {
 		heartbeatInterval = 30 * time.Second
 	}
-	pollInterval := s.cfg.Phase7.Bridge.PollInterval.Duration
+	pollInterval := s.cfg.Harness.Bridge.PollInterval.Duration
 	if pollInterval <= 0 {
 		pollInterval = 5 * time.Millisecond
 	}
@@ -2530,43 +2530,43 @@ func (s *Server) RunPhase7Maintenance(ctx context.Context) error {
 	processor := &bridge.Processor{
 		Store:           bridgeStore(s.store),
 		Owner:           owner,
-		LeaseTTL:        s.cfg.Phase7.Bridge.LeaseTTL.Duration,
-		AckStartedGrace: s.cfg.Phase7.Bridge.AckStartedGrace.Duration,
+		LeaseTTL:        s.cfg.Harness.Bridge.LeaseTTL.Duration,
+		AckStartedGrace: s.cfg.Harness.Bridge.AckStartedGrace.Duration,
 		AfterCommit:     s.handleBridgeCommittedEnvelope,
 	}
 	touchHostHeartbeat := func(generation store.BridgePollGeneration, now time.Time) {
 		if err := bridge.TouchHeartbeat(generation.BridgeDirPath, bridge.HostHeartbeatFile, now); err != nil && !errors.Is(err, context.Canceled) {
-			s.log.Warn("phase7 bridge host heartbeat failed", "session_id", generation.SessionID, "generation_id", generation.GenerationID, "error", err)
+			s.log.Warn("bridge host heartbeat failed", "session_id", generation.SessionID, "generation_id", generation.GenerationID, "error", err)
 		}
 	}
 
 	runMaintenance := func(now time.Time) {
 		if s.cfg.SessionRetention == 0 {
 			if _, err := s.store.ClearActiveSessionExpiry(ctx, now); err != nil && !errors.Is(err, context.Canceled) {
-				s.log.Warn("phase7 active-session expiry clear failed", "error", err)
+				s.log.Warn("active-session expiry clear failed", "error", err)
 			}
 		}
 		if _, err := s.store.SweepExpiredSessions(ctx, now); err != nil && !errors.Is(err, context.Canceled) {
-			s.log.Warn("phase7 expired-session sweep failed", "error", err)
+			s.log.Warn("expired-session sweep failed", "error", err)
 		}
 		if _, err := s.store.CancelTerminalSessionPendingTurns(ctx, now); err != nil && !errors.Is(err, context.Canceled) {
-			s.log.Warn("phase7 terminal-session turn cleanup failed", "error", err)
+			s.log.Warn("terminal-session turn cleanup failed", "error", err)
 		}
 		if _, err := s.RecoverExpiredRuntimeResources(ctx, now); err != nil && !errors.Is(err, context.Canceled) {
-			s.log.Warn("phase7 allocation recovery failed", "error", err)
+			s.log.Warn("allocation recovery failed", "error", err)
 		}
 		if _, err := s.store.RenewLiveGenerationLeases(ctx, store.RenewLiveGenerationsParams{
 			Owner:    owner,
-			LeaseTTL: s.cfg.Phase7.Bridge.LeaseTTL.Duration,
+			LeaseTTL: s.cfg.Harness.Bridge.LeaseTTL.Duration,
 			Now:      now,
 		}); err != nil && !errors.Is(err, context.Canceled) {
-			s.log.Warn("phase7 generation lease renewal failed", "error", err)
+			s.log.Warn("generation lease renewal failed", "error", err)
 		}
 		s.startColdFallbackSessions(ctx, owner)
-		generations, err := s.store.ListBridgePollGenerations(ctx, owner, now, s.cfg.Phase7.Bridge.AckStartedGrace.Duration)
+		generations, err := s.store.ListBridgePollGenerations(ctx, owner, now, s.cfg.Harness.Bridge.AckStartedGrace.Duration)
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
-				s.log.Warn("phase7 bridge heartbeat generation list failed", "error", err)
+				s.log.Warn("bridge heartbeat generation list failed", "error", err)
 			}
 		} else {
 			for _, generation := range generations {
@@ -2576,11 +2576,11 @@ func (s *Server) RunPhase7Maintenance(ctx context.Context) error {
 		retiredCheckpoints, err := s.store.RetireExpiredCheckpoints(ctx, store.RetireExpiredCheckpointsParams{
 			OwnerUUID:                s.ownerUUID,
 			Now:                      now,
-			CheckpointImageRetention: s.cfg.Phase7.Reaper.CheckpointImageRetention.Duration,
+			CheckpointImageRetention: s.cfg.Harness.Reaper.CheckpointImageRetention.Duration,
 		})
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
-				s.log.Warn("phase7 checkpoint retirement failed", "error", err)
+				s.log.Warn("checkpoint retirement failed", "error", err)
 			}
 		} else {
 			for _, retired := range retiredCheckpoints {
@@ -2589,25 +2589,25 @@ func (s *Server) RunPhase7Maintenance(ctx context.Context) error {
 		}
 		if _, err := s.store.ReapResources(ctx, store.ReaperParams{
 			OwnerUUID:       s.ownerUUID,
-			FailedRetention: s.cfg.Phase7.Reaper.FailedRetention.Duration,
+			FailedRetention: s.cfg.Harness.Reaper.FailedRetention.Duration,
 			Now:             now,
 		}); err != nil && !errors.Is(err, context.Canceled) {
-			s.log.Warn("phase7 resource reaper failed", "error", err)
+			s.log.Warn("resource reaper failed", "error", err)
 		}
 		s.destroyReclaimableGenerationResources(ctx, now)
 		if _, err := s.store.PruneEvents(ctx, store.PruneEventsParams{
-			RetentionWindow: s.cfg.Phase7.Events.RetentionWindow.Duration,
-			RetentionRows:   s.cfg.Phase7.Events.RetentionRows,
+			RetentionWindow: s.cfg.Harness.Events.RetentionWindow.Duration,
+			RetentionRows:   s.cfg.Harness.Events.RetentionRows,
 			Now:             now,
 		}); err != nil && !errors.Is(err, context.Canceled) {
-			s.log.Warn("phase7 event retention prune failed", "error", err)
+			s.log.Warn("event retention prune failed", "error", err)
 		}
 	}
 	pollBridge := func(now time.Time) {
-		generations, err := s.store.ListBridgePollGenerations(ctx, owner, now, s.cfg.Phase7.Bridge.AckStartedGrace.Duration)
+		generations, err := s.store.ListBridgePollGenerations(ctx, owner, now, s.cfg.Harness.Bridge.AckStartedGrace.Duration)
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
-				s.log.Warn("phase7 bridge generation list failed", "error", err)
+				s.log.Warn("bridge generation list failed", "error", err)
 			}
 			return
 		}
@@ -2617,7 +2617,7 @@ func (s *Server) RunPhase7Maintenance(ctx context.Context) error {
 				if errors.Is(err, context.Canceled) {
 					return
 				}
-				s.log.Warn("phase7 bridge poll failed", "session_id", generation.SessionID, "generation_id", generation.GenerationID, "error", err)
+				s.log.Warn("bridge poll failed", "session_id", generation.SessionID, "generation_id", generation.GenerationID, "error", err)
 			}
 		}
 	}
@@ -2647,9 +2647,9 @@ func (s *Server) RecoverExpiredRuntimeResources(ctx context.Context, now time.Ti
 	params := store.StartupRecoveryParams{
 		OwnerUUID:       s.ownerUUID,
 		Now:             now,
-		LeaseTTL:        s.cfg.Phase7.Bridge.LeaseTTL.Duration,
-		ReconnectGrace:  s.cfg.Phase7.Bridge.ReconnectGrace.Duration,
-		AckStartedGrace: s.cfg.Phase7.Bridge.AckStartedGrace.Duration,
+		LeaseTTL:        s.cfg.Harness.Bridge.LeaseTTL.Duration,
+		ReconnectGrace:  s.cfg.Harness.Bridge.ReconnectGrace.Duration,
+		AckStartedGrace: s.cfg.Harness.Bridge.AckStartedGrace.Duration,
 	}
 	candidates, err := s.store.ListExpiredRuntimeRecoveryCandidates(ctx, params)
 	if err != nil {
@@ -2661,7 +2661,7 @@ func (s *Server) RecoverExpiredRuntimeResources(ctx context.Context, now time.Ti
 		runtimeID := strings.TrimSpace(candidate.RuntimeID)
 		if runtimeID == "" {
 			result.RuntimeCleanupSkipped++
-			s.log.Warn("phase7 recovery candidate has no runtime id", "session_id", candidate.SessionID, "generation_id", candidate.GenerationID)
+			s.log.Warn("recovery candidate has no runtime id", "session_id", candidate.SessionID, "generation_id", candidate.GenerationID)
 			continue
 		}
 		if err := s.runtime.Destroy(ctx, runtimeID); err != nil {
@@ -2669,7 +2669,7 @@ func (s *Server) RecoverExpiredRuntimeResources(ctx context.Context, now time.Ti
 				return result, err
 			}
 			result.RuntimeCleanupSkipped++
-			s.log.Warn("phase7 runtime cleanup before recovery failed", "session_id", candidate.SessionID, "generation_id", candidate.GenerationID, "runtime_id", runtimeID, "error", err)
+			s.log.Warn("runtime cleanup before recovery failed", "session_id", candidate.SessionID, "generation_id", candidate.GenerationID, "runtime_id", runtimeID, "error", err)
 			continue
 		}
 		cleaned = append(cleaned, candidate)
@@ -2690,16 +2690,16 @@ func (s *Server) DestroyReclaimableGenerationResources(ctx context.Context, now 
 }
 
 func (s *Server) destroyReclaimableGenerationResources(ctx context.Context, now time.Time) {
-	candidates, err := s.store.ListDestroyableReclaimableGenerations(ctx, now, s.cfg.Phase7.Reaper.FailedRetention.Duration)
+	candidates, err := s.store.ListDestroyableReclaimableGenerations(ctx, now, s.cfg.Harness.Reaper.FailedRetention.Duration)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
-			s.log.Warn("phase7 destroyable resource list failed", "error", err)
+			s.log.Warn("destroyable resource list failed", "error", err)
 		}
 		return
 	}
 	for _, candidate := range candidates {
 		if err := s.cleanupGenerationResources(ctx, candidate.SessionID, candidate.GenerationID, now); err != nil && !errors.Is(err, context.Canceled) {
-			s.log.Warn("phase7 generation resource cleanup failed", "session_id", candidate.SessionID, "generation_id", candidate.GenerationID, "error", err)
+			s.log.Warn("generation resource cleanup failed", "session_id", candidate.SessionID, "generation_id", candidate.GenerationID, "error", err)
 		}
 	}
 }
@@ -2932,7 +2932,7 @@ func (s *Server) internalProxyRequestFinish(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) requireProxyPeerCredentials(next http.Handler) http.Handler {
-	expected := s.cfg.Phase7.ProxyServiceIdentity
+	expected := s.cfg.Harness.ProxyServiceIdentity
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		result, ok := r.Context().Value(proxyPeerCredentialsContextKey{}).(proxyPeerCredentialsResult)
 		if !ok {
@@ -3146,11 +3146,11 @@ func (s *Server) openArtifactFile(ctx context.Context, sessionID, artifactPath s
 }
 
 func (s *Server) dataVolumeProvisionerConfig() (store.DataVolumeProvisionerConfig, error) {
-	roots, err := config.ValidatePhase8IsolationRoots(s.cfg.Phase8IsolationRoots())
+	roots, err := config.ValidateIsolationRoots(s.cfg.IsolationRoots())
 	if err != nil {
 		return store.DataVolumeProvisionerConfig{}, err
 	}
-	identity := s.cfg.Phase7.SandboxIdentity
+	identity := s.cfg.Harness.SandboxIdentity
 	return store.DataVolumeProvisionerConfig{
 		SessionsRoot:   roots.SessionsRoot,
 		AgentHomesRoot: roots.AgentHomesRoot,
@@ -3444,7 +3444,7 @@ func (s *Server) MonitorIdleSessions(ctx context.Context) error {
 		s.log.Info("idle checkpoint monitor disabled because runsc host network is not checkpointable")
 		return nil
 	}
-	if !s.cfg.Phase7.Checkpoint.AutoEnabled {
+	if !s.cfg.Harness.Checkpoint.AutoEnabled {
 		s.log.Info("idle checkpoint monitor disabled by policy")
 		return nil
 	}
@@ -3453,15 +3453,15 @@ func (s *Server) MonitorIdleSessions(ctx context.Context) error {
 	}
 
 	owner := store.GenerationLeaseOwner(s.ownerUUID)
-	interval := s.cfg.Phase7.Checkpoint.MonitorInterval.Duration
+	interval := s.cfg.Harness.Checkpoint.MonitorInterval.Duration
 	if interval <= 0 {
 		interval = idleCheckpointInterval
 	}
-	idleThreshold := s.cfg.Phase7.Checkpoint.IdleThreshold.Duration
+	idleThreshold := s.cfg.Harness.Checkpoint.IdleThreshold.Duration
 	if idleThreshold < 0 {
 		idleThreshold = idleCheckpointThreshold
 	}
-	heartbeatInterval := s.cfg.Phase7.Bridge.HeartbeatInterval.Duration
+	heartbeatInterval := s.cfg.Harness.Bridge.HeartbeatInterval.Duration
 	if heartbeatInterval <= 0 {
 		heartbeatInterval = 30 * time.Second
 	}
