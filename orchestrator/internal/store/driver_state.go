@@ -359,17 +359,17 @@ func applyDriverStateUpdateTx(ctx context.Context, tx *sql.Tx, p CompleteTurnPar
 	update := *p.DriverStateUpdate
 	driverID, err := agents.CanonicalDriverID(update.DriverID)
 	if err != nil {
-		return err
+		return permanentTurnCompletion(err)
 	}
 	if p.TerminalStatus != "completed" {
-		return fmt.Errorf("driver state update is only valid for completed turns")
+		return permanentTurnCompletionf("driver state update is only valid for completed turns")
 	}
 	canonical, nextDigest, err := canonicalDriverStatePayload(update.StatePayload, string(driverID))
 	if err != nil {
-		return err
+		return permanentTurnCompletion(err)
 	}
 	if update.StateDigest != nextDigest {
-		return fmt.Errorf("driver state digest mismatch: got %s want %s", update.StateDigest, nextDigest)
+		return permanentTurnCompletionf("driver state digest mismatch: got %s want %s", update.StateDigest, nextDigest)
 	}
 
 	var generationDriver string
@@ -387,7 +387,7 @@ WHERE g.session_id = ?
 		return fmt.Errorf("driver state generation lease check: %w", err)
 	}
 	if generationDriver != string(driverID) {
-		return fmt.Errorf("driver state update driver mismatch: got %s want %s", driverID, generationDriver)
+		return permanentTurnCompletionf("driver state update driver mismatch: got %s want %s", driverID, generationDriver)
 	}
 	var turnCount int
 	if err := tx.QueryRowContext(ctx, `
@@ -401,7 +401,7 @@ WHERE id = ?
 		return err
 	}
 	if turnCount != 1 {
-		return fmt.Errorf("driver state update turn does not belong to generation")
+		return permanentTurnCompletionf("driver state update turn does not belong to generation")
 	}
 	if driverID == agents.Pi {
 		if err := validatePiDriverStateUpdateAgainstHostTx(ctx, tx, p, canonical); err != nil {
@@ -417,7 +417,7 @@ WHERE id = ?
 		return driverStateReplayOrStale(ctx, tx, p, current, canonical, update)
 	}
 	if update.StateVersion != current.StateVersion+1 {
-		return fmt.Errorf("driver state version = %d, want %d", update.StateVersion, current.StateVersion+1)
+		return permanentTurnCompletionf("driver state version = %d, want %d", update.StateVersion, current.StateVersion+1)
 	}
 	res, err := tx.ExecContext(ctx, `
 UPDATE session_driver_states
@@ -436,7 +436,7 @@ WHERE session_id = ?
 	if err != nil {
 		return err
 	}
-	return requireOneRow(res, "driver state CAS failed")
+	return permanentRequireOneRow(res, "driver state CAS failed")
 }
 
 func validatePiDriverStateUpdateAgainstHostTx(ctx context.Context, tx *sql.Tx, p CompleteTurnParams, canonicalPayload []byte) error {
@@ -609,7 +609,7 @@ WHERE g.session_id = ?
 		return err
 	}
 	if payload.DriverID != string(agents.ClaudeCode) || payload.StateKind != claudeDriverStateKind {
-		return fmt.Errorf("cannot synthesize claude driver state from %s/%s", payload.DriverID, payload.StateKind)
+		return permanentTurnCompletionf("cannot synthesize claude driver state from %s/%s", payload.DriverID, payload.StateKind)
 	}
 	turnID := fmt.Sprint(p.TurnID)
 	if payload.Initialized && payload.LastCompletedTurnID != nil && *payload.LastCompletedTurnID == turnID {
@@ -643,7 +643,7 @@ WHERE session_id = ?
 	if err != nil {
 		return err
 	}
-	return requireOneRow(res, "driver state CAS failed")
+	return permanentRequireOneRow(res, "driver state CAS failed")
 }
 
 func driverStateReplayOrStale(ctx context.Context, tx *sql.Tx, p CompleteTurnParams, current driverStateRow, canonical []byte, update DriverStateUpdate) error {
@@ -669,5 +669,5 @@ WHERE id = ?
 			return nil
 		}
 	}
-	return fmt.Errorf("driver state stale digest: got %s want %s", update.PreviousStateDigest, current.StateDigest)
+	return permanentTurnCompletionf("driver state stale digest: got %s want %s", update.PreviousStateDigest, current.StateDigest)
 }

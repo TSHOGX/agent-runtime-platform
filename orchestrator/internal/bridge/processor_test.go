@@ -1005,6 +1005,54 @@ WHERE generation_id = ?
 	}
 }
 
+// TestProcessorRetainsOutboxMessageWhenCompletionIsTransient asserts that a
+// transient CompleteTurn error (e.g. "database is locked") is propagated so the
+// outbox envelope is retained for retry, and that the generation is NOT failed.
+func TestProcessorRetainsOutboxMessageWhenCompletionIsTransient(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := EnsureLayout(root); err != nil {
+		t.Fatalf("ensure layout: %v", err)
+	}
+	failGenCalled := false
+	processor := &Processor{
+		Store: storeFailure{
+			completeErr:   errors.New("database is locked"),
+			failGenCalled: &failGenCalled,
+		},
+		Owner:    "owner",
+		LeaseTTL: time.Minute,
+	}
+	turnID := int64(1)
+	writeOutbox(t, ctx, root, Envelope{
+		MessageID:    "msg_complete",
+		RequestID:    "req_complete",
+		Type:         TypeAckTurnCompleted,
+		SessionID:    "sess_retry",
+		GenerationID: "gen_retry",
+		TurnID:       &turnID,
+		Payload:      json.RawMessage(`{"status":"completed"}`),
+	})
+	if err := processor.ProcessOnce(ctx, root); err == nil || !strings.Contains(err.Error(), "database is locked") {
+		t.Fatalf("process transient completion err=%v, want database is locked", err)
+	}
+	if failGenCalled {
+		t.Fatalf("failGeneration was called for a transient completion error; want retry without retiring the generation")
+	}
+	assertInboxEmpty(t, root)
+	outbox, err := OpenQueue(root, OutboxDir)
+	if err != nil {
+		t.Fatalf("open outbox: %v", err)
+	}
+	files, err := outbox.ReadAll()
+	if err != nil {
+		t.Fatalf("read outbox: %v", err)
+	}
+	if len(files) != 1 || files[0].Envelope.RequestID != "req_complete" {
+		t.Fatalf("outbox after transient completion=%+v, want original message retained", files)
+	}
+}
+
 func TestProcessorRetainsOutboxMessageWhenStoreApplyFails(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -1489,7 +1537,9 @@ WHERE g.session_id = ?
 }
 
 type storeFailure struct {
-	claimErr error
+	claimErr      error
+	completeErr   error
+	failGenCalled *bool
 }
 
 func (s storeFailure) BridgeHelloAck(context.Context, string, string, string, time.Time, time.Duration) (store.BridgeHelloAck, error) {
@@ -1517,10 +1567,17 @@ func (s storeFailure) AckTurnStarted(context.Context, store.AckStartedParams) (i
 }
 
 func (s storeFailure) CompleteTurn(context.Context, store.CompleteTurnParams) (int64, error) {
+	if s.completeErr != nil {
+		return 0, s.completeErr
+	}
 	return 0, errors.New("unexpected CompleteTurn")
 }
 
-func (s storeFailure) FailGeneration(context.Context, store.FailGenerationParams) error {
+func (s storeFailure) FailGeneration(_ context.Context, _ store.FailGenerationParams) error {
+	if s.failGenCalled != nil {
+		*s.failGenCalled = true
+		return nil
+	}
 	return errors.New("unexpected FailGeneration")
 }
 

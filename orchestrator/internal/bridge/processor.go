@@ -358,6 +358,13 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 			Now:               now,
 		})
 		if err != nil {
+			if !store.IsPermanentTurnCompletion(err) {
+				// Transient/infra failure (e.g. database locked, BeginTx /
+				// Commit failure, lease-check query error). Propagate so
+				// ProcessOnce retains the outbox envelope and retries instead
+				// of permanently failing the generation.
+				return err
+			}
 			if failErr := p.failGeneration(ctx, envelope, completionFailureClass(err), err.Error(), now); failErr != nil {
 				return fmt.Errorf("%w; additionally failed to retire generation: %v", err, failErr)
 			}

@@ -17,6 +17,49 @@ func IsDuplicateOutputSequenceMismatch(err error) bool {
 	return errors.Is(err, errDuplicateOutputSequenceMismatch)
 }
 
+// errPermanentTurnCompletion marks a CompleteTurn error as a definitive
+// rejection: a CAS conflict (the turn/generation lease no longer holds) or a
+// driver-state validation failure (the bridge supplied semantically invalid
+// data). Such errors can never succeed on retry, so the caller may retire the
+// generation. Transient/infra errors (e.g. "database is locked", BeginTx /
+// Commit failures, the driver-state lease-check query error) are deliberately
+// left unmarked so the caller retries them instead of failing the generation.
+var errPermanentTurnCompletion = errors.New("permanent turn completion failure")
+
+// IsPermanentTurnCompletion reports whether a CompleteTurn error is a definitive
+// rejection that must not be retried.
+func IsPermanentTurnCompletion(err error) bool {
+	return errors.Is(err, errPermanentTurnCompletion)
+}
+
+// permanentTurnCompletionf builds a new permanent turn-completion error.
+func permanentTurnCompletionf(format string, args ...any) error {
+	return fmt.Errorf("%w: "+format, append([]any{errPermanentTurnCompletion}, args...)...)
+}
+
+// permanentTurnCompletion marks an existing error as a permanent
+// turn-completion rejection while preserving it for errors.Is/As inspection.
+func permanentTurnCompletion(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %w", errPermanentTurnCompletion, err)
+}
+
+// permanentRequireOneRow behaves like requireOneRow but classifies the
+// "affected != 1" CAS conflict as a permanent turn-completion failure. A
+// RowsAffected() transport error is left unmarked so it is retried.
+func permanentRequireOneRow(result sql.Result, message string) error {
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return permanentTurnCompletionf(message)
+	}
+	return nil
+}
+
 type ClaimNextTurnParams struct {
 	SessionID    string
 	GenerationID string
@@ -862,7 +905,7 @@ func (s *Store) CompleteTurn(ctx context.Context, p CompleteTurnParams) (int64, 
 	switch p.TerminalStatus {
 	case "completed", "failed", "canceled":
 	default:
-		return 0, fmt.Errorf("invalid terminal turn status %q", p.TerminalStatus)
+		return 0, permanentTurnCompletionf("invalid terminal turn status %q", p.TerminalStatus)
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -905,7 +948,7 @@ WHERE id = ?
 	if affected, err := res.RowsAffected(); err != nil {
 		return 0, err
 	} else if affected != 1 && alreadyTerminal != 1 {
-		return 0, fmt.Errorf("turn completion CAS failed")
+		return 0, permanentTurnCompletionf("turn completion CAS failed")
 	}
 	sessionMarkedIdle := false
 	if alreadyTerminal != 1 {
@@ -1372,7 +1415,7 @@ WHERE g.generation_id = ?
 		return false, err
 	}
 	if ownsActiveGeneration != 1 {
-		return false, fmt.Errorf("generation idle CAS failed")
+		return false, permanentTurnCompletionf("generation idle CAS failed")
 	}
 
 	var pendingTurns int
@@ -1415,7 +1458,7 @@ WHERE generation_id = ?
 		return false, err
 	}
 	if affected != 1 {
-		return false, fmt.Errorf("generation idle CAS failed")
+		return false, permanentTurnCompletionf("generation idle CAS failed")
 	}
 	res, err = tx.ExecContext(ctx, `
 UPDATE sessions
@@ -1439,7 +1482,7 @@ WHERE id = ?
 		return false, err
 	}
 	if affected != 1 {
-		return false, fmt.Errorf("session idle CAS failed")
+		return false, permanentTurnCompletionf("session idle CAS failed")
 	}
 	return true, nil
 }
