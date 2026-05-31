@@ -16,7 +16,6 @@ import (
 	"harness-platform/orchestrator/internal/store"
 )
 
-
 type deploymentResolution struct {
 	Mode                    string
 	DriverID                agents.ID
@@ -349,19 +348,28 @@ func syntheticManifestDriver(spec agents.DriverSpec) imageManifestDriver {
 		OutputSchema:          spec.OutputSchema,
 		ModelAccess:           spec.ModelAccess,
 	}
-	switch spec.ID {
-	case agents.ClaudeCode:
-		driver.PackageName = "@anthropic-ai/claude-code"
-		driver.PackageVersion = "bundled"
-	case agents.Pi:
-		driver.PackageName = agents.PiPackageName
-		driver.PackageVersion = agents.PiPackageVersion
-		driver.PackageShasum = agents.PiPackageShasum
-		driver.PackageIntegrity = agents.PiPackageIntegrity
-		driver.EventSchemaVersion = agents.PiEventSchemaVersion
-	case agents.Shell:
-	}
+	facts := spec.PackageFacts
+	driver.PackageName = facts.Name
+	driver.PackageVersion = manifestPackageVersion(facts)
+	driver.PackageShasum = facts.Shasum
+	driver.PackageIntegrity = facts.Integrity
+	driver.EventSchemaVersion = facts.EventSchemaVersion
 	return driver
+}
+
+// manifestPackageVersion reports the version recorded in the agent image
+// manifest for a driver. A pinned version is used verbatim; a named package
+// with no pinned version (e.g. the bundled claude_code driver) is recorded as
+// "bundled"; a driver with no package (e.g. shell) has no version.
+func manifestPackageVersion(facts agents.DriverPackageFacts) string {
+	switch {
+	case strings.TrimSpace(facts.Version) != "":
+		return facts.Version
+	case strings.TrimSpace(facts.Name) != "":
+		return "bundled"
+	default:
+		return ""
+	}
 }
 
 func (s *Server) validateManifestDriver(manifest imageAgentManifest, driver imageManifestDriver, spec agents.DriverSpec) error {
@@ -397,34 +405,41 @@ func (s *Server) validateManifestDriver(manifest imageAgentManifest, driver imag
 }
 
 func validateDriverPackageFacts(driver imageManifestDriver, driverID agents.ID) error {
-	switch driverID {
-	case agents.ClaudeCode:
-		if strings.TrimSpace(driver.PackageName) != "@anthropic-ai/claude-code" ||
+	spec, ok := agents.DriverSpecFor(string(driverID))
+	if !ok {
+		return nil
+	}
+	facts := spec.PackageFacts
+	mismatch := func() error {
+		return fmt.Errorf("agent image manifest %s package facts mismatch", driverID)
+	}
+	if strings.TrimSpace(facts.Name) != "" {
+		if strings.TrimSpace(driver.PackageName) != facts.Name ||
 			strings.TrimSpace(driver.PackageVersion) == "" {
-			return fmt.Errorf("agent image manifest claude_code package facts mismatch")
+			return mismatch()
 		}
-	case agents.Pi:
-		if strings.TrimSpace(driver.PackageName) != agents.PiPackageName ||
-			strings.TrimSpace(driver.PackageVersion) != agents.PiPackageVersion ||
-			strings.TrimSpace(driver.PackageShasum) != agents.PiPackageShasum ||
-			strings.TrimSpace(driver.PackageIntegrity) != agents.PiPackageIntegrity ||
-			strings.TrimSpace(driver.EventSchemaVersion) != agents.PiEventSchemaVersion {
-			return fmt.Errorf("agent image manifest pi package facts mismatch")
-		}
-	case agents.Shell:
+	}
+	if strings.TrimSpace(facts.Version) != "" && strings.TrimSpace(driver.PackageVersion) != facts.Version {
+		return mismatch()
+	}
+	if strings.TrimSpace(facts.Shasum) != "" && strings.TrimSpace(driver.PackageShasum) != facts.Shasum {
+		return mismatch()
+	}
+	if strings.TrimSpace(facts.Integrity) != "" && strings.TrimSpace(driver.PackageIntegrity) != facts.Integrity {
+		return mismatch()
+	}
+	if strings.TrimSpace(facts.EventSchemaVersion) != "" && strings.TrimSpace(driver.EventSchemaVersion) != facts.EventSchemaVersion {
+		return mismatch()
 	}
 	return nil
 }
 
 func expectedDriverBinaryPath(driverID agents.ID) string {
-	switch driverID {
-	case agents.Pi:
-		return "/usr/local/bin/pi"
-	case agents.Shell:
-		return "/usr/local/bin/harness-shell-agent"
-	default:
-		return "/usr/local/bin/claude"
+	spec, ok := agents.DriverSpecFor(string(driverID))
+	if !ok || strings.TrimSpace(spec.BinaryPath) == "" {
+		return agents.ClaudeCodeBinaryPath
 	}
+	return spec.BinaryPath
 }
 
 func rootfsFileDigest(rootfs, sandboxPath string) (string, error) {

@@ -32,6 +32,12 @@ const (
 	PiPackageShasum        = "627664c042507babf8a134a3770285272ccae5d8"
 	PiPackageIntegrity     = "sha512-huS+k+dhQRR9PlTK7crLfeSRUw3a96V6JYfP0ZH3Zkko/m10gsYk8dKQmwScSy5Dll516pXorz19BURfD6S2qQ=="
 	PiEventSchemaVersion   = "pi_rpc_events_v1.0"
+	PiBinaryPath           = "/usr/local/bin/pi"
+
+	ClaudeCodePackageName = "@anthropic-ai/claude-code"
+	ClaudeCodeBinaryPath  = "/usr/local/bin/claude"
+
+	ShellBinaryPath = "/usr/local/bin/harness-shell-agent"
 )
 
 type Protocol string
@@ -55,6 +61,18 @@ type Definition struct {
 	Protocol Protocol
 }
 
+// DriverPackageFacts captures the verifiable package identity for a driver as
+// it is installed into the agent image. Empty fields mean the driver does not
+// pin that fact (e.g. a bundled driver carries only a name, a shell driver
+// carries none).
+type DriverPackageFacts struct {
+	Name               string
+	Version            string
+	Shasum             string
+	Integrity          string
+	EventSchemaVersion string
+}
+
 type DriverSpec struct {
 	ID                          ID
 	Label                       string
@@ -69,6 +87,8 @@ type DriverSpec struct {
 	SupportsInterrupt           bool
 	SupportsCompaction          bool
 	Phase10Support              []string
+	BinaryPath                  string
+	PackageFacts                DriverPackageFacts
 }
 
 type SnapshotPolicySpec struct {
@@ -123,6 +143,10 @@ var driverSpecs = map[ID]DriverSpec{
 		SupportsInterrupt:  false,
 		SupportsCompaction: true,
 		Phase10Support:     []string{"single_driver_turns"},
+		BinaryPath:         ClaudeCodeBinaryPath,
+		PackageFacts: DriverPackageFacts{
+			Name: ClaudeCodePackageName,
+		},
 	}),
 	Pi: normalizeDriverSpec(DriverSpec{
 		ID:                    Pi,
@@ -153,6 +177,14 @@ var driverSpecs = map[ID]DriverSpec{
 			"hooks_mcp:unsupported",
 			"interrupt:unsupported",
 		},
+		BinaryPath: PiBinaryPath,
+		PackageFacts: DriverPackageFacts{
+			Name:               PiPackageName,
+			Version:            PiPackageVersion,
+			Shasum:             PiPackageShasum,
+			Integrity:          PiPackageIntegrity,
+			EventSchemaVersion: PiEventSchemaVersion,
+		},
 	}),
 	Shell: normalizeDriverSpec(DriverSpec{
 		ID:                    Shell,
@@ -176,6 +208,7 @@ var driverSpecs = map[ID]DriverSpec{
 		SupportsInterrupt:  true,
 		SupportsCompaction: false,
 		Phase10Support:     []string{"single_driver_turns"},
+		BinaryPath:         ShellBinaryPath,
 	}),
 }
 

@@ -1793,29 +1793,35 @@ func effectiveString(value, fallback string) string {
 }
 
 func driverInstallDigest(driverID agents.ID) string {
-	switch driverID {
-	case agents.Pi:
-		return sandboxContractDigestForPayload(map[string]any{
-			"driver_id":         string(driverID),
-			"path":              "/usr/local/bin/pi",
-			"package":           agents.PiPackageName,
-			"package_version":   agents.PiPackageVersion,
-			"package_shasum":    agents.PiPackageShasum,
-			"package_integrity": agents.PiPackageIntegrity,
-			"event_schema":      agents.PiEventSchemaVersion,
-		})
-	case agents.Shell:
-		return sandboxContractDigestForPayload(map[string]any{
-			"driver_id": string(driverID),
-			"path":      "/usr/local/bin/harness-shell-agent",
-		})
-	default:
-		return sandboxContractDigestForPayload(map[string]any{
-			"driver_id": string(driverID),
-			"path":      "/usr/local/bin/claude",
-			"package":   "@anthropic-ai/claude-code",
-		})
+	spec, ok := agents.DriverSpecFor(string(driverID))
+	payload := map[string]any{
+		"driver_id": string(driverID),
+		"path":      expectedDriverBinaryPath(driverID),
 	}
+	var facts agents.DriverPackageFacts
+	if ok {
+		facts = spec.PackageFacts
+	} else {
+		// Preserve the historical default (claude-shaped) payload for any
+		// driver not present in the registry.
+		facts = agents.DriverPackageFacts{Name: agents.ClaudeCodePackageName}
+	}
+	if strings.TrimSpace(facts.Name) != "" {
+		payload["package"] = facts.Name
+	}
+	if strings.TrimSpace(facts.Version) != "" {
+		payload["package_version"] = facts.Version
+	}
+	if strings.TrimSpace(facts.Shasum) != "" {
+		payload["package_shasum"] = facts.Shasum
+	}
+	if strings.TrimSpace(facts.Integrity) != "" {
+		payload["package_integrity"] = facts.Integrity
+	}
+	if strings.TrimSpace(facts.EventSchemaVersion) != "" {
+		payload["event_schema"] = facts.EventSchemaVersion
+	}
+	return sandboxContractDigestForPayload(payload)
 }
 
 func sandboxContractDigestForPayload(value any) string {
