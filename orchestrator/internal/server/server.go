@@ -1826,24 +1826,6 @@ func sandboxContractDigestForPayload(value any) string {
 	return store.SandboxContractDigest(payload)
 }
 
-func driverBridgeProtocol(driverID string) string {
-	switch driverID {
-	case string(agents.Shell):
-		return "shell_pty"
-	default:
-		return "claude_stream_json_per_turn"
-	}
-}
-
-func driverOutputSchema(driverID string) string {
-	switch driverID {
-	case string(agents.Shell):
-		return "shell_pty_v1"
-	default:
-		return "claude_stream_json_v1"
-	}
-}
-
 func runtimeArtifactsFromDetails(details store.RuntimeGenerationDetails) runtime.GenerationArtifacts {
 	return runtime.GenerationArtifacts{
 		BundleDir:               details.BundleDirPath,
