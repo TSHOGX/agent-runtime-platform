@@ -99,11 +99,7 @@ type DriverRuntimeHomeDirSpec struct {
 }
 
 type DriverRuntimeControlManifestSpec struct {
-	PiCodingAgentDir        string
-	PiCodingAgentSessionDir string
-	PiOffline               bool
-	PiSkipVersionCheck      bool
-	PiTelemetryDisabled     bool
+	Fields map[string]any
 }
 
 type DriverRuntimeLayoutSpec struct {
@@ -176,11 +172,13 @@ var driverRuntimeLayoutSpecs = map[ID]DriverRuntimeLayoutSpec{
 			{Label: "pi session dir", AgentHomeRelativePath: ".pi/agent/sessions", Mode: 0o750},
 		},
 		ControlManifest: DriverRuntimeControlManifestSpec{
-			PiCodingAgentDir:        PiCodingAgentDir,
-			PiCodingAgentSessionDir: PiSessionDir,
-			PiOffline:               true,
-			PiSkipVersionCheck:      true,
-			PiTelemetryDisabled:     true,
+			Fields: map[string]any{
+				"pi_coding_agent_dir":         PiCodingAgentDir,
+				"pi_coding_agent_session_dir": PiSessionDir,
+				"pi_offline":                  true,
+				"pi_skip_version_check":       true,
+				"pi_telemetry_disabled":       true,
+			},
 		},
 	},
 }
@@ -513,7 +511,34 @@ func cloneDriverSpec(spec DriverSpec) DriverSpec {
 func cloneDriverRuntimeLayoutSpec(spec DriverRuntimeLayoutSpec) DriverRuntimeLayoutSpec {
 	spec.Env = append([]DriverRuntimeEnvVarSpec(nil), spec.Env...)
 	spec.HomeDirs = append([]DriverRuntimeHomeDirSpec(nil), spec.HomeDirs...)
+	spec.ControlManifest.Fields = cloneDriverRuntimeControlManifestFields(spec.ControlManifest.Fields)
 	return spec
+}
+
+func cloneDriverRuntimeControlManifestFields(fields map[string]any) map[string]any {
+	if len(fields) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(fields))
+	for key, value := range fields {
+		out[key] = cloneDriverRuntimeControlManifestValue(value)
+	}
+	return out
+}
+
+func cloneDriverRuntimeControlManifestValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneDriverRuntimeControlManifestFields(typed)
+	case []any:
+		out := make([]any, len(typed))
+		for i, item := range typed {
+			out[i] = cloneDriverRuntimeControlManifestValue(item)
+		}
+		return out
+	default:
+		return value
+	}
 }
 
 func cloneRuntimeProviderSpec(spec RuntimeProviderSpec) RuntimeProviderSpec {

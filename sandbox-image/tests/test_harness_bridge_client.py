@@ -1613,11 +1613,15 @@ class EntrypointStaticTest(unittest.TestCase):
     def test_entrypoint_exports_pi_startup_gates(self):
         entrypoint = SCRIPT.with_name("harness-agent-entrypoint")
         text = entrypoint.read_text(encoding="utf-8")
-        self.assertIn('emit("PI_CODING_AGENT_DIR", data.get("pi_coding_agent_dir"))', text)
-        self.assertIn('emit("PI_CODING_AGENT_SESSION_DIR", data.get("pi_coding_agent_session_dir"))', text)
-        self.assertIn('emit("PI_OFFLINE", data.get("pi_offline"))', text)
-        self.assertIn('emit("PI_SKIP_VERSION_CHECK", data.get("pi_skip_version_check"))', text)
-        self.assertIn('emit("PI_TELEMETRY", "0" if data.get("pi_telemetry_disabled") else "1")', text)
+        self.assertIn('driver_runtime = data.get("driver_runtime")', text)
+        self.assertIn("if not isinstance(driver_runtime, dict):", text)
+        self.assertIn("return driver_runtime.get(key, data.get(key))", text)
+        self.assertIn('emit("PI_CODING_AGENT_DIR", driver_runtime_value("pi_coding_agent_dir"))', text)
+        self.assertIn('emit("PI_CODING_AGENT_SESSION_DIR", driver_runtime_value("pi_coding_agent_session_dir"))', text)
+        self.assertIn('emit("PI_OFFLINE", driver_runtime_value("pi_offline"))', text)
+        self.assertIn('emit("PI_SKIP_VERSION_CHECK", driver_runtime_value("pi_skip_version_check"))', text)
+        self.assertIn('pi_telemetry_disabled = driver_runtime_value("pi_telemetry_disabled")', text)
+        self.assertIn('emit("PI_TELEMETRY", "0" if pi_telemetry_disabled else "1")', text)
 
     def test_claim_loop_starts_after_workspace_and_agent_home_setup(self):
         entrypoint = SCRIPT.with_name("harness-agent-entrypoint")

@@ -38,6 +38,12 @@ sys.path.insert(0, "/usr/local/lib")
 from harness_manifest import load_control_manifest
 
 data = load_control_manifest(sys.argv[1])
+driver_runtime = data.get("driver_runtime")
+if not isinstance(driver_runtime, dict):
+    driver_runtime = {}
+
+def driver_runtime_value(key):
+    return driver_runtime.get(key, data.get(key))
 
 def emit(key, value):
     if value is None or value == "":
@@ -63,12 +69,13 @@ emit("CLAUDE_MODEL", data.get("model", "sonnet"))
 emit("CLAUDE_OUTPUT_FORMAT", data.get("output_format", "stream-json"))
 emit("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", data.get("claude_code_disable_nonessential_traffic", True))
 emit("ANTHROPIC_BASE_URL", data.get("sandbox_model_proxy_base_url"))
-emit("PI_CODING_AGENT_DIR", data.get("pi_coding_agent_dir"))
-emit("PI_CODING_AGENT_SESSION_DIR", data.get("pi_coding_agent_session_dir"))
-emit("PI_OFFLINE", data.get("pi_offline"))
-emit("PI_SKIP_VERSION_CHECK", data.get("pi_skip_version_check"))
-if data.get("pi_telemetry_disabled") is not None:
-    emit("PI_TELEMETRY", "0" if data.get("pi_telemetry_disabled") else "1")
+emit("PI_CODING_AGENT_DIR", driver_runtime_value("pi_coding_agent_dir"))
+emit("PI_CODING_AGENT_SESSION_DIR", driver_runtime_value("pi_coding_agent_session_dir"))
+emit("PI_OFFLINE", driver_runtime_value("pi_offline"))
+emit("PI_SKIP_VERSION_CHECK", driver_runtime_value("pi_skip_version_check"))
+pi_telemetry_disabled = driver_runtime_value("pi_telemetry_disabled")
+if pi_telemetry_disabled is not None:
+    emit("PI_TELEMETRY", "0" if pi_telemetry_disabled else "1")
 PY
   )" || exit 65
   eval "$CONTROL_EXPORTS"

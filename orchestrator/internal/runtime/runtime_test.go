@@ -2011,12 +2011,33 @@ func TestPreparePiGenerationMaterializesReadOnlyConfig(t *testing.T) {
 	if err := json.Unmarshal(mustReadFile(t, details.ControlManifestPath), &manifestFile); err != nil {
 		t.Fatalf("parse pi control manifest: %v", err)
 	}
-	if manifestFile.Payload.PiCodingAgentDir != agents.PiCodingAgentDir ||
-		manifestFile.Payload.PiCodingAgentSessionDir != agents.PiSessionDir ||
-		!manifestFile.Payload.PiOffline ||
-		!manifestFile.Payload.PiSkipVersionCheck ||
-		!manifestFile.Payload.PiTelemetryDisabled {
+	driverRuntime := manifestFile.Payload.DriverRuntime
+	if driverRuntime["pi_coding_agent_dir"] != agents.PiCodingAgentDir ||
+		driverRuntime["pi_coding_agent_session_dir"] != agents.PiSessionDir ||
+		driverRuntime["pi_offline"] != true ||
+		driverRuntime["pi_skip_version_check"] != true ||
+		driverRuntime["pi_telemetry_disabled"] != true {
 		t.Fatalf("control manifest missing pi startup gates: %+v", manifestFile.Payload)
+	}
+	var rawManifestFile struct {
+		Payload map[string]json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(mustReadFile(t, details.ControlManifestPath), &rawManifestFile); err != nil {
+		t.Fatalf("parse raw pi control manifest: %v", err)
+	}
+	if _, ok := rawManifestFile.Payload["driver_runtime"]; !ok {
+		t.Fatalf("control manifest missing driver_runtime: %s", mustReadFile(t, details.ControlManifestPath))
+	}
+	for _, field := range []string{
+		"pi_coding_agent_dir",
+		"pi_coding_agent_session_dir",
+		"pi_offline",
+		"pi_skip_version_check",
+		"pi_telemetry_disabled",
+	} {
+		if _, ok := rawManifestFile.Payload[field]; ok {
+			t.Fatalf("control manifest must not contain top-level %s: %s", field, mustReadFile(t, details.ControlManifestPath))
+		}
 	}
 }
 

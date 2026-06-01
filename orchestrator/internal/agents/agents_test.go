@@ -55,17 +55,20 @@ func TestPiRuntimeLayoutSpec(t *testing.T) {
 		layout.HomeDirs[2].AgentHomeRelativePath != ".pi/agent/sessions" {
 		t.Fatalf("unexpected pi home dir layout: %+v", layout.HomeDirs)
 	}
-	if layout.ControlManifest.PiCodingAgentDir != PiCodingAgentDir ||
-		layout.ControlManifest.PiCodingAgentSessionDir != PiSessionDir ||
-		!layout.ControlManifest.PiOffline ||
-		!layout.ControlManifest.PiSkipVersionCheck ||
-		!layout.ControlManifest.PiTelemetryDisabled {
+	if layout.ControlManifest.Fields["pi_coding_agent_dir"] != PiCodingAgentDir ||
+		layout.ControlManifest.Fields["pi_coding_agent_session_dir"] != PiSessionDir ||
+		layout.ControlManifest.Fields["pi_offline"] != true ||
+		layout.ControlManifest.Fields["pi_skip_version_check"] != true ||
+		layout.ControlManifest.Fields["pi_telemetry_disabled"] != true {
 		t.Fatalf("unexpected pi manifest layout: %+v", layout.ControlManifest)
 	}
 
 	layout.Env[0].Value = "mutated"
+	layout.ControlManifest.Fields["pi_coding_agent_dir"] = "mutated"
 	layoutAgain, ok := DriverRuntimeLayoutSpecFor(Pi)
-	if !ok || layoutAgain.Env[0].Value != PiCodingAgentDir {
-		t.Fatalf("runtime layout spec should be cloned, got %+v/%v", layoutAgain.Env, ok)
+	if !ok ||
+		layoutAgain.Env[0].Value != PiCodingAgentDir ||
+		layoutAgain.ControlManifest.Fields["pi_coding_agent_dir"] != PiCodingAgentDir {
+		t.Fatalf("runtime layout spec should be cloned, got %+v/%+v/%v", layoutAgain.Env, layoutAgain.ControlManifest, ok)
 	}
 }

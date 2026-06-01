@@ -147,37 +147,33 @@ type checkpointImageManifestFile struct {
 }
 
 type controlManifest struct {
-	SessionID                            string `json:"session_id"`
-	GenerationID                         string `json:"generation_id"`
-	SandboxContractVersion               string `json:"sandbox_contract_version"`
-	CreatedAt                            string `json:"created_at"`
-	AttemptID                            string `json:"attempt_id"`
-	NetworkProfileID                     string `json:"network_profile_id"`
-	AgentRuntimeProfileID                string `json:"agent_runtime_profile_id"`
-	Agent                                string `json:"agent"`
-	DriverID                             string `json:"driver_id"`
-	BridgeProtocolVersion                int    `json:"bridge_protocol_version"`
-	TurnInputSchema                      string `json:"turn_input_schema"`
-	ClaudeSessionUUID                    string `json:"claude_session_uuid,omitempty"`
-	ResumeClaude                         bool   `json:"resume_claude"`
-	RunscPlatform                        string `json:"runsc_platform"`
-	RunscVersion                         string `json:"runsc_version"`
-	SandboxModelProxyBaseURL             string `json:"sandbox_model_proxy_base_url,omitempty"`
-	Model                                string `json:"model,omitempty"`
-	OutputFormat                         string `json:"output_format"`
-	WorkspacePath                        string `json:"workspace_path"`
-	AgentHomePath                        string `json:"agent_home_path"`
-	BundleDigest                         string `json:"bundle_digest"`
-	RuntimeConfigDigest                  string `json:"runtime_config_digest"`
-	SpecDigest                           string `json:"spec_digest"`
-	EgressPolicyDigest                   string `json:"egress_policy_digest"`
-	ManifestVersion                      int    `json:"manifest_version"`
-	ClaudeCodeDisableNonessentialTraffic bool   `json:"claude_code_disable_nonessential_traffic"`
-	PiCodingAgentDir                     string `json:"pi_coding_agent_dir,omitempty"`
-	PiCodingAgentSessionDir              string `json:"pi_coding_agent_session_dir,omitempty"`
-	PiOffline                            bool   `json:"pi_offline,omitempty"`
-	PiSkipVersionCheck                   bool   `json:"pi_skip_version_check,omitempty"`
-	PiTelemetryDisabled                  bool   `json:"pi_telemetry_disabled,omitempty"`
+	SessionID                            string         `json:"session_id"`
+	GenerationID                         string         `json:"generation_id"`
+	SandboxContractVersion               string         `json:"sandbox_contract_version"`
+	CreatedAt                            string         `json:"created_at"`
+	AttemptID                            string         `json:"attempt_id"`
+	NetworkProfileID                     string         `json:"network_profile_id"`
+	AgentRuntimeProfileID                string         `json:"agent_runtime_profile_id"`
+	Agent                                string         `json:"agent"`
+	DriverID                             string         `json:"driver_id"`
+	BridgeProtocolVersion                int            `json:"bridge_protocol_version"`
+	TurnInputSchema                      string         `json:"turn_input_schema"`
+	ClaudeSessionUUID                    string         `json:"claude_session_uuid,omitempty"`
+	ResumeClaude                         bool           `json:"resume_claude"`
+	RunscPlatform                        string         `json:"runsc_platform"`
+	RunscVersion                         string         `json:"runsc_version"`
+	SandboxModelProxyBaseURL             string         `json:"sandbox_model_proxy_base_url,omitempty"`
+	Model                                string         `json:"model,omitempty"`
+	OutputFormat                         string         `json:"output_format"`
+	WorkspacePath                        string         `json:"workspace_path"`
+	AgentHomePath                        string         `json:"agent_home_path"`
+	BundleDigest                         string         `json:"bundle_digest"`
+	RuntimeConfigDigest                  string         `json:"runtime_config_digest"`
+	SpecDigest                           string         `json:"spec_digest"`
+	EgressPolicyDigest                   string         `json:"egress_policy_digest"`
+	ManifestVersion                      int            `json:"manifest_version"`
+	ClaudeCodeDisableNonessentialTraffic bool           `json:"claude_code_disable_nonessential_traffic"`
+	DriverRuntime                        map[string]any `json:"driver_runtime,omitempty"`
 }
 
 type controlManifestFile struct {
@@ -1487,11 +1483,13 @@ func (r *Runtime) buildGenerationManifest(req StartRequest, runscVersion, bundle
 }
 
 func applyDriverControlManifestSpec(manifest *controlManifest, spec agents.DriverRuntimeControlManifestSpec) {
-	manifest.PiCodingAgentDir = spec.PiCodingAgentDir
-	manifest.PiCodingAgentSessionDir = spec.PiCodingAgentSessionDir
-	manifest.PiOffline = spec.PiOffline
-	manifest.PiSkipVersionCheck = spec.PiSkipVersionCheck
-	manifest.PiTelemetryDisabled = spec.PiTelemetryDisabled
+	if len(spec.Fields) == 0 {
+		return
+	}
+	manifest.DriverRuntime = make(map[string]any, len(spec.Fields))
+	for key, value := range spec.Fields {
+		manifest.DriverRuntime[key] = value
+	}
 }
 
 func validateGenerationDetails(req StartRequest) error {
@@ -1594,11 +1592,7 @@ func controlManifestProjectionFields() (map[string]struct{}, map[string]struct{}
 		"egress_policy_digest":         {},
 		"manifest_version":             {},
 		"claude_code_disable_nonessential_traffic": {},
-		"pi_coding_agent_dir":                      {},
-		"pi_coding_agent_session_dir":              {},
-		"pi_offline":                               {},
-		"pi_skip_version_check":                    {},
-		"pi_telemetry_disabled":                    {},
+		"driver_runtime": {},
 	}
 	regenerableFields := map[string]struct{}{
 		"created_at": {},
