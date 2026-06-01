@@ -2061,6 +2061,42 @@ func TestWriteDriverConfigProjectionReturnsNilWithoutSpecsOrRenderer(t *testing.
 	}
 }
 
+func TestDriverConfigProjectionRenderersMatchMaterializationSpecs(t *testing.T) {
+	driversWithSpecs := map[agents.ID]struct{}{}
+	for _, driver := range agents.AllDriverSpecs() {
+		specs := agents.DriverConfigMaterializationSpecsFor(driver.ID)
+		if len(specs) == 0 {
+			continue
+		}
+		driversWithSpecs[driver.ID] = struct{}{}
+
+		renderer, ok := driverConfigProjectionRenderers[driver.ID]
+		if !ok {
+			t.Errorf("%s driver has config materialization specs but no renderer", driver.ID)
+			continue
+		}
+
+		details := testGenerationDetails(t.TempDir(), "gen_"+string(driver.ID)+"_config_renderer")
+		details.Agent = string(driver.ID)
+		payloads, err := renderer(details)
+		if err != nil {
+			t.Errorf("%s driver config renderer failed for baseline generation details: %v", driver.ID, err)
+			continue
+		}
+		for _, spec := range specs {
+			if _, ok := payloads[spec.Name]; !ok {
+				t.Errorf("%s driver config renderer missing %q payload for materialization spec", driver.ID, spec.Name)
+			}
+		}
+	}
+
+	for driver := range driverConfigProjectionRenderers {
+		if _, ok := driversWithSpecs[driver]; !ok {
+			t.Errorf("%s driver has config renderer but no materialization specs", driver)
+		}
+	}
+}
+
 func TestWriteDriverConfigProjectionFailsClosedWhenSpecsHaveNoRenderer(t *testing.T) {
 	dir := t.TempDir()
 	rt := New(Config{})
