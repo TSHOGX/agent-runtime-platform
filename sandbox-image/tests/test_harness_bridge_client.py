@@ -1627,7 +1627,7 @@ class BridgeClientTest(unittest.TestCase):
 
 class EntrypointStaticTest(unittest.TestCase):
     def test_manifest_digest_matches_host_fixture(self):
-        fixture = Path(__file__).resolve().parent / "fixtures" / "control-manifest-payload.phase7.json"
+        fixture = Path(__file__).resolve().parent / "fixtures" / "control-manifest-payload.bridge-protocol-v2.json"
         payload = json.loads(fixture.read_text(encoding="utf-8"))
         digest = "2dcc2b3e69e7792c65fb521284d627253787e77f60202482e2839fe1fd97a341"
 
