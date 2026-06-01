@@ -214,6 +214,73 @@ func TestRuntimeResourceIdentityReuseRequiresAbsentVerified(t *testing.T) {
 	}
 }
 
+func TestRuntimeResourceCleanupTransitionsRequireWorkerIDBeforeMutation(t *testing.T) {
+	ctx := context.Background()
+	const workerID = "worker-cleanup"
+
+	t.Run("retiring", func(t *testing.T) {
+		st, owner := openOwnedStore(t, ctx)
+		now := time.Now().UTC()
+		before, _ := runtimeResourceInCleanupStateForTest(t, ctx, st, owner.UUID, "sess_resource_retire_worker_required", now, RuntimeResourceMaterializing, workerID)
+
+		err := st.ClaimRuntimeResourceRetiring(ctx, RuntimeResourceRetireParams{
+			GenerationID: before.GenerationID,
+			WorkerID:     " ",
+			HostID:       before.HostID,
+			Now:          now.Add(10 * time.Second),
+		})
+		requireRuntimeResourceWorkerIDErrorForTest(t, err)
+		assertRuntimeResourceUnchangedForTest(t, ctx, st, before)
+	})
+
+	t.Run("reconciling", func(t *testing.T) {
+		st, owner := openOwnedStore(t, ctx)
+		now := time.Now().UTC()
+		before, evidence := runtimeResourceInCleanupStateForTest(t, ctx, st, owner.UUID, "sess_resource_reconcile_worker_required", now, RuntimeResourceRetiring, workerID)
+
+		err := st.MarkRuntimeResourceReconciling(ctx, RuntimeResourceEvidenceParams{
+			GenerationID: before.GenerationID,
+			WorkerID:     " ",
+			HostID:       before.HostID,
+			Evidence:     evidence,
+			Now:          now.Add(10 * time.Second),
+		})
+		requireRuntimeResourceWorkerIDErrorForTest(t, err)
+		assertRuntimeResourceUnchangedForTest(t, ctx, st, before)
+	})
+
+	t.Run("absent verified", func(t *testing.T) {
+		st, owner := openOwnedStore(t, ctx)
+		now := time.Now().UTC()
+		before, evidence := runtimeResourceInCleanupStateForTest(t, ctx, st, owner.UUID, "sess_resource_absent_worker_required", now, RuntimeResourceReconciling, workerID)
+
+		err := st.MarkRuntimeResourceAbsentVerified(ctx, RuntimeResourceEvidenceParams{
+			GenerationID: before.GenerationID,
+			WorkerID:     " ",
+			HostID:       before.HostID,
+			Evidence:     evidence,
+			Now:          now.Add(10 * time.Second),
+		})
+		requireRuntimeResourceWorkerIDErrorForTest(t, err)
+		assertRuntimeResourceUnchangedForTest(t, ctx, st, before)
+	})
+
+	t.Run("destroyed", func(t *testing.T) {
+		st, owner := openOwnedStore(t, ctx)
+		now := time.Now().UTC()
+		before, _ := runtimeResourceInCleanupStateForTest(t, ctx, st, owner.UUID, "sess_resource_destroy_worker_required", now, RuntimeResourceAbsentVerified, workerID)
+
+		err := st.MarkRuntimeResourceDestroyed(ctx, RuntimeResourceRetireParams{
+			GenerationID: before.GenerationID,
+			WorkerID:     " ",
+			HostID:       before.HostID,
+			Now:          now.Add(10 * time.Second),
+		})
+		requireRuntimeResourceWorkerIDErrorForTest(t, err)
+		assertRuntimeResourceUnchangedForTest(t, ctx, st, before)
+	})
+}
+
 func TestRuntimeResourceAbsentVerifiedRejectsCorruptIdentityPayload(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
@@ -470,6 +537,88 @@ func createRuntimeResourceInstanceForTest(t *testing.T, ctx context.Context, st 
 		t.Fatalf("create runtime resource instance: %v", err)
 	}
 	return instance
+}
+
+func runtimeResourceInCleanupStateForTest(t *testing.T, ctx context.Context, st *Store, ownerUUID, sessionID string, now time.Time, state RuntimeResourceState, workerID string) (RuntimeResourceInstance, ResourceReconciliationEvidence) {
+	t.Helper()
+	instance := createRuntimeResourceInstanceForTest(t, ctx, st, ownerUUID, sessionID, "host-1", now)
+	evidence := runtimeResourceEvidenceForTest(instance)
+	if err := st.ClaimRuntimeResourceMaterialization(ctx, RuntimeResourceMaterializationClaimParams{
+		GenerationID:     instance.GenerationID,
+		WorkerID:         workerID,
+		HostID:           instance.HostID,
+		LeaseExpiresAt:   now.Add(time.Minute),
+		IdempotencyToken: "idem-cleanup-worker-test",
+		Now:              now.Add(time.Second),
+	}); err != nil {
+		t.Fatalf("claim materialization: %v", err)
+	}
+	if state == RuntimeResourceMaterializing {
+		return getRuntimeResourceInstanceForTest(t, ctx, st, instance.GenerationID), evidence
+	}
+	if err := st.ClaimRuntimeResourceRetiring(ctx, RuntimeResourceRetireParams{
+		GenerationID: instance.GenerationID,
+		WorkerID:     workerID,
+		HostID:       instance.HostID,
+		Now:          now.Add(2 * time.Second),
+	}); err != nil {
+		t.Fatalf("claim retiring: %v", err)
+	}
+	if state == RuntimeResourceRetiring {
+		return getRuntimeResourceInstanceForTest(t, ctx, st, instance.GenerationID), evidence
+	}
+	if err := st.MarkRuntimeResourceReconciling(ctx, RuntimeResourceEvidenceParams{
+		GenerationID: instance.GenerationID,
+		WorkerID:     workerID,
+		HostID:       instance.HostID,
+		Evidence:     evidence,
+		Now:          now.Add(3 * time.Second),
+	}); err != nil {
+		t.Fatalf("mark reconciling: %v", err)
+	}
+	if state == RuntimeResourceReconciling {
+		return getRuntimeResourceInstanceForTest(t, ctx, st, instance.GenerationID), evidence
+	}
+	if err := st.MarkRuntimeResourceAbsentVerified(ctx, RuntimeResourceEvidenceParams{
+		GenerationID: instance.GenerationID,
+		WorkerID:     workerID,
+		HostID:       instance.HostID,
+		Evidence:     evidence,
+		Now:          now.Add(4 * time.Second),
+	}); err != nil {
+		t.Fatalf("mark absent verified: %v", err)
+	}
+	if state == RuntimeResourceAbsentVerified {
+		return getRuntimeResourceInstanceForTest(t, ctx, st, instance.GenerationID), evidence
+	}
+	t.Fatalf("unsupported cleanup test state %s", state)
+	return RuntimeResourceInstance{}, ResourceReconciliationEvidence{}
+}
+
+func getRuntimeResourceInstanceForTest(t *testing.T, ctx context.Context, st *Store, generationID string) RuntimeResourceInstance {
+	t.Helper()
+	instance, err := st.GetRuntimeResourceInstance(ctx, generationID)
+	if err != nil {
+		t.Fatalf("get runtime resource instance: %v", err)
+	}
+	return instance
+}
+
+func requireRuntimeResourceWorkerIDErrorForTest(t *testing.T, err error) {
+	t.Helper()
+	if err == nil || !strings.Contains(err.Error(), "worker id") {
+		t.Fatalf("expected worker id validation error, got %v", err)
+	}
+}
+
+func assertRuntimeResourceUnchangedForTest(t *testing.T, ctx context.Context, st *Store, before RuntimeResourceInstance) {
+	t.Helper()
+	after := getRuntimeResourceInstanceForTest(t, ctx, st, before.GenerationID)
+	if after.State != before.State || after.WorkerID != before.WorkerID || !after.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Fatalf("runtime resource mutated: before state=%s worker=%q updated_at=%s; after state=%s worker=%q updated_at=%s",
+			before.State, before.WorkerID, before.UpdatedAt.Format(time.RFC3339Nano),
+			after.State, after.WorkerID, after.UpdatedAt.Format(time.RFC3339Nano))
+	}
 }
 
 func runtimeResourceInstanceParamsForTest(t *testing.T, ctx context.Context, st *Store, ownerUUID, sessionID, hostID string, now time.Time) RuntimeResourceInstanceParams {

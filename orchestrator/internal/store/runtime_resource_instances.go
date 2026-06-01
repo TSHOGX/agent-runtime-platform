@@ -364,13 +364,13 @@ func (s *Store) ClaimRuntimeResourceRetiring(ctx context.Context, p RuntimeResou
 	if p.Now.IsZero() {
 		p.Now = time.Now().UTC()
 	}
-	if strings.TrimSpace(p.GenerationID) == "" || strings.TrimSpace(p.HostID) == "" {
-		return fmt.Errorf("generation id and host id are required")
+	if strings.TrimSpace(p.GenerationID) == "" || strings.TrimSpace(p.WorkerID) == "" || strings.TrimSpace(p.HostID) == "" {
+		return fmt.Errorf("generation id, worker id, and host id are required")
 	}
 	res, err := s.db.ExecContext(ctx, `
 UPDATE runtime_resource_instances
 SET state = 'retiring',
-    worker_id = COALESCE(NULLIF(?, ''), worker_id),
+    worker_id = ?,
     host_id = ?,
     lease_expires_at = NULL,
     idempotency_token = NULL,
@@ -390,6 +390,9 @@ func (s *Store) MarkRuntimeResourceReconciling(ctx context.Context, p RuntimeRes
 	if p.Now.IsZero() {
 		p.Now = time.Now().UTC()
 	}
+	if strings.TrimSpace(p.WorkerID) == "" {
+		return fmt.Errorf("runtime resource worker id is required")
+	}
 	evidenceJSON, evidenceDigest, err := runtimeResourceEvidenceDigest(p.Evidence)
 	if err != nil {
 		return err
@@ -397,7 +400,7 @@ func (s *Store) MarkRuntimeResourceReconciling(ctx context.Context, p RuntimeRes
 	res, err := s.db.ExecContext(ctx, `
 UPDATE runtime_resource_instances
 SET state = 'reconciling',
-    worker_id = COALESCE(NULLIF(?, ''), worker_id),
+    worker_id = ?,
     evidence_json = ?,
     evidence_digest = ?,
     updated_at = ?
@@ -415,6 +418,9 @@ WHERE generation_id = ?
 func (s *Store) MarkRuntimeResourceAbsentVerified(ctx context.Context, p RuntimeResourceEvidenceParams) error {
 	if p.Now.IsZero() {
 		p.Now = time.Now().UTC()
+	}
+	if strings.TrimSpace(p.WorkerID) == "" {
+		return fmt.Errorf("runtime resource worker id is required")
 	}
 	instance, err := s.GetRuntimeResourceCleanupIdentity(ctx, p.GenerationID)
 	if err != nil {
@@ -436,7 +442,7 @@ func (s *Store) MarkRuntimeResourceAbsentVerified(ctx context.Context, p Runtime
 	res, err := s.db.ExecContext(ctx, `
 UPDATE runtime_resource_instances
 SET state = 'absent_verified',
-    worker_id = COALESCE(NULLIF(?, ''), worker_id),
+    worker_id = ?,
     evidence_json = ?,
     evidence_digest = ?,
     verified_at = ?,
@@ -457,10 +463,13 @@ func (s *Store) MarkRuntimeResourceDestroyed(ctx context.Context, p RuntimeResou
 	if p.Now.IsZero() {
 		p.Now = time.Now().UTC()
 	}
+	if strings.TrimSpace(p.WorkerID) == "" {
+		return fmt.Errorf("runtime resource worker id is required")
+	}
 	res, err := s.db.ExecContext(ctx, `
 UPDATE runtime_resource_instances
 SET state = 'destroyed',
-    worker_id = COALESCE(NULLIF(?, ''), worker_id),
+    worker_id = ?,
     updated_at = ?
 WHERE generation_id = ?
   AND host_id = ?
