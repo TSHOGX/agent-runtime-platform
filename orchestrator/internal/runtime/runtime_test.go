@@ -2020,6 +2020,56 @@ func TestPreparePiGenerationMaterializesReadOnlyConfig(t *testing.T) {
 	}
 }
 
+func TestWriteDriverConfigProjectionReturnsNilWithoutSpecsOrRenderer(t *testing.T) {
+	dir := t.TempDir()
+	rt := New(Config{})
+	details := testGenerationDetails(dir, "gen_shell_no_driver_config")
+	details.Agent = "sh"
+
+	entries, err := rt.writeDriverConfigProjection(StartRequest{
+		SessionID:    details.SessionID,
+		GenerationID: details.GenerationID,
+		Agent:        "sh",
+		Generation:   details,
+	})
+	if err != nil {
+		t.Fatalf("write shell driver config projection: %v", err)
+	}
+	if entries != nil {
+		t.Fatalf("shell driver config projection = %+v, want nil", entries)
+	}
+}
+
+func TestWriteDriverConfigProjectionFailsClosedWhenSpecsHaveNoRenderer(t *testing.T) {
+	dir := t.TempDir()
+	rt := New(Config{})
+	details := testGenerationDetails(dir, "gen_pi_missing_renderer")
+	details.SessionID = "sess_pi_missing_renderer"
+	details.Agent = "pi"
+
+	renderer, ok := driverConfigProjectionRenderers[agents.Pi]
+	if !ok {
+		t.Fatal("pi driver config projection renderer is not registered")
+	}
+	delete(driverConfigProjectionRenderers, agents.Pi)
+	t.Cleanup(func() {
+		driverConfigProjectionRenderers[agents.Pi] = renderer
+	})
+
+	_, err := rt.writeDriverConfigProjection(StartRequest{
+		SessionID:    details.SessionID,
+		GenerationID: details.GenerationID,
+		Agent:        "pi",
+		Generation:   details,
+	})
+	if err == nil {
+		t.Fatal("expected missing renderer error")
+	}
+	if !strings.Contains(err.Error(), "pi driver config projection renderer is missing") {
+		t.Fatalf("expected missing pi renderer error, got %v", err)
+	}
+}
+
 func TestRenderNetworkHostsProjectionRejectsNonAliasModelProxyHosts(t *testing.T) {
 	dir := t.TempDir()
 	tests := []struct {
