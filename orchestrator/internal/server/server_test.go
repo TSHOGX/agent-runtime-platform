@@ -262,8 +262,21 @@ func TestRuntimeResourceHostIDFailsClosed(t *testing.T) {
 }
 
 func TestRuntimeResourceNftTableNameRequiresIdentifier(t *testing.T) {
-	if _, err := runtimeResourceNftTableName(""); err == nil || !strings.Contains(err.Error(), "identifier is required") {
-		t.Fatalf("expected empty generation id error, got %v", err)
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{name: "empty", value: ""},
+		{name: "whitespace only", value: " \t\n"},
+		{name: "all invalid", value: "!!!"},
+		{name: "underscore only", value: "___"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := runtimeResourceNftTableName(tc.value); err == nil || !strings.Contains(err.Error(), "identifier is required") {
+				t.Fatalf("expected generation id error, got %v", err)
+			}
+		})
 	}
 }
 

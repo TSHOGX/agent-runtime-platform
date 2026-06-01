@@ -1814,14 +1814,23 @@ func prefixedSHA256(data []byte) string {
 }
 
 func shortID(id string) (string, error) {
-	token := strings.NewReplacer("gen_", "", "-", "").Replace(id)
+	token := strings.NewReplacer("gen_", "", "-", "").Replace(strings.TrimSpace(id))
 	if len(token) > 12 {
-		return token[:12], nil
+		token = token[:12]
 	}
-	if token == "" {
+	if token == "" || !hasASCIIAlnum(token) {
 		return "", fmt.Errorf("short generation id is required")
 	}
 	return token, nil
+}
+
+func hasASCIIAlnum(value string) bool {
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			return true
+		}
+	}
+	return false
 }
 
 func joinInts(values []int) string {
@@ -2540,17 +2549,22 @@ func (r *Runtime) applyHostEgressPolicy(ctx context.Context, details store.Runti
 }
 
 func nftIdentifier(value string) (string, error) {
+	value = strings.TrimSpace(value)
 	var b strings.Builder
+	hasToken := false
 	for _, r := range value {
 		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			hasToken = true
+		case r == '_':
 			b.WriteRune(r)
 		default:
 			b.WriteRune('_')
 		}
 	}
 	out := b.String()
-	if out == "" {
+	if out == "" || !hasToken {
 		return "", fmt.Errorf("nft identifier is required")
 	}
 	return out, nil

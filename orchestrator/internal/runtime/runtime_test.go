@@ -55,11 +55,26 @@ func TestRuntimeStartRequiresExplicitDriverID(t *testing.T) {
 }
 
 func TestRuntimeResourceIdentifiersFailClosed(t *testing.T) {
-	if _, err := shortID(""); err == nil || !strings.Contains(err.Error(), "short generation id is required") {
-		t.Fatalf("expected short id error, got %v", err)
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{name: "empty", value: ""},
+		{name: "whitespace only", value: " \t\n"},
+		{name: "all invalid", value: "!!!"},
+		{name: "underscore only", value: "___"},
 	}
-	if _, err := hostEgressTableName(""); err == nil || !strings.Contains(err.Error(), "nft identifier is required") {
-		t.Fatalf("expected nft identifier error, got %v", err)
+	for _, tc := range tests {
+		t.Run("short id "+tc.name, func(t *testing.T) {
+			if _, err := shortID(tc.value); err == nil || !strings.Contains(err.Error(), "short generation id is required") {
+				t.Fatalf("expected short id error, got %v", err)
+			}
+		})
+		t.Run("nft identifier "+tc.name, func(t *testing.T) {
+			if _, err := hostEgressTableName(tc.value); err == nil || !strings.Contains(err.Error(), "nft identifier is required") {
+				t.Fatalf("expected nft identifier error, got %v", err)
+			}
+		})
 	}
 }
 

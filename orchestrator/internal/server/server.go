@@ -2228,17 +2228,22 @@ func runtimeResourceNftTableName(generationID string) (string, error) {
 }
 
 func runtimeResourceIdentifier(value string) (string, error) {
+	value = strings.TrimSpace(value)
 	var b strings.Builder
+	hasToken := false
 	for _, r := range value {
 		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			hasToken = true
+		case r == '_':
 			b.WriteRune(r)
 		default:
 			b.WriteRune('_')
 		}
 	}
 	out := b.String()
-	if out == "" {
+	if out == "" || !hasToken {
 		return "", fmt.Errorf("runtime resource identifier is required")
 	}
 	return out, nil
