@@ -32,6 +32,21 @@ PI_HARNESS_PROXY_PROVIDER = "harness_anthropic_proxy"
 DRIVER_STATE_DIGEST_PREFIX = b"driver_state_digest_v1\n"
 
 
+def required_env(name):
+    value = os.environ.get(name)
+    if value is None or str(value).strip() == "":
+        raise RuntimeError(f"{name} is required")
+    return str(value)
+
+
+def required_int_env(name):
+    value = required_env(name)
+    try:
+        return int(value)
+    except ValueError as err:
+        raise RuntimeError(f"{name} must be an integer") from err
+
+
 def seq_name(seq):
     return f"{seq:020d}.json"
 
@@ -335,7 +350,9 @@ class BridgeClient:
             payload={"output_sequence": output_sequence, "stream": stream, "payload": payload},
         )
 
-    def ack_turn_completed(self, turn_id, status="completed", error_class="", error="", driver_state_update=None):
+    def ack_turn_completed(self, turn_id, status, error_class="", error="", driver_state_update=None):
+        if str(status or "").strip() == "":
+            raise RuntimeError("turn completion status is required")
         payload = {"status": status}
         if error_class:
             payload["error_class"] = error_class
@@ -421,11 +438,11 @@ class ClaudeTurnRunner:
             "bypassPermissions",
             "-p",
             "--model",
-            os.environ.get("CLAUDE_MODEL", "sonnet"),
+            required_env("CLAUDE_MODEL"),
             "--input-format",
             "stream-json",
             "--output-format",
-            os.environ.get("CLAUDE_OUTPUT_FORMAT", "stream-json"),
+            required_env("CLAUDE_OUTPUT_FORMAT"),
             "--include-partial-messages",
             "--replay-user-messages",
             "--verbose",
@@ -449,8 +466,8 @@ class ClaudeTurnRunner:
             optional_value = os.environ.get(optional_name)
             if optional_value:
                 env[optional_name] = optional_value
-        target_uid = os.environ.get("HARNESS_AGENT_UID", "65534")
-        target_gid = os.environ.get("HARNESS_AGENT_GID", "65534")
+        target_uid = required_env("HARNESS_AGENT_UID")
+        target_gid = required_env("HARNESS_AGENT_GID")
         if str(os.geteuid()) == target_uid and str(os.getegid()) == target_gid:
             command = claude_command
         else:
@@ -546,11 +563,8 @@ def validate_pi_config_materialization():
 
 
 def pi_config_writable_by_sandbox_uid(st):
-    try:
-        uid = int(os.environ.get("HARNESS_AGENT_UID", "65534"))
-        gid = int(os.environ.get("HARNESS_AGENT_GID", "65534"))
-    except ValueError:
-        uid, gid = 65534, 65534
+    uid = required_int_env("HARNESS_AGENT_UID")
+    gid = required_int_env("HARNESS_AGENT_GID")
     mode = st.st_mode
     return bool(
         mode & 0o002
@@ -612,7 +626,9 @@ class PiRPCTurnRunner:
         validate_pi_config_materialization()
         if self.proc is not None and self.proc.poll() is None:
             return
-        model = os.environ.get("PI_MODEL") or os.environ.get("CLAUDE_MODEL") or "sonnet"
+        model = os.environ.get("PI_MODEL") or os.environ.get("CLAUDE_MODEL")
+        if str(model or "").strip() == "":
+            raise RuntimeError("PI_MODEL or CLAUDE_MODEL is required")
         pi_command = [
             os.environ.get("PI_BIN", "/usr/local/bin/pi"),
             "--mode",
@@ -636,8 +652,8 @@ class PiRPCTurnRunner:
             optional_value = os.environ.get(optional_name)
             if optional_value:
                 env[optional_name] = optional_value
-        target_uid = os.environ.get("HARNESS_AGENT_UID", "65534")
-        target_gid = os.environ.get("HARNESS_AGENT_GID", "65534")
+        target_uid = required_env("HARNESS_AGENT_UID")
+        target_gid = required_env("HARNESS_AGENT_GID")
         if str(os.geteuid()) == target_uid and str(os.getegid()) == target_gid:
             command = pi_command
         else:
@@ -746,7 +762,9 @@ class PiRPCTurnRunner:
                 error = event.get("message") or event.get("error") or "pi rpc error"
                 break
             if event_type in {"turn_end", "agent_end"}:
-                terminal_status = str(event.get("status") or "completed")
+                terminal_status = str(event.get("status") or "").strip()
+                if not terminal_status:
+                    raise RuntimeError("pi terminal event status is required")
                 if terminal_status not in {"completed", "success", "ok"}:
                     status = "failed"
                     error_class = "agent_execution_failed"
@@ -847,27 +865,26 @@ def make_turn_runner(driver_id):
 
 
 def sandbox_source_ip():
-    try:
-        output = subprocess.check_output(["ip", "-j", "addr", "show"], text=True)
-        for link in json.loads(output):
-            if link.get("ifname") == "lo":
-                continue
-            for addr in link.get("addr_info", []):
-                if addr.get("family") == "inet" and addr.get("local"):
-                    return addr["local"]
-    except Exception:
-        pass
-    return "127.0.0.1"
+    output = subprocess.check_output(["ip", "-j", "addr", "show"], text=True)
+    for link in json.loads(output):
+        if link.get("ifname") == "lo":
+            continue
+        for addr in link.get("addr_info", []):
+            if addr.get("family") == "inet" and addr.get("local"):
+                return addr["local"]
+    raise RuntimeError("sandbox source ip is required")
 
 
-def parse_statuses(value, default):
+def parse_statuses(value):
     if value is None or str(value).strip() == "":
-        return set(default)
+        raise RuntimeError("probe healthz statuses are required")
     statuses = set()
     for raw in str(value).split(","):
         raw = raw.strip()
         if raw:
             statuses.add(int(raw))
+    if not statuses:
+        raise RuntimeError("probe healthz statuses are required")
     return statuses
 
 
@@ -897,7 +914,7 @@ def run_probe(args):
     if driver_id == "claude_code":
         run_network_probe(
             args.base_url,
-            parse_statuses(args.healthz_statuses, {200}),
+            parse_statuses(args.healthz_statuses),
             args.http_timeout,
         )
     client.probe_network(timeout=args.timeout)
@@ -950,12 +967,17 @@ def execute_grant(client, runner, grant):
         result = runner.run_turn(content, emit)
         driver_state_update = None
         if isinstance(result, dict):
-            status = result.get("status") or "completed"
+            status = str(result.get("status") or "").strip()
+            if not status:
+                raise RuntimeError("runner status is required")
             error_class = result.get("error_class") or ""
             error = result.get("error") or ""
             driver_state_update = result.get("driver_state_update")
         else:
             status, error_class, error = result[:3]
+            status = str(status or "").strip()
+            if not status:
+                raise RuntimeError("runner status is required")
             if len(result) > 3:
                 driver_state_update = result[3]
     except Exception as err:
@@ -967,7 +989,7 @@ def execute_grant(client, runner, grant):
     client.last_output_sequence_by_turn[turn_id] = output_sequence - 1
     client.ack_turn_completed(
         turn_id,
-        status=status or "completed",
+        status=status,
         error_class=error_class,
         error=error,
         driver_state_update=driver_state_update,
@@ -983,7 +1005,7 @@ def run_claim_loop(args, runner=None):
     if driver_id == "claude_code":
         run_network_probe(
             args.base_url,
-            parse_statuses(args.healthz_statuses, {200}),
+            parse_statuses(args.healthz_statuses),
             args.http_timeout,
         )
     client.probe_network(timeout=args.timeout)
@@ -1017,34 +1039,44 @@ def run_claim_loop(args, runner=None):
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("--bridge-dir", default=os.environ.get("HARNESS_BRIDGE_DIR", "/harness-control/bridge"))
+    parser.add_argument("--bridge-dir", default=os.environ.get("HARNESS_BRIDGE_DIR"))
     parser.add_argument("--session-id", default=os.environ.get("SESSION_ID"))
     parser.add_argument("--generation-id", default=os.environ.get("GENERATION_ID"))
-    parser.add_argument("--driver-id", default=os.environ.get("HARNESS_DRIVER_ID", ""))
-    parser.add_argument("--poll-interval", type=float, default=float(os.environ.get("HARNESS_BRIDGE_POLL_INTERVAL", "0.05")))
+    parser.add_argument("--driver-id", default=os.environ.get("HARNESS_DRIVER_ID"))
+    parser.add_argument("--poll-interval", type=float, default=os.environ.get("HARNESS_BRIDGE_POLL_INTERVAL"))
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--base-url", default=os.environ.get("ANTHROPIC_BASE_URL", ""))
-    parser.add_argument("--healthz-statuses", default=os.environ.get("HARNESS_PROBE_HEALTHZ_STATUSES", "200"))
-    parser.add_argument("--http-timeout", type=float, default=float(os.environ.get("HARNESS_PROBE_HTTP_TIMEOUT", "3")))
+    parser.add_argument("--healthz-statuses", default=os.environ.get("HARNESS_PROBE_HEALTHZ_STATUSES"))
+    parser.add_argument("--http-timeout", type=float, default=os.environ.get("HARNESS_PROBE_HTTP_TIMEOUT", "3"))
     subcommands = parser.add_subparsers(dest="command", required=True)
     subcommands.add_parser("probe")
     heartbeat_loop = subcommands.add_parser("heartbeat-loop")
-    heartbeat_loop.add_argument("--interval", type=float, default=float(os.environ.get("HARNESS_BRIDGE_HEARTBEAT_INTERVAL", "30")))
+    heartbeat_loop.add_argument("--interval", type=float, default=os.environ.get("HARNESS_BRIDGE_HEARTBEAT_INTERVAL"))
     claim_loop = subcommands.add_parser("claim-loop")
-    claim_loop.add_argument("--idle-interval", type=float, default=float(os.environ.get("HARNESS_BRIDGE_IDLE_INTERVAL", "0.05")))
-    claim_loop.add_argument("--heartbeat-interval", type=float, default=float(os.environ.get("HARNESS_BRIDGE_HEARTBEAT_INTERVAL", "30")))
+    claim_loop.add_argument("--idle-interval", type=float, default=os.environ.get("HARNESS_BRIDGE_IDLE_INTERVAL"))
+    claim_loop.add_argument("--heartbeat-interval", type=float, default=os.environ.get("HARNESS_BRIDGE_HEARTBEAT_INTERVAL"))
     claim_loop.add_argument("--max-turns", type=int, default=0)
     claim_loop.add_argument("--max-empty-polls", type=int, default=0)
     args = parser.parse_args(argv)
+    if not args.bridge_dir:
+        parser.error("--bridge-dir or HARNESS_BRIDGE_DIR is required")
     if not args.session_id or not args.generation_id:
         parser.error("--session-id and --generation-id are required")
     if not args.driver_id:
         parser.error("--driver-id is required")
+    if args.poll_interval is None:
+        parser.error("--poll-interval or HARNESS_BRIDGE_POLL_INTERVAL is required")
     if args.command == "probe":
         run_probe(args)
     elif args.command == "heartbeat-loop":
+        if args.interval is None:
+            parser.error("--interval or HARNESS_BRIDGE_HEARTBEAT_INTERVAL is required")
         run_heartbeat_loop(args)
     elif args.command == "claim-loop":
+        if args.idle_interval is None:
+            parser.error("--idle-interval or HARNESS_BRIDGE_IDLE_INTERVAL is required")
+        if args.heartbeat_interval is None:
+            parser.error("--heartbeat-interval or HARNESS_BRIDGE_HEARTBEAT_INTERVAL is required")
         run_claim_loop(args)
     return 0
 

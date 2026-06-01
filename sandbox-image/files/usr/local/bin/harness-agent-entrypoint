@@ -55,8 +55,8 @@ emit("HARNESS_AGENT_HOME", data.get("agent_home_path"))
 emit("HARNESS_DRIVER_ID", data.get("driver_id"))
 emit("HARNESS_BRIDGE_PROTOCOL_VERSION", data.get("bridge_protocol_version"))
 emit("HARNESS_TURN_INPUT_SCHEMA", data.get("turn_input_schema"))
-emit("CLAUDE_MODEL", data.get("model", "sonnet"))
-emit("CLAUDE_OUTPUT_FORMAT", data.get("output_format", "stream-json"))
+emit("CLAUDE_MODEL", data.get("model"))
+emit("CLAUDE_OUTPUT_FORMAT", data.get("output_format"))
 emit("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", driver_runtime_value("claude_code_disable_nonessential_traffic"))
 emit("ANTHROPIC_BASE_URL", data.get("sandbox_model_proxy_base_url"))
 emit("PI_CODING_AGENT_DIR", driver_runtime_value("pi_coding_agent_dir"))
@@ -101,8 +101,14 @@ fi
 unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
 
 if [ "$HARNESS_DRIVER_ID" = "claude_code" ]; then
+  : "${CLAUDE_MODEL:?CLAUDE_MODEL is required in control file}"
+  : "${CLAUDE_OUTPUT_FORMAT:?CLAUDE_OUTPUT_FORMAT is required in control file}"
   : "${ANTHROPIC_BASE_URL:?ANTHROPIC_BASE_URL is required for claude_code driver}"
   export ANTHROPIC_BASE_URL
+fi
+
+if [ "$HARNESS_DRIVER_ID" = "pi" ]; then
+  : "${CLAUDE_MODEL:?CLAUDE_MODEL is required in control file}"
 fi
 
 if [ "${HARNESS_BRIDGE_MODE:-}" = "probe" ]; then

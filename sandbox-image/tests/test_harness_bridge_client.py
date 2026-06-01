@@ -148,7 +148,7 @@ class BridgeClientTest(unittest.TestCase):
 
             client.ack_turn_started(9, "10.240.0.2")
             client.emit_output(9, 1, {"line": "ok"})
-            client.ack_turn_completed(9)
+            client.ack_turn_completed(9, status="completed")
 
             outbox = bridge.Queue(root, bridge.OUTBOX)
             messages = [envelope for _, _, envelope in outbox.read_all()]
@@ -157,6 +157,15 @@ class BridgeClientTest(unittest.TestCase):
                 ["ack_turn_started", "emit_output", "ack_turn_completed"],
             )
             self.assertEqual(messages[-2]["payload"]["output_sequence"], 1)
+
+    def test_ack_turn_completed_requires_status(self):
+        with tempfile.TemporaryDirectory() as root:
+            client = bridge.BridgeClient(root, "sess", "gen", "claude_code", poll_interval=0.001)
+
+            with self.assertRaisesRegex(RuntimeError, "turn completion status is required"):
+                client.ack_turn_completed(9, status="")
+
+            self.assertEqual(bridge.Queue(root, bridge.OUTBOX).read_all(), [])
 
     def test_resume_turn_returns_grant_payload(self):
         with tempfile.TemporaryDirectory() as root:
@@ -221,6 +230,17 @@ class BridgeClientTest(unittest.TestCase):
                 self.assertEqual(bridge.sandbox_source_ip(), "10.241.0.2")
 
         check_output.assert_called_once_with(["ip", "-j", "addr", "show"], text=True)
+
+    def test_sandbox_source_ip_requires_non_loopback_address(self):
+        with mock.patch.object(bridge.subprocess, "check_output") as check_output:
+            check_output.return_value = json.dumps(
+                [
+                    {"ifname": "lo", "addr_info": [{"family": "inet", "local": "127.0.0.1"}]},
+                    {"ifname": "eth0", "addr_info": [{"family": "inet6", "local": "fd00::2"}]},
+                ]
+            )
+            with self.assertRaisesRegex(RuntimeError, "sandbox source ip is required"):
+                bridge.sandbox_source_ip()
 
     def test_heartbeat_loop_uses_configured_interval(self):
         with tempfile.TemporaryDirectory() as root:
@@ -417,6 +437,30 @@ class BridgeClientTest(unittest.TestCase):
             self.assertEqual(completion["payload"]["status"], "failed")
             self.assertNotIn("driver_state_update", completion["payload"])
 
+    def test_execute_grant_fails_when_runner_omits_status(self):
+        with tempfile.TemporaryDirectory() as root:
+            client = bridge.BridgeClient(root, "sess", "gen", "sh", poll_interval=0.001)
+
+            class MissingStatusRunner:
+                def run_turn(self, content, emit):
+                    return "", "", ""
+
+            with mock.patch.object(bridge, "sandbox_source_ip", return_value="10.240.0.2"):
+                bridge.execute_grant(
+                    client,
+                    MissingStatusRunner(),
+                    {"turn_id": 9, "sequence": 1, "turn_input_schema": "RunTurn", "input": {"content": "run"}},
+                )
+
+            messages = [envelope for _, _, envelope in bridge.Queue(root, bridge.OUTBOX).read_all()]
+            completion = messages[-1]
+            self.assertEqual(completion["type"], "ack_turn_completed")
+            self.assertEqual(completion["payload"]["status"], "failed")
+            self.assertEqual(completion["payload"]["error_class"], "agent_execution_failed")
+            self.assertEqual(completion["payload"]["error"], "runner status is required")
+            stderr = next(message for message in messages if message["type"] == "emit_output" and message["payload"]["stream"] == "stderr")
+            self.assertEqual(stderr["payload"]["payload"]["line"], "runner status is required")
+
     def test_pi_rpc_runner_uses_session_rpc_and_returns_driver_state_update(self):
         class FakeStdin:
             def __init__(self):
@@ -546,6 +590,85 @@ class BridgeClientTest(unittest.TestCase):
             self.assertEqual(update["state_payload"]["selected_session_relpath"], "session-1.jsonl")
             self.assertEqual(update["state_payload"]["selected_session_id"], "pi-session-1")
             self.assertTrue(update["state_digest"].startswith("sha256:"))
+
+    def test_pi_rpc_runner_requires_terminal_event_status(self):
+        class FakeStdin:
+            def __init__(self):
+                self.writes = []
+
+            def write(self, value):
+                self.writes.append(value)
+
+            def flush(self):
+                pass
+
+        class FakeStdout:
+            def __init__(self, lines):
+                self.lines = list(lines)
+
+            def readline(self):
+                if not self.lines:
+                    return ""
+                return self.lines.pop(0)
+
+        class FakeProcess:
+            def __init__(self, lines):
+                self.stdin = FakeStdin()
+                self.stdout = FakeStdout(lines)
+                self.stderr = iter([])
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as root:
+            agent_dir = Path(root) / "agent"
+            session_dir = agent_dir / "sessions"
+            session_dir.mkdir(parents=True)
+            models = agent_dir / "models.json"
+            settings = agent_dir / "settings.json"
+            for path in (models, settings):
+                path.write_text("{}\n", encoding="utf-8")
+                path.chmod(0o444)
+
+            patches = [
+                mock.patch.object(bridge, "PI_CODING_AGENT_DIR", str(agent_dir)),
+                mock.patch.object(bridge, "PI_SESSION_DIR", str(session_dir)),
+                mock.patch.object(bridge, "PI_MODELS_SANDBOX_PATH", str(models)),
+                mock.patch.object(bridge, "PI_SETTINGS_SANDBOX_PATH", str(settings)),
+                mock.patch.object(bridge.subprocess, "Popen", return_value=FakeProcess(['{"type":"turn_end"}\n'])),
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "PI_CODING_AGENT_DIR": str(agent_dir),
+                        "PI_CODING_AGENT_SESSION_DIR": str(session_dir),
+                        "PI_OFFLINE": "1",
+                        "PI_SKIP_VERSION_CHECK": "1",
+                        "PI_TELEMETRY": "0",
+                        "PI_MODEL": "sonnet",
+                        "HARNESS_AGENT_UID": str(os.geteuid()),
+                        "HARNESS_AGENT_GID": str(os.getegid()),
+                    },
+                    clear=True,
+                ),
+            ]
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                runner = bridge.PiRPCTurnRunner()
+                runner.set_turn_context(
+                    {
+                        "turn_id": 9,
+                        "driver_state": {
+                            "driver_id": "pi",
+                            "state_digest": "sha256:" + "a" * 64,
+                            "state_version": 1,
+                            "state_payload": {"schema_version": 1, "driver_id": "pi", "state_kind": "pi_uninitialized"},
+                        },
+                    }
+                )
+                with self.assertRaisesRegex(RuntimeError, "pi terminal event status is required"):
+                    runner.run_turn("hello", lambda stream, line: None)
 
     def test_pi_rpc_runner_keeps_stderr_out_of_json_rpc_stream(self):
         class FakeStdin:
@@ -1194,6 +1317,12 @@ class BridgeClientTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, r"probe GET /healthz returned 204"):
                 bridge.run_network_probe("http://10.240.0.1:8082", {200}, 0.1)
 
+    def test_parse_statuses_requires_configured_statuses(self):
+        for value in ("", " , "):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(RuntimeError, "probe healthz statuses are required"):
+                    bridge.parse_statuses(value)
+
     def test_shell_probe_skips_proxy_http_probe(self):
         with tempfile.TemporaryDirectory() as root:
             args = argparse_namespace(
@@ -1273,6 +1402,8 @@ class BridgeClientTest(unittest.TestCase):
                 "HARNESS_AGENT_HOME": "/agent-home",
                 "HARNESS_AGENT_UID": "65534",
                 "HARNESS_AGENT_GID": "65534",
+                "CLAUDE_MODEL": "sonnet",
+                "CLAUDE_OUTPUT_FORMAT": "stream-json",
                 "HARNESS_SECRET_READERS_GID": "12345",
                 "ANTHROPIC_BASE_URL": "http://harness-model-proxy.internal:8082",
                 "ANTHROPIC_AUTH_TOKEN": "removed-token",
@@ -1341,6 +1472,8 @@ class BridgeClientTest(unittest.TestCase):
                 "HARNESS_AGENT_HOME": "/agent-home",
                 "HARNESS_AGENT_UID": "65534",
                 "HARNESS_AGENT_GID": "65534",
+                "CLAUDE_MODEL": "sonnet",
+                "CLAUDE_OUTPUT_FORMAT": "stream-json",
                 "ANTHROPIC_BASE_URL": "http://harness-model-proxy.internal:8082",
             },
             clear=True,
@@ -1396,6 +1529,8 @@ class BridgeClientTest(unittest.TestCase):
                 "HARNESS_AGENT_HOME": "/agent-home",
                 "HARNESS_AGENT_UID": "65534",
                 "HARNESS_AGENT_GID": "65534",
+                "CLAUDE_MODEL": "sonnet",
+                "CLAUDE_OUTPUT_FORMAT": "stream-json",
                 "ANTHROPIC_BASE_URL": "http://harness-model-proxy.internal:8082",
             },
             clear=True,
@@ -1412,6 +1547,13 @@ class BridgeClientTest(unittest.TestCase):
         self.assertEqual(captured["command"][0], "/usr/local/bin/claude")
         self.assertNotIn("setpriv", captured["command"])
         self.assertEqual(captured["env"]["ANTHROPIC_API_KEY"], bridge.HOST_ONLY_DUMMY_API_KEY)
+
+    def test_claude_runner_requires_model_configuration(self):
+        env = claude_runner_env()
+        env.pop("CLAUDE_MODEL")
+        with mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "CLAUDE_MODEL is required"):
+                claude_runner().run_turn("hello", lambda stream, line: None)
 
     def test_claude_runner_resume_selector_uses_driver_state(self):
         class FakeStdin:
@@ -1692,6 +1834,12 @@ class EntrypointStaticTest(unittest.TestCase):
         self.assertIn("return driver_runtime.get(key)", text)
         self.assertNotIn("return driver_runtime.get(key, data.get(key))", text)
         self.assertIn('emit("HARNESS_DRIVER_ID", data.get("driver_id"))', text)
+        self.assertIn('emit("CLAUDE_MODEL", data.get("model"))', text)
+        self.assertIn('emit("CLAUDE_OUTPUT_FORMAT", data.get("output_format"))', text)
+        self.assertIn("CLAUDE_MODEL is required in control file", text)
+        self.assertIn("CLAUDE_OUTPUT_FORMAT is required in control file", text)
+        self.assertNotIn('data.get("model", "sonnet")', text)
+        self.assertNotIn('data.get("output_format", "stream-json")', text)
         self.assertNotIn('emit("CLAUDE_SESSION_UUID"', text)
         self.assertNotIn('emit("CLAUDE_RESUME"', text)
         self.assertIn('emit("PI_CODING_AGENT_DIR", driver_runtime_value("pi_coding_agent_dir"))', text)
@@ -1728,6 +1876,8 @@ def claude_runner_env():
         "HARNESS_AGENT_HOME": "/agent-home",
         "HARNESS_AGENT_UID": "65534",
         "HARNESS_AGENT_GID": "65534",
+        "CLAUDE_MODEL": "sonnet",
+        "CLAUDE_OUTPUT_FORMAT": "stream-json",
         "ANTHROPIC_BASE_URL": "http://harness-model-proxy.internal:8082",
     }
 
