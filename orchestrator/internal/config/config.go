@@ -286,7 +286,10 @@ func Load() (Config, error) {
 	if err := validateDefaultAgentDriver(defaultDriver, projectConfig.Harness.Agents); err != nil {
 		return Config{}, fmt.Errorf("HARNESS_DEFAULT_AGENT: %w", err)
 	}
-	maxSessions := intEnv("HARNESS_MAX_SESSIONS", projectConfig.Harness.MaxSessions)
+	maxSessions, err := maxSessionsEnv(projectConfig.Harness.MaxSessions)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
 		Addr:              getenv("HARNESS_ORCHESTRATOR_ADDR", ":8090"),
 		SharedSecret:      os.Getenv("HARNESS_LAB_PASSWORD"),
@@ -314,7 +317,9 @@ func Load() (Config, error) {
 	cfg.Agents = cloneAgentConfigs(cfg.Harness.Agents)
 	cfg.ModelProfiles = cloneModelProfileConfigs(cfg.Harness.ModelProfiles)
 	cfg.RuntimeProviders = cloneRuntimeProviderConfigs(cfg.Harness.RuntimeProviders)
-	if value, ok := boolEnv("HARNESS_AUTO_CHECKPOINT_ENABLED"); ok {
+	if value, ok, err := boolEnv("HARNESS_AUTO_CHECKPOINT_ENABLED"); err != nil {
+		return Config{}, err
+	} else if ok {
 		cfg.Harness.Checkpoint.AutoEnabled = value
 	}
 	if err := validateHarnessConfig(cfg.Harness); err != nil {
@@ -350,13 +355,13 @@ func loadProjectConfig(path string) (projectConfig, error) {
 
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return finalizeProjectConfig(path, cfg)
+		return cfg, fmt.Errorf("load %s: config file is required", path)
 	}
 	if err != nil {
 		return cfg, err
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
-		return finalizeProjectConfig(path, cfg)
+		return cfg, fmt.Errorf("load %s: config file is empty", path)
 	}
 
 	var target struct {
@@ -1324,24 +1329,32 @@ func getenv(key, defaultValue string) string {
 	return defaultValue
 }
 
-func intEnv(key string, defaultValue int) int {
-	value, err := strconv.Atoi(os.Getenv(key))
-	if err != nil || value <= 0 {
-		return defaultValue
+func maxSessionsEnv(defaultValue int) (int, error) {
+	raw, ok := os.LookupEnv("HARNESS_MAX_SESSIONS")
+	if !ok {
+		return defaultValue, nil
 	}
-	return value
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return 0, fmt.Errorf("invalid HARNESS_MAX_SESSIONS %q: %w", raw, err)
+	}
+	if value <= 0 {
+		return 0, fmt.Errorf("invalid HARNESS_MAX_SESSIONS %q: must be > 0", raw)
+	}
+	return value, nil
 }
 
-func boolEnv(key string) (bool, bool) {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return false, false
+func boolEnv(key string) (bool, bool, error) {
+	raw, ok := os.LookupEnv(key)
+	if !ok {
+		return false, false, nil
 	}
+	value := strings.TrimSpace(raw)
 	parsed, err := strconv.ParseBool(value)
 	if err != nil {
-		return false, false
+		return false, false, fmt.Errorf("invalid %s %q: %w", key, raw, err)
 	}
-	return parsed, true
+	return parsed, true, nil
 }
 
 func sessionRetentionEnv(defaultValue time.Duration) (time.Duration, error) {

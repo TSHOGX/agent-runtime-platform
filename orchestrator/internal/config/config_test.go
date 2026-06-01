@@ -996,29 +996,23 @@ func TestLoadDefaultDBPathIsOutsideSessionsRoot(t *testing.T) {
 	}
 }
 
-func TestLoadProjectConfigMissingFileUsesDefaults(t *testing.T) {
-	cfg, err := loadProjectConfig(filepath.Join(t.TempDir(), "missing.yaml"))
-	if err != nil {
-		t.Fatalf("missing config should not fail: %v", err)
+func TestLoadProjectConfigRejectsMissingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing.yaml")
+	_, err := loadProjectConfig(path)
+	if err == nil || !strings.Contains(err.Error(), "config file is required") {
+		t.Fatalf("expected missing config rejection, got %v", err)
 	}
-	if agent := cfg.Harness.Agents["claude_code"]; agent.DisableNonessentialTraffic == nil || !*agent.DisableNonessentialTraffic {
-		t.Fatalf("expected default nonessential traffic setting to be true")
+}
+
+func TestLoadProjectConfigRejectsEmptyFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "harness.yaml")
+	if err := os.WriteFile(path, []byte(" \n\t\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
 	}
-	if profile := cfg.Harness.ModelProfiles["anthropic_default"]; profile.Model != "sonnet" {
-		t.Fatalf("default model profile = %+v", profile)
-	}
-	if cfg.Harness.ModelProxy.BindURL != "http://0.0.0.0:8082" ||
-		cfg.Harness.ModelProxy.BindPort != 8082 ||
-		cfg.Harness.ModelProxy.SandboxBaseURL != "http://harness-model-proxy.internal:8082" {
-		t.Fatalf("default model proxy config = %+v", cfg.Harness.ModelProxy)
-	}
-	if cfg.Harness.ControlRoot() != "/var/lib/harness/run/control" ||
-		cfg.Harness.BundleRoot() != "/var/lib/harness/run/runtime" ||
-		cfg.Harness.BridgeRoot() != "/var/lib/harness/run/bridge" {
-		t.Fatalf("unexpected derived roots: control=%s bundle=%s bridge=%s", cfg.Harness.ControlRoot(), cfg.Harness.BundleRoot(), cfg.Harness.BridgeRoot())
-	}
-	if cfg.Harness.Reaper.CheckpointImageRetention.Duration != 720*time.Hour {
-		t.Fatalf("checkpoint image retention default=%s want 720h", cfg.Harness.Reaper.CheckpointImageRetention.Duration)
+
+	_, err := loadProjectConfig(path)
+	if err == nil || !strings.Contains(err.Error(), "config file is empty") {
+		t.Fatalf("expected empty config rejection, got %v", err)
 	}
 }
 
@@ -1142,29 +1136,8 @@ func TestLoadValidatesMergedHarnessConfig(t *testing.T) {
 }
 
 func TestLoadAutoCheckpointEnvOverride(t *testing.T) {
-	repo := t.TempDir()
-	configDir := filepath.Join(repo, "config")
-	if err := os.Mkdir(configDir, 0o755); err != nil {
-		t.Fatalf("mkdir config dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(configDir, "harness.yaml"), []byte(`harness:
-  checkpoint:
-    auto_enabled: false
-`), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	oldWD, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	if err := os.Chdir(repo); err != nil {
-		t.Fatalf("chdir repo: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chdir(oldWD); err != nil {
-			t.Fatalf("restore wd: %v", err)
-		}
-	})
+	repo := writeMinimalLoadConfig(t)
+	chdirForLoadTest(t, repo)
 	t.Setenv("HARNESS_AUTO_CHECKPOINT_ENABLED", "true")
 
 	cfg, err := Load()
@@ -1173,6 +1146,34 @@ func TestLoadAutoCheckpointEnvOverride(t *testing.T) {
 	}
 	if !cfg.Harness.Checkpoint.AutoEnabled {
 		t.Fatalf("expected env override to enable checkpoint policy: %+v", cfg.Harness.Checkpoint)
+	}
+}
+
+func TestLoadRejectsInvalidMaxSessionsEnv(t *testing.T) {
+	tests := []string{"many", "0", "-1"}
+
+	for _, value := range tests {
+		t.Run(value, func(t *testing.T) {
+			repo := writeMinimalLoadConfig(t)
+			chdirForLoadTest(t, repo)
+			t.Setenv("HARNESS_MAX_SESSIONS", value)
+
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), "invalid HARNESS_MAX_SESSIONS") {
+				t.Fatalf("expected invalid max sessions env error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidAutoCheckpointEnv(t *testing.T) {
+	repo := writeMinimalLoadConfig(t)
+	chdirForLoadTest(t, repo)
+	t.Setenv("HARNESS_AUTO_CHECKPOINT_ENABLED", "maybe")
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "invalid HARNESS_AUTO_CHECKPOINT_ENABLED") {
+		t.Fatalf("expected invalid auto checkpoint env error, got %v", err)
 	}
 }
 
