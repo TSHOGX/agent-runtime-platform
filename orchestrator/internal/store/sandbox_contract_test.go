@@ -35,6 +35,8 @@ func TestStoreSandboxContractPersistsCanonicalDigestAndMirrors(t *testing.T) {
 		SessionID:              "sess_contract",
 		GenerationID:           allocation.GenerationID,
 		SandboxContractVersion: SandboxContractVersion,
+		ContractSchemaVersion:  SandboxContractSchemaVersion,
+		ContractGateVersion:    SandboxContractGateDriverManifest,
 		Payload:                payload,
 		Now:                    now.Add(time.Second),
 	})
@@ -87,6 +89,80 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(
 	}
 }
 
+func TestStoreSandboxContractRequiresExplicitMetadata(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	sessionID := "sess_contract_required_metadata"
+	createStoreSession(t, ctx, st, sessionID)
+	now := time.Now().UTC()
+	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: sessionID,
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       now,
+		Config:    testAllocatorConfig(t),
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	payload := testSandboxContractPayload(t, sessionID, allocation)
+	base := StoreSandboxContractParams{
+		ContractID:             "contract_" + allocation.GenerationID,
+		SessionID:              sessionID,
+		GenerationID:           allocation.GenerationID,
+		SandboxContractVersion: SandboxContractVersion,
+		ContractSchemaVersion:  SandboxContractSchemaVersion,
+		ContractGateVersion:    SandboxContractGateDriverManifest,
+		Payload:                payload,
+		Now:                    now.Add(time.Second),
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*StoreSandboxContractParams)
+		want   string
+	}{
+		{
+			name: "contract id",
+			mutate: func(p *StoreSandboxContractParams) {
+				p.ContractID = " "
+			},
+			want: "contract id",
+		},
+		{
+			name: "contract version",
+			mutate: func(p *StoreSandboxContractParams) {
+				p.SandboxContractVersion = " "
+			},
+			want: "sandbox contract version is required",
+		},
+		{
+			name: "schema version",
+			mutate: func(p *StoreSandboxContractParams) {
+				p.ContractSchemaVersion = 0
+			},
+			want: "sandbox contract schema version is required",
+		},
+		{
+			name: "gate version",
+			mutate: func(p *StoreSandboxContractParams) {
+				p.ContractGateVersion = " "
+			},
+			want: "sandbox contract gate version is required",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params := base
+			tt.mutate(&params)
+			_, err := st.StoreSandboxContract(ctx, params)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("StoreSandboxContract err=%v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestGetSandboxContractForGenerationIgnoresResourceContractMirror(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
@@ -103,11 +179,14 @@ func TestGetSandboxContractForGenerationIgnoresResourceContractMirror(t *testing
 		t.Fatalf("allocate generation: %v", err)
 	}
 	record, err := st.StoreSandboxContract(ctx, StoreSandboxContractParams{
-		ContractID:   "contract_" + allocation.GenerationID,
-		SessionID:    "sess_contract_resource_mirror",
-		GenerationID: allocation.GenerationID,
-		Payload:      testSandboxContractPayload(t, "sess_contract_resource_mirror", allocation),
-		Now:          now.Add(time.Second),
+		ContractID:             "contract_" + allocation.GenerationID,
+		SessionID:              "sess_contract_resource_mirror",
+		GenerationID:           allocation.GenerationID,
+		SandboxContractVersion: SandboxContractVersion,
+		ContractSchemaVersion:  SandboxContractSchemaVersion,
+		ContractGateVersion:    SandboxContractGateDriverManifest,
+		Payload:                testSandboxContractPayload(t, "sess_contract_resource_mirror", allocation),
+		Now:                    now.Add(time.Second),
 	})
 	if err != nil {
 		t.Fatalf("store sandbox contract: %v", err)
@@ -144,11 +223,14 @@ func TestGetSandboxContractForGenerationRejectsGenerationContractMirrorMismatch(
 		t.Fatalf("allocate generation: %v", err)
 	}
 	if _, err := st.StoreSandboxContract(ctx, StoreSandboxContractParams{
-		ContractID:   "contract_" + allocation.GenerationID,
-		SessionID:    "sess_contract_generation_mirror",
-		GenerationID: allocation.GenerationID,
-		Payload:      testSandboxContractPayload(t, "sess_contract_generation_mirror", allocation),
-		Now:          now.Add(time.Second),
+		ContractID:             "contract_" + allocation.GenerationID,
+		SessionID:              "sess_contract_generation_mirror",
+		GenerationID:           allocation.GenerationID,
+		SandboxContractVersion: SandboxContractVersion,
+		ContractSchemaVersion:  SandboxContractSchemaVersion,
+		ContractGateVersion:    SandboxContractGateDriverManifest,
+		Payload:                testSandboxContractPayload(t, "sess_contract_generation_mirror", allocation),
+		Now:                    now.Add(time.Second),
 	}); err != nil {
 		t.Fatalf("store sandbox contract: %v", err)
 	}
@@ -254,11 +336,14 @@ func TestStoreSandboxContractRejectsInvalidSecretGrantSemantics(t *testing.T) {
 			tc.tamper(payload)
 			refreshCredentialPolicyDigestForTest(t, payload)
 			_, err = st.StoreSandboxContract(ctx, StoreSandboxContractParams{
-				ContractID:   "contract_" + allocation.GenerationID,
-				SessionID:    sessionID,
-				GenerationID: allocation.GenerationID,
-				Payload:      payload,
-				Now:          now.Add(time.Second),
+				ContractID:             "contract_" + allocation.GenerationID,
+				SessionID:              sessionID,
+				GenerationID:           allocation.GenerationID,
+				SandboxContractVersion: SandboxContractVersion,
+				ContractSchemaVersion:  SandboxContractSchemaVersion,
+				ContractGateVersion:    SandboxContractGateDriverManifest,
+				Payload:                payload,
+				Now:                    now.Add(time.Second),
 			})
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("StoreSandboxContract err=%v, want %q", err, tc.want)
@@ -399,11 +484,14 @@ func TestGetSandboxContractForGenerationRejectsPayloadDigestMismatch(t *testing.
 		t.Fatalf("allocate generation: %v", err)
 	}
 	if _, err := st.StoreSandboxContract(ctx, StoreSandboxContractParams{
-		ContractID:   "contract_" + allocation.GenerationID,
-		SessionID:    "sess_contract_corrupt",
-		GenerationID: allocation.GenerationID,
-		Payload:      testSandboxContractPayload(t, "sess_contract_corrupt", allocation),
-		Now:          now.Add(time.Second),
+		ContractID:             "contract_" + allocation.GenerationID,
+		SessionID:              "sess_contract_corrupt",
+		GenerationID:           allocation.GenerationID,
+		SandboxContractVersion: SandboxContractVersion,
+		ContractSchemaVersion:  SandboxContractSchemaVersion,
+		ContractGateVersion:    SandboxContractGateDriverManifest,
+		Payload:                testSandboxContractPayload(t, "sess_contract_corrupt", allocation),
+		Now:                    now.Add(time.Second),
 	}); err != nil {
 		t.Fatalf("store sandbox contract: %v", err)
 	}
@@ -511,11 +599,14 @@ func TestStoreSandboxContractRejectsDigestInPayload(t *testing.T) {
 	payload["sandbox_contract_digest"] = "sha256:bad"
 
 	_, err = st.StoreSandboxContract(ctx, StoreSandboxContractParams{
-		ContractID:   "contract_" + allocation.GenerationID,
-		SessionID:    "sess_contract_digest_field",
-		GenerationID: allocation.GenerationID,
-		Payload:      payload,
-		Now:          now.Add(time.Second),
+		ContractID:             "contract_" + allocation.GenerationID,
+		SessionID:              "sess_contract_digest_field",
+		GenerationID:           allocation.GenerationID,
+		SandboxContractVersion: SandboxContractVersion,
+		ContractSchemaVersion:  SandboxContractSchemaVersion,
+		ContractGateVersion:    SandboxContractGateDriverManifest,
+		Payload:                payload,
+		Now:                    now.Add(time.Second),
 	})
 	if err == nil || !strings.Contains(err.Error(), "must not contain sandbox_contract_digest") {
 		t.Fatalf("expected digest-field rejection, got %v", err)
@@ -551,11 +642,14 @@ func TestRecordSandboxContractArtifactsVerifiesContractDigest(t *testing.T) {
 		t.Fatalf("allocate generation: %v", err)
 	}
 	contract, err := st.StoreSandboxContract(ctx, StoreSandboxContractParams{
-		ContractID:   "contract_" + allocation.GenerationID,
-		SessionID:    "sess_contract_artifacts",
-		GenerationID: allocation.GenerationID,
-		Payload:      testSandboxContractPayload(t, "sess_contract_artifacts", allocation),
-		Now:          now.Add(time.Second),
+		ContractID:             "contract_" + allocation.GenerationID,
+		SessionID:              "sess_contract_artifacts",
+		GenerationID:           allocation.GenerationID,
+		SandboxContractVersion: SandboxContractVersion,
+		ContractSchemaVersion:  SandboxContractSchemaVersion,
+		ContractGateVersion:    SandboxContractGateDriverManifest,
+		Payload:                testSandboxContractPayload(t, "sess_contract_artifacts", allocation),
+		Now:                    now.Add(time.Second),
 	})
 	if err != nil {
 		t.Fatalf("store sandbox contract: %v", err)

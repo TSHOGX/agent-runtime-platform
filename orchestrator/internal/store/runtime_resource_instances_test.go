@@ -436,6 +436,32 @@ func TestRuntimeResourceAbsentVerifiedRequiresIdentityFilesystemEvidence(t *test
 	}
 }
 
+func TestCreateRuntimeResourceInstanceRequiresExplicitSandboxContractVersion(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	now := time.Now().UTC()
+	params := runtimeResourceInstanceParamsForTest(t, ctx, st, owner.UUID, "sess_resource_required_contract_version", "host-1", now)
+	params.SandboxContractVersion = " "
+
+	_, err := st.CreateRuntimeResourceInstance(ctx, params)
+	if err == nil || !strings.Contains(err.Error(), "runtime resource sandbox contract version is required") {
+		t.Fatalf("CreateRuntimeResourceInstance err=%v, want sandbox contract version required", err)
+	}
+}
+
+func TestRuntimeResourceIdentityForParamsRequiresExplicitSandboxContractVersion(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	now := time.Now().UTC()
+	params := runtimeResourceInstanceParamsForTest(t, ctx, st, owner.UUID, "sess_resource_identity_required_contract_version", "host-1", now)
+	params.SandboxContractVersion = " "
+
+	_, _, err := RuntimeResourceIdentityForParams(params)
+	if err == nil || !strings.Contains(err.Error(), "runtime resource sandbox contract version is required") {
+		t.Fatalf("RuntimeResourceIdentityForParams err=%v, want sandbox contract version required", err)
+	}
+}
+
 func createRuntimeResourceInstanceForTest(t *testing.T, ctx context.Context, st *Store, ownerUUID, sessionID, hostID string, now time.Time) RuntimeResourceInstance {
 	t.Helper()
 	params := runtimeResourceInstanceParamsForTest(t, ctx, st, ownerUUID, sessionID, hostID, now)
@@ -461,11 +487,14 @@ func runtimeResourceInstanceParamsForTest(t *testing.T, ctx context.Context, st 
 	}
 	contractID := "contract_" + allocation.GenerationID
 	if _, err := st.StoreSandboxContract(ctx, StoreSandboxContractParams{
-		ContractID:   contractID,
-		SessionID:    sessionID,
-		GenerationID: allocation.GenerationID,
-		Payload:      testSandboxContractPayload(t, sessionID, allocation),
-		Now:          now.Add(time.Millisecond),
+		ContractID:             contractID,
+		SessionID:              sessionID,
+		GenerationID:           allocation.GenerationID,
+		SandboxContractVersion: SandboxContractVersion,
+		ContractSchemaVersion:  SandboxContractSchemaVersion,
+		ContractGateVersion:    SandboxContractGateDriverManifest,
+		Payload:                testSandboxContractPayload(t, sessionID, allocation),
+		Now:                    now.Add(time.Millisecond),
 	}); err != nil {
 		t.Fatalf("store sandbox contract: %v", err)
 	}

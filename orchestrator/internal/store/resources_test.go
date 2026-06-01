@@ -3148,11 +3148,14 @@ func createLiveRuntimeResourceInstanceForAllocation(t *testing.T, ctx context.Co
 	t.Helper()
 	contractID := "contract_" + allocation.GenerationID
 	if _, err := st.StoreSandboxContract(ctx, StoreSandboxContractParams{
-		ContractID:   contractID,
-		SessionID:    sessionID,
-		GenerationID: allocation.GenerationID,
-		Payload:      testSandboxContractPayload(t, sessionID, allocation),
-		Now:          now,
+		ContractID:             contractID,
+		SessionID:              sessionID,
+		GenerationID:           allocation.GenerationID,
+		SandboxContractVersion: SandboxContractVersion,
+		ContractSchemaVersion:  SandboxContractSchemaVersion,
+		ContractGateVersion:    SandboxContractGateDriverManifest,
+		Payload:                testSandboxContractPayload(t, sessionID, allocation),
+		Now:                    now,
 	}); err != nil {
 		t.Fatalf("store sandbox contract: %v", err)
 	}

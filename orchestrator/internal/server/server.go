@@ -642,6 +642,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			GenerationID:           allocation.GenerationID,
 			Owner:                  allocation.Owner,
 			SandboxContractVersion: store.SandboxContractVersion,
+			ContractSchemaVersion:  store.SandboxContractSchemaVersion,
 			ContractGateVersion:    store.SandboxContractGateDriverManifest,
 			DriverState:            allocation.DriverState,
 			Payload:                contractPayload,

@@ -141,27 +141,22 @@ func (s *Store) StoreSandboxContract(ctx context.Context, p StoreSandboxContract
 	p.ContractID = strings.TrimSpace(p.ContractID)
 	p.SessionID = strings.TrimSpace(p.SessionID)
 	p.GenerationID = strings.TrimSpace(p.GenerationID)
-	if strings.TrimSpace(p.SandboxContractVersion) == "" {
-		p.SandboxContractVersion = SandboxContractVersion
-	} else {
-		p.SandboxContractVersion = strings.TrimSpace(p.SandboxContractVersion)
-	}
-	if p.ContractID == "" {
-		p.ContractID = "contract_" + p.GenerationID
-	}
-	if p.ContractID == "contract_" || p.SessionID == "" || p.GenerationID == "" {
+	p.SandboxContractVersion = strings.TrimSpace(p.SandboxContractVersion)
+	p.ContractGateVersion = strings.TrimSpace(p.ContractGateVersion)
+	if p.ContractID == "" || p.SessionID == "" || p.GenerationID == "" {
 		return SandboxContractRecord{}, fmt.Errorf("contract id, session id, and generation id are required")
+	}
+	if p.SandboxContractVersion == "" {
+		return SandboxContractRecord{}, fmt.Errorf("sandbox contract version is required")
 	}
 	if p.SandboxContractVersion != SandboxContractVersion {
 		return SandboxContractRecord{}, fmt.Errorf("unsupported sandbox contract version %q", p.SandboxContractVersion)
 	}
 	if p.ContractSchemaVersion == 0 {
-		p.ContractSchemaVersion = SandboxContractSchemaVersion
+		return SandboxContractRecord{}, fmt.Errorf("sandbox contract schema version is required")
 	}
-	if strings.TrimSpace(p.ContractGateVersion) == "" {
-		p.ContractGateVersion = SandboxContractGateDriverManifest
-	} else {
-		p.ContractGateVersion = strings.TrimSpace(p.ContractGateVersion)
+	if p.ContractGateVersion == "" {
+		return SandboxContractRecord{}, fmt.Errorf("sandbox contract gate version is required")
 	}
 	canonicalPayload, err := CanonicalSandboxContractPayload(p.Payload)
 	if err != nil {

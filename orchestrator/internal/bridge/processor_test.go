@@ -1466,9 +1466,12 @@ func createBridgeRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 	contractID := "contract_" + allocation.GenerationID
 	credentialPolicy := bridgeCredentialPolicyForTest(t, allocation.DriverState.DriverID)
 	if _, err := st.StoreSandboxContract(ctx, store.StoreSandboxContractParams{
-		ContractID:   contractID,
-		SessionID:    sessionID,
-		GenerationID: allocation.GenerationID,
+		ContractID:             contractID,
+		SessionID:              sessionID,
+		GenerationID:           allocation.GenerationID,
+		SandboxContractVersion: store.SandboxContractVersion,
+		ContractSchemaVersion:  store.SandboxContractSchemaVersion,
+		ContractGateVersion:    store.SandboxContractGateDriverManifest,
 		Payload: map[string]any{
 			"contract_id":              contractID,
 			"contract_schema_version":  store.SandboxContractSchemaVersion,
@@ -1523,8 +1526,7 @@ func createBridgeRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 				"agent_manifest_digest": "sha256:agent-manifest",
 			},
 		},
-		ContractGateVersion: store.SandboxContractGateDriverManifest,
-		Now:                 time.Now().UTC(),
+		Now: time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("store sandbox contract: %v", err)
 	}

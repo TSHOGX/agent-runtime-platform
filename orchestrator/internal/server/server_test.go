@@ -5330,9 +5330,12 @@ func createServerRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 	credentialPolicy := serverCredentialPolicyForTest(t, allocation.DriverState.DriverID)
 	modelAccessAllowed := allocation.DriverState.DriverID == "claude_code"
 	if _, err := st.StoreSandboxContract(ctx, store.StoreSandboxContractParams{
-		ContractID:   contractID,
-		SessionID:    sessionID,
-		GenerationID: allocation.GenerationID,
+		ContractID:             contractID,
+		SessionID:              sessionID,
+		GenerationID:           allocation.GenerationID,
+		SandboxContractVersion: store.SandboxContractVersion,
+		ContractSchemaVersion:  store.SandboxContractSchemaVersion,
+		ContractGateVersion:    store.SandboxContractGateDriverManifest,
 		Payload: map[string]any{
 			"sandbox_contract_version": store.SandboxContractVersion,
 			"contract_schema_version":  store.SandboxContractSchemaVersion,
@@ -5387,8 +5390,7 @@ func createServerRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 				"agent_manifest_digest": "sha256:agent-manifest",
 			},
 		},
-		ContractGateVersion: store.SandboxContractGateDriverManifest,
-		Now:                 now,
+		Now: now,
 	}); err != nil {
 		t.Fatalf("store sandbox contract: %v", err)
 	}

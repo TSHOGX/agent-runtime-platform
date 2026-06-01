@@ -392,6 +392,7 @@ func createPiRuntimeResourceLiveForTest(t *testing.T, ctx context.Context, st *S
 		GenerationID:           allocation.GenerationID,
 		Owner:                  allocation.Owner,
 		SandboxContractVersion: SandboxContractVersion,
+		ContractSchemaVersion:  SandboxContractSchemaVersion,
 		ContractGateVersion:    SandboxContractGateDriverManifest,
 		DriverState:            allocation.DriverState,
 		Payload:                payload,

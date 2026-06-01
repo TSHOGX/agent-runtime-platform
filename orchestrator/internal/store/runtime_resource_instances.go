@@ -201,11 +201,7 @@ func (s *Store) CreateRuntimeResourceInstance(ctx context.Context, p RuntimeReso
 	if p.Now.IsZero() {
 		p.Now = time.Now().UTC()
 	}
-	if strings.TrimSpace(p.SandboxContractVersion) == "" {
-		p.SandboxContractVersion = SandboxContractVersion
-	} else {
-		p.SandboxContractVersion = strings.TrimSpace(p.SandboxContractVersion)
-	}
+	p.SandboxContractVersion = strings.TrimSpace(p.SandboxContractVersion)
 	if err := validateRuntimeResourceInstanceParams(p); err != nil {
 		return RuntimeResourceInstance{}, err
 	}
@@ -246,11 +242,7 @@ INSERT INTO runtime_resource_instances (
 }
 
 func RuntimeResourceIdentityForParams(p RuntimeResourceInstanceParams) ([]byte, string, error) {
-	if strings.TrimSpace(p.SandboxContractVersion) == "" {
-		p.SandboxContractVersion = SandboxContractVersion
-	} else {
-		p.SandboxContractVersion = strings.TrimSpace(p.SandboxContractVersion)
-	}
+	p.SandboxContractVersion = strings.TrimSpace(p.SandboxContractVersion)
 	if err := validateRuntimeResourceInstanceParams(p); err != nil {
 		return nil, "", err
 	}
