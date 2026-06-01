@@ -1,8 +1,8 @@
 # Agent Runtime Platform Plan
 
-> Active planning starts from the current codebase, not from historical stage
-> documents. Current architecture is in [architecture.md](./architecture.md);
-> the next stage is summarized in [next-stage.md](./next-stage.md).
+> Active planning starts from the current codebase. Current architecture is in
+> [architecture.md](./architecture.md); detailed next-stage design is in
+> [next-stage.md](./next-stage.md).
 
 ## Current Baseline
 
@@ -23,24 +23,27 @@
 
 ## Next Stage
 
-The next stage adds an agent capability plane on top of the existing
-driver/provider contract. Platform-managed agent behavior must flow through
-explicit driver adapters and immutable per-session or per-generation snapshots.
-Unsupported enabled features fail during deployment or generation preparation;
-silent no-op behavior is not acceptable.
+The next stage introduces a host-only immutable generation plan, then adds an
+agent capability plane on top of that plan and the existing driver/provider
+contract. Platform-managed agent behavior must flow through explicit driver
+adapters and immutable per-session or per-generation snapshots. Unsupported
+enabled features must fail during deployment or generation preparation.
 
 Primary work:
 
-1. Add typed capability declarations to driver specs, validate enabled
-   capabilities against the selected driver, and make launch artifacts
-   manifest-only and fail-closed.
-2. Persist an operator policy prompt snapshot per session and deliver it only
+1. Add a host-only `GenerationPlan` so the sandbox contract, control manifest,
+   OCI spec, mount plan, and driver config artifacts are derived from the same
+   immutable launch facts.
+2. Add typed capability declarations to driver specs, validate enabled features
+   and required sub-capabilities against the selected driver, and render launch
+   artifacts only from validated plan and manifest inputs.
+3. Persist an operator policy prompt snapshot per session and deliver it only
    through the selected driver's prompt adapter.
-3. Record proxy-reported model-context usage, enforce configured context
+4. Record proxy-reported model-context usage, enforce configured context
    budgets, and call driver compaction adapters only when supported.
-4. Mount shared operational skills as a read-only content-addressed snapshot at
+5. Mount shared operational skills as a read-only content-addressed snapshot at
    `/harness-skills`, outside `/workspace` and artifact watcher paths.
-5. Render non-secret managed driver settings, hooks, and remote MCP
+6. Render non-secret managed driver settings, hooks, and remote MCP
    registrations through driver policy adapters. Credential-bearing MCP needs a
    later broker/token design.
 
@@ -59,8 +62,9 @@ Primary work:
   not in-process flags.
 - After changing runtime scripts or files under `sandbox-image/files/`, rebuild
   or overlay-sync the active rootfs before live testing.
-- For runtime, bridge, proxy, deployment-config, rootfs, or session-lifecycle
-  changes, run a live smoke for the selected deployment driver.
+- Treat contract-breaking runtime, bridge, proxy, deployment-config, rootfs, or
+  session-lifecycle changes as a cold cutover, then smoke test the selected
+  deployment driver.
 
 ## Later Work
 
