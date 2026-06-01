@@ -2,88 +2,53 @@
 
 > Status: planned on top of the completed [Phase 8 runtime isolation hardening](../phase8/README.md).
 > Part of [Phase 10](./README.md).
-> Foundation for [Phase 12 trajectory→skill evolution](../phase12-trajectory-pipeline.md).
+> Foundation for [Phase 12 trajectory-to-skill evolution](../phase12-trajectory-pipeline.md).
 
 ## Goal
 
-Provide a shared set of internal skills to supported agent sessions while
-keeping those files out of the user-visible `/workspace` file tree and the
-right-side Files pane.
+Provide shared internal skills to supported agent sessions while keeping those
+files out of the user-visible `/workspace` file tree and Files pane.
 
-This is a runtime packaging and delivery problem:
+Phase 10c is runtime packaging, not a skills release system. Operators update
+skills by changing this repo and deploying a new commit. Generation preparation
+pins a content digest and mounts a content-addressed snapshot; post-cutover
+prepared, live, and checkpointed generations keep the digest they started with.
 
-- Skills are maintained in this repository.
-- Generation preparation materializes the repository's current skill content
-  into a content-addressed runtime snapshot.
-- New containers mount that immutable snapshot read-only.
-- The agent can discover and read the skills.
-- The user workspace remains clean.
-- Existing checkpointed generations remain pinned to the skill content digest they started with.
+## Runtime Boundary
 
-Phase 10c does **not** introduce a separate skills release system. Versioning is the repository git history: operators update skills by changing this repo and deploying a new commit. Phase 12 may add a reviewed `releases/` flow when the trajectory pipeline starts generating skill candidates.
+Phase 10c uses the Phase 8 MountPlan contract. The skills mount must be a
+read-only exact bind, separate from `/workspace`, `/agent-home`, DataVolume
+roots, and any path watched for artifacts.
 
-## Runtime Prerequisite
-
-Phase 10c starts from the Phase 8 MountPlan contract. The active sandbox receives
-exact DataVolume-backed `/workspace` and `/agent-home` binds, generation-scoped
-`/harness-control` surfaces, optional exact read-only content binds such as
-`/schema-pack`, and no parent `/sessions`, `/agent-homes`, or
-`/harness-secrets` mounts.
-
-The skills mount must be a separate read-only exact subtree, never below
-`/workspace`, `/agent-home`, or any host root used for DataVolume storage. The
-entrypoint may then link it into the selected driver's private HOME for a
-conventional discovery path.
-
-## Directory Layout
-
-Repository layout:
+The repo path is only the authoring source:
 
 ```text
 sandbox-image/system-skills/
   skills/
     doris-query/
       SKILL.md
-    harness-runtime/
-      SKILL.md
 ```
 
-Deployment resolves that repository path to a host path, for example:
-
-```text
-/opt/agent-runtime-platform/sandbox-image/system-skills
-```
-
-That repository path is the authoring source, not the long-lived bind source.
-Generation preparation copies the validated payload into a runtime-owned
-content-addressed snapshot, for example:
+Generation preparation copies validated content into a runtime-owned snapshot:
 
 ```text
 /var/lib/harness/content/skills/sha256-3e7f.../
 ```
 
-The OCI spec binds the snapshot path. This preserves the `skills_digest`
-contract even if a later deploy updates the repo working tree in place while a
-generation is still live or checkpointed.
-
-Container-side layout:
+Container layout:
 
 ```text
-/harness-skills              # read-only bind mount
 /harness-skills/skills/...
-
-/agent-home/                 # selected driver's private agent HOME
 ```
 
-Optional per-agent links created by the entrypoint:
+The entrypoint may link that directory into the selected driver's private HOME,
+for example:
 
 ```text
 $AGENT_HOME/.claude/skills/harness -> /harness-skills/skills
 ```
 
-The exact link target follows the real discovery path of the selected agent runtime. The mount path stays agent-agnostic.
-
-## Config Shape
+## Config
 
 ```yaml
 harness:
@@ -94,8 +59,6 @@ harness:
     agent_link_mode: symlink
 ```
 
-Go side:
-
 ```go
 type SkillsConfig struct {
     Enabled       bool
@@ -105,39 +68,43 @@ type SkillsConfig struct {
 }
 ```
 
-`source_path` is resolved relative to the repository root unless absolute. It must point at a directory in the deployed codebase, not an operator-managed release tree.
+`source_path` is resolved relative to the repository root unless absolute. It
+must point at a directory in the deployed codebase, not an operator-managed
+release tree.
+
+Because Phase 10 uses destructive cutover, 10c does not backfill skill metadata
+into pre-10 sessions or preserve pre-10 prepared generations. Missing `skills_*`
+fields after cutover are artifact corruption.
 
 Recommended defaults:
 
-- `enabled=false` in local tests unless the directory exists.
-- `source_path=./sandbox-image/system-skills`.
-- `mount_path=/harness-skills`.
+- `enabled=false` in local tests unless the directory exists;
+- `source_path=./sandbox-image/system-skills`;
+- `mount_path=/harness-skills`;
 - `agent_link_mode=symlink`.
 
-## Digest Rules
+## Digest And Snapshot
 
-Compute `skills_digest` directly from the validated source directory contents:
+Compute `skills_digest` from validated source directory contents:
 
 1. Walk all regular files under `source_path`.
-2. Reject symlinks, directories outside the root, device files, and sockets.
-3. Sort files by slash-normalized relative path.
-4. For each file, hash `relative_path + NUL + sha256(file_contents)` into a canonical digest stream.
-5. Hash the stream with SHA-256 and store as `sha256:<hex>`.
+2. Reject symlinks, escapes outside the root, device files, and sockets.
+3. Sort slash-normalized relative paths.
+4. Hash `relative_path + NUL + sha256(file_contents)` for each file.
+5. Hash the canonical stream with SHA-256 and store `sha256:<hex>`.
 
-No `manifest.json`, `release_id`, `drafts/`, or `current` symlink is required in Phase 10c. The git commit is the version; `skills_digest` is the runtime compatibility pin.
+No `manifest.json`, release directory, or `current` symlink is required in
+Phase 10c. The git commit is the version; `skills_digest` is the post-cutover
+restore pin.
 
-## Runtime Spec Mount
+Generation preparation must materialize and verify the content-addressed
+snapshot before binding it. If the pinned snapshot is missing or fails digest
+verification at restore time, restore uses cold fallback instead of binding the
+current repo path.
 
-During generation artifact rendering:
+## Mount And Manifest
 
-1. Resolve `harness.skills.source_path`.
-2. Validate it exists and is a directory.
-3. Compute `skills_digest`.
-4. Materialize the directory into a runtime-owned content-addressed snapshot
-   keyed by `skills_digest`; if the snapshot already exists, verify its digest
-   before reuse.
-5. Add a read-only exact bind mount of the snapshot through the Phase 8
-   MountPlan builder:
+Bind the snapshot read-only through Phase 8 MountPlan:
 
 ```json
 {
@@ -148,22 +115,10 @@ During generation artifact rendering:
 }
 ```
 
-This mount inherits the Phase 8 exact-bind contract. If a worker can only use a
-recursive fallback, it must reject nested source submounts, use private/slave
-propagation, and prove with the Phase 8 post-launch submount gate that new host
-submounts do not appear in the sandbox.
+If a worker can only use a recursive fallback, it must reject nested source
+submounts and satisfy the Phase 8 post-launch submount gate.
 
-Recommended behavior:
-
-- `enabled=false`: no mount and no skills fields except `skills_enabled=false`.
-- `enabled=true` with missing directory: fail generation preparation.
-- Digest calculation error or invalid file type: fail generation preparation.
-- Pinned snapshot missing at restore time: fail restore compatibility and cold
-  fall back rather than binding the current repo path.
-
-## Control Manifest Fields
-
-Add to the per-generation control manifest:
+Manifest fields:
 
 ```json
 {
@@ -173,78 +128,52 @@ Add to the per-generation control manifest:
 }
 ```
 
-Include these fields in the strict-field projection used by the control-manifest digest (see `../phase7/checkpoint-restore.md`), so checkpoint/restore enforces that:
+Include these fields in the strict projected control-manifest digest. Restored
+checkpointed generations must see the same `skills_digest`; new generations use
+the deployed repo content at generation creation time.
 
-- Existing live sessions keep their original mounted content.
-- Restored checkpointed sessions must see the same `skills_digest`.
-- New sessions use whatever skill content is present in the deployed repo at generation creation time.
+## Entrypoint And Visibility
 
-If the repo's skill files change after a checkpoint, restore should use the
-pinned content-addressed snapshot. If that snapshot has been garbage-collected
-or its digest no longer verifies, restore should reject the stale projected
-digest and fall back cold. It must not bind the current repo path as a
-substitute.
+The entrypoint exports `HARNESS_SKILLS_ENABLED` and
+`HARNESS_SKILLS_MOUNT_PATH` from the control manifest, then links skills into
+the selected driver's private HOME according to the driver adapter. The original
+mount remains read-only.
 
-## Entrypoint Integration
-
-After `AGENT_HOME` is determined and before launching the agent:
-
-```sh
-if [ "${HARNESS_SKILLS_ENABLED:-0}" = "1" ] && [ -d "${HARNESS_SKILLS_MOUNT_PATH:-/harness-skills}/skills" ]; then
-  mkdir -p "$AGENT_HOME/.claude/skills"
-  ln -sfn "${HARNESS_SKILLS_MOUNT_PATH:-/harness-skills}/skills" "$AGENT_HOME/.claude/skills/harness"
-fi
-```
-
-Make the path generic:
-
-- Export `HARNESS_SKILLS_ENABLED` and `HARNESS_SKILLS_MOUNT_PATH` from the control manifest.
-- Choose per-agent link locations in a small `case "$HARNESS_AGENT"` block.
-- Keep the original mount read-only; only the symlink is written into agent HOME.
-
-The agent HOME is already outside `/workspace`, so this does not appear in the right-side Files pane.
-
-## UI and Artifact Visibility
-
-Do not mount skills below:
+Do not mount or link skills below:
 
 - `/workspace`
 - `/agent-home`
-- any path scanned by the artifact watcher
+- any artifact watcher path
 
-With the proposed `/harness-skills` mount:
+This is a visibility boundary, not a secrecy boundary. Skills should contain
+operational knowledge and procedures, not credentials or secrets.
 
-- The agent can read the skills.
-- The user-visible Files pane remains scoped to artifacts written under `/workspace`.
-- Skill files do not show up as artifacts.
+## Implementation Checklist
 
-This is a visibility boundary, not a secrecy boundary. If the agent can read a skill, a user can ask the agent to explain it. Therefore skills should contain operational knowledge and procedures, not credentials or secrets.
+1. Add `harness.skills` config, validation, and defaults.
+2. Add canonical directory digest calculation.
+3. Materialize validated skills into a content-addressed runtime snapshot.
+4. Add the read-only exact bind through Phase 8 MountPlan.
+5. Add skills manifest fields and projected digest coverage.
+6. Update entrypoint driver-specific skill linking.
+7. Add retention/GC that preserves snapshots referenced by live, prepared, or
+   checkpointed generations.
 
-## Implementation Steps
+## Acceptance Tests
 
-1. Add `harness.skills` config with validation and defaults.
-2. Add runtime config fields for skills source path and mount path.
-3. Add canonical directory digest calculation.
-4. Materialize validated skills into a content-addressed runtime snapshot.
-5. Add the read-only skills exact bind through the Phase 8 MountPlan.
-6. Add skills fields to the control manifest and projected digest logic.
-7. Update the entrypoint to link skills into the selected agent's private HOME.
-8. Add snapshot retention/GC that never removes content still referenced by a
-   live, prepared, or checkpointed generation.
-9. Tests:
-   - `enabled=false` means no mount.
-   - `enabled=true` with missing source directory fails.
-   - Valid source directory adds read-only mount.
-   - Digest changes when any skill file content or relative path changes.
-   - The generated spec binds the content-addressed snapshot, not the mutable
-     repo authoring path.
-   - Invalid file types under the skills root are rejected.
-   - Generated control manifest includes skills metadata and the projected digest reflects them.
-   - Artifact watcher does not record skills as artifacts.
-   - Snapshot GC does not remove content referenced by live or checkpointed
-     generations.
+- `enabled=false` means no mount.
+- Missing or invalid source directory with `enabled=true` fails generation
+  preparation.
+- Digest changes when any skill file content or relative path changes.
+- Runtime spec binds the content-addressed snapshot, not the mutable repo path.
+- Invalid file types under the skills root are rejected.
+- Manifest metadata joins the projected digest.
+- Artifact watcher does not record skills as artifacts.
+- Snapshot GC does not remove content referenced by prepared, live, or
+  checkpointed generations.
 
 ## Open Decisions
 
-- Exact Claude Code skills discovery path inside the sandbox. Confirm against the pinned Claude Code version.
-- Whether shell sessions should see `/harness-skills` by default. Recommendation: mount for all agents, link into HOME only for agents that use skills.
+- Confirm the exact Claude Code skills discovery path for the pinned CLI.
+- Shell sessions may mount `/harness-skills`, but only agents that use skills
+  should get HOME links.

@@ -70,10 +70,31 @@ absent or durably quarantined before their ownership rows are removed.
 Phase 10 starts from Phase 9's driver contract. These features must use driver
 adapters, with Claude and Pi renderers where supported.
 
-1. **10a — Configurable agent system prompt.** Inject an operator-controlled system prompt into every session — agent identity (e.g., "BatteryGPT"), capability bounds (no image reading), and sandbox resource constraints (1 GiB memory, no `fetchall()` on wide tables). Detailed design: [phase10/system-prompt.md](./phase10/system-prompt.md).
-2. **10b — Proactive context compaction driven by proxy-reported usage.** Use the Phase 8 proxy correlation path and driver compaction adapters to compact before the deployed model's real context window is exhausted. Detailed design: [phase10/context-compaction.md](./phase10/context-compaction.md).
-3. **10c — System-skills mount.** Read-only `/harness-skills` bind mount with `skills_digest` persisted in the control manifest and exposed through per-driver discovery adapters. Detailed design: [phase10/system-skills-mount.md](./phase10/system-skills-mount.md).
-4. **10d — Control-plane-managed driver settings, hooks, and remote MCP.** Render non-secret policy/MCP config through per-driver adapters. Credential-bearing MCP delivery requires a separate broker/token design. Detailed design: [phase10/managed-settings.md](./phase10/managed-settings.md).
+Phase 10 uses an automatic destructive cutover for obsolete pre-10 runtime and
+session state. The implementation may delete pre-10 sessions, messages,
+artifacts, turns, events, active model contexts, runtime generations,
+checkpoints, control/bridge/runtime directories, and driver homes instead of
+backfilling compatibility columns or preserving old prepared artifacts. Live
+provider/isolation resources must still be stopped, proven absent, or durably
+quarantined before their ownership rows are removed. This is a release reset,
+not a migration/backup feature.
+
+1. **10a - Configurable agent system prompt.** Inject an operator-controlled
+   prompt into every session for identity, capability bounds, and sandbox
+   resource constraints. Detailed design:
+   [phase10/system-prompt.md](./phase10/system-prompt.md).
+2. **10b - Proactive context compaction driven by proxy-reported usage.** Use
+   Phase 8 proxy correlation and driver compaction adapters before the deployed
+   model's real context window is exhausted. Detailed design:
+   [phase10/context-compaction.md](./phase10/context-compaction.md).
+3. **10c - System-skills mount.** Bind read-only `/harness-skills`, persist
+   `skills_digest`, and expose skills through per-driver discovery adapters.
+   Detailed design:
+   [phase10/system-skills-mount.md](./phase10/system-skills-mount.md).
+4. **10d - Control-plane-managed driver settings, hooks, and remote MCP.**
+   Render non-secret policy/MCP config through per-driver adapters.
+   Credential-bearing MCP delivery requires a separate broker/token design.
+   Detailed design: [phase10/managed-settings.md](./phase10/managed-settings.md).
 
 ## Phase 11: production operations
 
