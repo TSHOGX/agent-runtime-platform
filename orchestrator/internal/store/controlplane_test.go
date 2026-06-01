@@ -1448,6 +1448,7 @@ func createStoreSessionWithAgent(t *testing.T, ctx context.Context, st *Store, i
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
 		DriverID:  agent,
+		Mode:      ModeForDriver(agent),
 		CreatedAt: now,
 		UpdatedAt: now,
 	}); err != nil {

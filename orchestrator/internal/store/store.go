@@ -133,10 +133,14 @@ func (s *Store) CreateSession(ctx context.Context, session Session) error {
 	}
 	session.Mode = strings.TrimSpace(session.Mode)
 	if session.Mode == "" {
-		session.Mode = ModeForDriver(session.DriverID)
+		return fmt.Errorf("session mode is required")
 	}
-	if session.Mode == "" {
+	wantMode := ModeForDriver(session.DriverID)
+	if wantMode == "" {
 		return fmt.Errorf("unsupported session mode for driver %q", session.DriverID)
+	}
+	if session.Mode != wantMode {
+		return fmt.Errorf("session mode %q is invalid for driver %q", session.Mode, session.DriverID)
 	}
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO sessions (
@@ -586,9 +590,6 @@ func scanSession(row scanner) (Session, error) {
 	}
 	if errorClass.Valid {
 		session.ErrorClass = errorClass.String
-	}
-	if strings.TrimSpace(session.Mode) == "" {
-		session.Mode = ModeForDriver(session.DriverID)
 	}
 	return session, nil
 }

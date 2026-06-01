@@ -550,6 +550,7 @@ func TestCloseSessionReleasesSoftLimitWithoutDeletingHistory(t *testing.T) {
 		UserID:    labUserID,
 		Status:    string(sessionstate.Created),
 		DriverID:  "claude_code",
+		Mode:      store.ModeForDriver("claude_code"),
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -932,6 +933,7 @@ func TestMonitorIdleSessionsReEnablesCheckpointedSessionsWhenCheckpointDisabled(
 		UserID:    "lab",
 		Status:    string(sessionstate.Checkpointed),
 		DriverID:  "claude_code",
+		Mode:      store.ModeForDriver("claude_code"),
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -5497,6 +5499,7 @@ func createServerTestSession(t *testing.T, ctx context.Context, st *store.Store,
 		UserID:    labUserID,
 		Status:    status,
 		DriverID:  "claude_code",
+		Mode:      store.ModeForDriver("claude_code"),
 		CreatedAt: now,
 		UpdatedAt: now,
 		ExpiresAt: expiresAt,

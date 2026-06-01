@@ -1408,6 +1408,7 @@ func createBridgeSession(t *testing.T, ctx context.Context, st *store.Store, id 
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
 		DriverID:  "claude_code",
+		Mode:      store.ModeForDriver("claude_code"),
 		CreatedAt: now,
 		UpdatedAt: now,
 	}); err != nil {

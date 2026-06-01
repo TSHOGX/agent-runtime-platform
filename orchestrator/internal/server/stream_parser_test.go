@@ -33,6 +33,7 @@ func newParserTestServer(t *testing.T) (*Server, *store.Store) {
 		UserID:    "lab",
 		Status:    string(sessionstate.RunningActive),
 		DriverID:  "claude_code",
+		Mode:      store.ModeForDriver("claude_code"),
 		CreatedAt: now,
 		UpdatedAt: now,
 	}); err != nil {

@@ -29,6 +29,31 @@ func TestModeForDriverUsesDriverRegistryKind(t *testing.T) {
 	}
 }
 
+func TestCreateSessionRequiresExplicitMode(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	ctx := context.Background()
+	st, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	now := time.Now().UTC()
+	err = st.CreateSession(ctx, Session{
+		ID:        "sess_missing_mode",
+		UserID:    "lab",
+		Status:    string(sessionstate.Created),
+		DriverID:  "claude_code",
+		CreatedAt: now,
+		UpdatedAt: now,
+	})
+	if err == nil || !strings.Contains(err.Error(), "session mode is required") {
+		t.Fatalf("expected missing mode error, got %v", err)
+	}
+}
+
 func TestListMessages(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
@@ -46,6 +71,7 @@ func TestListMessages(t *testing.T) {
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
 		DriverID:  "claude_code",
+		Mode:      "agent",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -113,6 +139,7 @@ func TestFreshSchemaDoesNotCreateRemovedSessionColumns(t *testing.T) {
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
 		DriverID:  "claude_code",
+		Mode:      "agent",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}); err != nil {
@@ -184,6 +211,7 @@ func TestUpdateSessionStatusAndActivity(t *testing.T) {
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
 		DriverID:  "claude_code",
+		Mode:      "agent",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -234,6 +262,7 @@ func TestFailSessionStoresTypedFailure(t *testing.T) {
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
 		DriverID:  "claude_code",
+		Mode:      "agent",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -283,6 +312,7 @@ func TestEnqueueTurnMessageCreatesQueuedTurnMessageAndActivatesSession(t *testin
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
 		DriverID:  "claude_code",
+		Mode:      "agent",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -342,6 +372,7 @@ func TestEnqueueTurnMessageRejectsBusySessionWithoutWrites(t *testing.T) {
 		UserID:    "lab",
 		Status:    string(sessionstate.RunningActive),
 		DriverID:  "claude_code",
+		Mode:      "agent",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -390,6 +421,7 @@ func TestListSessionsByStatus(t *testing.T) {
 			UserID:    "lab",
 			Status:    string(sessionstate.RunningIdle),
 			DriverID:  "claude_code",
+			Mode:      "agent",
 			CreatedAt: now,
 			UpdatedAt: now,
 		},
@@ -398,6 +430,7 @@ func TestListSessionsByStatus(t *testing.T) {
 			UserID:    "lab",
 			Status:    string(sessionstate.RunningActive),
 			DriverID:  "claude_code",
+			Mode:      "agent",
 			CreatedAt: now,
 			UpdatedAt: now,
 		},
@@ -406,6 +439,7 @@ func TestListSessionsByStatus(t *testing.T) {
 			UserID:    "lab",
 			Status:    string(sessionstate.RunningIdle),
 			DriverID:  "claude_code",
+			Mode:      "agent",
 			CreatedAt: now,
 			UpdatedAt: now,
 		},
@@ -463,6 +497,7 @@ func TestRejectsRemovedStatuses(t *testing.T) {
 		UserID:    "lab",
 		Status:    "idle",
 		DriverID:  "claude_code",
+		Mode:      "agent",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -505,6 +540,7 @@ func TestCountActiveSessionsUsesCanonicalStatuses(t *testing.T) {
 			UserID:    "lab",
 			Status:    string(status),
 			DriverID:  "claude_code",
+			Mode:      "agent",
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
@@ -539,6 +575,7 @@ func TestDeleteArtifactPathDeletesFileAndDescendants(t *testing.T) {
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
 		DriverID:  "claude_code",
+		Mode:      "agent",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
