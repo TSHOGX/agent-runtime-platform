@@ -73,7 +73,7 @@ func TestRuntimeStartRequiresGenerationDetailsForColdPath(t *testing.T) {
 	}
 }
 
-func TestResolveCheckpointPathPrefersGenerationPath(t *testing.T) {
+func TestResolveCheckpointPathUsesGenerationPath(t *testing.T) {
 	dir := t.TempDir()
 	generationPath := filepath.Join(dir, "run", "gen_a", "checkpoint")
 	legacyPath := filepath.Join(dir, "checkpoints", "sess_1")
@@ -99,6 +99,25 @@ func TestResolveCheckpointPathPrefersGenerationPath(t *testing.T) {
 	}
 }
 
+func TestResolveCheckpointPathRequiresGenerationPath(t *testing.T) {
+	dir := t.TempDir()
+	legacyPath := filepath.Join(dir, "checkpoints", "sess_1")
+	if err := os.MkdirAll(legacyPath, 0o755); err != nil {
+		t.Fatalf("create legacy checkpoint: %v", err)
+	}
+	rt := New(Config{CheckpointsRoot: filepath.Join(dir, "checkpoints")})
+
+	_, err := rt.resolveCheckpointPath(StartRequest{
+		SessionID: "sess_1",
+	})
+	if err == nil {
+		t.Fatal("expected missing checkpoint path error")
+	}
+	if !strings.Contains(err.Error(), "checkpoint path is required") {
+		t.Fatalf("expected checkpoint path error, got %v", err)
+	}
+}
+
 func TestRuntimeStartRestoreRequiresCheckpointPath(t *testing.T) {
 	rt := New(Config{DefaultAgent: "claude_code"})
 	res := rt.Start(context.Background(), StartRequest{
@@ -121,6 +140,27 @@ func TestRuntimeStartRestoreRequiresCheckpointPath(t *testing.T) {
 	}
 	if !strings.Contains(res.Err.Error(), "checkpoint path is required") {
 		t.Fatalf("expected checkpoint path error, got %v", res.Err)
+	}
+}
+
+func TestRuntimeStartRequiresExplicitRestoreEvenWhenCheckpointExists(t *testing.T) {
+	dir := t.TempDir()
+	details := testGenerationDetails(dir, "gen_no_implicit_restore")
+	writeCheckpointFiles(t, details.CheckpointPath)
+	details.RunscPlatform = "ptrace"
+	rt := New(Config{DefaultAgent: "claude_code"})
+
+	res := rt.Start(context.Background(), StartRequest{
+		SessionID:    details.SessionID,
+		GenerationID: details.GenerationID,
+		Agent:        "claude_code",
+		Generation:   details,
+	}, nil)
+	if res.Err == nil {
+		t.Fatal("expected cold start validation error")
+	}
+	if !strings.Contains(res.Err.Error(), `unsupported runsc platform "ptrace"`) {
+		t.Fatalf("expected cold start validation error, got %v", res.Err)
 	}
 }
 

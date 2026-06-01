@@ -41,7 +41,6 @@ type Config struct {
 	SandboxGID              int
 	SandboxSupplementalGIDs []int
 	Claude                  ClaudeConfig
-	RestoreFromCheckpoint   bool
 	RunDir                  string
 	PreStartProbeAttempts   int
 	PreStartProbeInterval   time.Duration
@@ -298,14 +297,6 @@ func (r *Runtime) Start(ctx context.Context, req StartRequest, output func(Outpu
 
 	if req.RestoreFromCheckpoint {
 		return r.resumeFromCheckpoint(ctx, req, output)
-	}
-
-	// Check if checkpoint exists (legacy resume path). Bridge-managed restore
-	// callers set RestoreFromCheckpoint explicitly with generation artifacts.
-	if r.cfg.RestoreFromCheckpoint {
-		if _, err := r.resolveCheckpointPath(req); err == nil {
-			return r.resumeFromCheckpoint(ctx, req, output)
-		}
 	}
 
 	// Fresh start (cold path)
@@ -2912,25 +2903,14 @@ func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, _ 
 }
 
 func (r *Runtime) resolveCheckpointPath(req StartRequest) (string, error) {
-	candidates := []string{}
-	if path := strings.TrimSpace(req.Generation.CheckpointPath); path != "" {
-		candidates = append(candidates, path)
-	}
-	if root := strings.TrimSpace(r.cfg.CheckpointsRoot); root != "" {
-		path := filepath.Join(root, req.SessionID)
-		if len(candidates) == 0 || candidates[len(candidates)-1] != path {
-			candidates = append(candidates, path)
-		}
-	}
-	if len(candidates) == 0 {
+	path := strings.TrimSpace(req.Generation.CheckpointPath)
+	if path == "" {
 		return "", errors.New("checkpoint path is required")
 	}
-	for _, path := range candidates {
-		if _, err := os.Stat(path); err == nil {
-			return path, nil
-		}
+	if _, err := os.Stat(path); err == nil {
+		return path, nil
 	}
-	return "", fmt.Errorf("checkpoint image not found in %s", strings.Join(candidates, ", "))
+	return "", fmt.Errorf("checkpoint image not found: %s", path)
 }
 
 func validateCheckpointRestore(details store.RuntimeGenerationDetails, artifacts GenerationArtifacts, checkpointPath string) error {
