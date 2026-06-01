@@ -978,8 +978,65 @@ func TestBridgeCheckpointReadyRequiresFreshHeartbeatAndMarker(t *testing.T) {
 	if !bridgeCheckpointReady(dir, now, time.Second) {
 		t.Fatal("fresh heartbeat and ready marker should be checkpoint-ready")
 	}
+	if bridgeCheckpointReady(dir, now, 0) {
+		t.Fatal("non-positive heartbeat interval should not be checkpoint-ready")
+	}
 	if bridgeCheckpointReady(dir, now.Add(10*time.Second), time.Second) {
 		t.Fatal("stale bridge control files should not be checkpoint-ready")
+	}
+}
+
+func TestMonitorIdleSessionsRequiresPositiveTimingConfig(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+
+	tests := []struct {
+		name string
+		edit func(*config.Config)
+		want string
+	}{
+		{
+			name: "monitor interval",
+			edit: func(cfg *config.Config) {
+				cfg.Harness.Checkpoint.MonitorInterval = config.Duration{}
+			},
+			want: "checkpoint monitor interval must be > 0",
+		},
+		{
+			name: "idle threshold",
+			edit: func(cfg *config.Config) {
+				cfg.Harness.Checkpoint.IdleThreshold = config.Duration{}
+			},
+			want: "checkpoint idle threshold must be > 0",
+		},
+		{
+			name: "bridge heartbeat interval",
+			edit: func(cfg *config.Config) {
+				cfg.Harness.Bridge.HeartbeatInterval = config.Duration{}
+			},
+			want: "bridge heartbeat interval must be > 0",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testServerConfig(filepath.Join(dir, tc.name))
+			cfg.Harness.Checkpoint.AutoEnabled = true
+			cfg.Harness.Checkpoint.MonitorInterval = config.Duration{Duration: time.Minute}
+			cfg.Harness.Checkpoint.IdleThreshold = config.Duration{Duration: time.Minute}
+			tc.edit(&cfg)
+			srv := &Server{
+				cfg:   cfg,
+				store: st,
+				hub:   events.NewHub(),
+				log:   slog.Default(),
+			}
+			srv.SetOwnerUUID(owner.UUID)
+			err := srv.MonitorIdleSessions(ctx)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("monitor err=%v, want %q", err, tc.want)
+			}
+		})
 	}
 }
 
@@ -3386,6 +3443,50 @@ func TestRunMaintenancePollsBridgeOutbox(t *testing.T) {
 	err = <-done
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("maintenance exit err=%v, want context canceled", err)
+	}
+}
+
+func TestRunMaintenanceRequiresPositiveBridgeIntervals(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+
+	tests := []struct {
+		name string
+		edit func(*config.Config)
+		want string
+	}{
+		{
+			name: "heartbeat",
+			edit: func(cfg *config.Config) {
+				cfg.Harness.Bridge.HeartbeatInterval = config.Duration{}
+			},
+			want: "bridge heartbeat interval must be > 0",
+		},
+		{
+			name: "poll",
+			edit: func(cfg *config.Config) {
+				cfg.Harness.Bridge.PollInterval = config.Duration{}
+			},
+			want: "bridge poll interval must be > 0",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testServerConfig(filepath.Join(dir, tc.name))
+			tc.edit(&cfg)
+			srv := &Server{
+				cfg:   cfg,
+				store: st,
+				hub:   events.NewHub(),
+				log:   slog.Default(),
+			}
+			srv.SetOwnerUUID(owner.UUID)
+			err := srv.RunMaintenance(ctx)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("maintenance err=%v, want %q", err, tc.want)
+			}
+		})
 	}
 }
 

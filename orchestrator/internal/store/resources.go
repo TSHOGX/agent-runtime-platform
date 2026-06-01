@@ -1149,8 +1149,11 @@ func (s *Store) ListExpiredRuntimeRecoveryCandidates(ctx context.Context, p Star
 	if p.Now.IsZero() {
 		p.Now = time.Now().UTC()
 	}
+	if p.ReconnectGrace <= 0 {
+		return nil, fmt.Errorf("reconnect grace must be > 0")
+	}
 	if p.AckStartedGrace <= 0 {
-		p.AckStartedGrace = p.ReconnectGrace
+		return nil, fmt.Errorf("ack-started grace must be > 0")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1280,8 +1283,11 @@ func (s *Store) RepairExpiredRuntimeRecovery(ctx context.Context, p StartupRecov
 	if p.Now.IsZero() {
 		p.Now = time.Now().UTC()
 	}
+	if p.ReconnectGrace <= 0 {
+		return StartupRecoveryResult{}, fmt.Errorf("reconnect grace must be > 0")
+	}
 	if p.AckStartedGrace <= 0 {
-		p.AckStartedGrace = p.ReconnectGrace
+		return StartupRecoveryResult{}, fmt.Errorf("ack-started grace must be > 0")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

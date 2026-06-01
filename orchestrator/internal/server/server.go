@@ -38,10 +38,8 @@ import (
 const labUserID = "lab"
 
 const (
-	idleCheckpointInterval  = 5 * time.Minute
-	idleCheckpointThreshold = 30 * time.Minute
-	checkpointTimeout       = 2 * time.Minute
-	proxyCorrelationSocket  = "proxy-correlation.sock"
+	checkpointTimeout      = 2 * time.Minute
+	proxyCorrelationSocket = "proxy-correlation.sock"
 )
 
 var (
@@ -2341,11 +2339,11 @@ func (s *Server) RunMaintenance(ctx context.Context) error {
 	}
 	heartbeatInterval := s.cfg.Harness.Bridge.HeartbeatInterval.Duration
 	if heartbeatInterval <= 0 {
-		heartbeatInterval = 30 * time.Second
+		return fmt.Errorf("bridge heartbeat interval must be > 0")
 	}
 	pollInterval := s.cfg.Harness.Bridge.PollInterval.Duration
 	if pollInterval <= 0 {
-		pollInterval = 5 * time.Millisecond
+		return fmt.Errorf("bridge poll interval must be > 0")
 	}
 	owner := store.GenerationLeaseOwner(s.ownerUUID)
 	processor := &bridge.Processor{
@@ -3258,15 +3256,15 @@ func (s *Server) MonitorIdleSessions(ctx context.Context) error {
 	owner := store.GenerationLeaseOwner(s.ownerUUID)
 	interval := s.cfg.Harness.Checkpoint.MonitorInterval.Duration
 	if interval <= 0 {
-		interval = idleCheckpointInterval
+		return fmt.Errorf("checkpoint monitor interval must be > 0")
 	}
 	idleThreshold := s.cfg.Harness.Checkpoint.IdleThreshold.Duration
-	if idleThreshold < 0 {
-		idleThreshold = idleCheckpointThreshold
+	if idleThreshold <= 0 {
+		return fmt.Errorf("checkpoint idle threshold must be > 0")
 	}
 	heartbeatInterval := s.cfg.Harness.Bridge.HeartbeatInterval.Duration
 	if heartbeatInterval <= 0 {
-		heartbeatInterval = 30 * time.Second
+		return fmt.Errorf("bridge heartbeat interval must be > 0")
 	}
 	tick := func(now time.Time) {
 		candidates, err := s.store.ListAutoCheckpointCandidates(ctx, owner, now, idleThreshold)
@@ -3360,7 +3358,7 @@ func bridgeCheckpointReady(root string, now time.Time, heartbeatInterval time.Du
 		now = time.Now().UTC()
 	}
 	if heartbeatInterval <= 0 {
-		heartbeatInterval = 30 * time.Second
+		return false
 	}
 	maxAge := heartbeatInterval * 2
 	if maxAge < heartbeatInterval+5*time.Second {

@@ -1278,10 +1278,11 @@ UPDATE runtime_generation_resources SET resource_state = 'recreating' WHERE gene
 	createLiveRuntimeResourceInstanceForAllocation(t, ctx, st, "sess_recover", allocation, owner.UUID, "host-recover", now.Add(-30*time.Second))
 
 	recovered, err := recoverCleanedAllocations(t, ctx, st, StartupRecoveryParams{
-		OwnerUUID:      owner.UUID,
-		Now:            now,
-		LeaseTTL:       time.Minute,
-		ReconnectGrace: 30 * time.Second,
+		OwnerUUID:       owner.UUID,
+		Now:             now,
+		LeaseTTL:        time.Minute,
+		ReconnectGrace:  30 * time.Second,
+		AckStartedGrace: time.Minute,
 	})
 	if err != nil {
 		t.Fatalf("recover allocations: %v", err)
@@ -1382,10 +1383,11 @@ WHERE generation_id = ?`, formatTime(now.Add(-5*time.Second)), recentFailed.Gene
 	}
 
 	recovered, err := recoverCleanedAllocations(t, ctx, st, StartupRecoveryParams{
-		OwnerUUID:      owner.UUID,
-		Now:            now,
-		LeaseTTL:       time.Minute,
-		ReconnectGrace: 30 * time.Second,
+		OwnerUUID:       owner.UUID,
+		Now:             now,
+		LeaseTTL:        time.Minute,
+		ReconnectGrace:  30 * time.Second,
+		AckStartedGrace: time.Minute,
 	})
 	if err != nil {
 		t.Fatalf("recover allocations: %v", err)
@@ -1458,9 +1460,10 @@ WHERE generation_id = ?`, mismatch.GenerationID); err != nil {
 	}
 
 	candidates, err := st.ListExpiredRuntimeRecoveryCandidates(ctx, StartupRecoveryParams{
-		OwnerUUID:      owner.UUID,
-		Now:            now,
-		ReconnectGrace: time.Minute,
+		OwnerUUID:       owner.UUID,
+		Now:             now,
+		ReconnectGrace:  time.Minute,
+		AckStartedGrace: time.Minute,
 	})
 	if err != nil {
 		t.Fatalf("list recovery candidates: %v", err)
@@ -1472,6 +1475,118 @@ WHERE generation_id = ?`, mismatch.GenerationID); err != nil {
 		candidates[0].RuntimeID != validInstance.RunscContainerID ||
 		candidates[0].RuntimeID == "legacy-"+valid.GenerationID {
 		t.Fatalf("unexpected recovery candidate: %+v want runtime id %q", candidates[0], validInstance.RunscContainerID)
+	}
+}
+
+func TestExpiredRuntimeRecoveryRequiresPositiveGraceWindows(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	now := time.Now().UTC()
+
+	tests := []struct {
+		name string
+		p    StartupRecoveryParams
+		want string
+	}{
+		{
+			name: "list missing reconnect grace",
+			p: StartupRecoveryParams{
+				OwnerUUID:       owner.UUID,
+				Now:             now,
+				AckStartedGrace: time.Minute,
+			},
+			want: "reconnect grace must be > 0",
+		},
+		{
+			name: "list missing ack-started grace",
+			p: StartupRecoveryParams{
+				OwnerUUID:      owner.UUID,
+				Now:            now,
+				ReconnectGrace: time.Minute,
+			},
+			want: "ack-started grace must be > 0",
+		},
+		{
+			name: "list negative reconnect grace",
+			p: StartupRecoveryParams{
+				OwnerUUID:       owner.UUID,
+				Now:             now,
+				ReconnectGrace:  -time.Second,
+				AckStartedGrace: time.Minute,
+			},
+			want: "reconnect grace must be > 0",
+		},
+		{
+			name: "list negative ack-started grace",
+			p: StartupRecoveryParams{
+				OwnerUUID:       owner.UUID,
+				Now:             now,
+				ReconnectGrace:  time.Minute,
+				AckStartedGrace: -time.Second,
+			},
+			want: "ack-started grace must be > 0",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := st.ListExpiredRuntimeRecoveryCandidates(ctx, tc.p)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("list err=%v, want %q", err, tc.want)
+			}
+		})
+	}
+
+	repairTests := []struct {
+		name string
+		p    StartupRecoveryParams
+		want string
+	}{
+		{
+			name: "repair missing reconnect grace",
+			p: StartupRecoveryParams{
+				OwnerUUID:       owner.UUID,
+				Now:             now,
+				AckStartedGrace: time.Minute,
+			},
+			want: "reconnect grace must be > 0",
+		},
+		{
+			name: "repair missing ack-started grace",
+			p: StartupRecoveryParams{
+				OwnerUUID:      owner.UUID,
+				Now:            now,
+				ReconnectGrace: time.Minute,
+			},
+			want: "ack-started grace must be > 0",
+		},
+		{
+			name: "repair negative reconnect grace",
+			p: StartupRecoveryParams{
+				OwnerUUID:       owner.UUID,
+				Now:             now,
+				ReconnectGrace:  -time.Second,
+				AckStartedGrace: time.Minute,
+			},
+			want: "reconnect grace must be > 0",
+		},
+		{
+			name: "repair negative ack-started grace",
+			p: StartupRecoveryParams{
+				OwnerUUID:       owner.UUID,
+				Now:             now,
+				ReconnectGrace:  time.Minute,
+				AckStartedGrace: -time.Second,
+			},
+			want: "ack-started grace must be > 0",
+		},
+	}
+	for _, tc := range repairTests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := st.RepairExpiredRuntimeRecovery(ctx, tc.p, nil)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("repair err=%v, want %q", err, tc.want)
+			}
+		})
 	}
 }
 
