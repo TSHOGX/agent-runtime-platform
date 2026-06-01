@@ -114,6 +114,7 @@ func newArtifactTestStore(t *testing.T, ctx context.Context, workspaceRoot, sess
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
 		DriverID:  "claude_code",
+		Mode:      store.ModeForDriver("claude_code"),
 		CreatedAt: now,
 		UpdatedAt: now,
 	}); err != nil {
