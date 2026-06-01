@@ -426,17 +426,17 @@ INSERT INTO runtime_generations (
 		generationID, p.SessionID, networkProfileID, agentRuntimeProfileID, SandboxContractVersion, p.Owner, formatTime(leaseExpires), now, p.SessionID); err != nil {
 		return GenerationAllocation{}, err
 	}
-	var sessionDriverID, claudeSessionUUID string
+	var sessionDriverID string
 	if err := tx.QueryRowContext(ctx, `
-SELECT driver_id, COALESCE(claude_session_uuid, '')
+SELECT driver_id
 FROM sessions
-WHERE id = ?`, p.SessionID).Scan(&sessionDriverID, &claudeSessionUUID); err != nil {
+WHERE id = ?`, p.SessionID).Scan(&sessionDriverID); err != nil {
 		return GenerationAllocation{}, err
 	}
 	if sessionDriverID != p.Config.agent() {
 		return GenerationAllocation{}, fmt.Errorf("session driver %q does not match allocation driver %q", sessionDriverID, p.Config.agent())
 	}
-	driverState, err := ensureAllocationDriverStateTx(ctx, tx, p.SessionID, generationID, sessionDriverID, claudeSessionUUID, p.Now)
+	driverState, err := ensureAllocationDriverStateTx(ctx, tx, p.SessionID, generationID, sessionDriverID, p.Now)
 	if err != nil {
 		return GenerationAllocation{}, err
 	}

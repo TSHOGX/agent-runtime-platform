@@ -61,6 +61,7 @@ func TestFreshSchemaCreatesCurrentRuntimeTables(t *testing.T) {
 	for _, column := range []string{"host_path", "layout_version", "sandbox_uid", "sandbox_gid", "sandbox_supplemental_gids", "runtime_identity_digest", "provisioning_marker_path", "provisioning_marker_digest"} {
 		assertColumnExists(t, st.db, "session_workspaces", column)
 	}
+	assertColumnMissing(t, st.db, "sessions", "claude_session_uuid")
 	for _, column := range []string{"driver", "host_path", "layout_version", "sandbox_uid", "sandbox_gid", "sandbox_supplemental_gids", "runtime_identity_digest", "provisioning_marker_path", "provisioning_marker_digest"} {
 		assertColumnExists(t, st.db, "session_driver_homes", column)
 	}
@@ -1394,6 +1395,20 @@ func assertIndexExists(t *testing.T, db *sql.DB, index string) {
 
 func assertColumnExists(t *testing.T, db *sql.DB, table, column string) {
 	t.Helper()
+	if !tableHasColumn(t, db, table, column) {
+		t.Fatalf("column %s.%s missing", table, column)
+	}
+}
+
+func assertColumnMissing(t *testing.T, db *sql.DB, table, column string) {
+	t.Helper()
+	if tableHasColumn(t, db, table, column) {
+		t.Fatalf("column %s.%s should be absent", table, column)
+	}
+}
+
+func tableHasColumn(t *testing.T, db *sql.DB, table, column string) bool {
+	t.Helper()
 	rows, err := db.Query(`PRAGMA table_info(` + quoteSQLiteIdent(table) + `)`)
 	if err != nil {
 		t.Fatalf("table info %s: %v", table, err)
@@ -1409,13 +1424,13 @@ func assertColumnExists(t *testing.T, db *sql.DB, table, column string) {
 			t.Fatalf("scan table info: %v", err)
 		}
 		if name == column {
-			return
+			return true
 		}
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("table info rows: %v", err)
 	}
-	t.Fatalf("column %s.%s missing", table, column)
+	return false
 }
 
 func createStoreSession(t *testing.T, ctx context.Context, st *Store, id string) {
@@ -1509,7 +1524,7 @@ INSERT INTO runtime_generations (
 		generationID, sessionID, networkProfileID, agentRuntimeProfileID, SandboxContractVersion, owner, formatTime(expires), formatTime(now)); err != nil {
 		t.Fatalf("insert generation: %v", err)
 	}
-	payload, digest, err := canonicalBootstrapDriverState("claude_code", "bootstrap-"+sessionID)
+	payload, digest, err := canonicalBootstrapDriverState("claude_code", sessionID)
 	if err != nil {
 		t.Fatalf("build driver state: %v", err)
 	}

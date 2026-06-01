@@ -527,16 +527,15 @@ func TestCloseSessionReleasesSoftLimitWithoutDeletingHistory(t *testing.T) {
 	cfg.Harness.MaxSessions = 1
 	now := time.Now().UTC()
 	oldSession := store.Session{
-		ID:                "sess_retained",
-		UserID:            labUserID,
-		Status:            string(sessionstate.Created),
-		Agent:             "claude_code",
-		Workspace:         filepath.Join(cfg.SessionsRoot, "sess_retained"),
-		AgentHomePath:     filepath.Join(dir, "agent-homes", "sess_retained"),
-		RestoreID:         "phase3-sess_retained",
-		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
-		CreatedAt:         now,
-		UpdatedAt:         now,
+		ID:            "sess_retained",
+		UserID:        labUserID,
+		Status:        string(sessionstate.Created),
+		Agent:         "claude_code",
+		Workspace:     filepath.Join(cfg.SessionsRoot, "sess_retained"),
+		AgentHomePath: filepath.Join(dir, "agent-homes", "sess_retained"),
+		RestoreID:     "phase3-sess_retained",
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}
 	if err := os.MkdirAll(oldSession.Workspace, 0o755); err != nil {
 		t.Fatalf("create workspace: %v", err)
@@ -1304,8 +1303,7 @@ func TestSendMessageColdFallbackAllocatesReplacementGeneration(t *testing.T) {
 	if gotSession.ActiveGenerationID == "" || gotSession.ActiveGenerationID == old.GenerationID {
 		t.Fatalf("active generation was not replaced: %q old=%q", gotSession.ActiveGenerationID, old.GenerationID)
 	}
-	if gotSession.ClaudeSessionUUID != session.ClaudeSessionUUID ||
-		gotSession.Workspace != session.Workspace ||
+	if gotSession.Workspace != session.Workspace ||
 		gotSession.AgentHomePath == "" {
 		t.Fatalf("session identity not preserved: before=%+v after=%+v", session, gotSession)
 	}
@@ -5315,16 +5313,15 @@ func openServerOwnedStore(t *testing.T, ctx context.Context, dir string) (*store
 func createServerTestSession(t *testing.T, ctx context.Context, st *store.Store, dir, id, status string, now time.Time, expiresAt *time.Time) store.Session {
 	t.Helper()
 	session := store.Session{
-		ID:                id,
-		UserID:            labUserID,
-		Status:            status,
-		Agent:             "claude_code",
-		Workspace:         filepath.Join(dir, "sessions", id),
-		RestoreID:         "phase3-" + id,
-		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
-		CreatedAt:         now,
-		UpdatedAt:         now,
-		ExpiresAt:         expiresAt,
+		ID:        id,
+		UserID:    labUserID,
+		Status:    status,
+		Agent:     "claude_code",
+		Workspace: filepath.Join(dir, "sessions", id),
+		RestoreID: "phase3-" + id,
+		CreatedAt: now,
+		UpdatedAt: now,
+		ExpiresAt: expiresAt,
 	}
 	if err := os.MkdirAll(session.Workspace, 0o755); err != nil {
 		t.Fatalf("create workspace: %v", err)

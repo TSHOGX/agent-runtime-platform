@@ -34,7 +34,6 @@ CREATE TABLE IF NOT EXISTS sessions (
   workspace TEXT NOT NULL,
   restore_id TEXT NOT NULL,
   restore_ms INTEGER,
-  claude_session_uuid TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   expires_at TEXT,

@@ -168,6 +168,17 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ne
 	if details.NetworkHostsPath == "" {
 		t.Fatalf("claude generation should allocate network hosts alias projection: %+v", details)
 	}
+	var claudeStatePayload string
+	if err := st.db.QueryRowContext(ctx, `
+SELECT state_payload
+FROM session_driver_states
+WHERE session_id = ?
+  AND driver_id = 'claude_code'`, "sess_alloc").Scan(&claudeStatePayload); err != nil {
+		t.Fatalf("query claude driver state: %v", err)
+	}
+	if !strings.Contains(claudeStatePayload, `"claude_session_uuid":"bootstrap-sess_alloc"`) {
+		t.Fatalf("claude driver state did not initialize deterministic uuid: %s", claudeStatePayload)
+	}
 
 	if err := st.MarkGenerationResourcesLive(ctx, "sess_alloc", allocation.GenerationID, allocation.Owner, now.Add(time.Second)); err != nil {
 		t.Fatalf("mark resources live: %v", err)

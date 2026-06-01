@@ -25,7 +25,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
 	"harness-platform/orchestrator/internal/agents"
@@ -451,7 +450,6 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		Mode:                  mode,
 		Workspace:             filepath.Join(s.cfg.SessionsRoot, id),
 		RestoreID:             "unused-" + id,
-		ClaudeSessionUUID:     uuid.NewString(),
 		AutoCheckpointEnabled: s.cfg.Harness.Checkpoint.AutoEnabled,
 		CreatedAt:             now,
 		UpdatedAt:             now,

@@ -29,7 +29,7 @@ func TestModeForDriverUsesDriverRegistryKind(t *testing.T) {
 	}
 }
 
-func TestListMessagesAndUUID(t *testing.T) {
+func TestListMessages(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -42,15 +42,14 @@ func TestListMessagesAndUUID(t *testing.T) {
 
 	now := time.Now().UTC()
 	want := Session{
-		ID:                "sess_1",
-		UserID:            "lab",
-		Status:            string(sessionstate.Created),
-		Agent:             "claude_code",
-		Workspace:         dir,
-		RestoreID:         "phase3-sess_1",
-		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
-		CreatedAt:         now,
-		UpdatedAt:         now,
+		ID:        "sess_1",
+		UserID:    "lab",
+		Status:    string(sessionstate.Created),
+		Agent:     "claude_code",
+		Workspace: dir,
+		RestoreID: "phase3-sess_1",
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 	if err := st.CreateSession(ctx, want); err != nil {
 		t.Fatalf("create session: %v", err)
@@ -60,8 +59,8 @@ func TestListMessagesAndUUID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get session: %v", err)
 	}
-	if got.ClaudeSessionUUID != want.ClaudeSessionUUID {
-		t.Fatalf("uuid: want %q, got %q", want.ClaudeSessionUUID, got.ClaudeSessionUUID)
+	if got.ID != want.ID || got.Agent != want.Agent || got.RestoreID != want.RestoreID {
+		t.Fatalf("session mismatch: got=%+v want=%+v", got, want)
 	}
 
 	if _, err := st.AddMessage(ctx, want.ID, "user", "hello"); err != nil {

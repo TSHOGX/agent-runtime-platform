@@ -47,7 +47,7 @@ type driverStateRow struct {
 }
 
 type driverStateBootstrapContext struct {
-	ClaudeSessionUUID string
+	SessionID string
 }
 
 type driverStateCodec struct {
@@ -64,14 +64,15 @@ func driverStateCodecRegistry() map[agents.ID]driverStateCodec {
 		agents.ClaudeCode: {
 			driverID: agents.ClaudeCode,
 			bootstrap: func(ctx driverStateBootstrapContext) (any, error) {
-				if strings.TrimSpace(ctx.ClaudeSessionUUID) == "" {
-					return nil, fmt.Errorf("claude session uuid is required")
+				sessionID := strings.TrimSpace(ctx.SessionID)
+				if sessionID == "" {
+					return nil, fmt.Errorf("session id is required")
 				}
 				return map[string]any{
 					"schema_version":         1,
 					"driver_id":              string(agents.ClaudeCode),
 					"state_kind":             claudeDriverStateKind,
-					"claude_session_uuid":    strings.TrimSpace(ctx.ClaudeSessionUUID),
+					"claude_session_uuid":    "bootstrap-" + sessionID,
 					"initialized":            false,
 					"last_completed_turn_id": nil,
 				}, nil
@@ -153,12 +154,12 @@ func CheckpointDriverStatesDigest(generationID string, states []DriverStateToken
 	return "sha256:" + fmt.Sprintf("%x", sum[:]), nil
 }
 
-func canonicalBootstrapDriverState(driverID, claudeSessionUUID string) ([]byte, string, error) {
+func canonicalBootstrapDriverState(driverID, sessionID string) ([]byte, string, error) {
 	codec, ok := driverStateCodecFor(driverID)
 	if !ok {
 		return nil, "", fmt.Errorf("unsupported driver %q", driverID)
 	}
-	payload, err := codec.bootstrap(driverStateBootstrapContext{ClaudeSessionUUID: claudeSessionUUID})
+	payload, err := codec.bootstrap(driverStateBootstrapContext{SessionID: sessionID})
 	if err != nil {
 		return nil, "", err
 	}
@@ -237,7 +238,7 @@ func stringValue(value any) string {
 	return ""
 }
 
-func ensureAllocationDriverStateTx(ctx context.Context, tx *sql.Tx, sessionID, generationID, driverID, claudeSessionUUID string, now time.Time) (DriverStateToken, error) {
+func ensureAllocationDriverStateTx(ctx context.Context, tx *sql.Tx, sessionID, generationID, driverID string, now time.Time) (DriverStateToken, error) {
 	row, err := getDriverStateTx(ctx, tx, sessionID, driverID)
 	if err == nil {
 		return DriverStateToken{DriverID: row.DriverID, StateDigest: row.StateDigest, StateVersion: row.StateVersion}, nil
@@ -258,10 +259,7 @@ WHERE g.session_id = ?
 	if priorGenerations != 0 {
 		return DriverStateToken{}, fmt.Errorf("missing driver state for existing %s session", driverID)
 	}
-	if agents.ID(driverID) == agents.ClaudeCode && strings.TrimSpace(claudeSessionUUID) == "" {
-		claudeSessionUUID = "bootstrap-" + strings.TrimSpace(sessionID)
-	}
-	payload, digest, err := canonicalBootstrapDriverState(driverID, claudeSessionUUID)
+	payload, digest, err := canonicalBootstrapDriverState(driverID, sessionID)
 	if err != nil {
 		return DriverStateToken{}, err
 	}

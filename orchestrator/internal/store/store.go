@@ -27,7 +27,6 @@ type Session struct {
 	ActiveGenerationID    string     `json:"active_generation_id,omitempty"`
 	RestoreID             string     `json:"restore_id"`
 	RestoreMS             *int64     `json:"restore_ms,omitempty"`
-	ClaudeSessionUUID     string     `json:"claude_session_uuid,omitempty"`
 	CreatedAt             time.Time  `json:"created_at"`
 	UpdatedAt             time.Time  `json:"updated_at"`
 	ExpiresAt             *time.Time `json:"expires_at,omitempty"`
@@ -159,12 +158,11 @@ func (s *Store) CreateSession(ctx context.Context, session Session) error {
 	}
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO sessions (
-  id, user_id, status, driver_id, mode, workspace, agent_home_path, restore_id, claude_session_uuid,
+  id, user_id, status, driver_id, mode, workspace, agent_home_path, restore_id,
   created_at, updated_at, expires_at, auto_checkpoint_enabled
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		session.ID, session.UserID, session.Status, session.Agent, session.Mode, session.Workspace, nullableString(session.AgentHomePath),
-		session.RestoreID, nullableString(session.ClaudeSessionUUID),
-		formatTime(session.CreatedAt), formatTime(session.UpdatedAt), formatOptionalTime(session.ExpiresAt),
+		session.RestoreID, formatTime(session.CreatedAt), formatTime(session.UpdatedAt), formatOptionalTime(session.ExpiresAt),
 		boolInt(session.AutoCheckpointEnabled),
 	)
 	return err
@@ -172,14 +170,14 @@ INSERT INTO sessions (
 
 func (s *Store) GetSession(ctx context.Context, id string) (Session, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT id, user_id, status, driver_id, mode, workspace, agent_home_path, active_generation_id, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path, auto_checkpoint_enabled, failure_reason, error_class
+SELECT id, user_id, status, driver_id, mode, workspace, agent_home_path, active_generation_id, restore_id, restore_ms, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path, auto_checkpoint_enabled, failure_reason, error_class
 FROM sessions WHERE id = ?`, id)
 	return scanSession(row)
 }
 
 func (s *Store) ListSessions(ctx context.Context) ([]Session, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, user_id, status, driver_id, mode, workspace, agent_home_path, active_generation_id, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path, auto_checkpoint_enabled, failure_reason, error_class
+SELECT id, user_id, status, driver_id, mode, workspace, agent_home_path, active_generation_id, restore_id, restore_ms, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path, auto_checkpoint_enabled, failure_reason, error_class
 FROM sessions ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -561,7 +559,6 @@ type scanner interface {
 func scanSession(row scanner) (Session, error) {
 	var session Session
 	var restoreMS sql.NullInt64
-	var claudeUUID sql.NullString
 	var agentHomePath, activeGenerationID sql.NullString
 	var createdAt, updatedAt string
 	var expiresAt, endedAt, lastActivityAt sql.NullString
@@ -569,7 +566,7 @@ func scanSession(row scanner) (Session, error) {
 	var autoCheckpointEnabled int
 	err := row.Scan(
 		&session.ID, &session.UserID, &session.Status, &session.Agent, &session.Mode, &session.Workspace, &agentHomePath,
-		&activeGenerationID, &session.RestoreID, &restoreMS, &claudeUUID, &createdAt, &updatedAt,
+		&activeGenerationID, &session.RestoreID, &restoreMS, &createdAt, &updatedAt,
 		&expiresAt, &endedAt, &lastActivityAt, &checkpointPath, &autoCheckpointEnabled, &failureReason, &errorClass,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -586,9 +583,6 @@ func scanSession(row scanner) (Session, error) {
 	}
 	if activeGenerationID.Valid {
 		session.ActiveGenerationID = activeGenerationID.String
-	}
-	if claudeUUID.Valid {
-		session.ClaudeSessionUUID = claudeUUID.String
 	}
 	session.CreatedAt = parseTime(createdAt)
 	session.UpdatedAt = parseTime(updatedAt)
@@ -727,7 +721,7 @@ func (s *Store) ListSessionsByStatus(ctx context.Context, status string) ([]Sess
 		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, user_id, status, driver_id, mode, workspace, agent_home_path, active_generation_id, restore_id, restore_ms, claude_session_uuid, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path, auto_checkpoint_enabled, failure_reason, error_class
+SELECT id, user_id, status, driver_id, mode, workspace, agent_home_path, active_generation_id, restore_id, restore_ms, created_at, updated_at, expires_at, ended_at, last_activity_at, checkpoint_path, auto_checkpoint_enabled, failure_reason, error_class
 FROM sessions WHERE status = ? ORDER BY last_activity_at ASC`, status)
 	if err != nil {
 		return nil, err
