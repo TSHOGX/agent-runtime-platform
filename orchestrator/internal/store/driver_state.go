@@ -51,6 +51,72 @@ type driverStateRow struct {
 	UpdatedAt           time.Time
 }
 
+type driverStateBootstrapContext struct {
+	ClaudeSessionUUID string
+}
+
+type driverStateCodec struct {
+	driverID                             agents.ID
+	bootstrap                            func(driverStateBootstrapContext) (any, error)
+	validatePayload                      func(map[string]any) error
+	validateHostPayload                  func(canonicalPayload []byte, agentHomeHostPath, expectedCompletedTurnID string) error
+	validateCompletedUpdateAgainstHostTx func(context.Context, *sql.Tx, CompleteTurnParams, []byte) error
+	synthesizeCompletedUpdateTx          func(context.Context, *sql.Tx, CompleteTurnParams, driverStateRow) error
+}
+
+func driverStateCodecRegistry() map[agents.ID]driverStateCodec {
+	return map[agents.ID]driverStateCodec{
+		agents.ClaudeCode: {
+			driverID: agents.ClaudeCode,
+			bootstrap: func(ctx driverStateBootstrapContext) (any, error) {
+				if strings.TrimSpace(ctx.ClaudeSessionUUID) == "" {
+					return nil, fmt.Errorf("claude session uuid is required")
+				}
+				return map[string]any{
+					"schema_version":         1,
+					"driver_id":              string(agents.ClaudeCode),
+					"state_kind":             claudeDriverStateKind,
+					"claude_session_uuid":    strings.TrimSpace(ctx.ClaudeSessionUUID),
+					"initialized":            false,
+					"last_completed_turn_id": nil,
+				}, nil
+			},
+			validatePayload:             validateClaudeDriverStatePayload,
+			synthesizeCompletedUpdateTx: synthesizeClaudeCompletedDriverStateUpdateTx,
+		},
+		agents.Shell: {
+			driverID: agents.Shell,
+			bootstrap: func(driverStateBootstrapContext) (any, error) {
+				return map[string]any{
+					"schema_version": 1,
+					"driver_id":      string(agents.Shell),
+					"state_kind":     emptyDriverStateKind,
+				}, nil
+			},
+			validatePayload: validateEmptyDriverStatePayload,
+		},
+		agents.Pi: {
+			driverID: agents.Pi,
+			bootstrap: func(driverStateBootstrapContext) (any, error) {
+				return map[string]any{
+					"schema_version": 1,
+					"driver_id":      string(agents.Pi),
+					"state_kind":     piDriverStateKindUninitialized,
+					"session_dir":    agents.PiSessionDir,
+				}, nil
+			},
+			validatePayload:                      validatePiDriverStatePayload,
+			validateHostPayload:                  validatePiDriverStatePayloadForHost,
+			validateCompletedUpdateAgainstHostTx: validatePiDriverStateUpdateAgainstHostTx,
+		},
+	}
+}
+
+func driverStateCodecFor(driverID string) (driverStateCodec, bool) {
+	codec, ok := driverStateCodecRegistry()[agents.ID(strings.TrimSpace(driverID))]
+	return codec, ok
+}
+
 func DriverStateDigest(canonicalPayload []byte) string {
 	sum := sha256.Sum256(append([]byte(driverStateDigestPrefix), canonicalPayload...))
 	return "sha256:" + fmt.Sprintf("%x", sum[:])
@@ -100,35 +166,15 @@ func CheckpointDriverStatesDigest(generationID string, states []DriverStateToken
 }
 
 func canonicalBootstrapDriverState(driverID, claudeSessionUUID string) ([]byte, string, error) {
-	switch agents.ID(strings.TrimSpace(driverID)) {
-	case agents.ClaudeCode:
-		if strings.TrimSpace(claudeSessionUUID) == "" {
-			return nil, "", fmt.Errorf("claude session uuid is required")
-		}
-		return canonicalDriverStatePayload(map[string]any{
-			"schema_version":         1,
-			"driver_id":              string(agents.ClaudeCode),
-			"state_kind":             claudeDriverStateKind,
-			"claude_session_uuid":    strings.TrimSpace(claudeSessionUUID),
-			"initialized":            false,
-			"last_completed_turn_id": nil,
-		}, string(agents.ClaudeCode))
-	case agents.Shell:
-		return canonicalDriverStatePayload(map[string]any{
-			"schema_version": 1,
-			"driver_id":      string(agents.Shell),
-			"state_kind":     emptyDriverStateKind,
-		}, string(agents.Shell))
-	case agents.Pi:
-		return canonicalDriverStatePayload(map[string]any{
-			"schema_version": 1,
-			"driver_id":      string(agents.Pi),
-			"state_kind":     piDriverStateKindUninitialized,
-			"session_dir":    agents.PiSessionDir,
-		}, string(agents.Pi))
-	default:
+	codec, ok := driverStateCodecFor(driverID)
+	if !ok {
 		return nil, "", fmt.Errorf("unsupported driver %q", driverID)
 	}
+	payload, err := codec.bootstrap(driverStateBootstrapContext{ClaudeSessionUUID: claudeSessionUUID})
+	if err != nil {
+		return nil, "", err
+	}
+	return canonicalDriverStatePayload(payload, string(codec.driverID))
 }
 
 func canonicalDriverStatePayload(value any, driverID string) ([]byte, string, error) {
@@ -163,30 +209,32 @@ func validateDriverStatePayload(canonicalPayload []byte, driverID string) error 
 	if got, _ := object["driver_id"].(string); got != strings.TrimSpace(driverID) {
 		return fmt.Errorf("driver state driver_id = %q, want %q", got, strings.TrimSpace(driverID))
 	}
-	switch agents.ID(strings.TrimSpace(driverID)) {
-	case agents.ClaudeCode:
-		if got, _ := object["state_kind"].(string); got != claudeDriverStateKind {
-			return fmt.Errorf("claude driver state_kind = %q", got)
-		}
-		if strings.TrimSpace(stringValue(object["claude_session_uuid"])) == "" {
-			return fmt.Errorf("claude driver state uuid is required")
-		}
-		if _, ok := object["initialized"].(bool); !ok {
-			return fmt.Errorf("claude driver state initialized is required")
-		}
-		if _, ok := object["last_completed_turn_id"]; !ok {
-			return fmt.Errorf("claude driver state last_completed_turn_id is required")
-		}
-	case agents.Shell:
-		if got, _ := object["state_kind"].(string); got != emptyDriverStateKind {
-			return fmt.Errorf("shell driver state_kind = %q", got)
-		}
-	case agents.Pi:
-		if err := validatePiDriverStatePayload(object); err != nil {
-			return err
-		}
-	default:
+	codec, ok := driverStateCodecFor(driverID)
+	if !ok {
 		return fmt.Errorf("unsupported driver %q", driverID)
+	}
+	return codec.validatePayload(object)
+}
+
+func validateClaudeDriverStatePayload(object map[string]any) error {
+	if got, _ := object["state_kind"].(string); got != claudeDriverStateKind {
+		return fmt.Errorf("claude driver state_kind = %q", got)
+	}
+	if strings.TrimSpace(stringValue(object["claude_session_uuid"])) == "" {
+		return fmt.Errorf("claude driver state uuid is required")
+	}
+	if _, ok := object["initialized"].(bool); !ok {
+		return fmt.Errorf("claude driver state initialized is required")
+	}
+	if _, ok := object["last_completed_turn_id"]; !ok {
+		return fmt.Errorf("claude driver state last_completed_turn_id is required")
+	}
+	return nil
+}
+
+func validateEmptyDriverStatePayload(object map[string]any) error {
+	if got, _ := object["state_kind"].(string); got != emptyDriverStateKind {
+		return fmt.Errorf("shell driver state_kind = %q", got)
 	}
 	return nil
 }
@@ -403,8 +451,8 @@ WHERE id = ?
 	if turnCount != 1 {
 		return permanentTurnCompletionf("driver state update turn does not belong to generation")
 	}
-	if driverID == agents.Pi {
-		if err := validatePiDriverStateUpdateAgainstHostTx(ctx, tx, p, canonical); err != nil {
+	if codec, ok := driverStateCodecFor(string(driverID)); ok && codec.validateCompletedUpdateAgainstHostTx != nil {
+		if err := codec.validateCompletedUpdateAgainstHostTx(ctx, tx, p, canonical); err != nil {
 			return err
 		}
 	}
@@ -480,7 +528,39 @@ func piAgentHomeHostPathFromContract(contract map[string]any) (string, error) {
 	return hostPath, nil
 }
 
+func ValidateDriverStatePayloadForRuntimeLaunch(driverID string, canonicalPayload []byte, agentHomeHostPath string) error {
+	codec, ok := driverStateCodecFor(driverID)
+	if !ok {
+		return fmt.Errorf("unsupported driver %q", driverID)
+	}
+	if codec.validateHostPayload == nil {
+		return nil
+	}
+	if len(canonicalPayload) == 0 {
+		return fmt.Errorf("%s runtime launch requires driver state payload", codec.driverID)
+	}
+	if err := codec.validateHostPayload(canonicalPayload, agentHomeHostPath, ""); err != nil {
+		return fmt.Errorf("%s runtime launch driver state validation: %w", codec.driverID, err)
+	}
+	return nil
+}
+
+func ValidateDriverStatePayloadForHost(driverID string, canonicalPayload []byte, agentHomeHostPath, expectedCompletedTurnID string) error {
+	codec, ok := driverStateCodecFor(driverID)
+	if !ok {
+		return fmt.Errorf("unsupported driver %q", driverID)
+	}
+	if codec.validateHostPayload == nil {
+		return nil
+	}
+	return codec.validateHostPayload(canonicalPayload, agentHomeHostPath, expectedCompletedTurnID)
+}
+
 func ValidatePiDriverStatePayloadForHost(canonicalPayload []byte, agentHomeHostPath, expectedCompletedTurnID string) error {
+	return ValidateDriverStatePayloadForHost(string(agents.Pi), canonicalPayload, agentHomeHostPath, expectedCompletedTurnID)
+}
+
+func validatePiDriverStatePayloadForHost(canonicalPayload []byte, agentHomeHostPath, expectedCompletedTurnID string) error {
 	canonical, _, err := canonicalDriverStatePayload(canonicalPayload, string(agents.Pi))
 	if err != nil {
 		return err
@@ -590,13 +670,18 @@ WHERE g.session_id = ?
 		}
 		return fmt.Errorf("driver state generation lease check: %w", err)
 	}
-	if driverID != string(agents.ClaudeCode) {
+	codec, ok := driverStateCodecFor(driverID)
+	if !ok || codec.synthesizeCompletedUpdateTx == nil {
 		return nil
 	}
 	current, err := getDriverStateTx(ctx, tx, p.SessionID, driverID)
 	if err != nil {
 		return err
 	}
+	return codec.synthesizeCompletedUpdateTx(ctx, tx, p, current)
+}
+
+func synthesizeClaudeCompletedDriverStateUpdateTx(ctx context.Context, tx *sql.Tx, p CompleteTurnParams, current driverStateRow) error {
 	var payload struct {
 		SchemaVersion       int     `json:"schema_version"`
 		DriverID            string  `json:"driver_id"`
@@ -639,7 +724,7 @@ WHERE session_id = ?
   AND state_digest = ?
   AND state_version = ?`,
 		string(nextPayload), nextDigest, current.StateVersion+1, p.GenerationID, p.TurnID, formatTime(p.Now),
-		p.SessionID, driverID, current.StateDigest, current.StateVersion)
+		p.SessionID, current.DriverID, current.StateDigest, current.StateVersion)
 	if err != nil {
 		return err
 	}

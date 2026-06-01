@@ -1382,16 +1382,7 @@ func (s *Server) runtimeStartRequest(session store.Session, generationID string,
 }
 
 func validateDriverStateForRuntimeLaunch(details store.RuntimeGenerationDetails, volumes sessionRuntimeDataVolumes) error {
-	if strings.TrimSpace(details.Agent) != string(agents.Pi) {
-		return nil
-	}
-	if len(details.DriverStatePayload) == 0 {
-		return fmt.Errorf("pi runtime launch requires driver state payload")
-	}
-	if err := store.ValidatePiDriverStatePayloadForHost(details.DriverStatePayload, volumes.DriverHome.HostPath, ""); err != nil {
-		return fmt.Errorf("pi runtime launch driver state validation: %w", err)
-	}
-	return nil
+	return store.ValidateDriverStatePayloadForRuntimeLaunch(details.Agent, details.DriverStatePayload, volumes.DriverHome.HostPath)
 }
 
 func driverStateInitialized(details store.RuntimeGenerationDetails) bool {
