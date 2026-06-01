@@ -1444,13 +1444,13 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndIsolatedRuntime(t *t
 	if err := json.Unmarshal(specData, &spec); err != nil {
 		t.Fatalf("runtime spec is not valid JSON: %v\n%s", err, specData)
 	}
-	if strings.Contains(string(specData), "legacy-template") {
-		t.Fatalf("runtime spec hot path must not reference legacy-template: %s", specData)
+	if strings.Contains(string(specData), "removed-template") {
+		t.Fatalf("runtime spec hot path must not reference removed-template: %s", specData)
 	}
 	if strings.Contains(string(specData), "/harness-secrets") ||
 		strings.Contains(string(specData), "anthropic_api_key") ||
 		strings.Contains(string(specData), "anthropic_auth_token") {
-		t.Fatalf("runtime spec must not contain legacy secret references: %s", specData)
+		t.Fatalf("runtime spec must not contain removed secret references: %s", specData)
 	}
 	if !spec.Root.Readonly {
 		t.Fatalf("isolated rootfs must be read-only: %+v", spec.Root)
@@ -1524,7 +1524,7 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndIsolatedRuntime(t *t
 	}
 	for _, key := range []string{"HARNESS_EXPECTED_API_KEY_SECRET_ID", "HARNESS_EXPECTED_AUTH_TOKEN_SECRET_ID", "HARNESS_EXPECTED_SECRET_VERSION", "HARNESS_SECRET_READERS_GID"} {
 		if _, ok := env[key]; ok {
-			t.Fatalf("runtime spec must not include legacy secret env %s: %+v", key, env)
+			t.Fatalf("runtime spec must not include removed secret env %s: %+v", key, env)
 		}
 	}
 	for _, name := range []string{"inbox", "outbox", "heartbeat", "tmp"} {
@@ -1648,14 +1648,14 @@ func TestPrepareClaudeHostOnlyGenerationHasNoSecretMount(t *testing.T) {
 	if strings.Contains(string(manifestData), "/harness-secrets") ||
 		strings.Contains(string(manifestData), "anthropic_api_key") ||
 		strings.Contains(string(manifestData), "anthropic_auth_token") {
-		t.Fatalf("host-only manifest contains legacy secret references: %s", manifestData)
+		t.Fatalf("host-only manifest contains removed secret references: %s", manifestData)
 	}
 
 	specData := mustReadFile(t, details.SpecPath)
 	if strings.Contains(string(specData), "/harness-secrets") ||
 		strings.Contains(string(specData), "anthropic_api_key") ||
 		strings.Contains(string(specData), "anthropic_auth_token") {
-		t.Fatalf("host-only spec contains legacy secret references: %s", specData)
+		t.Fatalf("host-only spec contains removed secret references: %s", specData)
 	}
 	var spec runtimeSpec
 	if err := json.Unmarshal(specData, &spec); err != nil {
@@ -1749,7 +1749,7 @@ func TestPreparePiGenerationMaterializesReadOnlyConfig(t *testing.T) {
 		t.Fatalf("pi models config must use Pi native schema without harness schema_version: %+v", models)
 	}
 	if _, ok := models["models"]; ok {
-		t.Fatalf("pi models config must not use legacy top-level models array: %+v", models)
+		t.Fatalf("pi models config must not use removed top-level models array: %+v", models)
 	}
 	if _, ok := providers["anthropic"]; ok {
 		t.Fatalf("pi models config must not use built-in anthropic provider: %+v", models)
@@ -2131,8 +2131,8 @@ func TestPrepareShellGenerationHasNoSecretMount(t *testing.T) {
 func TestPrepareGenerationUsesProvidedDataVolumePaths(t *testing.T) {
 	dir := t.TempDir()
 	rt := New(Config{
-		SessionsRoot:   filepath.Join(dir, "legacy-sessions"),
-		AgentHomesRoot: filepath.Join(dir, "legacy-agent-homes"),
+		SessionsRoot:   filepath.Join(dir, "unused-sessions"),
+		AgentHomesRoot: filepath.Join(dir, "unused-agent-homes"),
 		BundleRoot:     filepath.Join(dir, "bundle", "out"),
 		RootFSPath:     filepath.Join(dir, "rootfs"),
 		RunscNetwork:   "host",
@@ -2173,8 +2173,8 @@ func TestPrepareGenerationUsesProvidedDataVolumePaths(t *testing.T) {
 func TestPrepareGenerationRequiresDataVolumePaths(t *testing.T) {
 	dir := t.TempDir()
 	rt := New(Config{
-		SessionsRoot:   filepath.Join(dir, "legacy-sessions"),
-		AgentHomesRoot: filepath.Join(dir, "legacy-agent-homes"),
+		SessionsRoot:   filepath.Join(dir, "unused-sessions"),
+		AgentHomesRoot: filepath.Join(dir, "unused-agent-homes"),
 		BundleRoot:     filepath.Join(dir, "bundle", "out"),
 		RootFSPath:     filepath.Join(dir, "rootfs"),
 		RunscNetwork:   "host",

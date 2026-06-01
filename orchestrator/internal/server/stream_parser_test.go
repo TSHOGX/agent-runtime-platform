@@ -434,13 +434,13 @@ func TestPiOutputNormalizerFlushPreservesInsertionOrder(t *testing.T) {
 	}
 }
 
-func TestPiOutputNormalizerDrainsFallbackKeyAtMessageEnd(t *testing.T) {
+func TestPiOutputNormalizerDrainsEmptyIDPendingKeyAtMessageEnd(t *testing.T) {
 	srv, st := newParserTestServer(t)
 	parser := newStreamParser(srv, "sess_1", "pi")
 
 	// Deltas arrive without a messageId so they buffer under the
-	// "pi_assistant_pending" fallback key. message_end then arrives with a real
-	// id but no inline text. The fallback text must be emitted as this
+	// "pi_assistant_pending" empty-id pending key. message_end then arrives with a real
+	// id but no inline text. The pending text must be emitted as this
 	// message's assistant.message at message_end rather than only being
 	// salvaged in bulk at turn_end.
 	lines := []string{
@@ -456,10 +456,10 @@ func TestPiOutputNormalizerDrainsFallbackKeyAtMessageEnd(t *testing.T) {
 		t.Fatalf("list messages: %v", err)
 	}
 	if len(messages) != 1 || messages[0].Role != "assistant" || messages[0].Content != "buffered text" {
-		t.Fatalf("expected fallback-key text persisted at message_end, got %+v", messages)
+		t.Fatalf("expected empty-id pending text persisted at message_end, got %+v", messages)
 	}
 
-	// A following turn_end must not re-emit the already-drained fallback text.
+	// A following turn_end must not re-emit the already-drained pending text.
 	parser.handle(runtime.Output{Stream: "stdout", Line: `{"type":"turn_end","status":"completed"}`})
 	messages, err = st.ListMessages(context.Background(), "sess_1")
 	if err != nil {

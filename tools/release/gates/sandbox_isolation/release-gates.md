@@ -14,7 +14,7 @@ crash recovery.
 - Each generation references an immutable canonical `SandboxContract` payload.
 - `sandbox_contract_digest` is computed from the stored payload bytes.
 - Removing, corrupting, or reformatting the payload while leaving the digest
-  blocks launch, restore, checkpoint compatibility, bridge polling, and proxy
+  blocks launch, restore, checkpoint validation, bridge polling, and proxy
   authorization.
 - Contract corruption switches cleanup to `HostStateReconciler`
   corruption-mode: it may delete or quarantine host resources only from the
@@ -30,12 +30,12 @@ crash recovery.
   content digests.
 - Changing the worker's `runsc` platform, resolved binary, or reported version
   after allocation does not mutate existing contracts. Fresh launch, restore,
-  and checkpoint compatibility for the old contract reject the mismatch; live
+  and checkpoint validation for the stored contract reject the mismatch; live
   generations pinned to the old value are drained, retired, and reallocated
   before the new runsc pin is considered active. Cleanup remains allowed, uses
   the contract `runsc_container_id`, and records mismatch evidence before
   reconciliation. If current `runsc` cannot delete an old container or
-  checkpoint, cleanup uses the recorded compatible `runsc` binary only when its
+  checkpoint, cleanup uses the recorded pinned `runsc` binary only when its
   recorded path is still canonical and its digest matches the contract;
   otherwise the resource is quarantined or marked for manual reconciliation,
   and identity reuse stays blocked until independent evidence reaches
@@ -79,8 +79,8 @@ crash recovery.
   host-only subroot under the DB/control-plane state root. It is not equal to,
   contained by, or containing any sandbox content bind source, provider
   credential root, or proxy-internal root.
-- Legacy `harness.secrets.root` and `harness.secrets.readers_gid` are removed
-  from `sandbox-isolation-v1` config; old secret roots are absent from active roots or
+- Removed `harness.secrets.root` and `harness.secrets.readers_gid` are rejected
+  by `sandbox-isolation-v1` config; old secret roots are absent from active roots or
   quarantined outside all `sandbox-isolation-v1` roots before enablement.
 - The DB lives outside every sandbox-bindable root.
 - Provider credential roots and proxy-internal roots live outside every
@@ -113,7 +113,7 @@ crash recovery.
   product-compatible.
 - Nested mountpoints under exact bind sources are rejected or hidden by private
   propagation.
-- A host submount created after launch under a recursive-fallback source is not
+- A host submount created after launch under a recursive bind source is not
   visible in the sandbox.
 - The bridge placeholder exists, is empty, is not a symlink, is not a
   mountpoint, and is mounted over by the real bridge source.
@@ -130,8 +130,8 @@ crash recovery.
 - `bridge-protocol-v2` session, generation, turn, bridge, and event semantics remain intact.
 - `runtime_resource_instances.state` is never used as a substitute for session
   state, turn state, generation execution status, or bridge claim ownership.
-- Resource state follows only the allowed graph in
-  [Migration and sunset](./migration-and-sunset.md).
+- Resource state follows only the allowed graph in the runtime resource state
+  contract.
 - Direct `ready -> materializing`, direct transition to `destroyed` from any
   state other than `absent_verified`, direct `checkpoint_reserved ->
   absent_verified`, direct `checkpoint_reserved -> destroyed`,
@@ -151,7 +151,7 @@ crash recovery.
 - A stale host object with the same generation identity blocks fresh launch,
   restore, and allocator reuse until reconciled.
 - Evidence includes `host_id` and is rejected from the wrong worker/host.
-- Runtime start, restore, cleanup, fallback destruction, and release evidence use
+- Runtime start, restore, cleanup, forced destruction, and release evidence use
   `runtime_resource_instances.runsc_container_id`, not `sessions.restore_id`,
   session ID, or historical stage-prefixed session IDs.
 - `ready -> live` occurs only after the worker records post-start proof for the
@@ -180,7 +180,7 @@ crash recovery.
   non-root sandbox identity.
 - OCI capability sets contain no `CAP_NET_ADMIN`, `CAP_NET_RAW`, or
   `CAP_SYS_ADMIN`; ambient capabilities are empty and `noNewPrivileges` is set.
-- Entrypoint tests fail on hardcoded UID/GID fallback.
+- Entrypoint tests fail on hardcoded UID/GID defaults.
 - Bridge queue permissions are directional and not world-writable.
 - Sandbox cannot create, replace, rename, or unlink host-owned bridge inbox,
   host-temp, or host-heartbeat files.
@@ -238,7 +238,7 @@ crash recovery.
 - Injected multiple in-flight turns for one generation/source IP deny.
 - Proxy correlation APIs are reachable only over the authenticated UDS and reject
   sandbox or unauthenticated host-local callers.
-- The re-pinned `claude-code-proxy` contract tests replace the legacy
+- The re-pinned `claude-code-proxy` contract tests replace the removed
   authenticated malformed `/v1/messages` pre-turn probe: `/healthz` passes
   through the stable alias; pre-turn model endpoints reject without active
   context; malformed `/v1/messages` is tested only after a running turn has a
@@ -248,30 +248,30 @@ crash recovery.
   gateway-literal connection with manually spoofed alias `Host` must be tested
   as indistinguishable from the alias path and still requires the normal
   authorization checks. Evidence records the proxy commit.
-- The selected Claude CLI compatibility key mode is gate-checked end to end:
+- The selected Claude CLI auth-key mode is gate-checked end to end:
   bridge-client/rootfs behavior, proxy configuration, and pinned proxy contract
   tests agree on `no key` or the fixed non-secret dummy key. `/healthz` alone
   cannot qualify proxy readiness.
 - Claude CLI starts with the selected no-key or non-secret dummy-key mode, and
-  the proxy ignores that compatibility value for authorization.
+  the proxy ignores that dummy value for authorization.
 - Changing `model_access_allowed` is gated as drain/retire/reallocate, not a
   silent mutation of live contracts.
 - Changing `sandbox_model_proxy_base_url` is gated as drain/retire/reallocate,
   not a silent projection rewrite for live contracts.
 
-## Migration Gates
+## Cutover Gates
 
 - Cutover inventories old sessions, workspaces, agent homes, runtime rows,
   active proxy contexts, checkpoints, prepared bundles, netns/veth/nft, runsc
-  containers, generation directories, legacy secret roots, provider credential
+  containers, generation directories, removed secret roots, provider credential
   roots, and proxy-internal sockets before enablement.
 - Old host runtime resources block `sandbox-isolation-v1` enablement until reconciled and
   absence evidence is recorded.
 - Existing session/workspace/agent-home data is wiped from active roots before
   the first `sandbox-isolation-v1` allocation.
-- Legacy `harness.secrets.root` data is deleted or quarantined outside all
+- Removed `harness.secrets.root` data is deleted or quarantined outside all
   `sandbox-isolation-v1` roots and cannot be mounted as `/harness-secrets`.
-- The legacy secret permission lab is retired only after `sandbox-isolation-v1` gates prove
+- The removed secret permission lab is retired only after `sandbox-isolation-v1` gates prove
   `harness.secrets.*` config is rejected, `/harness-secrets` is absent, provider
   credentials are host/proxy-only, and no credential material appears in
   sandbox-visible files, env, `/proc`, logs, DB rows, checkpoints, or release
@@ -280,15 +280,15 @@ crash recovery.
   in protected DB rows and mandatory root-owned markers outside
   sandbox-writable bind sources, under the DataVolume provisioning evidence
   root.
-- Artifact metadata, watcher scans, and download handlers are cut over to
-  verified `session_workspaces` evidence; any legacy artifact path derived from
+- Artifact metadata, watcher scans, and download handlers use
+  verified `session_workspaces` evidence; any removed artifact path derived from
   public session rows or `<sessions_root>/<session_id>` is rejected or
   re-indexed through the verified workspace row before enablement.
 - Later generations for the same session select valid existing workspace/home
   rows without wiping or rejecting user-created contents.
-- Provisioning does not carry legacy hardlinks, xattrs, capabilities, sockets,
+- Provisioning does not carry stale hardlinks, xattrs, capabilities, sockets,
   FIFOs, device nodes, setuid/setgid bits, unsupported ACLs, or root-owned
-  legacy content into bind sources.
+  stale content into bind sources.
 - Shell-first startup creates/uses only
   `<agent_homes_root>/<session_id>/sh` and cannot read a Claude driver home.
 - A second cutover/provisioning dry run is a no-op over clean active roots.
@@ -298,7 +298,7 @@ crash recovery.
   designed trusted host-side reprovision flow.
 - Optional backup evidence is outside active roots and is not treated as `sandbox-isolation-v1`
   runtime data.
-- Legacy bake/restore smoke tooling is migrated to `sandbox-isolation-v1` or
+- Removed bake/restore smoke tooling is rewritten for `sandbox-isolation-v1` or
   quarantined from release evidence.
 
 ## Documentation Gates
@@ -320,7 +320,7 @@ A runtime-isolation release candidate is complete only when:
   RuntimeResourceInstance, HostStateReconciler, non-root execution, read-only
   rootfs, public API DTO cleanup, post-start live proof, host-side model
   credentials, authenticated proxy correlation, driver entitlement, proxy
-  re-pin, destructive migration, and sunset fences are active;
+  re-pin, destructive cutover, and sunset fences are active;
 - runtime launch/restore/checkpoint/poll/normal-cleanup/proxy paths consume the
   shared contract components instead of reconstructing paths, identity, state,
   annotations, or authorization locally; corruption-mode cleanup uses only

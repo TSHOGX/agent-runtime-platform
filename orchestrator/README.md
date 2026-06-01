@@ -51,7 +51,7 @@ Useful environment variables:
 - `HARNESS_MAX_SESSIONS` defaults to `30` and caps non-terminal sessions, not live `/30` slots.
 - `RUNSC_ROOT` defaults to `/var/lib/harness/runsc`.
 
-`HARNESS_SESSION_TTL` is obsolete and fails startup if present; use `HARNESS_SESSION_RETENTION`.
+`HARNESS_SESSION_TTL` has been removed and fails startup if present; use `HARNESS_SESSION_RETENTION`.
 
 Runtime network and model proxy settings are explicit in `config/harness.yaml`:
 
@@ -136,10 +136,10 @@ nested keys fail startup.
 and egress allow-listing; `harness.model_proxy.sandbox_base_url` is the
 sandbox-visible alias written into generated control manifests.
 
-Legacy top-level `runtime:` / `claude:` sections no longer load. Migrate model
-proxy settings to `harness.model_proxy`; legacy `claude.proxy_bind_url` and
+Removed top-level `runtime:` / `claude:` sections no longer load. Configure model
+proxy settings in `harness.model_proxy`; removed `claude.proxy_bind_url` and
 `claude.sandbox_base_url` are rejected along with other unknown top-level keys.
-Obsolete `harness.session_ttl` and legacy `harness.secrets.*` keys are also
+Removed `harness.session_ttl` and `harness.secrets.*` keys are also
 rejected; use `harness.session_retention`, and keep provider credentials
 host-side.
 
@@ -166,7 +166,7 @@ across turns. Each generation gets its own network profile, netns/veth pair,
 Automatic idle checkpointing is a per-session policy. The checked-in default is
 off; `HARNESS_AUTO_CHECKPOINT_ENABLED=true` enables it for newly created
 sessions. Only the next idle generation with an empty turn queue plus fresh
-bridge heartbeat/checkpoint-ready markers can checkpoint. Legacy bundle/restore
+bridge heartbeat/checkpoint-ready markers can checkpoint. Removed bundle/restore
 smoke tooling has been removed from the runtime surface.
 
 ## Event Streams

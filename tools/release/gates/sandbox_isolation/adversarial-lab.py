@@ -262,7 +262,7 @@ def evidence_labels_for_section(section, gate_id):
         return ("reconciliation", "cutover")
     if section == "Model Proxy Gates":
         return ("proxy_contract", "cutover")
-    if section == "Migration Gates":
+    if section == "Cutover Gates":
         return ("cutover", "reconciliation")
     if section == "Documentation Gates":
         return ()

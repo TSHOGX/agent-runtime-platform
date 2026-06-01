@@ -324,11 +324,11 @@ class BridgeClientTest(unittest.TestCase):
                 def run_turn(self, content, emit):
                     raise AssertionError("runner should not execute invalid schema")
 
-            with self.assertRaisesRegex(RuntimeError, "unsupported turn_input_schema legacy"):
+            with self.assertRaisesRegex(RuntimeError, "unsupported turn_input_schema removed"):
                 bridge.execute_grant(
                     client,
                     FakeRunner(),
-                    {"turn_id": 9, "sequence": 1, "turn_input_schema": "legacy", "input": {"content": "run"}},
+                    {"turn_id": 9, "sequence": 1, "turn_input_schema": "removed", "input": {"content": "run"}},
                 )
 
     def test_native_events_probe_is_not_a_production_runner(self):
@@ -1238,7 +1238,7 @@ class BridgeClientTest(unittest.TestCase):
             self.assertTrue((Path(root) / bridge.HEARTBEAT / bridge.BRIDGE_HEARTBEAT).exists())
             self.assertTrue((Path(root) / bridge.HEARTBEAT / bridge.CHECKPOINT_READY).exists())
 
-    def test_claude_runner_ignores_legacy_secret_environment(self):
+    def test_claude_runner_ignores_removed_secret_environment(self):
         class FakeStdin:
             def __init__(self):
                 self.writes = []
@@ -1275,7 +1275,7 @@ class BridgeClientTest(unittest.TestCase):
                 "HARNESS_AGENT_GID": "65534",
                 "HARNESS_SECRET_READERS_GID": "12345",
                 "ANTHROPIC_BASE_URL": "http://harness-model-proxy.internal:8082",
-                "ANTHROPIC_AUTH_TOKEN": "legacy-token",
+                "ANTHROPIC_AUTH_TOKEN": "removed-token",
                 "SECRET_MOUNT_PATH": "/harness-secrets",
                 "ANTHROPIC_API_KEY_SECRET_ID": "anthropic_api_key",
                 "ANTHROPIC_AUTH_TOKEN_SECRET_ID": "anthropic_auth_token",

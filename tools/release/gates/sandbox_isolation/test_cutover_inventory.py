@@ -25,7 +25,7 @@ class CutoverInventoryTest(unittest.TestCase):
             self.assertEqual(payload["db"]["info"]["exists"], False)
             self.assertEqual(payload["blockers"], [])
 
-    def test_expect_clean_fails_on_legacy_roots(self):
+    def test_expect_clean_fails_on_removed_roots(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             (base / "sessions" / "sess_old").mkdir(parents=True)
@@ -41,7 +41,7 @@ class CutoverInventoryTest(unittest.TestCase):
             self.assertIn(("sessions_root", "root_entries"), blockers)
             self.assertIn(("run_network_root", "root_entries"), blockers)
             self.assertIn(("run_logs_root", "root_entries"), blockers)
-            self.assertIn(("legacy_secret_root", "legacy_secret_root_present"), blockers)
+            self.assertIn(("removed_secret_root", "removed_secret_root_present"), blockers)
 
     def test_expect_clean_fails_on_active_db_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -58,21 +58,21 @@ class CutoverInventoryTest(unittest.TestCase):
             self.assertEqual(blockers["runtime_resource_instances_active"]["count"], 1)
             self.assertEqual(blockers["active_model_contexts_total"]["count"], 1)
 
-    def test_expect_clean_fails_on_obsolete_session_columns(self):
+    def test_expect_clean_fails_on_removed_session_columns(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "state" / "orchestrator.db"
             db.parent.mkdir()
-            create_db_with_obsolete_session_columns(db)
+            create_db_with_removed_session_columns(db)
             args = args_for(tmp, db=db, expect_clean=True)
 
             payload = MODULE.inspect_cutover(args)
 
             self.assertEqual(payload["status"], "failed")
-            query = payload["db"]["queries"]["obsolete_session_columns"]
+            query = payload["db"]["queries"]["removed_session_columns"]
             self.assertEqual(query["count"], 2)
             self.assertEqual(query["columns"], ["restore_id", "workspace"])
             blockers = {item["name"]: item for item in payload["blockers"]}
-            self.assertEqual(blockers["obsolete_session_columns"]["count"], 2)
+            self.assertEqual(blockers["removed_session_columns"]["count"], 2)
 
     def test_inventory_mode_reports_blockers_without_failing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -155,9 +155,9 @@ def args_for(tmp, db=None, expect_clean=False):
             "agent_homes_root": str(base / "agent-homes"),
             "run_dir": str(base / "run"),
             "runsc_root": str(base / "runsc"),
-            "legacy_checkpoints_root": str(base / "checkpoints"),
+            "removed_checkpoints_root": str(base / "checkpoints"),
             "prepared_bundle_root": str(base / "bundle" / "out"),
-            "legacy_secret_root": str(base / "secrets"),
+            "removed_secret_root": str(base / "secrets"),
             "provider_credential_root": "",
             "proxy_internal_root": "",
             "skip_host_commands": True,
@@ -208,7 +208,7 @@ CREATE TABLE sandbox_contracts (contract_id TEXT PRIMARY KEY);
         conn.close()
 
 
-def create_db_with_obsolete_session_columns(path):
+def create_db_with_removed_session_columns(path):
     conn = sqlite3.connect(path)
     try:
         conn.executescript(

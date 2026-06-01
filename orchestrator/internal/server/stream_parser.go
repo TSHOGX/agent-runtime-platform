@@ -133,7 +133,7 @@ func (p *streamParser) dropPending(id string) {
 // drainPending concatenates the builders for the given ids in the order they
 // were first buffered and removes them, returning the salvaged text. It lets a
 // message_end finalize text that may have landed under a real id and/or the
-// empty-id fallback key.
+// empty-id pending key.
 func (p *streamParser) drainPending(ids ...string) string {
 	want := make(map[string]bool, len(ids))
 	for _, id := range ids {
@@ -392,7 +392,7 @@ func (p *streamParser) handlePiMessageEnd(event map[string]any) {
 	text := piMessageText(event["message"])
 	if text == "" {
 		// No authoritative inline text: salvage whatever streamed in under the
-		// real id and the empty-id fallback key, emitting it as this message's
+		// real id and the empty-id pending key, emitting it as this message's
 		// assistant.message rather than deferring to the turn_end bulk flush.
 		if salvaged := p.drainPending(id, "pi_assistant_pending"); salvaged != "" {
 			p.persistAssistant(salvaged)
@@ -400,7 +400,7 @@ func (p *streamParser) handlePiMessageEnd(event map[string]any) {
 		return
 	}
 	// Inline text is authoritative; drop the buffered deltas for both the real
-	// id and the fallback key (mirrors the claude path) so they are neither
+	// id and the empty-id pending key (mirrors the claude path) so they are neither
 	// re-emitted here nor salvaged again at turn_end.
 	p.dropPending(id)
 	p.dropPending("pi_assistant_pending")
@@ -503,7 +503,7 @@ func (p *streamParser) handleStreamEvent(raw json.RawMessage) {
 		return
 	}
 	// Claude stream_event doesn't always nest the message id; use a stable
-	// fallback so the UI can still group deltas.
+	// pending key so the UI can still group deltas.
 	id := inner.Message.ID
 	if id == "" {
 		id = "assistant_pending"
@@ -630,7 +630,7 @@ func (p *streamParser) flush() {
 	// If the runtime exited mid-stream without ever delivering an "assistant"
 	// or "result" event, salvage whatever we buffered into a final message.
 	// Iterate in insertion order so multi-builder text (multiple messageIds or
-	// a real id plus the fallback key) is reassembled chronologically rather
+	// a real id plus the empty-id pending key) is reassembled chronologically rather
 	// than in randomized map order.
 	if len(p.pending) == 0 {
 		return

@@ -39,7 +39,7 @@ class ReleaseGatesTest(unittest.TestCase):
         self.assertIn("tools/release/gates/sandbox_isolation/test_reconciliation_evidence.py", gates[2].command)
         self.assertIn("tools/release/gates/sandbox_isolation/test_rootfs_inspect.py", gates[2].command)
 
-    def test_optional_flags_add_external_and_compatibility_gates(self):
+    def test_optional_flags_add_external_and_baseline_gates(self):
         args = argparse_namespace(
             include_prior_release=True,
             include_cutover_inventory=True,
@@ -67,7 +67,7 @@ class ReleaseGatesTest(unittest.TestCase):
                 "live_turn_start_latency",
             ],
         )
-        self.assertEqual(gates[-8].category, "compatibility")
+        self.assertEqual(gates[-8].category, "baseline")
         self.assertEqual({gates[-7].category, gates[-6].category, gates[-5].category, gates[-3].category}, {"evidence"})
         self.assertEqual({gates[-4].category, gates[-2].category, gates[-1].category}, {"external"})
         self.assertIn("/tmp/sandbox-adversarial-lab.json", gates[-3].command)
@@ -102,7 +102,7 @@ class ReleaseGatesTest(unittest.TestCase):
         self.assertGreater(inventory["total"], 80)
         self.assertIn("Contract Gates", inventory["counts_by_section"])
         self.assertIn("Root and Mount Gates", inventory["counts_by_section"])
-        self.assertIn("Migration Gates", inventory["counts_by_section"])
+        self.assertIn("Cutover Gates", inventory["counts_by_section"])
         self.assertTrue(any("sandbox_contract_version" in gate["text"] for gate in inventory["gates"]))
 
     def test_evidence_is_not_release_complete_without_supplied_lab_evidence(self):
@@ -120,7 +120,7 @@ class ReleaseGatesTest(unittest.TestCase):
         )
         self.assertIn("release_gate_inventory", payload)
         self.assertEqual(payload["contract"], "sandbox-isolation-v1")
-        self.assertNotIn("phase", payload)
+        self.assertNotIn("rollout_id", payload)
 
     def test_require_release_evidence_fails_when_supplied_labels_are_missing(self):
         payload = MODULE.evidence(

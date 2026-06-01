@@ -39,7 +39,7 @@ func TestSessionStatusSemantics(t *testing.T) {
 	}
 }
 
-func TestRejectsLegacyStatuses(t *testing.T) {
+func TestRejectsRemovedStatuses(t *testing.T) {
 	for _, status := range []string{"running", "idle", "completed"} {
 		if err := Validate(status); err == nil {
 			t.Fatalf("Validate(%s) should fail", status)

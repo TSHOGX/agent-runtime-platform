@@ -133,7 +133,7 @@ def optional_gates(args):
                 name="prior_deterministic_release_runner",
                 command=("python3", "tools/release/run.py", "--suite", "control_plane"),
                 cwd=REPO_ROOT,
-                category="compatibility",
+                category="baseline",
             )
         )
     if args.include_cutover_inventory:

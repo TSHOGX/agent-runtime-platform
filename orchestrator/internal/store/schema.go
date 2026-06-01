@@ -10,7 +10,7 @@ import (
 	"harness-platform/orchestrator/internal/sessionstate"
 )
 
-var obsoleteSessionColumns = []string{
+var removedSessionColumns = []string{
 	"workspace",
 	"restore_id",
 	"claude_session_uuid",
@@ -633,17 +633,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS runtime_resource_instances_log_dir_path_active
 	if err != nil {
 		return err
 	}
-	return s.rejectObsoleteSessionColumns(ctx)
+	return s.rejectRemovedSessionColumns(ctx)
 }
 
-func (s *Store) rejectObsoleteSessionColumns(ctx context.Context) error {
-	for _, column := range obsoleteSessionColumns {
+func (s *Store) rejectRemovedSessionColumns(ctx context.Context) error {
+	for _, column := range removedSessionColumns {
 		exists, err := tableColumnExists(ctx, s.db, "sessions", column)
 		if err != nil {
-			return fmt.Errorf("check obsolete sessions.%s: %w", column, err)
+			return fmt.Errorf("check removed sessions.%s: %w", column, err)
 		}
 		if exists {
-			return fmt.Errorf("obsolete sessions.%s column is present; run the destructive cutover cleanup before starting this build", column)
+			return fmt.Errorf("removed sessions.%s column is present; run the destructive cutover cleanup before starting this build", column)
 		}
 	}
 	return nil

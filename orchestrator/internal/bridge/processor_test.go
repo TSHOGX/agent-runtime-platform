@@ -104,7 +104,7 @@ func TestProcessorRejectsInvalidV2Hello(t *testing.T) {
 		{name: "missing payload", want: "hello requires protocol_version"},
 		{name: "protocol v1", payload: json.RawMessage(`{"protocol_version":1,"driver_id":"claude_code","turn_input_schema":"RunTurn"}`), want: "unsupported bridge protocol_version 1"},
 		{name: "driver mismatch", payload: json.RawMessage(`{"protocol_version":2,"driver_id":"sh","turn_input_schema":"RunTurn"}`), want: "does not match generation driver"},
-		{name: "schema mismatch", payload: json.RawMessage(`{"protocol_version":2,"driver_id":"claude_code","turn_input_schema":"legacy"}`), want: "unsupported turn_input_schema"},
+		{name: "schema mismatch", payload: json.RawMessage(`{"protocol_version":2,"driver_id":"claude_code","turn_input_schema":"removed"}`), want: "unsupported turn_input_schema"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

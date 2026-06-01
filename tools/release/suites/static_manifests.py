@@ -24,7 +24,7 @@ def _next_stage_checks():
             "patterns": (
                 ("workspace_symlink_to_sessions", "`/workspace` is a symlink to `/sessions/<session_id>`"),
                 ("agent_home_parent_root", "`/agent-homes/<session_id>`"),
-                ("legacy_mount_centralization", "Runtime spec generation already centralizes mounts"),
+                ("removed_mount_centralization", "Runtime spec generation already centralizes mounts"),
             ),
         },
         {
@@ -62,15 +62,15 @@ def sandbox_isolation_checks():
             "kind": "lacks",
             "path": REPO_ROOT / "docs" / "PLAN.md",
             "patterns": (
-                ("obsolete_parent_mount_boundary", "the sandbox reaches"),
-                ("obsolete_parent_mount_target", "parent `/sessions` and `/agent-homes` mounts"),
+                ("removed_parent_mount_boundary", "the sandbox reaches"),
+                ("removed_parent_mount_target", "parent `/sessions` and `/agent-homes` mounts"),
             ),
         },
         {
             "name": "current_architecture_uses_state_db_default",
             "kind": "lacks",
             "path": REPO_ROOT / "docs" / "architecture.md",
-            "patterns": (("obsolete_db_under_sessions", "/var/lib/harness/sessions/orchestrator.db"),),
+            "patterns": (("removed_db_under_sessions", "/var/lib/harness/sessions/orchestrator.db"),),
         },
         {
             "name": "bridge_client_has_no_pre_turn_model_probe_config",
@@ -79,7 +79,7 @@ def sandbox_isolation_checks():
             "patterns": (("pre_turn_model_probe_status_env", "HARNESS_PROBE_MESSAGE_STATUSES"),),
         },
         {
-            "name": "frontend_session_types_hide_legacy_host_fields",
+            "name": "frontend_session_types_hide_removed_host_fields",
             "kind": "lacks",
             "path": REPO_ROOT / "frontend" / "lib" / "types.ts",
             "patterns": (

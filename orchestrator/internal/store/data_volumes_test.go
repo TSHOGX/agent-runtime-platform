@@ -199,8 +199,8 @@ func TestProvisionSessionWorkspaceRejectsNonEmptyFreshDirectory(t *testing.T) {
 	if err := os.MkdirAll(workspacePath, 0o755); err != nil {
 		t.Fatalf("mkdir workspace: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(workspacePath, "legacy.txt"), []byte("legacy"), 0o644); err != nil {
-		t.Fatalf("write legacy content: %v", err)
+	if err := os.WriteFile(filepath.Join(workspacePath, "stale.txt"), []byte("stale"), 0o644); err != nil {
+		t.Fatalf("write stale content: %v", err)
 	}
 
 	_, err := st.ProvisionSessionWorkspace(ctx, ProvisionSessionWorkspaceParams{

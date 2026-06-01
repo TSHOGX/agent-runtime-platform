@@ -36,7 +36,7 @@ harness:
             config = Path(tmp) / "harness.yaml"
             config.write_text(
                 """
-legacy:
+ignored:
   secrets:
     root: /wrong/before
     readers_gid: 1

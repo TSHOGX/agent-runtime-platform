@@ -13,7 +13,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_CONFIG = REPO_ROOT / "config" / "harness.yaml"
-OBSOLETE_SESSION_COLUMNS = {"workspace", "restore_id", "claude_session_uuid", "agent_home_path"}
+REMOVED_SESSION_COLUMNS = {"workspace", "restore_id", "claude_session_uuid", "agent_home_path"}
 
 
 def parse_args():
@@ -24,14 +24,14 @@ def parse_args():
     parser.add_argument("--agent-homes-root", default=os.environ.get("HARNESS_AGENT_HOMES_ROOT", "/var/lib/harness/agent-homes"))
     parser.add_argument("--run-dir", default=os.environ.get("HARNESS_RUN_DIR", defaults.get("harness.run_dir", "/var/lib/harness/run")))
     parser.add_argument("--runsc-root", default=os.environ.get("RUNSC_ROOT", "/var/lib/harness/runsc"))
-    parser.add_argument("--legacy-checkpoints-root", default=os.environ.get("HARNESS_LEGACY_CHECKPOINTS_ROOT", "/var/lib/harness/checkpoints"))
+    parser.add_argument("--removed-checkpoints-root", default=os.environ.get("HARNESS_REMOVED_CHECKPOINTS_ROOT", "/var/lib/harness/checkpoints"))
     parser.add_argument("--prepared-bundle-root", default=os.environ.get("HARNESS_BUNDLE_ROOT", str(REPO_ROOT / "bundle" / "out")))
-    parser.add_argument("--legacy-secret-root", default=os.environ.get("HARNESS_LEGACY_SECRET_ROOT", "/var/lib/harness/secrets"))
+    parser.add_argument("--removed-secret-root", default=os.environ.get("HARNESS_REMOVED_SECRET_ROOT", "/var/lib/harness/secrets"))
     parser.add_argument("--provider-credential-root", default=os.environ.get("HARNESS_PROVIDER_CREDENTIAL_ROOT", ""))
     parser.add_argument("--proxy-internal-root", default=os.environ.get("HARNESS_PROXY_INTERNAL_ROOT", ""))
     parser.add_argument("--skip-host-commands", action="store_true", help="Skip ip/nft/runsc host inventory commands.")
     parser.add_argument("--require-host-inventory", action="store_true", help="Fail if host inventory commands are unavailable or fail.")
-    parser.add_argument("--expect-clean", action="store_true", help="Fail when cutover inventory finds active or legacy resources.")
+    parser.add_argument("--expect-clean", action="store_true", help="Fail when cutover inventory finds active or removed resources.")
     parser.add_argument("--output", default="", help="Optional path for JSON evidence.")
     return parser.parse_args()
 
@@ -218,15 +218,15 @@ def db_inventory(db_path):
             else:
                 result["queries"][name] = {"status": "missing_table", "count": 0}
         if table_exists(conn, "sessions"):
-            columns = obsolete_session_columns(conn)
-            result["tables"]["sessions"]["obsolete_columns"] = columns
-            result["queries"]["obsolete_session_columns"] = {
+            columns = removed_session_columns(conn)
+            result["tables"]["sessions"]["removed_columns"] = columns
+            result["queries"]["removed_session_columns"] = {
                 "status": "present",
                 "count": len(columns),
                 "columns": columns,
             }
         else:
-            result["queries"]["obsolete_session_columns"] = {"status": "missing_table", "count": 0, "columns": []}
+            result["queries"]["removed_session_columns"] = {"status": "missing_table", "count": 0, "columns": []}
     finally:
         conn.close()
     return result
@@ -240,9 +240,9 @@ def table_exists(conn, table):
     return row is not None
 
 
-def obsolete_session_columns(conn):
+def removed_session_columns(conn):
     rows = conn.execute("PRAGMA table_info(sessions)").fetchall()
-    columns = sorted(row[1] for row in rows if row[1] in OBSOLETE_SESSION_COLUMNS)
+    columns = sorted(row[1] for row in rows if row[1] in REMOVED_SESSION_COLUMNS)
     return columns
 
 
@@ -257,7 +257,7 @@ def root_inventories(args):
     roots = {
         "sessions_root": Path(args.sessions_root),
         "agent_homes_root": Path(args.agent_homes_root),
-        "legacy_checkpoints_root": Path(args.legacy_checkpoints_root),
+        "removed_checkpoints_root": Path(args.removed_checkpoints_root),
         "prepared_bundle_root": Path(args.prepared_bundle_root),
         "run_control_root": run_dir / "control",
         "run_runtime_root": run_dir / "runtime",
@@ -265,7 +265,7 @@ def root_inventories(args):
         "run_network_root": run_dir / "network",
         "run_logs_root": run_dir / "logs",
         "proxy_internal_root": proxy_internal,
-        "legacy_secret_root": Path(args.legacy_secret_root),
+        "removed_secret_root": Path(args.removed_secret_root),
     }
     if args.provider_credential_root:
         roots["provider_credential_root"] = Path(args.provider_credential_root)
@@ -304,9 +304,9 @@ def blockers_for_inventory(db, roots, host, args):
             elif entries > 0:
                 blockers.append({"name": name, "kind": "proxy_internal_entries", "count": entries})
             continue
-        if name == "legacy_secret_root":
+        if name == "removed_secret_root":
             if inventory["info"].get("exists"):
-                blockers.append({"name": name, "kind": "legacy_secret_root_present", "count": entries})
+                blockers.append({"name": name, "kind": "removed_secret_root_present", "count": entries})
             continue
         if name == "provider_credential_root":
             continue
@@ -339,7 +339,7 @@ def host_runtime_resource_count(command):
 
 def host_runtime_line_matches(line):
     lower = line.lower()
-    return any(marker in lower for marker in ("harness", "phase", "hgen", "hv-", "sv-"))
+    return any(marker in lower for marker in ("harness", "hgen", "hv-", "sv-"))
 
 
 def inspect_cutover(args):

@@ -57,12 +57,12 @@ class SandboxIsolationSuiteTest(unittest.TestCase):
             ],
         )
 
-    def test_evidence_envelope_is_contract_shaped_without_phase(self):
+    def test_evidence_envelope_is_contract_shaped_without_rollout_id(self):
         payload = sandbox_isolation.evidence(
             [{"name": "ok", "status": "passed"}], commit="abc", context={"git": {"commit": "abc"}}
         )
         self.assertEqual(payload["contract"], "sandbox-isolation-v1")
-        self.assertNotIn("phase", payload)
+        self.assertNotIn("rollout_id", payload)
         self.assertIn("release_gate_inventory", payload)
         self.assertEqual(
             payload["release_completion"]["missing_supplied_evidence"],

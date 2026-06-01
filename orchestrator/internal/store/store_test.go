@@ -86,7 +86,7 @@ func TestListMessages(t *testing.T) {
 	}
 }
 
-func TestFreshSchemaDoesNotCreateLegacySessionColumns(t *testing.T) {
+func TestFreshSchemaDoesNotCreateRemovedSessionColumns(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -97,7 +97,7 @@ func TestFreshSchemaDoesNotCreateLegacySessionColumns(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	for _, column := range removedLegacySessionColumnsForTest() {
+	for _, column := range removedSessionColumnsForTest() {
 		exists, err := tableColumnExists(ctx, st.db, "sessions", column)
 		if err != nil {
 			t.Fatalf("check sessions.%s: %v", column, err)
@@ -116,11 +116,11 @@ func TestFreshSchemaDoesNotCreateLegacySessionColumns(t *testing.T) {
 		CreatedAt: now,
 		UpdatedAt: now,
 	}); err != nil {
-		t.Fatalf("create session without legacy columns: %v", err)
+		t.Fatalf("create session without removed columns: %v", err)
 	}
 }
 
-func TestMigrateRejectsLegacySessionColumns(t *testing.T) {
+func TestOpenRejectsRemovedSessionColumns(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -130,22 +130,22 @@ func TestMigrateRejectsLegacySessionColumns(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	if _, err := st.db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN workspace TEXT`); err != nil {
-		t.Fatalf("add legacy workspace column: %v", err)
+		t.Fatalf("add removed workspace column: %v", err)
 	}
-	if _, err := st.db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN restore_id TEXT NOT NULL DEFAULT 'legacy'`); err != nil {
-		t.Fatalf("add legacy restore_id column: %v", err)
+	if _, err := st.db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN restore_id TEXT NOT NULL DEFAULT 'removed'`); err != nil {
+		t.Fatalf("add removed restore_id column: %v", err)
 	}
 	if _, err := st.db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN claude_session_uuid TEXT`); err != nil {
-		t.Fatalf("add legacy claude_session_uuid column: %v", err)
+		t.Fatalf("add removed claude_session_uuid column: %v", err)
 	}
 	if _, err := st.db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN agent_home_path TEXT`); err != nil {
-		t.Fatalf("add legacy agent_home_path column: %v", err)
+		t.Fatalf("add removed agent_home_path column: %v", err)
 	}
-	for _, column := range removedLegacySessionColumnsForTest() {
+	for _, column := range removedSessionColumnsForTest() {
 		if exists, err := tableColumnExists(ctx, st.db, "sessions", column); err != nil {
 			t.Fatalf("check added %s column: %v", column, err)
 		} else if !exists {
-			t.Fatalf("legacy %s column was not added", column)
+			t.Fatalf("removed %s column was not added", column)
 		}
 	}
 	if err := st.Close(); err != nil {
@@ -155,15 +155,15 @@ func TestMigrateRejectsLegacySessionColumns(t *testing.T) {
 	st, err = Open(ctx, dbPath)
 	if err == nil {
 		_ = st.Close()
-		t.Fatalf("reopen store should reject legacy session columns")
+		t.Fatalf("reopen store should reject removed session columns")
 	}
-	if !strings.Contains(err.Error(), "obsolete sessions.") ||
+	if !strings.Contains(err.Error(), "removed sessions.") ||
 		!strings.Contains(err.Error(), "destructive cutover cleanup") {
-		t.Fatalf("unexpected legacy column rejection: %v", err)
+		t.Fatalf("unexpected removed column rejection: %v", err)
 	}
 }
 
-func removedLegacySessionColumnsForTest() []string {
+func removedSessionColumnsForTest() []string {
 	return []string{"workspace", "restore_id", "claude_session_uuid", "agent_home_path"}
 }
 
@@ -446,7 +446,7 @@ func TestListSessionsByStatus(t *testing.T) {
 	}
 }
 
-func TestRejectsLegacyStatuses(t *testing.T) {
+func TestRejectsRemovedStatuses(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -459,7 +459,7 @@ func TestRejectsLegacyStatuses(t *testing.T) {
 
 	now := time.Now().UTC()
 	session := Session{
-		ID:        "sess_legacy",
+		ID:        "sess_removed_status",
 		UserID:    "lab",
 		Status:    "idle",
 		DriverID:  "claude_code",
@@ -467,13 +467,13 @@ func TestRejectsLegacyStatuses(t *testing.T) {
 		UpdatedAt: now,
 	}
 	if err := st.CreateSession(ctx, session); err == nil {
-		t.Fatalf("create session with legacy status should fail")
+		t.Fatalf("create session with removed status should fail")
 	}
-	if err := st.UpdateSessionStatus(ctx, "sess_legacy", "completed", nil); err == nil {
-		t.Fatalf("update to legacy status should fail")
+	if err := st.UpdateSessionStatus(ctx, "sess_removed_status", "completed", nil); err == nil {
+		t.Fatalf("update to removed status should fail")
 	}
 	if _, err := st.ListSessionsByStatus(ctx, "running"); err == nil {
-		t.Fatalf("listing legacy status should fail")
+		t.Fatalf("listing removed status should fail")
 	}
 }
 

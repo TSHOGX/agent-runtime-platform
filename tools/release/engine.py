@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Generic release-gate engine.
 
-This module is intentionally phase-agnostic: it contains no gate data, no
-evidence labels, and no phase identifiers. Concrete release suites under
+This module is intentionally suite-agnostic: it contains no gate data, no
+evidence labels, and no rollout identifiers. Concrete release suites under
 ``tools/release/suites/`` declare their gates, evidence model, and static
 checks and assemble their own evidence envelope from these primitives.
 """

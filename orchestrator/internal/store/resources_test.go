@@ -496,14 +496,14 @@ func TestAllocateGenerationSnapshotsSessionAutoCheckpointPolicy(t *testing.T) {
 func TestAllocateGenerationCanCASFromFailedActiveGeneration(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
-	createStoreSession(t, ctx, st, "sess_fallback")
+	createStoreSession(t, ctx, st, "sess_new_generation")
 	cfg := testAllocatorConfig(t)
 	cfg.CIDRPool = netip.MustParsePrefix("10.240.0.0/28")
 	now := time.Now().UTC()
 	leaseOwner := GenerationLeaseOwner(owner.UUID)
 
 	first, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
-		SessionID: "sess_fallback",
+		SessionID: "sess_new_generation",
 		Owner:     leaseOwner,
 		LeaseTTL:  time.Minute,
 		Now:       now,
@@ -512,11 +512,11 @@ func TestAllocateGenerationCanCASFromFailedActiveGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("allocate first generation: %v", err)
 	}
-	if err := st.MarkGenerationResourcesLive(ctx, "sess_fallback", first.GenerationID, first.Owner, now.Add(time.Second)); err != nil {
+	if err := st.MarkGenerationResourcesLive(ctx, "sess_new_generation", first.GenerationID, first.Owner, now.Add(time.Second)); err != nil {
 		t.Fatalf("mark first generation live: %v", err)
 	}
 	if err := st.FailGeneration(ctx, FailGenerationParams{
-		SessionID:    "sess_fallback",
+		SessionID:    "sess_new_generation",
 		GenerationID: first.GenerationID,
 		Owner:        first.Owner,
 		ErrorClass:   "orchestrator_restart_reconnect_grace_expired",
@@ -527,7 +527,7 @@ func TestAllocateGenerationCanCASFromFailedActiveGeneration(t *testing.T) {
 	}
 
 	_, err = st.AllocateGeneration(ctx, AllocateGenerationParams{
-		SessionID:            "sess_fallback",
+		SessionID:            "sess_new_generation",
 		ExpectedGenerationID: sql.NullString{String: "gen_stale", Valid: true},
 		Owner:                leaseOwner,
 		LeaseTTL:             time.Minute,
@@ -538,7 +538,7 @@ func TestAllocateGenerationCanCASFromFailedActiveGeneration(t *testing.T) {
 		t.Fatalf("expected stale active-generation CAS failure, got %v", err)
 	}
 	var generations int
-	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_generations WHERE session_id = 'sess_fallback'`).Scan(&generations); err != nil {
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_generations WHERE session_id = 'sess_new_generation'`).Scan(&generations); err != nil {
 		t.Fatalf("count generations after stale CAS: %v", err)
 	}
 	if generations != 1 {
@@ -546,7 +546,7 @@ func TestAllocateGenerationCanCASFromFailedActiveGeneration(t *testing.T) {
 	}
 
 	next, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
-		SessionID:            "sess_fallback",
+		SessionID:            "sess_new_generation",
 		ExpectedGenerationID: sql.NullString{String: first.GenerationID, Valid: true},
 		Owner:                leaseOwner,
 		LeaseTTL:             time.Minute,
@@ -554,14 +554,14 @@ func TestAllocateGenerationCanCASFromFailedActiveGeneration(t *testing.T) {
 		Config:               cfg,
 	})
 	if err != nil {
-		t.Fatalf("allocate fallback generation: %v", err)
+		t.Fatalf("allocate replacement generation: %v", err)
 	}
 	if next.GenerationID == first.GenerationID {
-		t.Fatalf("fallback reused failed generation id %s", next.GenerationID)
+		t.Fatalf("replacement reused failed generation id %s", next.GenerationID)
 	}
 
 	var activeGeneration, firstStatus, firstNetworkState, nextStatus, nextCIDR string
-	if err := st.db.QueryRowContext(ctx, `SELECT active_generation_id FROM sessions WHERE id = 'sess_fallback'`).Scan(&activeGeneration); err != nil {
+	if err := st.db.QueryRowContext(ctx, `SELECT active_generation_id FROM sessions WHERE id = 'sess_new_generation'`).Scan(&activeGeneration); err != nil {
 		t.Fatalf("query active generation: %v", err)
 	}
 	if activeGeneration != next.GenerationID {
@@ -582,10 +582,10 @@ SELECT g.status, n.host_side_cidr
 FROM runtime_generations g
 JOIN network_profiles n ON n.generation_id = g.generation_id
 WHERE g.generation_id = ?`, next.GenerationID).Scan(&nextStatus, &nextCIDR); err != nil {
-		t.Fatalf("query fallback generation: %v", err)
+		t.Fatalf("query replacement generation: %v", err)
 	}
 	if nextStatus != "allocating" || nextCIDR != "10.240.0.4/30" {
-		t.Fatalf("unexpected fallback generation state: status=%s cidr=%s", nextStatus, nextCIDR)
+		t.Fatalf("unexpected replacement generation state: status=%s cidr=%s", nextStatus, nextCIDR)
 	}
 }
 
@@ -1622,8 +1622,8 @@ func TestListBridgePollGenerationsFiltersCurrentOwnerLiveResources(t *testing.T)
 UPDATE runtime_generation_resources
 SET resource_state = 'ready',
     bridge_dir_path = ?
-WHERE generation_id = ?`, filepath.Join(t.TempDir(), "legacy-bridge"), pollAllocation.GenerationID); err != nil {
-		t.Fatalf("make legacy poll resource state stale: %v", err)
+WHERE generation_id = ?`, filepath.Join(t.TempDir(), "stale-bridge"), pollAllocation.GenerationID); err != nil {
+		t.Fatalf("make poll resource state stale: %v", err)
 	}
 
 	createStoreSession(t, ctx, st, "sess_other")
@@ -1750,8 +1750,8 @@ func TestAutoCheckpointCandidatesRequirePolicyArtifactsAndNoActiveTurns(t *testi
 UPDATE runtime_generation_resources
 SET resource_state = 'ready',
     bridge_dir_path = ?
-WHERE generation_id = ?`, filepath.Join(t.TempDir(), "legacy-auto-bridge"), eligible.GenerationID); err != nil {
-		t.Fatalf("make legacy auto checkpoint resource state stale: %v", err)
+WHERE generation_id = ?`, filepath.Join(t.TempDir(), "stale-auto-bridge"), eligible.GenerationID); err != nil {
+		t.Fatalf("make auto checkpoint resource state stale: %v", err)
 	}
 	disabled := createAutoCheckpointGeneration(t, ctx, st, cfg, "sess_auto_disabled", ownerLease, now)
 	if _, err := st.db.ExecContext(ctx, `UPDATE sessions SET auto_checkpoint_enabled = 0 WHERE id = ?`, "sess_auto_disabled"); err != nil {
@@ -1805,7 +1805,7 @@ func TestGenerationCheckpointTransitionsAndMetadata(t *testing.T) {
 UPDATE runtime_generation_resources
 SET resource_state = 'ready'
 WHERE generation_id = ?`, allocation.GenerationID); err != nil {
-		t.Fatalf("make legacy checkpoint resource state stale: %v", err)
+		t.Fatalf("make checkpoint resource state stale: %v", err)
 	}
 
 	if err := st.BeginGenerationCheckpoint(ctx, "sess_auto_complete", allocation.GenerationID, allocation.Owner, now.Add(2*time.Minute)); err != nil {
@@ -1994,7 +1994,7 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(
 	}
 }
 
-func TestRetireExpiredCheckpointsUsesCheckpointCreatedFallbackAndChecksOwner(t *testing.T) {
+func TestRetireExpiredCheckpointsUsesCheckpointCreatedAtWhenSessionActivityIsMissing(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
 	cfg := testAllocatorConfig(t)
@@ -2028,7 +2028,7 @@ WHERE id = ?`, filepath.Join(t.TempDir(), sessionID, "checkpoint"), sessionID); 
 		t.Fatalf("retire expired checkpoints: %v", err)
 	}
 	if len(retired) != 1 || retired[0].SessionID != "sess_retire_null_activity" {
-		t.Fatalf("unexpected fallback-anchor retirements: %+v", retired)
+		t.Fatalf("unexpected checkpoint-created-at retirements: %+v", retired)
 	}
 	oldSession, err := st.GetSession(ctx, "sess_retire_null_activity")
 	if err != nil {
@@ -2039,7 +2039,7 @@ WHERE id = ?`, filepath.Join(t.TempDir(), sessionID, "checkpoint"), sessionID); 
 		t.Fatalf("get young session: %v", err)
 	}
 	if oldSession.Status != string(sessionstate.RunningIdle) || youngSession.Status != string(sessionstate.Checkpointed) {
-		t.Fatalf("unexpected fallback-anchor statuses: old=%s young=%s", oldSession.Status, youngSession.Status)
+		t.Fatalf("unexpected checkpoint-created-at statuses: old=%s young=%s", oldSession.Status, youngSession.Status)
 	}
 }
 
@@ -2197,7 +2197,7 @@ func TestClearActiveSessionExpiryClearsOnlyActiveSessions(t *testing.T) {
 	expiredAt := now.Add(-time.Hour)
 	sessions := []Session{
 		{
-			ID:        "sess_active_legacy_expiry",
+			ID:        "sess_active_retained_expiry",
 			UserID:    "lab",
 			Status:    string(sessionstate.RunningIdle),
 			DriverID:  "claude_code",
@@ -2206,7 +2206,7 @@ func TestClearActiveSessionExpiryClearsOnlyActiveSessions(t *testing.T) {
 			ExpiresAt: &expiredAt,
 		},
 		{
-			ID:        "sess_failed_legacy_expiry",
+			ID:        "sess_failed_retained_expiry",
 			UserID:    "lab",
 			Status:    string(sessionstate.Failed),
 			DriverID:  "claude_code",
@@ -2215,7 +2215,7 @@ func TestClearActiveSessionExpiryClearsOnlyActiveSessions(t *testing.T) {
 			ExpiresAt: &expiredAt,
 		},
 		{
-			ID:        "sess_destroyed_legacy_expiry",
+			ID:        "sess_destroyed_retained_expiry",
 			UserID:    "lab",
 			Status:    string(sessionstate.Destroyed),
 			DriverID:  "claude_code",
@@ -2246,13 +2246,13 @@ func TestClearActiveSessionExpiryClearsOnlyActiveSessions(t *testing.T) {
 	}
 
 	var activeExpiry, failedExpiry, destroyedExpiry sql.NullString
-	if err := st.db.QueryRowContext(ctx, `SELECT expires_at FROM sessions WHERE id = 'sess_active_legacy_expiry'`).Scan(&activeExpiry); err != nil {
+	if err := st.db.QueryRowContext(ctx, `SELECT expires_at FROM sessions WHERE id = 'sess_active_retained_expiry'`).Scan(&activeExpiry); err != nil {
 		t.Fatalf("query active expiry: %v", err)
 	}
-	if err := st.db.QueryRowContext(ctx, `SELECT expires_at FROM sessions WHERE id = 'sess_failed_legacy_expiry'`).Scan(&failedExpiry); err != nil {
+	if err := st.db.QueryRowContext(ctx, `SELECT expires_at FROM sessions WHERE id = 'sess_failed_retained_expiry'`).Scan(&failedExpiry); err != nil {
 		t.Fatalf("query failed expiry: %v", err)
 	}
-	if err := st.db.QueryRowContext(ctx, `SELECT expires_at FROM sessions WHERE id = 'sess_destroyed_legacy_expiry'`).Scan(&destroyedExpiry); err != nil {
+	if err := st.db.QueryRowContext(ctx, `SELECT expires_at FROM sessions WHERE id = 'sess_destroyed_retained_expiry'`).Scan(&destroyedExpiry); err != nil {
 		t.Fatalf("query destroyed expiry: %v", err)
 	}
 	if activeExpiry.Valid {

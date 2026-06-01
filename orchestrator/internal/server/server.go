@@ -1682,10 +1682,10 @@ func (s *Server) driverManifestInputDigests(deployment deploymentResolution) dri
 	}
 }
 
-func effectiveString(value, fallback string) string {
+func effectiveString(value, defaultValue string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return fallback
+		return defaultValue
 	}
 	return value
 }

@@ -123,7 +123,7 @@ type DriverSpec struct {
 	OutputFormat                string
 	SupportsInterrupt           bool
 	SupportsCompaction          bool
-	Phase10Support              []string
+	FeatureSupport              []string
 	BinaryPath                  string
 	PackageFacts                DriverPackageFacts
 	ConfigMaterializationSpecs  []DriverConfigMaterializationSpec
@@ -213,7 +213,7 @@ var driverSpecs = map[ID]DriverSpec{
 		OutputFormat:       "stream-json",
 		SupportsInterrupt:  false,
 		SupportsCompaction: true,
-		Phase10Support:     []string{"single_driver_turns"},
+		FeatureSupport:     []string{"single_driver_turns"},
 		BinaryPath:         ClaudeCodeBinaryPath,
 		PackageFacts: DriverPackageFacts{
 			Name: ClaudeCodePackageName,
@@ -240,7 +240,7 @@ var driverSpecs = map[ID]DriverSpec{
 		OutputFormat:       PiEventSchemaVersion,
 		SupportsInterrupt:  false,
 		SupportsCompaction: false,
-		Phase10Support: []string{
+		FeatureSupport: []string{
 			"single_driver_turns",
 			"system_prompt:unsupported",
 			"compaction:unsupported",
@@ -325,7 +325,7 @@ var driverSpecs = map[ID]DriverSpec{
 		OutputFormat:       "shell_pty",
 		SupportsInterrupt:  true,
 		SupportsCompaction: false,
-		Phase10Support:     []string{"single_driver_turns"},
+		FeatureSupport:     []string{"single_driver_turns"},
 		BinaryPath:         ShellBinaryPath,
 	}),
 }
@@ -465,7 +465,7 @@ func CanonicalDriverID(value string) (ID, error) {
 
 func normalizeDriverSpec(spec DriverSpec) DriverSpec {
 	sort.Strings(spec.RequiredRuntimeCapabilities)
-	sort.Strings(spec.Phase10Support)
+	sort.Strings(spec.FeatureSupport)
 	return spec
 }
 
@@ -480,7 +480,7 @@ func secretGrantSpecKey(domain, scope string) string {
 
 func cloneDriverSpec(spec DriverSpec) DriverSpec {
 	spec.RequiredRuntimeCapabilities = append([]string(nil), spec.RequiredRuntimeCapabilities...)
-	spec.Phase10Support = append([]string(nil), spec.Phase10Support...)
+	spec.FeatureSupport = append([]string(nil), spec.FeatureSupport...)
 	spec.ConfigMaterializationSpecs = cloneDriverConfigMaterializationSpecs(spec.ConfigMaterializationSpecs)
 	if spec.RuntimeLayoutSpec != nil {
 		layout := cloneDriverRuntimeLayoutSpec(*spec.RuntimeLayoutSpec)

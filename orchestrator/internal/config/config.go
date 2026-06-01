@@ -1310,24 +1310,24 @@ func isUnspecifiedModelProxyBindHost(host string) bool {
 	return addr.IsUnspecified()
 }
 
-func defaultString(value, fallback string) string {
+func defaultString(value, defaultValue string) string {
 	if strings.TrimSpace(value) == "" {
-		return fallback
+		return defaultValue
 	}
 	return strings.TrimSpace(value)
 }
 
-func getenv(key, fallback string) string {
+func getenv(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
 	}
-	return fallback
+	return defaultValue
 }
 
-func intEnv(key string, fallback int) int {
+func intEnv(key string, defaultValue int) int {
 	value, err := strconv.Atoi(os.Getenv(key))
 	if err != nil || value <= 0 {
-		return fallback
+		return defaultValue
 	}
 	return value
 }
@@ -1344,13 +1344,13 @@ func boolEnv(key string) (bool, bool) {
 	return parsed, true
 }
 
-func sessionRetentionEnv(fallback time.Duration) (time.Duration, error) {
+func sessionRetentionEnv(defaultValue time.Duration) (time.Duration, error) {
 	if _, ok := os.LookupEnv("HARNESS_SESSION_TTL"); ok {
-		return 0, fmt.Errorf("HARNESS_SESSION_TTL is obsolete; use HARNESS_SESSION_RETENTION")
+		return 0, fmt.Errorf("HARNESS_SESSION_TTL has been removed; use HARNESS_SESSION_RETENTION")
 	}
 	value, ok := os.LookupEnv("HARNESS_SESSION_RETENTION")
 	if !ok {
-		return fallback, nil
+		return defaultValue, nil
 	}
 	duration, err := time.ParseDuration(strings.TrimSpace(value))
 	if err != nil {

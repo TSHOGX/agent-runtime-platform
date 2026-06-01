@@ -102,7 +102,7 @@ class CutoverCleanupTest(unittest.TestCase):
             (base / "sessions").mkdir()
             inventory = inventory_for(base)
             inventory["roots"]["sessions_root"]["entries"] = 0
-            inventory["roots"]["legacy_secret_root"]["info"] = {"exists": False}
+            inventory["roots"]["removed_secret_root"]["info"] = {"exists": False}
             inventory["host"]["commands"] = []
             inventory_path = write_inventory(base, inventory)
 
@@ -116,7 +116,7 @@ class CutoverCleanupTest(unittest.TestCase):
             base = Path(tmp)
             (base / "sessions").mkdir()
             inventory = inventory_for(base)
-            inventory["roots"]["legacy_secret_root"]["path"] = "/var/lib/harness"
+            inventory["roots"]["removed_secret_root"]["path"] = "/var/lib/harness"
             inventory_path = write_inventory(base, inventory)
 
             payload = MODULE.cleanup(args_for(inventory_path))
@@ -186,7 +186,7 @@ def inventory_for(base):
                 "info": {"exists": True, "kind": "directory"},
                 "entries": 1,
             },
-            "legacy_secret_root": {
+            "removed_secret_root": {
                 "path": str(secrets),
                 "info": {"exists": True, "kind": "directory"},
                 "entries": 1,

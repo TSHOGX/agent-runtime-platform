@@ -60,7 +60,7 @@ GET /api/events/stream -> orchestrator GET /api/events/stream
 Runtime is the execution substrate: gVisor `runsc`, the sandbox process,
 rootfs, mounts, network namespace, bridge client, selected agent driver, and
 checkpoint/restore mechanics. Its concerns are isolation, resource shape,
-execution compatibility, and recovery behavior.
+execution validation, and recovery behavior.
 
 Control plane is the host-side manager: session and turn state, generation
 allocation, resource reconciliation, control manifest rendering, bridge
@@ -86,7 +86,7 @@ image agent-manifest digests.
 - Workspace and agent HOME are provisioned through host-trusted DataVolume rows
   and mounted as exact `/workspace` and `/agent-home` binds.
 - Parent `/sessions` and `/agent-homes` mounts are forbidden.
-- `/harness-secrets` is absent; legacy sandbox secret config keys are rejected.
+- `/harness-secrets` is absent; removed sandbox secret config keys are rejected.
 - Rootfs is read-only; writable surfaces are explicit binds or scratch mounts.
 - Agent processes run as the configured non-root sandbox identity.
 - Provider credentials remain host/proxy-side. The sandbox sees only the
@@ -249,11 +249,11 @@ Important environment overrides:
 - `HARNESS_DB_PATH`
 - `RUNSC_ROOT`
 
-`HARNESS_SESSION_TTL` is obsolete and fails startup if present. Legacy top-level
-`runtime:` / `claude:` config no longer loads, and legacy
+`HARNESS_SESSION_TTL` has been removed and fails startup if present. Removed top-level
+`runtime:` / `claude:` config no longer loads, and removed
 `claude.proxy_bind_url` / `claude.sandbox_base_url` settings no longer map into
 the active schema. Configure model proxy settings only under
-`harness.model_proxy`. Obsolete `harness.session_ttl` and legacy
+`harness.model_proxy`. Removed `harness.session_ttl` and
 `harness.secrets.*` keys are rejected.
 
 With `session_retention: 0s`, sessions, messages, artifacts, workspaces, and
@@ -297,7 +297,7 @@ metadata events.
 - The artifact UI is read-only.
 - The output hub is appropriate for UI streaming but not an audit log.
 - Automatic checkpointing is disabled by default.
-- Obsolete `workspace`, `agent_home_path`, and `restore_id` session columns are
+- Removed `workspace`, `agent_home_path`, and `restore_id` session columns are
   rejected at store open; cutover cleanup must remove old DB state.
 - Tenant authz, credential storage/rotation/GC, tenant egress policy, resource
   limits, observability, and multi-orchestrator HA are later production work.

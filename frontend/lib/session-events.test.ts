@@ -76,21 +76,6 @@ describe("reduceSessionEvent", () => {
     });
   });
 
-  it("clears restore metadata for restore fallback retirement", () => {
-    const next = reduce(slice(), {
-      type: "session.restore_fallback_retired",
-      session_id: "sess_1",
-      payload: {
-        session_status: "running_idle",
-        session_updated_at: "2026-05-26T01:03:00Z",
-        restore_ms: null
-      }
-    });
-
-    expect(next.sessions[0].status).toBe("running_idle");
-    expect(next.sessions[0].restore_ms).toBeNull();
-  });
-
   it("marks terminal session events failed", () => {
     const failedStatus = reduce(slice(session({ status: "running_idle" })), {
       type: "session.failed",

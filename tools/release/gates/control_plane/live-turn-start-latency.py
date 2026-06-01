@@ -14,9 +14,9 @@ import urllib.request
 import uuid
 
 
-def env_default(name, fallback):
+def env_default(name, default_value):
     value = os.environ.get(name)
-    return fallback if value is None or value == "" else value
+    return default_value if value is None or value == "" else value
 
 
 def parse_args():

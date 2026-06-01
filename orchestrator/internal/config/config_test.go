@@ -371,7 +371,7 @@ func TestLoadProjectConfigRejectsMalformedModelProxySandboxBaseURL(t *testing.T)
 	}
 }
 
-func TestLoadProjectConfigRejectsLegacyRuntimeSection(t *testing.T) {
+func TestLoadProjectConfigRejectsRemovedRuntimeSection(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "harness.yaml")
 	if err := os.WriteFile(path, []byte(`harness:
@@ -384,7 +384,7 @@ runtime:
 
 	_, err := loadProjectConfig(path)
 	if err == nil || !strings.Contains(err.Error(), "field runtime not found") {
-		t.Fatalf("expected legacy runtime section rejection, got %v", err)
+		t.Fatalf("expected removed runtime section rejection, got %v", err)
 	}
 }
 
@@ -404,7 +404,7 @@ func TestLoadProjectConfigRejectsUnknownKeys(t *testing.T) {
 	}
 }
 
-func TestLoadProjectConfigRejectsObsoleteSessionTTLKey(t *testing.T) {
+func TestLoadProjectConfigRejectsRemovedSessionTTLKey(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "harness.yaml")
 	if err := os.WriteFile(path, []byte(`harness:
@@ -415,11 +415,11 @@ func TestLoadProjectConfigRejectsObsoleteSessionTTLKey(t *testing.T) {
 
 	_, err := loadProjectConfig(path)
 	if err == nil || !strings.Contains(err.Error(), "field session_ttl not found") {
-		t.Fatalf("expected obsolete session_ttl error, got %v", err)
+		t.Fatalf("expected removed session_ttl error, got %v", err)
 	}
 }
 
-func TestLoadProjectConfigRejectsLegacySecretsConfig(t *testing.T) {
+func TestLoadProjectConfigRejectsRemovedSecretsConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "harness.yaml")
 	if err := os.WriteFile(path, []byte(`harness:
@@ -432,7 +432,7 @@ func TestLoadProjectConfigRejectsLegacySecretsConfig(t *testing.T) {
 
 	_, err := loadProjectConfig(path)
 	if err == nil || !strings.Contains(err.Error(), "field secrets not found") {
-		t.Fatalf("expected legacy secrets rejection, got %v", err)
+		t.Fatalf("expected removed secrets rejection, got %v", err)
 	}
 }
 
@@ -862,23 +862,23 @@ func TestValidateHarnessConfigAllowsMaxSessionsAboveCIDRCapacity(t *testing.T) {
 	}
 }
 
-func TestSessionRetentionEnvRejectsObsoleteSessionTTL(t *testing.T) {
+func TestSessionRetentionEnvRejectsRemovedSessionTTL(t *testing.T) {
 	unsetEnvForTest(t, "HARNESS_SESSION_RETENTION")
 	t.Setenv("HARNESS_SESSION_TTL", "2h")
 
 	_, err := sessionRetentionEnv(time.Hour)
-	if err == nil || !strings.Contains(err.Error(), "HARNESS_SESSION_TTL is obsolete; use HARNESS_SESSION_RETENTION") {
-		t.Fatalf("expected obsolete env error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "HARNESS_SESSION_TTL has been removed; use HARNESS_SESSION_RETENTION") {
+		t.Fatalf("expected removed env error, got %v", err)
 	}
 }
 
-func TestSessionRetentionEnvRejectsObsoleteSessionTTLEvenWithReplacement(t *testing.T) {
+func TestSessionRetentionEnvRejectsRemovedSessionTTLEvenWithReplacement(t *testing.T) {
 	t.Setenv("HARNESS_SESSION_TTL", "2h")
 	t.Setenv("HARNESS_SESSION_RETENTION", "720h")
 
 	_, err := sessionRetentionEnv(time.Hour)
-	if err == nil || !strings.Contains(err.Error(), "HARNESS_SESSION_TTL is obsolete") {
-		t.Fatalf("expected obsolete env error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "HARNESS_SESSION_TTL has been removed") {
+		t.Fatalf("expected removed env error, got %v", err)
 	}
 }
 
@@ -916,14 +916,14 @@ func TestSessionRetentionEnvStrictParsing(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsObsoleteSessionTTLEnv(t *testing.T) {
+func TestLoadRejectsRemovedSessionTTLEnv(t *testing.T) {
 	repo := writeMinimalLoadConfig(t)
 	chdirForLoadTest(t, repo)
 	t.Setenv("HARNESS_SESSION_TTL", "2h")
 
 	_, err := Load()
-	if err == nil || !strings.Contains(err.Error(), "HARNESS_SESSION_TTL is obsolete; use HARNESS_SESSION_RETENTION") {
-		t.Fatalf("expected obsolete env load error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "HARNESS_SESSION_TTL has been removed; use HARNESS_SESSION_RETENTION") {
+		t.Fatalf("expected removed env load error, got %v", err)
 	}
 }
 

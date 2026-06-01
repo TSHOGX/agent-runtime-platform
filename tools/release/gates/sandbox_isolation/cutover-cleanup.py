@@ -14,7 +14,7 @@ CONTRACT = "sandbox-isolation-v1"
 CONTENT_ROOTS = {
     "sessions_root",
     "agent_homes_root",
-    "legacy_checkpoints_root",
+    "removed_checkpoints_root",
     "prepared_bundle_root",
     "run_control_root",
     "run_runtime_root",
@@ -23,7 +23,7 @@ CONTENT_ROOTS = {
     "run_logs_root",
     "proxy_internal_root",
 }
-ROOTS_TO_DELETE = {"legacy_secret_root"}
+ROOTS_TO_DELETE = {"removed_secret_root"}
 PROTECTED_DELETE_PATHS = {
     "/",
     "/bin",
@@ -257,7 +257,7 @@ def parse_nft_tables(output):
 
 def host_runtime_line_matches(line):
     lower = line.lower()
-    return any(marker in lower for marker in ("harness", "phase", "hgen", "hv-", "sv-"))
+    return any(marker in lower for marker in ("harness", "hgen", "hv-", "sv-"))
 
 
 def apply_actions(actions):

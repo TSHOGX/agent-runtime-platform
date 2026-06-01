@@ -357,10 +357,10 @@ func restoreGenerationArtifacts(req StartRequest) (GenerationArtifacts, error) {
 	return artifacts, nil
 }
 
-func resolveDriverID(driverID, fallback string) (string, error) {
+func resolveDriverID(driverID, defaultValue string) (string, error) {
 	driverID = strings.TrimSpace(driverID)
 	if driverID == "" {
-		driverID = strings.TrimSpace(fallback)
+		driverID = strings.TrimSpace(defaultValue)
 	}
 	if driverID == "" {
 		return "", errors.New("driver id is required")
@@ -1772,11 +1772,11 @@ func joinInts(values []int) string {
 	return strings.Join(parts, ",")
 }
 
-func defaultDuration(value, fallback time.Duration) time.Duration {
+func defaultDuration(value, defaultValue time.Duration) time.Duration {
 	if value > 0 {
 		return value
 	}
-	return fallback
+	return defaultValue
 }
 
 func formatSeconds(value time.Duration) string {
@@ -1905,9 +1905,9 @@ func runscBinaryMetadata() (string, string) {
 	return canonical, "sha256:" + digest
 }
 
-func defaultString(value, fallback string) string {
+func defaultString(value, defaultValue string) string {
 	if strings.TrimSpace(value) == "" {
-		return fallback
+		return defaultValue
 	}
 	return strings.TrimSpace(value)
 }
@@ -2491,9 +2491,9 @@ func (r *Runtime) runSandboxNetworkProbeOnce(ctx context.Context, details store.
 	return nil
 }
 
-func defaultIntSlice(values, fallback []int) []int {
+func defaultIntSlice(values, defaultValue []int) []int {
 	if len(values) == 0 {
-		return fallback
+		return defaultValue
 	}
 	return values
 }

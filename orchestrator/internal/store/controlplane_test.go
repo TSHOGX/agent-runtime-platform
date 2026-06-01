@@ -61,7 +61,7 @@ func TestFreshSchemaCreatesCurrentRuntimeTables(t *testing.T) {
 	for _, column := range []string{"host_path", "layout_version", "sandbox_uid", "sandbox_gid", "sandbox_supplemental_gids", "runtime_identity_digest", "provisioning_marker_path", "provisioning_marker_digest"} {
 		assertColumnExists(t, st.db, "session_workspaces", column)
 	}
-	for _, column := range removedLegacySessionColumnsForTest() {
+	for _, column := range removedSessionColumnsForTest() {
 		assertColumnMissing(t, st.db, "sessions", column)
 	}
 	for _, column := range []string{"driver", "host_path", "layout_version", "sandbox_uid", "sandbox_gid", "sandbox_supplemental_gids", "runtime_identity_digest", "provisioning_marker_path", "provisioning_marker_digest"} {

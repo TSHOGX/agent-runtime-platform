@@ -128,8 +128,7 @@ export function reduceSessionEvent<TConversation extends SessionEventConversatio
         notifications: [{ level: "error", message }]
       };
     }
-    case "session.checkpoint_retired":
-    case "session.restore_fallback_retired": {
+    case "session.checkpoint_retired": {
       if (!sessionId || !isRecord(event.payload)) return emptyReduction(slice, true);
       const sessionStatus = readSessionStatus(event.payload.session_status) ?? "running_idle";
       const updatedAt =

@@ -33,7 +33,7 @@ import (
 	"harness-platform/orchestrator/internal/store"
 )
 
-func TestCreateSessionRejectsLegacyAgentInput(t *testing.T) {
+func TestCreateSessionRejectsRemovedAgentInput(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	st, err := store.Open(ctx, filepath.Join(dir, "test.db"))
@@ -65,7 +65,7 @@ func TestCreateSessionRejectsLegacyAgentInput(t *testing.T) {
 		t.Fatalf("expected status 400, got %d", rec.Code)
 	}
 	if !strings.Contains(rec.Body.String(), "agent input is no longer supported") {
-		t.Fatalf("expected legacy agent error, got %s", rec.Body.String())
+		t.Fatalf("expected removed agent input error, got %s", rec.Body.String())
 	}
 }
 
@@ -1540,18 +1540,17 @@ WHERE session_id = ?`, session.ID).Scan(&queuedTurns); err != nil {
 	if !startRequests[0].RestoreFromCheckpoint || startRequests[0].GenerationID != old.GenerationID {
 		t.Fatalf("start was not restore: %+v", startRequests[0])
 	}
-	var restoreRetiredEvents, runtimeEvents, terminalEvents int
+	var runtimeEvents, terminalEvents int
 	if err := st.DBForTest().QueryRowContext(ctx, `
 SELECT
-  COALESCE(SUM(CASE WHEN type = 'session.restore_fallback_retired' THEN 1 ELSE 0 END), 0),
   COALESCE(SUM(CASE WHEN type = 'generation.error' THEN 1 ELSE 0 END), 0),
   COALESCE(SUM(CASE WHEN type = 'session.error' THEN 1 ELSE 0 END), 0)
 FROM events
-WHERE session_id = ?`, session.ID).Scan(&restoreRetiredEvents, &runtimeEvents, &terminalEvents); err != nil {
+WHERE session_id = ?`, session.ID).Scan(&runtimeEvents, &terminalEvents); err != nil {
 		t.Fatalf("count restore failure events: %v", err)
 	}
-	if restoreRetiredEvents != 0 || runtimeEvents != 1 || terminalEvents != 0 {
-		t.Fatalf("unexpected restore failure events: retired=%d runtime=%d terminal=%d", restoreRetiredEvents, runtimeEvents, terminalEvents)
+	if runtimeEvents != 1 || terminalEvents != 0 {
+		t.Fatalf("unexpected restore failure events: runtime=%d terminal=%d", runtimeEvents, terminalEvents)
 	}
 }
 
@@ -1825,7 +1824,7 @@ WHERE g.generation_id = ?`, old.GenerationID).Scan(&oldStatus, &oldNetwork, &old
 SELECT COUNT(*)
 FROM events
 WHERE session_id = ?
-  AND type IN ('session.restore_fallback_retired', 'generation.error')`, session.ID).Scan(&retirementEvents); err != nil {
+  AND type IN ('session.checkpoint_retired', 'generation.error')`, session.ID).Scan(&retirementEvents); err != nil {
 		t.Fatalf("count restore failure events: %v", err)
 	}
 	if retirementEvents != 0 {
@@ -1958,7 +1957,7 @@ func TestRunMaintenanceDoesNotColdStartFailedActiveGenerationWithQueuedTurn(t *t
 	ctx := context.Background()
 	dir := t.TempDir()
 	st, owner := openServerOwnedStore(t, ctx, dir)
-	session := createServerTestSession(t, ctx, st, dir, "sess_maintenance_no_fallback", string(sessionstate.RunningActive), time.Now().UTC(), nil)
+	session := createServerTestSession(t, ctx, st, dir, "sess_maintenance_no_restart", string(sessionstate.RunningActive), time.Now().UTC(), nil)
 	cfg := testServerConfig(dir)
 	cfg.Harness.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
 	cfg.Harness.Bridge.HeartbeatInterval = config.Duration{Duration: time.Hour}
@@ -4119,7 +4118,7 @@ func TestEventsStreamReplaysDurableEventsAfterLastEventID(t *testing.T) {
 	firstID, err := st.AppendEvent(ctx, store.AppendEventParams{
 		SessionID: "sess_a",
 		Type:      bridge.TypeAckTurnStarted,
-		Payload:   map[string]string{"phase": "first"},
+		Payload:   map[string]string{"step": "first"},
 		Now:       now,
 	})
 	if err != nil {
@@ -4223,7 +4222,7 @@ func TestEventsStreamReplaysDurableEventsAfterLastEventID(t *testing.T) {
 	assertContains(t, gapBody, `"reason":"retention_window_exceeded"`)
 	assertContains(t, gapBody, "id: "+strconv.FormatInt(secondID, 10)+"\n")
 	assertContains(t, gapBody, "id: "+strconv.FormatInt(thirdID, 10)+"\n")
-	if strings.Contains(gapBody, `"payload":{"phase":"first"}`) {
+	if strings.Contains(gapBody, `"payload":{"step":"first"}`) {
 		t.Fatalf("gap replay included pruned event: %s", gapBody)
 	}
 

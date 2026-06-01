@@ -13,23 +13,23 @@ import type { ApiArtifact } from "@/lib/types";
 type Props = { sessionId: string; path: string; artifact?: ApiArtifact | null };
 
 type LoadState =
-  | { phase: "skip" }
-  | { phase: "loading" }
-  | { phase: "ok"; text: string }
-  | { phase: "error"; error: string };
+  | { status: "skip" }
+  | { status: "loading" }
+  | { status: "ok"; text: string }
+  | { status: "error"; error: string };
 
 export function ArtifactViewer({ sessionId, path, artifact }: Props) {
   const meta = classifyArtifact(path);
   const href = buildArtifactHref(sessionId, path);
   const skip = meta.kind === "binary" || meta.kind === "image" || meta.kind === "pdf";
-  const [load, setLoad] = useState<LoadState>(skip ? { phase: "skip" } : { phase: "loading" });
+  const [load, setLoad] = useState<LoadState>(skip ? { status: "skip" } : { status: "loading" });
 
   useEffect(() => {
     if (skip) return;
     let cancelled = false;
     void fetchArtifactText(sessionId, path).then((res) => {
       if (cancelled) return;
-      setLoad(res.ok ? { phase: "ok", text: res.text } : { phase: "error", error: res.error });
+      setLoad(res.ok ? { status: "ok", text: res.text } : { status: "error", error: res.error });
     });
     return () => {
       cancelled = true;
@@ -139,17 +139,17 @@ function ViewerBody({
     );
   }
 
-  if (load.phase === "loading") {
+  if (load.status === "loading") {
     return (
       <div className="flex h-full items-center justify-center text-[var(--color-foreground-muted)]">
         <Loader2 className="h-4 w-4 animate-spin" />
       </div>
     );
   }
-  if (load.phase === "error") {
+  if (load.status === "error") {
     return <div className="px-6 py-4 text-sm text-[var(--color-danger)]">{load.error}</div>;
   }
-  if (load.phase !== "ok") return null;
+  if (load.status !== "ok") return null;
 
   if (meta.kind === "markdown") {
     return (
