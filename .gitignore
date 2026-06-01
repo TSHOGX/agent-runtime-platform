@@ -15,6 +15,7 @@ bundle/checkpoints/
 
 # 构建产物
 orchestrator/orchestrator
+schema-pack/
 .scratch/
 
 # 通用
