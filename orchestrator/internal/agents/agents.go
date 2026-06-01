@@ -128,75 +128,25 @@ type DriverSpec struct {
 	Phase10Support              []string
 	BinaryPath                  string
 	PackageFacts                DriverPackageFacts
-}
-
-var driverConfigMaterializationSpecs = map[ID][]DriverConfigMaterializationSpec{
-	Pi: {
-		{
-			Name:                        "models",
-			MountName:                   "pi_models_config",
-			ControlRelativePath:         "driver/pi/models.json",
-			SourceProjectionPath:        PiModelsConfigPath,
-			SandboxDestination:          PiModelsSandboxPath,
-			DestinationMutableBySandbox: false,
-			MountType:                   "bind",
-			MountMode:                   "ro",
-			MountExact:                  true,
-		},
-		{
-			Name:                        "settings",
-			MountName:                   "pi_settings_config",
-			ControlRelativePath:         "driver/pi/settings.json",
-			SourceProjectionPath:        PiSettingsConfigPath,
-			SandboxDestination:          PiSettingsSandboxPath,
-			DestinationMutableBySandbox: false,
-			MountType:                   "bind",
-			MountMode:                   "ro",
-			MountExact:                  true,
-		},
-	},
-}
-
-var driverRuntimeLayoutSpecs = map[ID]DriverRuntimeLayoutSpec{
-	Pi: {
-		Env: []DriverRuntimeEnvVarSpec{
-			{Name: "PI_CODING_AGENT_DIR", Value: PiCodingAgentDir},
-			{Name: "PI_CODING_AGENT_SESSION_DIR", Value: PiSessionDir},
-			{Name: "PI_OFFLINE", Value: "1"},
-			{Name: "PI_SKIP_VERSION_CHECK", Value: "1"},
-			{Name: "PI_TELEMETRY", Value: "0"},
-		},
-		HomeDirs: []DriverRuntimeHomeDirSpec{
-			{Label: "pi root dir", AgentHomeRelativePath: ".pi", Mode: 0o750},
-			{Label: "pi agent dir", AgentHomeRelativePath: ".pi/agent", Mode: 0o750},
-			{Label: "pi session dir", AgentHomeRelativePath: ".pi/agent/sessions", Mode: 0o750},
-		},
-		ControlManifest: DriverRuntimeControlManifestSpec{
-			Fields: map[string]any{
-				"pi_coding_agent_dir":         PiCodingAgentDir,
-				"pi_coding_agent_session_dir": PiSessionDir,
-				"pi_offline":                  true,
-				"pi_skip_version_check":       true,
-				"pi_telemetry_disabled":       true,
-			},
-		},
-	},
+	ConfigMaterializationSpecs  []DriverConfigMaterializationSpec
+	RuntimeLayoutSpec           *DriverRuntimeLayoutSpec
 }
 
 func DriverConfigMaterializationSpecsFor(driver ID) []DriverConfigMaterializationSpec {
-	specs := driverConfigMaterializationSpecs[ID(strings.TrimSpace(string(driver)))]
-	if len(specs) == 0 {
+	spec, ok := driverSpecs[ID(strings.TrimSpace(string(driver)))]
+	if !ok || len(spec.ConfigMaterializationSpecs) == 0 {
 		return nil
 	}
-	out := make([]DriverConfigMaterializationSpec, len(specs))
-	copy(out, specs)
-	return out
+	return cloneDriverConfigMaterializationSpecs(spec.ConfigMaterializationSpecs)
 }
 
 func AllDriverConfigMaterializationSpecs() []DriverConfigMaterializationSpec {
 	var out []DriverConfigMaterializationSpec
-	drivers := make([]string, 0, len(driverConfigMaterializationSpecs))
-	for driver := range driverConfigMaterializationSpecs {
+	drivers := make([]string, 0, len(driverSpecs))
+	for driver, spec := range driverSpecs {
+		if len(spec.ConfigMaterializationSpecs) == 0 {
+			continue
+		}
 		drivers = append(drivers, string(driver))
 	}
 	sort.Strings(drivers)
@@ -207,11 +157,11 @@ func AllDriverConfigMaterializationSpecs() []DriverConfigMaterializationSpec {
 }
 
 func DriverRuntimeLayoutSpecFor(driver ID) (DriverRuntimeLayoutSpec, bool) {
-	spec, ok := driverRuntimeLayoutSpecs[ID(strings.TrimSpace(string(driver)))]
-	if !ok {
+	spec, ok := driverSpecs[ID(strings.TrimSpace(string(driver)))]
+	if !ok || spec.RuntimeLayoutSpec == nil {
 		return DriverRuntimeLayoutSpec{}, false
 	}
-	return cloneDriverRuntimeLayoutSpec(spec), true
+	return cloneDriverRuntimeLayoutSpec(*spec.RuntimeLayoutSpec), true
 }
 
 type SnapshotPolicySpec struct {
@@ -307,6 +257,53 @@ var driverSpecs = map[ID]DriverSpec{
 			Shasum:             PiPackageShasum,
 			Integrity:          PiPackageIntegrity,
 			EventSchemaVersion: PiEventSchemaVersion,
+		},
+		ConfigMaterializationSpecs: []DriverConfigMaterializationSpec{
+			{
+				Name:                        "models",
+				MountName:                   "pi_models_config",
+				ControlRelativePath:         "driver/pi/models.json",
+				SourceProjectionPath:        PiModelsConfigPath,
+				SandboxDestination:          PiModelsSandboxPath,
+				DestinationMutableBySandbox: false,
+				MountType:                   "bind",
+				MountMode:                   "ro",
+				MountExact:                  true,
+			},
+			{
+				Name:                        "settings",
+				MountName:                   "pi_settings_config",
+				ControlRelativePath:         "driver/pi/settings.json",
+				SourceProjectionPath:        PiSettingsConfigPath,
+				SandboxDestination:          PiSettingsSandboxPath,
+				DestinationMutableBySandbox: false,
+				MountType:                   "bind",
+				MountMode:                   "ro",
+				MountExact:                  true,
+			},
+		},
+		RuntimeLayoutSpec: &DriverRuntimeLayoutSpec{
+			Env: []DriverRuntimeEnvVarSpec{
+				{Name: "PI_CODING_AGENT_DIR", Value: PiCodingAgentDir},
+				{Name: "PI_CODING_AGENT_SESSION_DIR", Value: PiSessionDir},
+				{Name: "PI_OFFLINE", Value: "1"},
+				{Name: "PI_SKIP_VERSION_CHECK", Value: "1"},
+				{Name: "PI_TELEMETRY", Value: "0"},
+			},
+			HomeDirs: []DriverRuntimeHomeDirSpec{
+				{Label: "pi root dir", AgentHomeRelativePath: ".pi", Mode: 0o750},
+				{Label: "pi agent dir", AgentHomeRelativePath: ".pi/agent", Mode: 0o750},
+				{Label: "pi session dir", AgentHomeRelativePath: ".pi/agent/sessions", Mode: 0o750},
+			},
+			ControlManifest: DriverRuntimeControlManifestSpec{
+				Fields: map[string]any{
+					"pi_coding_agent_dir":         PiCodingAgentDir,
+					"pi_coding_agent_session_dir": PiSessionDir,
+					"pi_offline":                  true,
+					"pi_skip_version_check":       true,
+					"pi_telemetry_disabled":       true,
+				},
+			},
 		},
 	}),
 	Shell: normalizeDriverSpec(DriverSpec{
@@ -505,7 +502,21 @@ func secretGrantSpecKey(domain, scope string) string {
 func cloneDriverSpec(spec DriverSpec) DriverSpec {
 	spec.RequiredRuntimeCapabilities = append([]string(nil), spec.RequiredRuntimeCapabilities...)
 	spec.Phase10Support = append([]string(nil), spec.Phase10Support...)
+	spec.ConfigMaterializationSpecs = cloneDriverConfigMaterializationSpecs(spec.ConfigMaterializationSpecs)
+	if spec.RuntimeLayoutSpec != nil {
+		layout := cloneDriverRuntimeLayoutSpec(*spec.RuntimeLayoutSpec)
+		spec.RuntimeLayoutSpec = &layout
+	}
 	return spec
+}
+
+func cloneDriverConfigMaterializationSpecs(specs []DriverConfigMaterializationSpec) []DriverConfigMaterializationSpec {
+	if len(specs) == 0 {
+		return nil
+	}
+	out := make([]DriverConfigMaterializationSpec, len(specs))
+	copy(out, specs)
+	return out
 }
 
 func cloneDriverRuntimeLayoutSpec(spec DriverRuntimeLayoutSpec) DriverRuntimeLayoutSpec {

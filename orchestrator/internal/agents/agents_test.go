@@ -12,7 +12,9 @@ func TestPiDriverSpecIsRegistered(t *testing.T) {
 		spec.BridgeProtocolVersion != 2 ||
 		spec.TurnInputSchema != "RunTurn" ||
 		spec.OutputSchema != PiEventSchemaVersion ||
-		!spec.ModelAccess {
+		!spec.ModelAccess ||
+		len(spec.ConfigMaterializationSpecs) != 2 ||
+		spec.RuntimeLayoutSpec == nil {
 		t.Fatalf("unexpected pi spec: %+v", spec)
 	}
 	if PiPackageName != "@earendil-works/pi-coding-agent" ||
@@ -30,6 +32,57 @@ func TestPiDriverSpecIsRegistered(t *testing.T) {
 	def, ok := Lookup("pi")
 	if !ok || def.Protocol != ProtocolPiRPC {
 		t.Fatalf("lookup pi = %+v/%v", def, ok)
+	}
+}
+
+func TestPiDriverConfigMaterializationSpecs(t *testing.T) {
+	spec, ok := DriverSpecFor("pi")
+	if !ok {
+		t.Fatalf("pi driver spec missing")
+	}
+	if len(spec.ConfigMaterializationSpecs) != 2 {
+		t.Fatalf("unexpected pi config materialization specs: %+v", spec.ConfigMaterializationSpecs)
+	}
+	if spec.ConfigMaterializationSpecs[0].Name != "models" ||
+		spec.ConfigMaterializationSpecs[0].SourceProjectionPath != PiModelsConfigPath ||
+		spec.ConfigMaterializationSpecs[0].SandboxDestination != PiModelsSandboxPath ||
+		spec.ConfigMaterializationSpecs[1].Name != "settings" ||
+		spec.ConfigMaterializationSpecs[1].SourceProjectionPath != PiSettingsConfigPath ||
+		spec.ConfigMaterializationSpecs[1].SandboxDestination != PiSettingsSandboxPath {
+		t.Fatalf("unexpected pi config materialization specs: %+v", spec.ConfigMaterializationSpecs)
+	}
+
+	helperSpecs := DriverConfigMaterializationSpecsFor(Pi)
+	if len(helperSpecs) != 2 ||
+		helperSpecs[0] != spec.ConfigMaterializationSpecs[0] ||
+		helperSpecs[1] != spec.ConfigMaterializationSpecs[1] {
+		t.Fatalf("helper specs = %+v, driver specs = %+v", helperSpecs, spec.ConfigMaterializationSpecs)
+	}
+
+	allSpecs := AllDriverConfigMaterializationSpecs()
+	if len(allSpecs) != 2 ||
+		allSpecs[0] != spec.ConfigMaterializationSpecs[0] ||
+		allSpecs[1] != spec.ConfigMaterializationSpecs[1] {
+		t.Fatalf("all specs = %+v, driver specs = %+v", allSpecs, spec.ConfigMaterializationSpecs)
+	}
+
+	spec.ConfigMaterializationSpecs[0].MountName = "mutated"
+	if spec.RuntimeLayoutSpec == nil {
+		t.Fatalf("pi runtime layout missing")
+	}
+	spec.RuntimeLayoutSpec.Env[0].Value = "mutated"
+	specAgain, ok := DriverSpecFor("pi")
+	if !ok ||
+		specAgain.ConfigMaterializationSpecs[0].MountName != "pi_models_config" ||
+		specAgain.RuntimeLayoutSpec == nil ||
+		specAgain.RuntimeLayoutSpec.Env[0].Value != PiCodingAgentDir {
+		t.Fatalf("driver spec should be cloned, got %+v/%v", specAgain, ok)
+	}
+
+	helperSpecs[0].MountName = "mutated"
+	helperAgain := DriverConfigMaterializationSpecsFor(Pi)
+	if helperAgain[0].MountName != "pi_models_config" {
+		t.Fatalf("helper specs should be cloned, got %+v", helperAgain)
 	}
 }
 
