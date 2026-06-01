@@ -331,14 +331,56 @@ class BridgeClientTest(unittest.TestCase):
                     {"turn_id": 9, "sequence": 1, "turn_input_schema": "legacy", "input": {"content": "run"}},
                 )
 
-    def test_native_events_probe_runner_emits_schema_tagged_payload(self):
+    def test_native_events_probe_is_not_a_production_runner(self):
+        self.assertNotIn("native_events_probe", bridge.RUNNER_FACTORIES)
+        with self.assertRaisesRegex(RuntimeError, "unsupported driver native_events_probe"):
+            bridge.make_turn_runner("native_events_probe")
+
+    def test_native_events_probe_driver_id_is_rejected_before_bridge_hello(self):
         with tempfile.TemporaryDirectory() as root:
-            client = bridge.BridgeClient(root, "sess", "gen", "native_events_probe", poll_interval=0.001)
-            runner = bridge.make_turn_runner("native_events_probe")
+            args = argparse_namespace(
+                bridge_dir=root,
+                session_id="sess",
+                generation_id="gen",
+                driver_id="native_events_probe",
+                poll_interval=0.001,
+                timeout=0.1,
+                base_url="",
+                healthz_statuses="200",
+                http_timeout=0.1,
+                heartbeat_interval=60,
+                idle_interval=0.001,
+                max_turns=1,
+                max_empty_polls=0,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "unsupported driver native_events_probe"):
+                bridge.run_claim_loop(args, runner=object())
+
+            self.assertFalse((Path(root) / bridge.OUTBOX).exists())
+
+    def test_execute_grant_preserves_native_event_parser_payload_for_test_injection(self):
+        with tempfile.TemporaryDirectory() as root:
+            client = bridge.BridgeClient(root, "sess", "gen", "sh", poll_interval=0.001)
+
+            class NativeEventsTestRunner:
+                def run_turn(self, content, emit):
+                    emit(
+                        "stdout",
+                        {
+                            "schema": "harness_native_events_v1",
+                            "event": {
+                                "type": "agent.message",
+                                "payload": {"content": content},
+                            },
+                        },
+                    )
+                    return "completed", "", ""
+
             with mock.patch.object(bridge, "sandbox_source_ip", return_value="10.240.0.2"):
                 bridge.execute_grant(
                     client,
-                    runner,
+                    NativeEventsTestRunner(),
                     {"turn_id": 9, "sequence": 1, "turn_input_schema": "RunTurn", "input": {"content": "native ok"}},
                 )
 

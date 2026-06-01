@@ -222,6 +222,8 @@ def args_driver_id(args):
     driver_id = (getattr(args, "driver_id", "") or "").strip()
     if not driver_id:
         raise RuntimeError("--driver-id is required")
+    if driver_id not in RUNNER_FACTORIES:
+        raise RuntimeError(f"unsupported driver {driver_id}")
     return driver_id
 
 
@@ -829,29 +831,10 @@ class PiRPCTurnRunner:
             pass
 
 
-class NativeEventsProbeRunner:
-    def run_turn(self, content, emit):
-        emit(
-            "stdout",
-            {
-                "schema": "harness_native_events_v1",
-                "event": {
-                    "type": "agent.message",
-                    "payload": {"content": content},
-                },
-            },
-        )
-        return "completed", "", ""
-
-    def close(self):
-        pass
-
-
 RUNNER_FACTORIES = {
     "claude_code": ClaudeTurnRunner,
     "pi": PiRPCTurnRunner,
     "sh": ShellTurnRunner,
-    "native_events_probe": NativeEventsProbeRunner,
 }
 
 
