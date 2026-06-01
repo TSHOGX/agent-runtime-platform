@@ -525,26 +525,35 @@ func TestCloseSessionReleasesSoftLimitWithoutDeletingHistory(t *testing.T) {
 	cfg.SessionRetention = 0
 	cfg.MaxSessions = 1
 	cfg.Harness.MaxSessions = 1
+	volumeConfig, err := serverDataVolumeConfigForTest(cfg)
+	if err != nil {
+		t.Fatalf("data volume config: %v", err)
+	}
 	now := time.Now().UTC()
 	oldSession := store.Session{
-		ID:            "sess_retained",
-		UserID:        labUserID,
-		Status:        string(sessionstate.Created),
-		Agent:         "claude_code",
-		Workspace:     filepath.Join(cfg.SessionsRoot, "sess_retained"),
-		AgentHomePath: filepath.Join(dir, "agent-homes", "sess_retained"),
-		RestoreID:     "phase3-sess_retained",
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		ID:        "sess_retained",
+		UserID:    labUserID,
+		Status:    string(sessionstate.Created),
+		Agent:     "claude_code",
+		Workspace: filepath.Join(cfg.SessionsRoot, "sess_retained"),
+		RestoreID: "phase3-sess_retained",
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 	if err := os.MkdirAll(oldSession.Workspace, 0o755); err != nil {
 		t.Fatalf("create workspace: %v", err)
 	}
-	if err := os.MkdirAll(oldSession.AgentHomePath, 0o755); err != nil {
-		t.Fatalf("create agent home: %v", err)
-	}
 	if err := st.CreateSession(ctx, oldSession); err != nil {
 		t.Fatalf("create retained session: %v", err)
+	}
+	oldDriverHome, err := st.ProvisionSessionDriverHome(ctx, store.ProvisionSessionDriverHomeParams{
+		SessionID: oldSession.ID,
+		Driver:    oldSession.Agent,
+		Config:    volumeConfig,
+		Now:       now,
+	})
+	if err != nil {
+		t.Fatalf("provision driver home: %v", err)
 	}
 	if _, err := st.AddMessage(ctx, oldSession.ID, "user", "keep this"); err != nil {
 		t.Fatalf("add message: %v", err)
@@ -593,15 +602,21 @@ func TestCloseSessionReleasesSoftLimitWithoutDeletingHistory(t *testing.T) {
 		t.Fatalf("get closed session: %v", err)
 	}
 	if closed.Status != string(sessionstate.Destroyed) ||
-		closed.Workspace != oldSession.Workspace ||
-		closed.AgentHomePath != oldSession.AgentHomePath {
+		closed.Workspace != oldSession.Workspace {
 		t.Fatalf("closed session should preserve terminal state and paths: %+v", closed)
 	}
 	if _, err := os.Stat(oldSession.Workspace); err != nil {
 		t.Fatalf("workspace should remain after close: %v", err)
 	}
-	if _, err := os.Stat(oldSession.AgentHomePath); err != nil {
+	if _, err := os.Stat(oldDriverHome.HostPath); err != nil {
 		t.Fatalf("agent home should remain after close: %v", err)
+	}
+	retainedDriverHome, err := st.GetSessionDriverHomeVolume(ctx, oldSession.ID, oldSession.Agent)
+	if err != nil {
+		t.Fatalf("get retained driver home: %v", err)
+	}
+	if retainedDriverHome.HostPath != oldDriverHome.HostPath {
+		t.Fatalf("driver home row should be retained: got=%+v want=%+v", retainedDriverHome, oldDriverHome)
 	}
 	messages, err := st.ListMessages(ctx, oldSession.ID)
 	if err != nil {
@@ -801,10 +816,9 @@ func TestSessionReadResponsesUsePublicSessionDTO(t *testing.T) {
 	restoreMS := int64(123)
 	if _, err := st.DBForTest().ExecContext(ctx, `
 UPDATE sessions
-SET agent_home_path = ?,
-    checkpoint_path = ?,
+SET checkpoint_path = ?,
     restore_ms = ?
-WHERE id = ?`, filepath.Join(dir, "agent-homes", session.ID), filepath.Join(dir, "checkpoints", session.ID), restoreMS, session.ID); err != nil {
+WHERE id = ?`, filepath.Join(dir, "checkpoints", session.ID), restoreMS, session.ID); err != nil {
 		t.Fatalf("seed host-only fields: %v", err)
 	}
 
@@ -1303,9 +1317,20 @@ func TestSendMessageColdFallbackAllocatesReplacementGeneration(t *testing.T) {
 	if gotSession.ActiveGenerationID == "" || gotSession.ActiveGenerationID == old.GenerationID {
 		t.Fatalf("active generation was not replaced: %q old=%q", gotSession.ActiveGenerationID, old.GenerationID)
 	}
-	if gotSession.Workspace != session.Workspace ||
-		gotSession.AgentHomePath == "" {
+	if gotSession.Workspace != session.Workspace {
 		t.Fatalf("session identity not preserved: before=%+v after=%+v", session, gotSession)
+	}
+	volumeConfig, err := srv.dataVolumeProvisionerConfig()
+	if err != nil {
+		t.Fatalf("data volume config: %v", err)
+	}
+	driverHome, err := st.VerifySessionDriverHomeVolume(ctx, store.VerifySessionDriverHomeVolumeParams{
+		SessionID: session.ID,
+		Driver:    session.Agent,
+		Config:    volumeConfig,
+	})
+	if err != nil {
+		t.Fatalf("verify replacement driver home: %v", err)
 	}
 	var oldStatus, oldNetwork, oldResources, newStatus, newNetwork, newResources string
 	if err := st.DBForTest().QueryRowContext(ctx, `
@@ -1349,6 +1374,9 @@ WHERE session_id = ?
 	}
 	if startRequests[0].GenerationID != gotSession.ActiveGenerationID {
 		t.Fatalf("unexpected replacement start request: %+v", startRequests[0])
+	}
+	if startRequests[0].AgentHomeHostPath != driverHome.HostPath {
+		t.Fatalf("replacement start did not use driver home volume: start=%+v home=%+v", startRequests[0], driverHome)
 	}
 }
 
@@ -5478,6 +5506,25 @@ func newServerTestWatcher(t *testing.T, sessionsRoot string, st *store.Store, hu
 			GID: serverTestSandboxGID(),
 		},
 	}, st, hub, slog.Default())
+}
+
+func serverDataVolumeConfigForTest(cfg config.Config) (store.DataVolumeProvisionerConfig, error) {
+	roots, err := config.ValidateIsolationRoots(cfg.IsolationRoots())
+	if err != nil {
+		return store.DataVolumeProvisionerConfig{}, err
+	}
+	identity := cfg.Harness.SandboxIdentity
+	return store.DataVolumeProvisionerConfig{
+		SessionsRoot:   roots.SessionsRoot,
+		AgentHomesRoot: roots.AgentHomesRoot,
+		EvidenceRoot:   roots.DataVolumeEvidenceRoot,
+		LayoutVersion:  store.DataVolumeLayoutVersion,
+		RuntimeIdentity: store.RuntimeIdentity{
+			UID:              identity.UID,
+			GID:              identity.GID,
+			SupplementalGIDs: identity.SupplementalGIDs,
+		},
+	}, nil
 }
 
 func testServerConfig(dir string) config.Config {

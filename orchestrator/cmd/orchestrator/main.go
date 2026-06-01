@@ -50,7 +50,7 @@ func main() {
 	}
 	defer owner.Close()
 
-	db, err := store.OpenWithOptions(ctx, cfg.DBPath, store.Options{AgentHomesRoot: cfg.AgentHomesRoot})
+	db, err := store.Open(ctx, cfg.DBPath)
 	if err != nil {
 		log.Error("failed to open store", "error", err)
 		os.Exit(1)

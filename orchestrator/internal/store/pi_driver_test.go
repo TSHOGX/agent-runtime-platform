@@ -20,7 +20,7 @@ import (
 func TestFreshSchemaAcceptsPiDriver(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	st, err := OpenWithOptions(ctx, filepath.Join(dir, "pi-driver.db"), Options{AgentHomesRoot: filepath.Join(dir, "agent-homes")})
+	st, err := Open(ctx, filepath.Join(dir, "pi-driver.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

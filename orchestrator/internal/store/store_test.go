@@ -88,6 +88,47 @@ func TestListMessages(t *testing.T) {
 	}
 }
 
+func TestCreateSessionDoesNotWriteLegacyAgentHomePathColumn(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	ctx := context.Background()
+	st, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if _, err := st.db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN agent_home_path TEXT`); err != nil {
+		t.Fatalf("add legacy agent_home_path column: %v", err)
+	}
+
+	now := time.Now().UTC()
+	if err := st.CreateSession(ctx, Session{
+		ID:        "sess_legacy_home",
+		UserID:    "lab",
+		Status:    string(sessionstate.Created),
+		Agent:     "claude_code",
+		Workspace: dir,
+		RestoreID: "phase3-sess_legacy_home",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	var nonNullCount int
+	if err := st.db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM sessions
+WHERE id = ?
+  AND agent_home_path IS NOT NULL`, "sess_legacy_home").Scan(&nonNullCount); err != nil {
+		t.Fatalf("query legacy agent_home_path: %v", err)
+	}
+	if nonNullCount != 0 {
+		t.Fatalf("new session wrote legacy agent_home_path")
+	}
+}
+
 func TestUpdateSessionStatusAndActivity(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")

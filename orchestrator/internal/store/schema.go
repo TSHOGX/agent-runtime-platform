@@ -42,7 +42,6 @@ CREATE TABLE IF NOT EXISTS sessions (
   checkpoint_path TEXT,
   auto_checkpoint_enabled INTEGER NOT NULL DEFAULT 0 CHECK(auto_checkpoint_enabled IN (0,1)),
   active_generation_id TEXT REFERENCES runtime_generations(generation_id),
-  agent_home_path TEXT,
   failure_reason TEXT,
   error_class TEXT
 );
