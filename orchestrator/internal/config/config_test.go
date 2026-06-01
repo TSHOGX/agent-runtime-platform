@@ -385,8 +385,8 @@ func testHarnessConfig() HarnessConfig {
 			GID: 0,
 		},
 		ModelProxy: ModelProxyConfig{
-			BindURL:        defaultModelProxyBindURL,
-			SandboxBaseURL: defaultSandboxModelProxyBaseURL,
+			BindURL:        "http://0.0.0.0:8082",
+			SandboxBaseURL: "http://harness-model-proxy.internal:8082",
 			BindPort:       8082,
 		},
 	}

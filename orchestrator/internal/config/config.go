@@ -72,11 +72,6 @@ type RuntimeProviderConfig struct {
 	ProfileID  string `yaml:"profile_id" json:"profile_id,omitempty"`
 }
 
-const defaultModelProxyBindPort = 8082
-const defaultModelProxyBindURL = "http://0.0.0.0:8082"
-const defaultSandboxModelProxyHost = "harness-model-proxy.internal"
-const defaultSandboxModelProxyBaseURL = "http://harness-model-proxy.internal:8082"
-
 type HarnessConfig struct {
 	DefaultAgent         string                           `yaml:"default_agent"`
 	Agents               map[string]AgentConfig           `yaml:"agents"`
@@ -1092,13 +1087,6 @@ func validateModelProxyConfig(cfg ModelProxyConfig) error {
 		return err
 	}
 	return validateModelProxySandboxBaseURL(cfg.SandboxBaseURL, bindPort)
-}
-
-func defaultSandboxModelProxyBaseURLForPort(port int) string {
-	if port <= 0 {
-		port = defaultModelProxyBindPort
-	}
-	return fmt.Sprintf("http://%s:%d", defaultSandboxModelProxyHost, port)
 }
 
 func validateModelProxySandboxBaseURL(raw string, bindPort int) error {
