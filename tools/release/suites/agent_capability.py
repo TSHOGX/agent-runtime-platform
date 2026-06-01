@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Agent-capability release suite (Phase 10 agent capability / UX).
+"""Agent-capability release suite.
 
-Reserved suite. Phase 10 is still in design; its only executable checks today
-are the static doc-pinning scans, which also live in the sandbox_isolation
-suite's full static set (the single source of truth in
-``static_manifests``). This suite exposes the phase10 subset as a focused
-``--static-only`` view for capability development, not a replacement for the
+Reserved suite. The next capability plane is still in design; its only
+executable checks today are the static doc-pinning scans, which also live in
+the sandbox_isolation suite's full static set (the single source of truth in
+``static_manifests``). This suite exposes that subset as a focused
+``--static-only`` view for capability development, not a replacement for
 release-blocking static scans.
 """
 import argparse
@@ -20,7 +20,7 @@ FAILURE_BANNER = "agent capability release gates failed"
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="Agent-capability release suite (reserved; phase10 static-check view).")
+    parser = argparse.ArgumentParser(description="Agent-capability release suite (reserved static-check view).")
     parser.add_argument("--output", default="", help="Optional path for the JSON evidence file.")
     parser.add_argument("--list", action="store_true", help="List selected gates without running them.")
     parser.add_argument("--static-only", action="store_true", help=argparse.SUPPRESS)

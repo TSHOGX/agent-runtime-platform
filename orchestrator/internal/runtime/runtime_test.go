@@ -54,12 +54,11 @@ func TestPathIsMountPointDetectsRootAndTempDir(t *testing.T) {
 
 func TestRuntimeStartRequiresGenerationDetailsForColdPath(t *testing.T) {
 	rt := New(Config{
-		DefaultAgent:    "claude_code",
-		SessionsRoot:    filepath.Join(t.TempDir(), "sessions"),
-		AgentHomesRoot:  filepath.Join(t.TempDir(), "agent-homes"),
-		CheckpointsRoot: filepath.Join(t.TempDir(), "checkpoints"),
-		BundleRoot:      filepath.Join(t.TempDir(), "bundle", "out"),
-		RunscNetwork:    "host",
+		DefaultAgent:   "claude_code",
+		SessionsRoot:   filepath.Join(t.TempDir(), "sessions"),
+		AgentHomesRoot: filepath.Join(t.TempDir(), "agent-homes"),
+		BundleRoot:     filepath.Join(t.TempDir(), "bundle", "out"),
+		RunscNetwork:   "host",
 	})
 	res := rt.Start(context.Background(), StartRequest{
 		SessionID: "sess_1",
@@ -76,14 +75,10 @@ func TestRuntimeStartRequiresGenerationDetailsForColdPath(t *testing.T) {
 func TestResolveCheckpointPathUsesGenerationPath(t *testing.T) {
 	dir := t.TempDir()
 	generationPath := filepath.Join(dir, "run", "gen_a", "checkpoint")
-	legacyPath := filepath.Join(dir, "checkpoints", "sess_1")
 	if err := os.MkdirAll(generationPath, 0o755); err != nil {
 		t.Fatalf("create generation checkpoint: %v", err)
 	}
-	if err := os.MkdirAll(legacyPath, 0o755); err != nil {
-		t.Fatalf("create legacy checkpoint: %v", err)
-	}
-	rt := New(Config{CheckpointsRoot: filepath.Join(dir, "checkpoints")})
+	rt := New(Config{})
 
 	got, err := rt.resolveCheckpointPath(StartRequest{
 		SessionID: "sess_1",
@@ -100,12 +95,7 @@ func TestResolveCheckpointPathUsesGenerationPath(t *testing.T) {
 }
 
 func TestResolveCheckpointPathRequiresGenerationPath(t *testing.T) {
-	dir := t.TempDir()
-	legacyPath := filepath.Join(dir, "checkpoints", "sess_1")
-	if err := os.MkdirAll(legacyPath, 0o755); err != nil {
-		t.Fatalf("create legacy checkpoint: %v", err)
-	}
-	rt := New(Config{CheckpointsRoot: filepath.Join(dir, "checkpoints")})
+	rt := New(Config{})
 
 	_, err := rt.resolveCheckpointPath(StartRequest{
 		SessionID: "sess_1",
@@ -257,7 +247,7 @@ func TestProjectedControlManifestDigestRejectsHostOnlyFields(t *testing.T) {
 }
 
 func TestCanonicalManifestDigestMatchesSandboxProjectionFixture(t *testing.T) {
-	data := mustReadFile(t, filepath.Join("..", "..", "..", "docs", "phase8", "fixtures", "control-manifest-payload.json"))
+	data := mustReadFile(t, filepath.Join("testdata", "control-manifest-payload.phase8.json"))
 	var payload any
 	if err := json.Unmarshal(data, &payload); err != nil {
 		t.Fatalf("read canonical manifest fixture: %v", err)
@@ -547,8 +537,7 @@ func TestCheckpointRejectsRunscPinMismatchBeforeFilesystemMutation(t *testing.T)
 		},
 	}
 	rt := New(Config{
-		CheckpointsRoot: filepath.Join(dir, "checkpoints"),
-		CommandRunner:   runner,
+		CommandRunner: runner,
 	})
 	details := testGenerationDetails(dir, "gen_checkpoint_pin_mismatch")
 	details.RunscVersion = "runsc current"
@@ -706,8 +695,7 @@ func TestCheckpointRequiresGenerationScopedPath(t *testing.T) {
 		},
 	}
 	rt := New(Config{
-		CheckpointsRoot: filepath.Join(dir, "legacy-checkpoints"),
-		CommandRunner:   runner,
+		CommandRunner: runner,
 	})
 	details := testGenerationDetails(dir, "gen_checkpoint_path")
 	details.RunscVersion = "runsc checkpoint-path"
@@ -729,15 +717,12 @@ func TestCheckpointRequiresGenerationScopedPath(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "generation checkpoint path is required") {
 		t.Fatalf("expected missing generation checkpoint path error, got %v", err)
 	}
-	if _, statErr := os.Stat(filepath.Join(dir, "legacy-checkpoints", details.SessionID)); !os.IsNotExist(statErr) {
-		t.Fatalf("checkpoint should not create legacy session path, stat err=%v", statErr)
-	}
 
 	details.CheckpointPath = filepath.Join(dir, "run", "gen-"+details.GenerationID, "checkpoint")
 	err = rt.Checkpoint(context.Background(), CheckpointRequest{
 		SessionID:      details.SessionID,
 		GenerationID:   details.GenerationID,
-		CheckpointPath: filepath.Join(dir, "legacy-checkpoints", details.SessionID),
+		CheckpointPath: filepath.Join(dir, "run", "gen-"+details.GenerationID, "checkpoint-other"),
 		Generation:     details,
 	})
 	if err == nil || !strings.Contains(err.Error(), "checkpoint path mismatch") {
@@ -899,12 +884,11 @@ func TestDestroyGenerationResourcesDeletesPerGenerationNetwork(t *testing.T) {
 		},
 	}
 	rt := New(Config{
-		RunscNetwork:    "sandbox",
-		RunscOverlay2:   "none",
-		RunscRoot:       runscRoot,
-		RunDir:          filepath.Join(dir, "run"),
-		CheckpointsRoot: filepath.Join(dir, "checkpoints"),
-		CommandRunner:   runner,
+		RunscNetwork:  "sandbox",
+		RunscOverlay2: "none",
+		RunscRoot:     runscRoot,
+		RunDir:        filepath.Join(dir, "run"),
+		CommandRunner: runner,
 	})
 	details := testGenerationDetails(dir, "gen_a")
 	details.RunscNetwork = "sandbox"
@@ -953,11 +937,10 @@ func TestDestroyGenerationResourcesFallsBackToRecordedRunscOnPinMismatch(t *test
 		},
 	}
 	rt := New(Config{
-		RunscNetwork:    "host",
-		RunscRoot:       runscRoot,
-		RunDir:          filepath.Join(dir, "run"),
-		CheckpointsRoot: filepath.Join(dir, "checkpoints"),
-		CommandRunner:   runner,
+		RunscNetwork:  "host",
+		RunscRoot:     runscRoot,
+		RunDir:        filepath.Join(dir, "run"),
+		CommandRunner: runner,
 	})
 	details := testGenerationDetails(dir, "gen_pin")
 	details.RunscNetwork = "host"
@@ -1005,11 +988,10 @@ func TestDestroyGenerationResourcesRejectsRecordedRunscDigestMismatch(t *testing
 		},
 	}
 	rt := New(Config{
-		RunscNetwork:    "host",
-		RunscRoot:       runscRoot,
-		RunDir:          filepath.Join(dir, "run"),
-		CheckpointsRoot: filepath.Join(dir, "checkpoints"),
-		CommandRunner:   runner,
+		RunscNetwork:  "host",
+		RunscRoot:     runscRoot,
+		RunDir:        filepath.Join(dir, "run"),
+		CommandRunner: runner,
 	})
 	details := testGenerationDetails(dir, "gen_pin_bad")
 	details.RunscNetwork = "host"
@@ -1038,10 +1020,9 @@ func TestDestroyGenerationResourcesDeletesFilesystemInNonSandboxMode(t *testing.
 	dir := t.TempDir()
 	runscRoot := filepath.Join(dir, "runsc-root")
 	rt := New(Config{
-		RunscNetwork:    "host",
-		RunscRoot:       runscRoot,
-		RunDir:          filepath.Join(dir, "run"),
-		CheckpointsRoot: filepath.Join(dir, "checkpoints"),
+		RunscNetwork: "host",
+		RunscRoot:    runscRoot,
+		RunDir:       filepath.Join(dir, "run"),
 		CommandRunner: &recordingCommandRunner{fail: map[string]error{
 			"runsc -root " + runscRoot + " state harness-gen-gen_cleanup": errors.New("not found"),
 		}},
@@ -1067,34 +1048,6 @@ func TestDestroyGenerationResourcesDeletesFilesystemInNonSandboxMode(t *testing.
 	if cleanup.CheckpointDeleted || cleanup.ControlDirDeleted || cleanup.BundleDirDeleted || cleanup.BridgeDirDeleted || cleanup.NetworkDirDeleted || cleanup.LogDirDeleted {
 		t.Fatalf("missing paths should be idempotent, got cleanup result: %+v", cleanup)
 	}
-}
-
-func TestDestroyGenerationResourcesDeletesLegacyCheckpointPath(t *testing.T) {
-	dir := t.TempDir()
-	checkpointsRoot := filepath.Join(dir, "checkpoints")
-	runscRoot := filepath.Join(dir, "runsc-root")
-	rt := New(Config{
-		RunscNetwork:    "host",
-		RunscRoot:       runscRoot,
-		RunDir:          filepath.Join(dir, "run"),
-		CheckpointsRoot: checkpointsRoot,
-		CommandRunner: &recordingCommandRunner{fail: map[string]error{
-			"runsc -root " + runscRoot + " state harness-gen-gen_legacy": errors.New("not found"),
-		}},
-	})
-	details := testGenerationDetails(dir, "gen_legacy")
-	details.RunscNetwork = "host"
-	details.CheckpointPath = filepath.Join(checkpointsRoot, details.SessionID)
-	createGenerationFilesystem(t, details)
-
-	cleanup, err := rt.DestroyGenerationResources(context.Background(), details)
-	if err != nil {
-		t.Fatalf("destroy generation resources: %v", err)
-	}
-	if !cleanup.CheckpointDeleted {
-		t.Fatalf("legacy checkpoint path was not deleted: %+v", cleanup)
-	}
-	assertGenerationFilesystemMissing(t, generationFilesystemPaths(details))
 }
 
 func TestDestroyGenerationResourcesRejectsUnsafeFilesystemPaths(t *testing.T) {
@@ -1154,10 +1107,9 @@ func TestDestroyGenerationResourcesRejectsUnsafeFilesystemPaths(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			rt := New(Config{
-				RunscNetwork:    "host",
-				RunDir:          filepath.Join(dir, "run"),
-				CheckpointsRoot: filepath.Join(dir, "checkpoints"),
-				CommandRunner:   &recordingCommandRunner{},
+				RunscNetwork:  "host",
+				RunDir:        filepath.Join(dir, "run"),
+				CommandRunner: &recordingCommandRunner{},
 			})
 			details := testGenerationDetails(dir, "gen_unsafe")
 			details.RunscNetwork = "host"
@@ -1173,90 +1125,6 @@ func TestDestroyGenerationResourcesRejectsUnsafeFilesystemPaths(t *testing.T) {
 	}
 }
 
-func TestDestroyGenerationResourcesRejectsUnsafeLegacyCheckpointPaths(t *testing.T) {
-	cases := []struct {
-		name   string
-		mutate func(t *testing.T, dir, checkpointsRoot string, details *store.RuntimeGenerationDetails)
-		check  func(t *testing.T, dir, checkpointsRoot string, details store.RuntimeGenerationDetails)
-	}{
-		{
-			name: "wrong session",
-			mutate: func(t *testing.T, _ string, checkpointsRoot string, details *store.RuntimeGenerationDetails) {
-				t.Helper()
-				details.CheckpointPath = filepath.Join(checkpointsRoot, "sess_other")
-				if err := os.MkdirAll(details.CheckpointPath, 0o755); err != nil {
-					t.Fatalf("create wrong-session checkpoint: %v", err)
-				}
-			},
-		},
-		{
-			name: "outside checkpoint root",
-			mutate: func(t *testing.T, dir, _ string, details *store.RuntimeGenerationDetails) {
-				t.Helper()
-				details.CheckpointPath = filepath.Join(dir, "outside-checkpoints", details.SessionID)
-				if err := os.MkdirAll(details.CheckpointPath, 0o755); err != nil {
-					t.Fatalf("create outside checkpoint: %v", err)
-				}
-			},
-		},
-		{
-			name: "symlink escape",
-			mutate: func(t *testing.T, dir, checkpointsRoot string, details *store.RuntimeGenerationDetails) {
-				t.Helper()
-				outside := filepath.Join(dir, "outside-legacy-target")
-				if err := os.MkdirAll(outside, 0o755); err != nil {
-					t.Fatalf("create outside target: %v", err)
-				}
-				details.CheckpointPath = filepath.Join(checkpointsRoot, details.SessionID)
-				if err := os.MkdirAll(filepath.Dir(details.CheckpointPath), 0o755); err != nil {
-					t.Fatalf("create legacy checkpoint parent: %v", err)
-				}
-				if err := os.RemoveAll(details.CheckpointPath); err != nil {
-					t.Fatalf("remove legacy checkpoint path before symlink: %v", err)
-				}
-				if err := os.Symlink(outside, details.CheckpointPath); err != nil {
-					t.Fatalf("create legacy checkpoint symlink: %v", err)
-				}
-			},
-			check: func(t *testing.T, dir, _ string, details store.RuntimeGenerationDetails) {
-				t.Helper()
-				if _, err := os.Lstat(details.CheckpointPath); err != nil {
-					t.Fatalf("legacy symlink should remain after rejected cleanup: %v", err)
-				}
-				if _, err := os.Stat(filepath.Join(dir, "outside-legacy-target")); err != nil {
-					t.Fatalf("outside symlink target should remain: %v", err)
-				}
-			},
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			checkpointsRoot := filepath.Join(dir, "checkpoints")
-			rt := New(Config{
-				RunscNetwork:    "host",
-				RunDir:          filepath.Join(dir, "run"),
-				CheckpointsRoot: checkpointsRoot,
-				CommandRunner:   &recordingCommandRunner{},
-			})
-			details := testGenerationDetails(dir, "gen_legacy_unsafe")
-			details.RunscNetwork = "host"
-			createGenerationFilesystem(t, details)
-			originalPaths := generationFilesystemPaths(details)
-			tc.mutate(t, dir, checkpointsRoot, &details)
-
-			if _, err := rt.DestroyGenerationResources(context.Background(), details); err == nil {
-				t.Fatal("expected unsafe legacy checkpoint path error")
-			}
-			assertGenerationFilesystemPresent(t, originalPaths)
-			if tc.check != nil {
-				tc.check(t, dir, checkpointsRoot, details)
-			}
-		})
-	}
-}
-
 func TestDestroyGenerationResourcesCleansFilesystemWithIncompleteSandboxMetadata(t *testing.T) {
 	dir := t.TempDir()
 	runscRoot := filepath.Join(dir, "runsc-root")
@@ -1267,11 +1135,10 @@ func TestDestroyGenerationResourcesCleansFilesystemWithIncompleteSandboxMetadata
 		},
 	}
 	rt := New(Config{
-		RunscNetwork:    "sandbox",
-		RunscRoot:       runscRoot,
-		RunDir:          filepath.Join(dir, "run"),
-		CheckpointsRoot: filepath.Join(dir, "checkpoints"),
-		CommandRunner:   runner,
+		RunscNetwork:  "sandbox",
+		RunscRoot:     runscRoot,
+		RunDir:        filepath.Join(dir, "run"),
+		CommandRunner: runner,
 	})
 	details := testGenerationDetails(dir, "gen_missing_net")
 	details.RunscNetwork = "sandbox"

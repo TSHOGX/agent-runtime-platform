@@ -241,7 +241,7 @@ func TestStreamParserPersistsShellOutputAndCompletesOnTurnDone(t *testing.T) {
 func TestPiOutputNormalizerConsumesPinnedCorpus(t *testing.T) {
 	srv, st := newParserTestServer(t)
 	parser := newStreamParser(srv, "sess_1", "pi")
-	path := filepath.Join("..", "..", "..", "docs", "phase9", "fixtures", "pi", "0.77.0", "event-normalizer-corpus.jsonl")
+	path := filepath.Join("testdata", "pi", "0.77.0", "event-normalizer-corpus.jsonl")
 	file, err := os.Open(path)
 	if err != nil {
 		t.Fatalf("open pi corpus: %v", err)

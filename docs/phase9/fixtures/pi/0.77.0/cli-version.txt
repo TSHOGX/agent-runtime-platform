@@ -1,5 +1,0 @@
-@earendil-works/pi-coding-agent 0.77.0
-package shasum: 627664c042507babf8a134a3770285272ccae5d8
-package integrity: sha512-huS+k+dhQRR9PlTK7crLfeSRUw3a96V6JYfP0ZH3Zkko/m10gsYk8dKQmwScSy5Dll516pXorz19BURfD6S2qQ==
-node engine: >=22.19.0
-

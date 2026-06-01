@@ -1,6 +1,6 @@
 # Agent Runtime Platform Architecture
 
-> Last updated: 2026-05-30
+> Last updated: 2026-06-01
 
 ## Overview
 
@@ -14,12 +14,10 @@ events to the frontend workbench.
 Architecturally, `runtime` is the execution and isolation layer; `control
 plane` is the durable state, scheduling, policy, and observability layer.
 
-Detailed phase records live in:
+Active planning docs:
 
-- [phase7/README.md](./phase7/README.md) for the checkpoint-safe control plane.
-- [phase8/README.md](./phase8/README.md) for the runtime-isolation boundary.
-- [current-status.md](./current-status.md) for live baseline and qualification
-  evidence.
+- [PLAN.md](./PLAN.md) for the current roadmap.
+- [next-stage.md](./next-stage.md) for the next capability target.
 
 ## Component Model
 
@@ -57,9 +55,6 @@ artifact requests to the orchestrator. Live browser events use same-origin SSE:
 GET /api/events/stream -> orchestrator GET /api/events/stream
 ```
 
-The orchestrator still exposes `/api/events` as a WebSocket compatibility and
-manual-debug endpoint.
-
 ## Runtime Vs Control Plane
 
 Runtime is the execution substrate: gVisor `runsc`, the sandbox process,
@@ -75,10 +70,10 @@ governance, observability, and operational scale.
 
 ## Sandbox Boundary
 
-The active runtime boundary is `sandbox-isolation-v1`, with Phase 9 sandbox
-contract v2 metadata for driver/provider identity, credential policy, runtime
-capabilities, DataVolume evidence, driver-state fences, source deployment
-config digests, and image agent-manifest digests.
+The active runtime boundary is `sandbox-isolation-v1`, with sandbox contract
+metadata for driver/provider identity, credential policy, runtime capabilities,
+DataVolume evidence, driver-state fences, source deployment config digests, and
+image agent-manifest digests.
 
 - gVisor uses `runsc` with the `systrap` platform.
 - The runtime launches `runsc` directly with sandbox networking and
@@ -197,7 +192,6 @@ HTTP routes:
 Event routes:
 
 - `GET /api/events/stream?session_id=<id>` - SSE
-- `GET /api/events?session_id=<id>` - WebSocket compatibility
 
 Typed runtime/control-plane failures generally return:
 
@@ -211,7 +205,7 @@ Generic validation and not-found handlers may still return `{"error":"..."}`.
 
 SQLite stores sessions, messages, turns, durable events, proxy request context,
 runtime generations, runtime resource instances, network profiles, sandbox
-contracts, Phase 9 input evidence, DataVolume rows, and artifact metadata.
+contracts, driver input evidence, DataVolume rows, and artifact metadata.
 
 Primary project config is `config/harness.yaml` under the `harness:` schema.
 The config loader decodes only that top-level `harness:` document with strict
@@ -251,7 +245,6 @@ Important environment overrides:
 - `HARNESS_MAX_SESSIONS`
 - `HARNESS_SESSIONS_ROOT`
 - `HARNESS_AGENT_HOMES_ROOT`
-- `HARNESS_CHECKPOINTS_ROOT`
 - `HARNESS_ROOTFS_PATH`
 - `HARNESS_DB_PATH`
 - `RUNSC_ROOT`
@@ -300,14 +293,14 @@ metadata events.
 ## Current Limitations
 
 - Supported agent paths are Claude Code, Pi, and the shell shim. Other adapters
-  must enter through the Phase 9 driver/provider contracts.
+  must enter through the existing driver/provider contracts.
 - The artifact UI is read-only.
 - The output hub is appropriate for UI streaming but not an audit log.
 - Automatic checkpointing is disabled by default.
-- Legacy `workspace`, `agent_home_path`, and `restore_id` columns remain
-  internal compatibility storage; public DTOs omit them.
+- Obsolete `workspace`, `agent_home_path`, and `restore_id` session columns are
+  rejected at store open; cutover cleanup must remove old DB state.
 - Tenant authz, credential storage/rotation/GC, tenant egress policy, resource
-  limits, observability, and multi-orchestrator HA are Phase 11 work.
+  limits, observability, and multi-orchestrator HA are later production work.
 
 ## Source Map
 

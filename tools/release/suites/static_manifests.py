@@ -3,8 +3,8 @@
 
 These are file-pattern scans that any release can run without a host. The
 full list is the source of truth for the sandbox_isolation suite's
-``--static-only`` payload; the agent_capability suite exposes the phase10
-subset as a focused view (not a replacement).
+``--static-only`` payload; the agent_capability suite exposes the next-stage
+capability subset as a focused view (not a replacement).
 
 Each spec is ``{"name", "kind": "lacks"|"contains", "path", "patterns"}``
 where ``patterns`` is a tuple of ``(label, pattern)`` pairs. The generic
@@ -15,12 +15,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
-def _phase10_checks():
+def _next_stage_checks():
     return [
         {
-            "name": "phase10_skills_docs_use_exact_bind_prerequisite",
+            "name": "next_stage_skills_docs_use_exact_bind_prerequisite",
             "kind": "lacks",
-            "path": REPO_ROOT / "docs" / "phase10" / "system-skills-mount.md",
+            "path": REPO_ROOT / "docs" / "next-stage.md",
             "patterns": (
                 ("workspace_symlink_to_sessions", "`/workspace` is a symlink to `/sessions/<session_id>`"),
                 ("agent_home_parent_root", "`/agent-homes/<session_id>`"),
@@ -28,27 +28,27 @@ def _phase10_checks():
             ),
         },
         {
-            "name": "phase10_skills_docs_pin_content_snapshots",
+            "name": "next_stage_skills_docs_pin_content_snapshots",
             "kind": "contains",
-            "path": REPO_ROOT / "docs" / "phase10" / "system-skills-mount.md",
+            "path": REPO_ROOT / "docs" / "next-stage.md",
             "patterns": (
-                ("content_addressed_snapshot", "content-addressed runtime snapshot"),
-                ("no_mutable_repo_bind", "current repo path as a"),
+                ("content_addressed_snapshot", "content-addressed snapshot"),
+                ("no_mutable_repo_bind", "no mutable repo path mounted directly"),
             ),
         },
         {
-            "name": "phase10_managed_settings_do_not_reference_live_secret_mount",
+            "name": "next_stage_managed_settings_do_not_reference_live_secret_mount",
             "kind": "lacks",
-            "path": REPO_ROOT / "docs" / "phase10" / "managed-settings.md",
+            "path": REPO_ROOT / "docs" / "next-stage.md",
             "patterns": (("existing_model_provider_secret_mount", "existing model-provider `/harness-secrets` mount"),),
         },
         {
-            "name": "phase10_managed_settings_docs_pin_content_snapshots",
+            "name": "next_stage_managed_settings_docs_pin_content_snapshots",
             "kind": "contains",
-            "path": REPO_ROOT / "docs" / "phase10" / "managed-settings.md",
+            "path": REPO_ROOT / "docs" / "next-stage.md",
             "patterns": (
                 ("content_addressed_snapshot", "content-addressed snapshot"),
-                ("no_mutable_repo_bind", "mutable repository path directly"),
+                ("no_credential_mcp_without_broker", "Credential-bearing MCP needs a later broker/token design"),
             ),
         },
     ]
@@ -67,9 +67,9 @@ def sandbox_isolation_checks():
             ),
         },
         {
-            "name": "current_status_uses_state_db_default",
+            "name": "current_architecture_uses_state_db_default",
             "kind": "lacks",
-            "path": REPO_ROOT / "docs" / "current-status.md",
+            "path": REPO_ROOT / "docs" / "architecture.md",
             "patterns": (("obsolete_db_under_sessions", "/var/lib/harness/sessions/orchestrator.db"),),
         },
         {
@@ -87,10 +87,10 @@ def sandbox_isolation_checks():
                 ("restore_id", "restore_id"),
             ),
         },
-        *_phase10_checks(),
+        *_next_stage_checks(),
     ]
 
 
 def agent_capability_checks():
-    """Phase 10 subset view (not a replacement for the full list)."""
-    return _phase10_checks()
+    """Next-stage capability subset view (not a replacement for the full list)."""
+    return _next_stage_checks()

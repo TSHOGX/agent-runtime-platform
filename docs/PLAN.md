@@ -1,142 +1,71 @@
-# Agent Runtime Platform - Plan
+# Agent Runtime Platform Plan
 
-> This is the active roadmap. Current baseline and implementation notes live in [current-status.md](./current-status.md). Phase 7 architecture details live in [phase7/README.md](./phase7/README.md).
+> Active planning starts from the current codebase, not from historical stage
+> documents. Current architecture is in [architecture.md](./architecture.md);
+> the next stage is summarized in [next-stage.md](./next-stage.md).
 
-## Phases
+## Current Baseline
 
-- [x] **Phase 0**: local LLM harness + Doris connectivity + `vhr_data` schema packaging + runtime selection
-- [x] **Phase 1**: manual single sandbox DEMO with `runsc run`
-- [x] **Phase 2**: scripted rootfs build, bundle bake, and restore smoke path
-- [x] **Phase 3**: Go orchestrator MVP with session API, checkpoint/restore, artifact metadata, and event hub
-- [x] **Phase 4**: Next.js workbench with same-origin proxy, SSE event stream, and fallback/refresh behavior
-- [x] **Phase 5**: per-container `OutputHub`, stream-parser turn completion routing, and interactive shell sessions
-- [x] **Phase 6**: artifact UX hardening, live file tree, and richer previews
-- [x] **Phase 7a**: control-plane skeleton — per-generation resources, durable schema, per-generation network and bundle, no shared `phase1-demo` / `phase2-template` state.
-- [x] **Phase 7b**: turn execution refactor — Agent Bridge claim/ack, durable turn ledger with `ack_started_at` semantics, durable event log, cold Claude resume, checkpoint-safe restore, and checkpoint policy.
-- [x] **P0 fixes**: rename `harness.session_ttl` to `harness.session_retention` with `0s = no expiry` as default, decouple retryable runtime/turn failures from terminal session failure, add checkpoint image retention, and close the generation cleanup/quota documentation gaps.
-- [x] **Phase 8**: runtime isolation hardening — exact per-session/per-driver mounts, unified generation resource reconciliation, non-root shell, read-only rootfs, and host-side model credential boundary.
-- [x] **Pre-Phase 9 cleanup**: model proxy port moved into `harness.model_proxy`, main/publish runtime resources isolated, and product-visible naming kept on Agent Runtime Platform wording. Details: [pre-phase-runtime-cleanup.md](./pre-phase-runtime-cleanup.md).
-- [x] **Phase 9**: Agent Driver abstraction, runtime provider contract, deployment-selected agent driver, and Pi Agent integration.
-- [ ] **Phase 10**: configurable agent system prompt, proactive context compaction driven by proxy-reported token usage, system-skills mount, control-plane-managed driver settings/hooks/MCP.
-- [ ] **Phase 11**: multi-user auth, credential storage/rotation/GC, tenant egress policy enforcement, cgroup limits, observability, multi-orchestrator HA.
-- [ ] **Phase 12** (future, design only): trajectory → memory → skill pipeline.
+- The Go orchestrator owns sessions, turns, runtime generations, durable
+  events, artifact metadata, proxy correlation, quota, and retention.
+- The Next.js workbench talks to the orchestrator through same-origin route
+  handlers and streams live updates over SSE.
+- Each generation runs in a gVisor `runsc` sandbox with exact workspace and
+  agent-home binds, non-root process identity, read-only rootfs, per-generation
+  networking, and host-side model credentials.
+- Product mode `Agent` resolves through deployment config to the selected
+  driver; the checked-in lab default resolves it to Pi. `Shell` is available
+  only when enabled and present in the active image manifest.
+- Claude Code, Pi, and the shell shim are supported through the existing
+  driver/provider registry and bridge protocol paths.
+- Checkpoint/restore exists but automatic idle checkpointing is disabled in the
+  checked-in lab config.
 
-## Current Target
+## Next Stage
 
-The checkpoint-safe Phase 7 baseline, P0 lifetime separation, Phase 8 runtime
-isolation baseline, pre-Phase 9 runtime cleanup gate, and Phase 9 driver/Pi
-baseline are complete. Active engineering work moves to Phase 10 agent
-capability work behind the driver adapters. Phase 11 production operations
-follows Phase 10. Phase 12 is design-only for now.
+The next stage adds an agent capability plane on top of the existing
+driver/provider contract. Platform-managed agent behavior must flow through
+explicit driver adapters and immutable per-session or per-generation snapshots.
+Unsupported enabled features fail during deployment or generation preparation;
+silent no-op behavior is not acceptable.
 
-## Completed Baselines
+Primary work:
 
-Implementation history and release evidence for completed work live outside
-this roadmap:
+1. Add typed capability declarations to driver specs, validate enabled
+   capabilities against the selected driver, and make launch artifacts
+   manifest-only and fail-closed.
+2. Persist an operator policy prompt snapshot per session and deliver it only
+   through the selected driver's prompt adapter.
+3. Record proxy-reported model-context usage, enforce configured context
+   budgets, and call driver compaction adapters only when supported.
+4. Mount shared operational skills as a read-only content-addressed snapshot at
+   `/harness-skills`, outside `/workspace` and artifact watcher paths.
+5. Render non-secret managed driver settings, hooks, and remote MCP
+   registrations through driver policy adapters. Credential-bearing MCP needs a
+   later broker/token design.
 
-- Current baseline and qualification notes: [current-status.md](./current-status.md).
-- P0 session/runtime lifetime separation: [p0-session-lifetime.md](./p0-session-lifetime.md).
-- Phase 8 runtime isolation design and release evidence:
-  [phase8/README.md](./phase8/README.md).
-- Pre-Phase 9 runtime cleanup and local publish isolation:
-  [pre-phase-runtime-cleanup.md](./pre-phase-runtime-cleanup.md).
-- Phase 9 driver/provider contract and Pi integration:
-  [phase9/README.md](./phase9/README.md).
+## Guardrails
 
-## Phase 9: Agent Driver and Pi integration
+- Keep `Agent` and `Shell` as product modes; do not expose raw driver IDs in
+  normal user workflows.
+- Do not add driver-specific branches in server, runtime, bridge, or frontend
+  code. New behavior must enter through shared driver/provider contracts and
+  adapter interfaces.
+- Keep provider credentials host-side. Do not put live secrets in prompts,
+  skills, managed settings, `/workspace`, `/agent-home`, argv, env, logs, or
+  bridge queues.
+- Treat bridge clients, turn runners, and sandboxes as restartable at any turn
+  boundary. Correctness must come from durable state and rendered artifacts,
+  not in-process flags.
+- After changing runtime scripts or files under `sandbox-image/files/`, rebuild
+  or overlay-sync the active rootfs before live testing.
+- For runtime, bridge, proxy, deployment-config, rootfs, or session-lifecycle
+  changes, run a live smoke for the selected deployment driver.
 
-Phase 9 made "agent" a deployment-selected driver contract instead of a
-Claude-shaped string branch. Detailed design and release gates:
-[phase9/README.md](./phase9/README.md).
-Phase 9 uses an automatic destructive cutover for obsolete pre-9a state: old
-rows may be deleted and constrained SQLite tables rebuilt without a manual
-data-preservation gate, but live provider/isolation resources must be proven
-absent or durably quarantined before their ownership rows are removed.
+## Later Work
 
-1. Add `AgentDriverSpec` for Claude Code, shell, and Pi. Do not register
-   legacy `claude` as a runtime alias; only the temporary 9a/9b public API
-   boundary may translate it to `claude_code` before the 9c mode cutover, and
-   only the protocol-v1 sandbox projection may emit `claude` to the current
-   runner until 9d replaces that bridge path.
-2. Add `RuntimeProviderSpec` for `local_runsc` and validate driver capabilities before allocation.
-3. Move model/provider config into `harness.agents` and `harness.model_profiles`; `harness.default_agent` selects the deployed driver.
-4. Keep the frontend product surface as "Agent" and deployment-capable "Shell"; users do not choose or see whether "Agent" is Claude Code, Pi, or another deployed driver.
-5. Build the sandbox image from the deployed driver set so only selected driver CLIs are pinned into the rootfs; deployments that omit `sh` must not advertise Shell.
-6. Add generic driver state, runtime profile, sandbox contract, runner, and output-normalizer slots.
-7. Add Pi as a long-lived RPC driver through the Phase 8 model-proxy boundary.
-
-## Phase 10: agent capability and UX
-
-Phase 10 starts from Phase 9's driver contract. These features must use driver
-adapters, with Claude and Pi renderers where supported.
-
-Phase 10 uses an automatic destructive cutover for obsolete pre-10 runtime and
-session state. The implementation may delete pre-10 sessions, messages,
-artifacts, turns, events, active model contexts, runtime generations,
-checkpoints, control/bridge/runtime directories, and driver homes instead of
-backfilling compatibility columns or preserving old prepared artifacts. Live
-provider/isolation resources must still be stopped, proven absent, or durably
-quarantined before their ownership rows are removed. This is a release reset,
-not a migration/backup feature.
-
-1. **10a - Configurable agent system prompt.** Inject an operator-controlled
-   prompt into every session for identity, capability bounds, and sandbox
-   resource constraints. Detailed design:
-   [phase10/system-prompt.md](./phase10/system-prompt.md).
-2. **10b - Proactive context compaction driven by proxy-reported usage.** Use
-   Phase 8 proxy correlation and driver compaction adapters before the deployed
-   model's real context window is exhausted. Detailed design:
-   [phase10/context-compaction.md](./phase10/context-compaction.md).
-3. **10c - System-skills mount.** Bind read-only `/harness-skills`, persist
-   `skills_digest`, and expose skills through per-driver discovery adapters.
-   Detailed design:
-   [phase10/system-skills-mount.md](./phase10/system-skills-mount.md).
-4. **10d - Control-plane-managed driver settings, hooks, and remote MCP.**
-   Render non-secret policy/MCP config through per-driver adapters.
-   Credential-bearing MCP delivery requires a separate broker/token design.
-   Detailed design: [phase10/managed-settings.md](./phase10/managed-settings.md).
-
-## Phase 11: production operations
-
-Scope: multi-user auth, credential storage/rotation/GC, tenant egress policy enforcement, cgroup limits, cleanup/resource observability, multi-orchestrator HA.
-
-## Phase 12: trajectory → memory → skill pipeline (future)
-
-Design only. Folds raw session trajectories into reviewed skills via episode memory, semantic memory, and human-reviewed skill candidates. Sits on top of 10c's skills mount; a human-review flow and optional `releases/` layer are Phase 12 concerns, not 10c. Detailed design: [phase12-trajectory-pipeline.md](./phase12-trajectory-pipeline.md). Not currently planned in detail.
-
-## Ongoing Guardrails
-
-Standing constraints that must hold after P0, Phase 8, and Phase 9, throughout
-Phase 10, Phase 11, and any later work. These are not deliverables — there is no "done"
-state — but any change that violates one should be revisited before it lands.
-
-1. Maintain the supported Pi, Claude Code, and shell session paths.
-2. Keep Phase 7 release gates blocking for runtime, proxy, or config changes
-   until a later phase explicitly retires or replaces a gate. Phase 8's gate
-   compatibility and retired-gate mapping live in
-   [phase8/README.md](./phase8/README.md#phase-7-boundary) and
-   [phase8/release-gates.md](./phase8/release-gates.md).
-3. Keep artifact browsing in regression coverage while preserving the existing read-only metadata-backed UX.
-4. Do not add driver-specific one-off branches. New agent adapters, including
-   Pi, must enter through the Phase 9 driver/provider contracts and satisfy the
-   adapter release gates before deployment.
-5. Treat bridge clients, turn runners, and sandboxes as restartable at any
-   turn boundary. No correctness rule may depend only on in-process flags such
-   as "first turn"; Claude logical resume must be derived from durable session
-   state, control-manifest intent, or driver-home evidence.
-6. Keep the sandbox-to-proxy compatibility key as an explicit contract. A proxy
-   health check is not enough: gates must prove the key mode used by Claude
-   Code (`no key` or the fixed dummy key) is accepted or ignored exactly as the
-   pinned proxy expects, and that model dispatch still requires active turn
-   context and contract authorization.
-7. After changing files under `sandbox-image/files/`, rebuild or overlay-sync
-   the active rootfs before live testing. The repo overlay is source of truth,
-   but gVisor launches the files currently present under `sandbox-image/rootfs`
-   or the configured `HARNESS_ROOTFS_PATH`.
-8. For runtime, bridge, proxy, deployment-config, rootfs, or
-   session-lifecycle changes, run a live smoke for the selected deployment
-   driver. For the checked-in lab default that means `mode: "agent"` resolving
-   to Pi. For Claude CLI or Claude state-continuity changes, use a rootfs
-   manifest containing `claude_code`, then run a live two-turn Claude smoke on
-   a fresh session and verify both turns complete under the same Claude session
-   UUID.
+- Production operations: multi-user auth, credential storage/rotation/GC,
+  tenant egress policy, cgroup limits, observability, and multi-orchestrator
+  high availability.
+- Trajectory-to-memory-to-skill pipeline: design work for turning reviewed
+  session evidence into shared skills after the skills mount exists.

@@ -1,11 +1,11 @@
-# Phase 8 Release Gates
+# Runtime Isolation Release Gates
 
 These gates define the acceptance criteria for any `sandbox-isolation-v1`
-runtime-isolation release candidate. The qualified Phase 8 baseline passed them
-on the target lab host; current HEAD changes must rerun the final evidence
-bundle before a new runtime-isolation release. Unit tests are necessary but not
-sufficient because the risky behavior involves actual runsc mounts, network
-namespaces, proxy peer addresses, filesystem metadata, and crash recovery.
+runtime-isolation release candidate. Current HEAD changes must rerun the final
+evidence bundle before a new runtime-isolation release. Unit tests are
+necessary but not sufficient because the risky behavior involves actual runsc
+mounts, network namespaces, proxy peer addresses, filesystem metadata, and
+crash recovery.
 
 ## Contract Gates
 
@@ -303,10 +303,9 @@ namespaces, proxy peer addresses, filesystem metadata, and crash recovery.
 
 ## Documentation Gates
 
-- `docs/PLAN.md`, `docs/current-status.md`, `docs/architecture.md`, and Phase 7
-  runtime-resource docs do not imply stronger isolation than the implementation
-  provides.
-- Phase 10 skills and managed-settings docs use the Phase 8 MountPlan exact-bind
+- `docs/PLAN.md`, `docs/architecture.md`, and `docs/next-stage.md` do not
+  imply stronger isolation than the implementation provides.
+- Next-stage skills and managed-settings docs use the MountPlan exact-bind
   contract and bind content-addressed/generated snapshots rather than mutable
   repo authoring paths.
 - Managed settings do not render upstream bearer tokens or remote MCP bearer

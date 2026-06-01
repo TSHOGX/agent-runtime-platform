@@ -17,7 +17,7 @@ from tools.release.suites import static_manifests
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PROXY_ROOT = Path(os.environ.get("HARNESS_PROXY_ROOT", "/root/claude-code-proxy"))
-RELEASE_GATES_DOC = REPO_ROOT / "docs" / "phase8" / "release-gates.md"
+RELEASE_GATES_DOC = REPO_ROOT / "tools" / "release" / "gates" / "sandbox_isolation" / "release-gates.md"
 
 SUITE = "sandbox_isolation"
 FAILURE_BANNER = "runtime isolation release gates failed"

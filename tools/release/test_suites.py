@@ -87,7 +87,7 @@ class ReservedSuiteTest(unittest.TestCase):
         self.assertEqual(driver_contract.selected_gates(), [])
         self.assertEqual(driver_contract.evidence()["result"], "skipped")
 
-    def test_agent_capability_is_phase10_subset(self):
+    def test_agent_capability_is_next_stage_subset(self):
         names = [c["name"] for c in static_manifests.agent_capability_checks()]
         full = [c["name"] for c in static_manifests.sandbox_isolation_checks()]
         self.assertEqual(len(names), 4)
