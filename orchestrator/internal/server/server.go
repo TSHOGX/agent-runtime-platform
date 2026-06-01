@@ -448,7 +448,6 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		Status:                string(sessionstate.Created),
 		Agent:                 string(driverID),
 		Mode:                  mode,
-		Workspace:             filepath.Join(s.cfg.SessionsRoot, id),
 		RestoreID:             "unused-" + id,
 		AutoCheckpointEnabled: s.cfg.Harness.Checkpoint.AutoEnabled,
 		CreatedAt:             now,

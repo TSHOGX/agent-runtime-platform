@@ -535,12 +535,12 @@ func TestCloseSessionReleasesSoftLimitWithoutDeletingHistory(t *testing.T) {
 		UserID:    labUserID,
 		Status:    string(sessionstate.Created),
 		Agent:     "claude_code",
-		Workspace: filepath.Join(cfg.SessionsRoot, "sess_retained"),
 		RestoreID: "phase3-sess_retained",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	if err := os.MkdirAll(oldSession.Workspace, 0o755); err != nil {
+	oldWorkspacePath := filepath.Join(cfg.SessionsRoot, oldSession.ID)
+	if err := os.MkdirAll(oldWorkspacePath, 0o755); err != nil {
 		t.Fatalf("create workspace: %v", err)
 	}
 	if err := st.CreateSession(ctx, oldSession); err != nil {
@@ -601,11 +601,10 @@ func TestCloseSessionReleasesSoftLimitWithoutDeletingHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get closed session: %v", err)
 	}
-	if closed.Status != string(sessionstate.Destroyed) ||
-		closed.Workspace != oldSession.Workspace {
-		t.Fatalf("closed session should preserve terminal state and paths: %+v", closed)
+	if closed.Status != string(sessionstate.Destroyed) {
+		t.Fatalf("closed session should preserve terminal state: %+v", closed)
 	}
-	if _, err := os.Stat(oldSession.Workspace); err != nil {
+	if _, err := os.Stat(oldWorkspacePath); err != nil {
 		t.Fatalf("workspace should remain after close: %v", err)
 	}
 	if _, err := os.Stat(oldDriverHome.HostPath); err != nil {
@@ -733,8 +732,9 @@ func TestCreateSessionDefersWorkspaceProvisioning(t *testing.T) {
 	if strings.HasPrefix(session.RestoreID, "phase3-") {
 		t.Fatalf("new sessions must not receive phase3 restore ids: %+v", session)
 	}
-	if _, err := os.Stat(session.Workspace); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("session create should defer workspace provisioning, stat err=%v path=%s", err, session.Workspace)
+	workspacePath := filepath.Join(cfg.SessionsRoot, session.ID)
+	if _, err := os.Stat(workspacePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("session create should defer workspace provisioning, stat err=%v path=%s", err, workspacePath)
 	}
 	var workspaceRows int
 	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM session_workspaces WHERE session_id = ?`, session.ID).Scan(&workspaceRows); err != nil {
@@ -927,7 +927,6 @@ func TestMonitorIdleSessionsReEnablesCheckpointedSessionsWhenCheckpointDisabled(
 		UserID:    "lab",
 		Status:    string(sessionstate.Checkpointed),
 		Agent:     "claude_code",
-		Workspace: filepath.Join(dir, "sessions", "sess_checkpointed"),
 		RestoreID: "phase3-sess_checkpointed",
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -1316,9 +1315,6 @@ func TestSendMessageColdFallbackAllocatesReplacementGeneration(t *testing.T) {
 	}
 	if gotSession.ActiveGenerationID == "" || gotSession.ActiveGenerationID == old.GenerationID {
 		t.Fatalf("active generation was not replaced: %q old=%q", gotSession.ActiveGenerationID, old.GenerationID)
-	}
-	if gotSession.Workspace != session.Workspace {
-		t.Fatalf("session identity not preserved: before=%+v after=%+v", session, gotSession)
 	}
 	volumeConfig, err := srv.dataVolumeProvisionerConfig()
 	if err != nil {
@@ -2770,7 +2766,6 @@ func TestSandboxContractPayloadRecordsPiMaterializedConfig(t *testing.T) {
 		Status:    string(sessionstate.Created),
 		Agent:     "pi",
 		Mode:      "agent",
-		Workspace: filepath.Join(dir, "sessions", "sess_pi_contract"),
 		RestoreID: "pi-driver",
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -5345,13 +5340,12 @@ func createServerTestSession(t *testing.T, ctx context.Context, st *store.Store,
 		UserID:    labUserID,
 		Status:    status,
 		Agent:     "claude_code",
-		Workspace: filepath.Join(dir, "sessions", id),
 		RestoreID: "phase3-" + id,
 		CreatedAt: now,
 		UpdatedAt: now,
 		ExpiresAt: expiresAt,
 	}
-	if err := os.MkdirAll(session.Workspace, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "sessions", id), 0o755); err != nil {
 		t.Fatalf("create workspace: %v", err)
 	}
 	if err := st.CreateSession(ctx, session); err != nil {

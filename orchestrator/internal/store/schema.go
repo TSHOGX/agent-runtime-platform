@@ -31,7 +31,6 @@ CREATE TABLE IF NOT EXISTS sessions (
   status TEXT NOT NULL CHECK(status IN (`+statusCheck+`)),
   driver_id TEXT NOT NULL CHECK(driver_id IN (`+driverCheck+`)),
   mode TEXT NOT NULL CHECK(mode IN ('agent','shell')),
-  workspace TEXT NOT NULL,
   restore_id TEXT NOT NULL,
   restore_ms INTEGER,
   created_at TEXT NOT NULL,
@@ -624,7 +623,44 @@ CREATE UNIQUE INDEX IF NOT EXISTS runtime_resource_instances_log_dir_path_active
   WHERE log_dir_path IS NOT NULL
     AND state NOT IN ('absent_verified','destroyed');
 `)
+	if err != nil {
+		return err
+	}
+	return s.dropLegacySessionWorkspaceColumn(ctx)
+}
+
+func (s *Store) dropLegacySessionWorkspaceColumn(ctx context.Context) error {
+	exists, err := tableColumnExists(ctx, s.db, "sessions", "workspace")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	_, err = s.db.ExecContext(ctx, `ALTER TABLE sessions DROP COLUMN workspace`)
 	return err
+}
+
+func tableColumnExists(ctx context.Context, db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 func quoteSQLiteIdent(value string) string {
