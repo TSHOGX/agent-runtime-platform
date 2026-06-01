@@ -1749,6 +1749,10 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndIsolatedRuntime(t *t
 		env["HARNESS_AGENT_HOME"] != "/agent-home" {
 		t.Fatalf("runtime spec missing isolated agent env: %+v", env)
 	}
+	if env["HARNESS_BRIDGE_PROTOCOL_VERSION"] != fmt.Sprint(manifest.BridgeProtocolVersion) ||
+		env["HARNESS_TURN_INPUT_SCHEMA"] != manifest.TurnInputSchema {
+		t.Fatalf("runtime spec bridge env must match control manifest: env=%+v manifest=%+v", env, manifest)
+	}
 	for _, key := range []string{"HARNESS_EXPECTED_API_KEY_SECRET_ID", "HARNESS_EXPECTED_AUTH_TOKEN_SECRET_ID", "HARNESS_EXPECTED_SECRET_VERSION", "HARNESS_SECRET_READERS_GID"} {
 		if _, ok := env[key]; ok {
 			t.Fatalf("runtime spec must not include legacy secret env %s: %+v", key, env)
@@ -1791,6 +1795,46 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndIsolatedRuntime(t *t
 		{path: bridge.HostOwnedPath(details.BridgeDirPath, bridge.HostTmpDir), uid: hostUID, gid: testSandboxGID(), mode: 0o750},
 	} {
 		assertBridgeDirOwnership(t, check.path, check.uid, check.gid, check.mode)
+	}
+}
+
+func TestRuntimeBridgeMetadataComesFromDriverSpec(t *testing.T) {
+	dir := t.TempDir()
+	rt := New(Config{
+		SessionsRoot:   filepath.Join(dir, "sessions"),
+		AgentHomesRoot: filepath.Join(dir, "agent-homes"),
+		BundleRoot:     filepath.Join(dir, "bundle", "out"),
+		RootFSPath:     filepath.Join(dir, "rootfs"),
+	})
+	details := testGenerationDetails(dir, "gen_driver_metadata")
+	driverSpec, ok := agents.DriverSpecFor("claude_code")
+	if !ok {
+		t.Fatal("missing claude_code driver spec")
+	}
+	driverSpec.BridgeProtocolVersion = 42
+	driverSpec.TurnInputSchema = "SpecTurn"
+	req := withDataVolumePathsForTest(dir, StartRequest{
+		SessionID:    details.SessionID,
+		GenerationID: details.GenerationID,
+		Agent:        "claude_code",
+		Generation:   details,
+	})
+
+	manifest, err := rt.buildGenerationManifest(req, driverSpec, "runsc test", "bundle_digest", "runtime_config_digest", "spec_digest")
+	if err != nil {
+		t.Fatalf("build generation manifest: %v", err)
+	}
+	if manifest.BridgeProtocolVersion != 42 || manifest.TurnInputSchema != "SpecTurn" {
+		t.Fatalf("manifest bridge metadata = %d/%q, want spec values", manifest.BridgeProtocolVersion, manifest.TurnInputSchema)
+	}
+
+	spec, _, err := rt.renderRuntimeSpecWithDriverSpec(req, driverSpec)
+	if err != nil {
+		t.Fatalf("render runtime spec: %v", err)
+	}
+	env := specEnv(spec.Process.Env)
+	if env["HARNESS_BRIDGE_PROTOCOL_VERSION"] != "42" || env["HARNESS_TURN_INPUT_SCHEMA"] != "SpecTurn" {
+		t.Fatalf("runtime spec bridge env = %+v, want spec values", env)
 	}
 }
 

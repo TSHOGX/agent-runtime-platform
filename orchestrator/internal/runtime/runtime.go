@@ -1159,6 +1159,10 @@ func (r *Runtime) renderGenerationArtifacts(ctx context.Context, req StartReques
 	if err := validateGenerationDetails(req); err != nil {
 		return GenerationArtifacts{}, err
 	}
+	driverSpec, err := runtimeDriverSpec(req)
+	if err != nil {
+		return GenerationArtifacts{}, err
+	}
 	if strings.TrimSpace(details.SpecPath) == "" || strings.TrimSpace(details.ControlManifestPath) == "" {
 		return GenerationArtifacts{}, fmt.Errorf("generation resource paths are required")
 	}
@@ -1172,7 +1176,7 @@ func (r *Runtime) renderGenerationArtifacts(ctx context.Context, req StartReques
 	if err != nil {
 		return GenerationArtifacts{}, err
 	}
-	spec, specDigest, err := r.renderRuntimeSpec(req)
+	spec, specDigest, err := r.renderRuntimeSpecWithDriverSpec(req, driverSpec)
 	if err != nil {
 		return GenerationArtifacts{}, err
 	}
@@ -1193,7 +1197,7 @@ func (r *Runtime) renderGenerationArtifacts(ctx context.Context, req StartReques
 		"runsc_binary_digest": currentRunsc.BinaryDigest,
 		"rootfs":              spec.Root.Path,
 	}))
-	manifest, err := r.buildGenerationManifest(req, currentRunsc.Version, bundleDigest, runtimeConfigDigest, specDigest)
+	manifest, err := r.buildGenerationManifest(req, driverSpec, currentRunsc.Version, bundleDigest, runtimeConfigDigest, specDigest)
 	if err != nil {
 		return GenerationArtifacts{}, err
 	}
@@ -1431,16 +1435,18 @@ func modelProxyHostIsProviderUpstream(host string) bool {
 	}
 }
 
-func (r *Runtime) buildGenerationManifest(req StartRequest, runscVersion, bundleDigest, runtimeConfigDigest, specDigest string) (controlManifest, error) {
+func (r *Runtime) buildGenerationManifest(req StartRequest, driverSpec agents.DriverSpec, runscVersion, bundleDigest, runtimeConfigDigest, specDigest string) (controlManifest, error) {
 	details := req.Generation
-	if !isSandboxIsolatedRequest(req) {
-		selectedDriver := driverID(req)
-		if selectedDriver == "" {
-			return controlManifest{}, fmt.Errorf("agent is required")
-		}
+	selectedDriver := driverID(req)
+	if selectedDriver == "" {
+		return controlManifest{}, fmt.Errorf("agent is required")
+	}
+	if string(driverSpec.ID) != selectedDriver {
+		return controlManifest{}, fmt.Errorf("generation agent mismatch")
+	}
+	if !isSandboxIsolatedDriverSpec(driverSpec) {
 		return controlManifest{}, fmt.Errorf("unsupported agent %q", selectedDriver)
 	}
-	selectedDriver := driverID(req)
 	manifest := controlManifest{
 		SessionID:                req.SessionID,
 		GenerationID:             details.GenerationID,
@@ -1450,8 +1456,8 @@ func (r *Runtime) buildGenerationManifest(req StartRequest, runscVersion, bundle
 		NetworkProfileID:         details.NetworkProfileID,
 		AgentRuntimeProfileID:    details.AgentRuntimeProfileID,
 		DriverID:                 selectedDriver,
-		BridgeProtocolVersion:    2,
-		TurnInputSchema:          "RunTurn",
+		BridgeProtocolVersion:    driverSpec.BridgeProtocolVersion,
+		TurnInputSchema:          driverSpec.TurnInputSchema,
 		RunscPlatform:            effectiveRunscPlatform(details),
 		RunscVersion:             runscVersion,
 		SandboxModelProxyBaseURL: details.ManifestAnthropicBaseURL,
@@ -1602,24 +1608,47 @@ func controlManifestProjectionFields() (map[string]struct{}, map[string]struct{}
 }
 
 func (r *Runtime) renderRuntimeSpec(req StartRequest) (runtimeSpec, string, error) {
-	selectedDriver := driverID(req)
-	switch selectedDriver {
-	case string(agents.ClaudeCode), string(agents.Pi), string(agents.Shell):
-		return r.renderSandboxIsolatedRuntimeSpec(req)
-	case "":
-		return runtimeSpec{}, "", fmt.Errorf("agent is required")
-	default:
-		return runtimeSpec{}, "", fmt.Errorf("unsupported agent %q", selectedDriver)
+	driverSpec, err := runtimeDriverSpec(req)
+	if err != nil {
+		return runtimeSpec{}, "", err
 	}
+	return r.renderRuntimeSpecWithDriverSpec(req, driverSpec)
 }
 
-func (r *Runtime) renderSandboxIsolatedRuntimeSpec(req StartRequest) (runtimeSpec, string, error) {
+func runtimeDriverSpec(req StartRequest) (agents.DriverSpec, error) {
+	selectedDriver := driverID(req)
+	if selectedDriver == "" {
+		return agents.DriverSpec{}, fmt.Errorf("agent is required")
+	}
+	driverSpec, ok := agents.DriverSpecFor(selectedDriver)
+	if !ok || !isSandboxIsolatedDriverSpec(driverSpec) {
+		return agents.DriverSpec{}, fmt.Errorf("unsupported agent %q", selectedDriver)
+	}
+	return driverSpec, nil
+}
+
+func isSandboxIsolatedDriverSpec(spec agents.DriverSpec) bool {
+	return spec.ID == agents.ClaudeCode || spec.ID == agents.Pi || spec.ID == agents.Shell
+}
+
+func (r *Runtime) renderRuntimeSpecWithDriverSpec(req StartRequest, driverSpec agents.DriverSpec) (runtimeSpec, string, error) {
+	selectedDriver := driverID(req)
+	if selectedDriver == "" {
+		return runtimeSpec{}, "", fmt.Errorf("agent is required")
+	}
+	if string(driverSpec.ID) != selectedDriver {
+		return runtimeSpec{}, "", fmt.Errorf("generation agent mismatch")
+	}
+	if !isSandboxIsolatedDriverSpec(driverSpec) {
+		return runtimeSpec{}, "", fmt.Errorf("unsupported agent %q", driverSpec.ID)
+	}
+	return r.renderSandboxIsolatedRuntimeSpec(req, driverSpec)
+}
+
+func (r *Runtime) renderSandboxIsolatedRuntimeSpec(req StartRequest, driverSpec agents.DriverSpec) (runtimeSpec, string, error) {
 	var spec runtimeSpec
 	details := req.Generation
-	selectedDriver := driverID(req)
-	if _, ok := agents.DriverSpecFor(selectedDriver); !ok {
-		return runtimeSpec{}, "", fmt.Errorf("unsupported agent %q", selectedDriver)
-	}
+	selectedDriver := string(driverSpec.ID)
 	identity, err := r.requiredSandboxIdentity(details)
 	if err != nil {
 		return runtimeSpec{}, "", err
@@ -1651,9 +1680,9 @@ func (r *Runtime) renderSandboxIsolatedRuntimeSpec(req StartRequest) (runtimeSpe
 		"LOGNAME=harness",
 		"SESSION_WORKSPACE=/workspace",
 		"HARNESS_AGENT_HOME=/agent-home",
-		"HARNESS_DRIVER_ID=" + driverID(req),
-		"HARNESS_TURN_INPUT_SCHEMA=RunTurn",
-		"HARNESS_BRIDGE_PROTOCOL_VERSION=2",
+		"HARNESS_DRIVER_ID=" + selectedDriver,
+		"HARNESS_TURN_INPUT_SCHEMA=" + driverSpec.TurnInputSchema,
+		fmt.Sprintf("HARNESS_BRIDGE_PROTOCOL_VERSION=%d", driverSpec.BridgeProtocolVersion),
 		"HARNESS_EXPECTED_SESSION_ID=" + req.SessionID,
 		"HARNESS_EXPECTED_GENERATION_ID=" + details.GenerationID,
 		"HARNESS_EXPECTED_NETWORK_PROFILE_ID=" + details.NetworkProfileID,

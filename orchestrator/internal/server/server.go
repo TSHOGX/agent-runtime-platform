@@ -1766,20 +1766,20 @@ func effectiveString(value, fallback string) string {
 	return value
 }
 
-func driverInstallDigest(driverID agents.ID) string {
+func driverInstallDigest(driverID agents.ID) (string, error) {
 	spec, ok := agents.DriverSpecFor(string(driverID))
+	if !ok {
+		return "", fmt.Errorf("unsupported driver %q", driverID)
+	}
+	binaryPath, err := expectedDriverBinaryPath(driverID)
+	if err != nil {
+		return "", err
+	}
 	payload := map[string]any{
 		"driver_id": string(driverID),
-		"path":      expectedDriverBinaryPath(driverID),
+		"path":      binaryPath,
 	}
-	var facts agents.DriverPackageFacts
-	if ok {
-		facts = spec.PackageFacts
-	} else {
-		// Preserve the historical default (claude-shaped) payload for any
-		// driver not present in the registry.
-		facts = agents.DriverPackageFacts{Name: agents.ClaudeCodePackageName}
-	}
+	facts := spec.PackageFacts
 	if strings.TrimSpace(facts.Name) != "" {
 		payload["package"] = facts.Name
 	}
@@ -1795,7 +1795,7 @@ func driverInstallDigest(driverID agents.ID) string {
 	if strings.TrimSpace(facts.EventSchemaVersion) != "" {
 		payload["event_schema"] = facts.EventSchemaVersion
 	}
-	return sandboxContractDigestForPayload(payload)
+	return sandboxContractDigestForPayload(payload), nil
 }
 
 func sandboxContractDigestForPayload(value any) string {

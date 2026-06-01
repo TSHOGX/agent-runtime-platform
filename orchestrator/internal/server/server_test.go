@@ -4997,7 +4997,10 @@ func writeServerTestAgentImageManifest(t *testing.T, rootfs string, drivers ...a
 		if !ok {
 			t.Fatalf("missing driver spec for %s", driverID)
 		}
-		binaryPath := expectedDriverBinaryPath(driverID)
+		binaryPath, err := expectedDriverBinaryPath(driverID)
+		if err != nil {
+			t.Fatalf("expected driver binary path: %v", err)
+		}
 		hostPath := filepath.Join(rootfs, strings.TrimPrefix(binaryPath, "/"))
 		if err := os.MkdirAll(filepath.Dir(hostPath), 0o755); err != nil {
 			t.Fatalf("mkdir driver binary parent: %v", err)
@@ -5007,7 +5010,10 @@ func writeServerTestAgentImageManifest(t *testing.T, rootfs string, drivers ...a
 			t.Fatalf("write driver binary: %v", err)
 		}
 		sum := sha256.Sum256(content)
-		entry := syntheticManifestDriver(spec)
+		entry, err := syntheticManifestDriver(spec)
+		if err != nil {
+			t.Fatalf("synthetic manifest driver: %v", err)
+		}
 		entry.InstalledBinaryDigest = fmt.Sprintf("sha256:%x", sum[:])
 		entries = append(entries, entry)
 		buildDrivers = append(buildDrivers, string(driverID))
@@ -5032,6 +5038,16 @@ func writeServerTestAgentImageManifest(t *testing.T, rootfs string, drivers ...a
 		t.Fatalf("write manifest: %v", err)
 	}
 	return manifestPath
+}
+
+func TestDriverManifestHelpersFailClosedForUnknownDriver(t *testing.T) {
+	unknown := agents.ID("opencode")
+	if _, err := expectedDriverBinaryPath(unknown); err == nil || !strings.Contains(err.Error(), `unsupported driver "opencode"`) {
+		t.Fatalf("expected unknown driver binary path error, got %v", err)
+	}
+	if _, err := driverInstallDigest(unknown); err == nil || !strings.Contains(err.Error(), `unsupported driver "opencode"`) {
+		t.Fatalf("expected unknown driver install digest error, got %v", err)
+	}
 }
 
 func createServerRuntimeResourceLive(t *testing.T, ctx context.Context, st *store.Store, sessionID string, allocation store.GenerationAllocation, ownerUUID, hostID string, now time.Time) store.RuntimeResourceInstance {

@@ -309,7 +309,11 @@ func (s *Server) syntheticAgentImageManifest() (imageAgentManifest, error) {
 		if !ok {
 			continue
 		}
-		drivers = append(drivers, syntheticManifestDriver(spec))
+		driver, err := syntheticManifestDriver(spec)
+		if err != nil {
+			return imageAgentManifest{}, err
+		}
+		drivers = append(drivers, driver)
 		buildDrivers = append(buildDrivers, string(driverID))
 	}
 	manifest := imageAgentManifest{
@@ -335,13 +339,21 @@ func (s *Server) syntheticAgentImageManifest() (imageAgentManifest, error) {
 	return manifest, nil
 }
 
-func syntheticManifestDriver(spec agents.DriverSpec) imageManifestDriver {
+func syntheticManifestDriver(spec agents.DriverSpec) (imageManifestDriver, error) {
+	binaryPath, err := expectedDriverBinaryPath(spec.ID)
+	if err != nil {
+		return imageManifestDriver{}, err
+	}
+	installDigest, err := driverInstallDigest(spec.ID)
+	if err != nil {
+		return imageManifestDriver{}, err
+	}
 	driver := imageManifestDriver{
 		DriverID:              string(spec.ID),
 		Label:                 spec.Label,
 		Kind:                  string(spec.Kind),
-		BinaryPath:            expectedDriverBinaryPath(spec.ID),
-		InstalledBinaryDigest: driverInstallDigest(spec.ID),
+		BinaryPath:            binaryPath,
+		InstalledBinaryDigest: installDigest,
 		BridgeProtocol:        spec.BridgeProtocol,
 		BridgeProtocolVersion: spec.BridgeProtocolVersion,
 		TurnInputSchema:       spec.TurnInputSchema,
@@ -354,7 +366,7 @@ func syntheticManifestDriver(spec agents.DriverSpec) imageManifestDriver {
 	driver.PackageShasum = facts.Shasum
 	driver.PackageIntegrity = facts.Integrity
 	driver.EventSchemaVersion = facts.EventSchemaVersion
-	return driver
+	return driver, nil
 }
 
 // manifestPackageVersion reports the version recorded in the agent image
@@ -382,7 +394,11 @@ func (s *Server) validateManifestDriver(manifest imageAgentManifest, driver imag
 		driver.ModelAccess != spec.ModelAccess {
 		return fmt.Errorf("agent image manifest driver %s does not match registry facts", spec.ID)
 	}
-	if strings.TrimSpace(driver.BinaryPath) != expectedDriverBinaryPath(spec.ID) {
+	expectedBinaryPath, err := expectedDriverBinaryPath(spec.ID)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(driver.BinaryPath) != expectedBinaryPath {
 		return fmt.Errorf("agent image manifest driver %s binary path mismatch", spec.ID)
 	}
 	if !strings.HasPrefix(strings.TrimSpace(driver.InstalledBinaryDigest), "sha256:") {
@@ -434,12 +450,16 @@ func validateDriverPackageFacts(driver imageManifestDriver, driverID agents.ID) 
 	return nil
 }
 
-func expectedDriverBinaryPath(driverID agents.ID) string {
+func expectedDriverBinaryPath(driverID agents.ID) (string, error) {
 	spec, ok := agents.DriverSpecFor(string(driverID))
-	if !ok || strings.TrimSpace(spec.BinaryPath) == "" {
-		return agents.ClaudeCodeBinaryPath
+	if !ok {
+		return "", fmt.Errorf("unsupported driver %q", driverID)
 	}
-	return spec.BinaryPath
+	path := strings.TrimSpace(spec.BinaryPath)
+	if path == "" {
+		return "", fmt.Errorf("driver %s missing binary path", driverID)
+	}
+	return path, nil
 }
 
 func rootfsFileDigest(rootfs, sandboxPath string) (string, error) {
