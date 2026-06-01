@@ -165,9 +165,9 @@ func TestPiCompletedTurnAdvancesSidecarOnlyAfterHostSessionValidation(t *testing
 	sessionID := "sess_pi_sidecar"
 	createStoreSessionWithAgent(t, ctx, st, sessionID, "pi")
 	cfg := testAllocatorConfig(t)
-	cfg.Agent = "pi"
-	cfg.AgentModel = "sonnet"
-	cfg.AgentOutputFormat = agents.PiEventSchemaVersion
+	cfg.DriverID = "pi"
+	cfg.Model = "sonnet"
+	cfg.OutputFormat = agents.PiEventSchemaVersion
 	modelAccessAllowed := true
 	cfg.ModelAccessAllowed = &modelAccessAllowed
 	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
@@ -261,10 +261,10 @@ WHERE session_id = ?
 func createAllocatedDriverSession(t *testing.T, ctx context.Context, st *Store, ownerUUID string, cfg ResourceAllocatorConfig, sessionID, driverID, outputFormat string) GenerationAllocation {
 	t.Helper()
 	createStoreSessionWithAgent(t, ctx, st, sessionID, driverID)
-	cfg.Agent = driverID
-	cfg.AgentOutputFormat = outputFormat
+	cfg.DriverID = driverID
+	cfg.OutputFormat = outputFormat
 	if driverID == "sh" {
-		cfg.AgentModel = ""
+		cfg.Model = ""
 	}
 	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
 		SessionID: sessionID,

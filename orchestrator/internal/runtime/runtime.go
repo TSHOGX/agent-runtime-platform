@@ -90,7 +90,7 @@ func (execCommandRunner) CombinedOutput(ctx context.Context, name string, args .
 type StartRequest struct {
 	SessionID             string
 	GenerationID          string
-	Agent                 string
+	DriverID              string
 	RestoreFromCheckpoint bool
 	Generation            store.RuntimeGenerationDetails
 	PreparedArtifacts     GenerationArtifacts
@@ -240,7 +240,7 @@ type Container struct {
 	SessionID        string
 	GenerationID     string
 	RunscContainerID string
-	Agent            string
+	DriverID         string
 	Cmd              *exec.Cmd
 	Stdin            io.WriteCloser
 	Stdout           io.ReadCloser
@@ -263,11 +263,11 @@ func New(cfg Config) *Runtime {
 }
 
 func (r *Runtime) Start(ctx context.Context, req StartRequest, output func(Output)) Result {
-	agent, err := resolveAgent(req.Agent, r.cfg.DefaultAgent)
+	driverID, err := resolveDriverID(req.DriverID, r.cfg.DefaultAgent)
 	if err != nil {
 		return Result{Err: err}
 	}
-	req.Agent = agent
+	req.DriverID = driverID
 
 	// Check if container already exists (hot path)
 	r.mu.RLock()
@@ -357,18 +357,18 @@ func restoreGenerationArtifacts(req StartRequest) (GenerationArtifacts, error) {
 	return artifacts, nil
 }
 
-func resolveAgent(agent, fallback string) (string, error) {
-	agent = strings.TrimSpace(agent)
-	if agent == "" {
-		agent = strings.TrimSpace(fallback)
+func resolveDriverID(driverID, fallback string) (string, error) {
+	driverID = strings.TrimSpace(driverID)
+	if driverID == "" {
+		driverID = strings.TrimSpace(fallback)
 	}
-	if agent == "" {
-		return "", errors.New("agent is required")
+	if driverID == "" {
+		return "", errors.New("driver id is required")
 	}
-	if _, ok := agents.Lookup(agent); !ok {
-		return "", fmt.Errorf("unsupported agent %q", agent)
+	if _, ok := agents.Lookup(driverID); !ok {
+		return "", fmt.Errorf("unsupported driver %q", driverID)
 	}
-	return agent, nil
+	return driverID, nil
 }
 
 func scanLines(wg *sync.WaitGroup, r io.Reader, stream string, hub *OutputHub) {
@@ -1400,13 +1400,13 @@ func (r *Runtime) buildGenerationManifest(req StartRequest, driverSpec agents.Dr
 	details := req.Generation
 	selectedDriver := driverID(req)
 	if selectedDriver == "" {
-		return controlManifest{}, fmt.Errorf("agent is required")
+		return controlManifest{}, fmt.Errorf("driver id is required")
 	}
 	if string(driverSpec.ID) != selectedDriver {
-		return controlManifest{}, fmt.Errorf("generation agent mismatch")
+		return controlManifest{}, fmt.Errorf("generation driver mismatch")
 	}
 	if !isSandboxIsolatedDriverSpec(driverSpec) {
-		return controlManifest{}, fmt.Errorf("unsupported agent %q", selectedDriver)
+		return controlManifest{}, fmt.Errorf("unsupported driver %q", selectedDriver)
 	}
 	manifest := controlManifest{
 		SessionID:                req.SessionID,
@@ -1471,18 +1471,18 @@ func validateGenerationDetails(req StartRequest) error {
 	if strings.TrimSpace(req.GenerationID) != "" && req.GenerationID != details.GenerationID {
 		return fmt.Errorf("generation id mismatch")
 	}
-	if strings.TrimSpace(details.Agent) != "" && strings.TrimSpace(req.Agent) != "" && details.Agent != req.Agent {
-		return fmt.Errorf("generation agent mismatch")
+	if strings.TrimSpace(details.DriverID) != "" && strings.TrimSpace(req.DriverID) != "" && details.DriverID != req.DriverID {
+		return fmt.Errorf("generation driver mismatch")
 	}
 	selectedDriver := driverID(req)
 	if selectedDriver == "" {
-		return fmt.Errorf("agent is required")
+		return fmt.Errorf("driver id is required")
 	}
 	if _, ok := agents.Lookup(selectedDriver); !ok {
-		return fmt.Errorf("unsupported agent %q", selectedDriver)
+		return fmt.Errorf("unsupported driver %q", selectedDriver)
 	}
 	if !isSandboxIsolatedRequest(req) {
-		return fmt.Errorf("unsupported agent %q", selectedDriver)
+		return fmt.Errorf("unsupported driver %q", selectedDriver)
 	}
 	if platform := effectiveRunscPlatform(details); platform != defaultRunscPlatform {
 		return fmt.Errorf("unsupported runsc platform %q", platform)
@@ -1579,11 +1579,11 @@ func (r *Runtime) renderRuntimeSpec(req StartRequest) (runtimeSpec, string, erro
 func runtimeDriverSpec(req StartRequest) (agents.DriverSpec, error) {
 	selectedDriver := driverID(req)
 	if selectedDriver == "" {
-		return agents.DriverSpec{}, fmt.Errorf("agent is required")
+		return agents.DriverSpec{}, fmt.Errorf("driver id is required")
 	}
 	driverSpec, ok := agents.DriverSpecFor(selectedDriver)
 	if !ok || !isSandboxIsolatedDriverSpec(driverSpec) {
-		return agents.DriverSpec{}, fmt.Errorf("unsupported agent %q", selectedDriver)
+		return agents.DriverSpec{}, fmt.Errorf("unsupported driver %q", selectedDriver)
 	}
 	return driverSpec, nil
 }
@@ -1595,13 +1595,13 @@ func isSandboxIsolatedDriverSpec(spec agents.DriverSpec) bool {
 func (r *Runtime) renderRuntimeSpecWithDriverSpec(req StartRequest, driverSpec agents.DriverSpec) (runtimeSpec, string, error) {
 	selectedDriver := driverID(req)
 	if selectedDriver == "" {
-		return runtimeSpec{}, "", fmt.Errorf("agent is required")
+		return runtimeSpec{}, "", fmt.Errorf("driver id is required")
 	}
 	if string(driverSpec.ID) != selectedDriver {
-		return runtimeSpec{}, "", fmt.Errorf("generation agent mismatch")
+		return runtimeSpec{}, "", fmt.Errorf("generation driver mismatch")
 	}
 	if !isSandboxIsolatedDriverSpec(driverSpec) {
-		return runtimeSpec{}, "", fmt.Errorf("unsupported agent %q", driverSpec.ID)
+		return runtimeSpec{}, "", fmt.Errorf("unsupported driver %q", driverSpec.ID)
 	}
 	return r.renderSandboxIsolatedRuntimeSpec(req, driverSpec)
 }
@@ -1708,14 +1708,6 @@ func (r *Runtime) rootFSPath() string {
 		return strings.TrimSpace(r.cfg.RootFSPath)
 	}
 	return filepath.Join(r.repoRoot(), "sandbox-image", "rootfs")
-}
-
-func (r *Runtime) schemaPackPath() string {
-	path := filepath.Join(r.repoRoot(), "schema-pack")
-	if _, err := os.Stat(path); err == nil {
-		return path
-	}
-	return ""
 }
 
 func (r *Runtime) repoRoot() string {
@@ -2051,9 +2043,9 @@ func (r *Runtime) prepareRuntimeDataDirs(req StartRequest) error {
 	}
 	selectedDriver := driverID(req)
 	if selectedDriver == "" {
-		return fmt.Errorf("agent is required")
+		return fmt.Errorf("driver id is required")
 	}
-	return fmt.Errorf("unsupported agent %q", selectedDriver)
+	return fmt.Errorf("unsupported driver %q", selectedDriver)
 }
 
 func (r *Runtime) prepareSandboxIsolationDataDirs(req StartRequest) error {
@@ -2137,10 +2129,10 @@ func cleanSandboxDataPath(path, label string) (string, error) {
 }
 
 func driverID(req StartRequest) string {
-	if agent := strings.TrimSpace(req.Agent); agent != "" {
-		return agent
+	if driverID := strings.TrimSpace(req.DriverID); driverID != "" {
+		return driverID
 	}
-	return strings.TrimSpace(req.Generation.Agent)
+	return strings.TrimSpace(req.Generation.DriverID)
 }
 
 func isSandboxIsolatedRequest(req StartRequest) bool {
@@ -2620,13 +2612,13 @@ type shellInputFrame struct {
 	Content string `json:"content,omitempty"`
 }
 
-func writeInterrupt(stdin io.Writer, agent string) error {
-	def, ok := agents.Lookup(agent)
+func writeInterrupt(stdin io.Writer, driverID string) error {
+	def, ok := agents.Lookup(driverID)
 	if !ok {
-		return fmt.Errorf("unsupported agent %q", agent)
+		return fmt.Errorf("unsupported driver %q", driverID)
 	}
 	if def.Protocol != agents.ProtocolShellPTY {
-		return fmt.Errorf("interrupt not supported for agent %q", agent)
+		return fmt.Errorf("interrupt not supported for driver %q", driverID)
 	}
 	frame := shellInputFrame{Type: "interrupt"}
 	encoded, err := json.Marshal(frame)
@@ -2715,7 +2707,7 @@ func (r *Runtime) startFresh(ctx context.Context, req StartRequest, _ func(Outpu
 		SessionID:        req.SessionID,
 		GenerationID:     req.GenerationID,
 		RunscContainerID: containerID,
-		Agent:            req.Agent,
+		DriverID:         req.DriverID,
 		Cmd:              cmd,
 		Stdin:            stdin,
 		Stdout:           stdout,
@@ -2826,7 +2818,7 @@ func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, _ 
 		SessionID:        req.SessionID,
 		GenerationID:     req.GenerationID,
 		RunscContainerID: containerID,
-		Agent:            req.Agent,
+		DriverID:         req.DriverID,
 		Cmd:              cmd,
 		Stdin:            stdin,
 		Stdout:           stdout,
@@ -3113,6 +3105,6 @@ func (r *Runtime) Interrupt(sessionID string) error {
 		return errors.New("container not found")
 	}
 	return r.writeContainerInput(container, func(stdin io.Writer) error {
-		return writeInterrupt(stdin, container.Agent)
+		return writeInterrupt(stdin, container.DriverID)
 	})
 }

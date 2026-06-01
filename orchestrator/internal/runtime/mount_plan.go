@@ -89,7 +89,7 @@ func BuildSandboxMountPlan(input SandboxMountPlanInputs) (MountPlan, error) {
 	if strings.TrimSpace(input.NetworkHostsPath) != "" {
 		plan.Content = append(plan.Content, exactBindMount("network_hosts", input.NetworkHostsPath, "/etc/hosts", "ro", []string{"bind", "ro", "nosuid", "nodev", "noexec"}, nil))
 	}
-	for _, spec := range agents.DriverConfigMaterializationSpecsFor(agents.ID(strings.TrimSpace(details.Agent))) {
+	for _, spec := range agents.DriverConfigMaterializationSpecsFor(agents.ID(strings.TrimSpace(details.DriverID))) {
 		plan.Content = append(plan.Content, exactBindMount(spec.MountName, spec.HostSourcePath(details.ControlDirPath), spec.SandboxDestination, spec.MountMode, driverConfigMaterializationMountOptions(spec), nil))
 	}
 	if err := plan.Validate(); err != nil {

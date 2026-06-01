@@ -26,9 +26,6 @@ func TestPiDriverSpecIsRegistered(t *testing.T) {
 	if _, err := CanonicalDriverID("pi"); err != nil {
 		t.Fatalf("canonical pi driver rejected: %v", err)
 	}
-	if public, ok := PublicAgentForDriver("pi"); !ok || public != "pi" {
-		t.Fatalf("public pi mapping = %q/%v", public, ok)
-	}
 	def, ok := Lookup("pi")
 	if !ok || def.Protocol != ProtocolPiRPC {
 		t.Fatalf("lookup pi = %+v/%v", def, ok)

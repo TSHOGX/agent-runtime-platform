@@ -154,12 +154,12 @@ func TestValidateDriverStateForRuntimeLaunchPiHostState(t *testing.T) {
 	}
 	uninitialized := []byte(`{"driver_id":"pi","schema_version":1,"session_dir":"/agent-home/.pi/agent/sessions","state_kind":"pi_uninitialized"}`)
 	if err := validateDriverStateForRuntimeLaunch(store.RuntimeGenerationDetails{
-		Agent:              "pi",
+		DriverID:           "pi",
 		DriverStatePayload: uninitialized,
 	}, volumes); err != nil {
 		t.Fatalf("pi uninitialized launch state rejected: %v", err)
 	}
-	if err := validateDriverStateForRuntimeLaunch(store.RuntimeGenerationDetails{Agent: "pi"}, volumes); err == nil || !strings.Contains(err.Error(), "requires driver state payload") {
+	if err := validateDriverStateForRuntimeLaunch(store.RuntimeGenerationDetails{DriverID: "pi"}, volumes); err == nil || !strings.Contains(err.Error(), "requires driver state payload") {
 		t.Fatalf("expected missing pi driver state rejection, got %v", err)
 	}
 
@@ -169,7 +169,7 @@ func TestValidateDriverStateForRuntimeLaunchPiHostState(t *testing.T) {
 		agents.PiSessionDir,
 	))
 	if err := validateDriverStateForRuntimeLaunch(store.RuntimeGenerationDetails{
-		Agent:              "pi",
+		DriverID:           "pi",
 		DriverStatePayload: sessionPayload,
 	}, volumes); err == nil || !strings.Contains(err.Error(), "host file missing") {
 		t.Fatalf("expected missing pi session file rejection, got %v", err)
@@ -183,12 +183,12 @@ func TestValidateDriverStateForRuntimeLaunchPiHostState(t *testing.T) {
 		t.Fatalf("write pi session file: %v", err)
 	}
 	if err := validateDriverStateForRuntimeLaunch(store.RuntimeGenerationDetails{
-		Agent:              "pi",
+		DriverID:           "pi",
 		DriverStatePayload: sessionPayload,
 	}, volumes); err != nil {
 		t.Fatalf("pi session launch state rejected: %v", err)
 	}
-	if err := validateDriverStateForRuntimeLaunch(store.RuntimeGenerationDetails{Agent: "sh"}, sessionRuntimeDataVolumes{}); err != nil {
+	if err := validateDriverStateForRuntimeLaunch(store.RuntimeGenerationDetails{DriverID: "sh"}, sessionRuntimeDataVolumes{}); err != nil {
 		t.Fatalf("non-pi runtime launch should not require driver state: %v", err)
 	}
 }
@@ -526,7 +526,7 @@ func TestCloseSessionReleasesSoftLimitWithoutDeletingHistory(t *testing.T) {
 		ID:        "sess_retained",
 		UserID:    labUserID,
 		Status:    string(sessionstate.Created),
-		Agent:     "claude_code",
+		DriverID:  "claude_code",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -539,7 +539,7 @@ func TestCloseSessionReleasesSoftLimitWithoutDeletingHistory(t *testing.T) {
 	}
 	oldDriverHome, err := st.ProvisionSessionDriverHome(ctx, store.ProvisionSessionDriverHomeParams{
 		SessionID: oldSession.ID,
-		Driver:    oldSession.Agent,
+		Driver:    oldSession.DriverID,
 		Config:    volumeConfig,
 		Now:       now,
 	})
@@ -601,7 +601,7 @@ func TestCloseSessionReleasesSoftLimitWithoutDeletingHistory(t *testing.T) {
 	if _, err := os.Stat(oldDriverHome.HostPath); err != nil {
 		t.Fatalf("agent home should remain after close: %v", err)
 	}
-	retainedDriverHome, err := st.GetSessionDriverHomeVolume(ctx, oldSession.ID, oldSession.Agent)
+	retainedDriverHome, err := st.GetSessionDriverHomeVolume(ctx, oldSession.ID, oldSession.DriverID)
 	if err != nil {
 		t.Fatalf("get retained driver home: %v", err)
 	}
@@ -908,7 +908,7 @@ func TestMonitorIdleSessionsReEnablesCheckpointedSessionsWhenCheckpointDisabled(
 		ID:        "sess_checkpointed",
 		UserID:    "lab",
 		Status:    string(sessionstate.Checkpointed),
-		Agent:     "claude_code",
+		DriverID:  "claude_code",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -1303,7 +1303,7 @@ func TestSendMessageColdFallbackAllocatesReplacementGeneration(t *testing.T) {
 	}
 	driverHome, err := st.VerifySessionDriverHomeVolume(ctx, store.VerifySessionDriverHomeVolumeParams{
 		SessionID: session.ID,
-		Driver:    session.Agent,
+		Driver:    session.DriverID,
 		Config:    volumeConfig,
 	})
 	if err != nil {
@@ -1829,7 +1829,7 @@ func TestSendMessageFallsBackWhenCheckpointImageManifestInvalid(t *testing.T) {
 	if _, err := st.DBForTest().ExecContext(ctx, `UPDATE sessions SET driver_id = 'sh', mode = 'shell' WHERE id = ?`, session.ID); err != nil {
 		t.Fatalf("set shell session agent: %v", err)
 	}
-	session.Agent = "sh"
+	session.DriverID = "sh"
 	session.Mode = "shell"
 	cfg := testServerConfig(dir)
 	cfg.Harness.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
@@ -2297,9 +2297,9 @@ func TestGetQuotaReportsSessionAndPoolCeilings(t *testing.T) {
 			EgressDNSPolicy:    string(cfg.Harness.Network.Egress.DNSPolicy),
 			HostProxyBindURL:   cfg.ModelProxy.BindURL,
 			ProxyPort:          cfg.ModelProxy.BindPort,
-			Agent:              "claude_code",
-			AgentModel:         "sonnet",
-			AgentOutputFormat:  "stream-json",
+			DriverID:           "claude_code",
+			Model:              "sonnet",
+			OutputFormat:       "stream-json",
 		},
 	})
 	if err != nil {
@@ -2542,7 +2542,7 @@ func TestStartEnsuredGenerationRenewsLeaseDuringSlowPrepare(t *testing.T) {
 		Owner:     store.GenerationLeaseOwner(owner.UUID),
 		LeaseTTL:  cfg.Harness.Bridge.LeaseTTL.Duration,
 		Now:       now,
-		Config:    serverTestAllocatorConfig(cfg, session.Agent),
+		Config:    serverTestAllocatorConfig(cfg, session.DriverID),
 	})
 	if err != nil {
 		t.Fatalf("allocate generation: %v", err)
@@ -2595,7 +2595,7 @@ func TestStartEnsuredGenerationRenewsLeaseDuringSlowPrepare(t *testing.T) {
 	}
 	driverHomeVolume, err := st.VerifySessionDriverHomeVolume(ctx, store.VerifySessionDriverHomeVolumeParams{
 		SessionID: session.ID,
-		Driver:    session.Agent,
+		Driver:    session.DriverID,
 		Config:    volumeConfig,
 	})
 	if err != nil {
@@ -2744,7 +2744,7 @@ func TestSandboxContractPayloadRecordsPiMaterializedConfig(t *testing.T) {
 		ID:        "sess_pi_contract",
 		UserID:    labUserID,
 		Status:    string(sessionstate.Created),
-		Agent:     "pi",
+		DriverID:  "pi",
 		Mode:      "agent",
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -2758,9 +2758,9 @@ func TestSandboxContractPayloadRecordsPiMaterializedConfig(t *testing.T) {
 		EgressDNSPolicy:            "hostnames_only",
 		HostProxyBindURL:           "http://0.0.0.0:8082",
 		ProxyPort:                  8082,
-		Agent:                      "pi",
-		AgentModel:                 "sonnet",
-		AgentOutputFormat:          "pi_rpc_events_v1.0",
+		DriverID:                   "pi",
+		Model:                      "sonnet",
+		OutputFormat:               "pi_rpc_events_v1.0",
 		DisableNonessentialTraffic: true,
 		SandboxUID:                 65534,
 		SandboxGID:                 65534,
@@ -2794,7 +2794,7 @@ func TestSandboxContractPayloadRecordsPiMaterializedConfig(t *testing.T) {
 	artifacts, err := rt.PrepareGeneration(ctx, runtime.StartRequest{
 		SessionID:         session.ID,
 		GenerationID:      allocation.GenerationID,
-		Agent:             "pi",
+		DriverID:          "pi",
 		Generation:        details,
 		WorkspaceHostPath: workspaceHostPath,
 		AgentHomeHostPath: agentHomeHostPath,
@@ -2876,7 +2876,7 @@ func TestStartEnsuredGenerationLeavesBridgeClaimsUntilLivePoll(t *testing.T) {
 		Owner:     store.GenerationLeaseOwner(owner.UUID),
 		LeaseTTL:  time.Minute,
 		Now:       time.Now().UTC(),
-		Config:    serverTestAllocatorConfig(cfg, session.Agent),
+		Config:    serverTestAllocatorConfig(cfg, session.DriverID),
 	})
 	if err != nil {
 		t.Fatalf("allocate generation: %v", err)
@@ -2927,7 +2927,7 @@ func TestRuntimeResourceInstanceCheckpointRestoreTransitions(t *testing.T) {
 		Owner:     store.GenerationLeaseOwner(owner.UUID),
 		LeaseTTL:  time.Minute,
 		Now:       time.Now().UTC(),
-		Config:    serverTestAllocatorConfig(cfg, session.Agent),
+		Config:    serverTestAllocatorConfig(cfg, session.DriverID),
 	})
 	if err != nil {
 		t.Fatalf("allocate generation: %v", err)
@@ -3001,7 +3001,7 @@ func TestRuntimeResourceInstanceCheckpointRestoreTransitions(t *testing.T) {
 	}
 	driverHomeVolume, err := st.VerifySessionDriverHomeVolume(ctx, store.VerifySessionDriverHomeVolumeParams{
 		SessionID: session.ID,
-		Driver:    session.Agent,
+		Driver:    session.DriverID,
 		Config:    volumeConfig,
 	})
 	if err != nil {
@@ -3024,7 +3024,7 @@ func TestStartEnsuredGenerationDestroysRuntimeAfterOwnerLoss(t *testing.T) {
 		Owner:     store.GenerationLeaseOwner(owner.UUID),
 		LeaseTTL:  time.Minute,
 		Now:       time.Now().UTC(),
-		Config:    serverTestAllocatorConfig(cfg, session.Agent),
+		Config:    serverTestAllocatorConfig(cfg, session.DriverID),
 	})
 	if err != nil {
 		t.Fatalf("allocate generation: %v", err)
@@ -3231,7 +3231,7 @@ func TestDestroySessionCancelsPendingTurnAndReclaimsGeneration(t *testing.T) {
 		Owner:     store.GenerationLeaseOwner(owner.UUID),
 		LeaseTTL:  time.Minute,
 		Now:       time.Now().UTC(),
-		Config:    serverTestAllocatorConfig(cfg, session.Agent),
+		Config:    serverTestAllocatorConfig(cfg, session.DriverID),
 	})
 	if err != nil {
 		t.Fatalf("allocate generation: %v", err)
@@ -3338,9 +3338,9 @@ func TestRunMaintenancePollsBridgeOutbox(t *testing.T) {
 			EgressDNSPolicy:    string(cfg.Harness.Network.Egress.DNSPolicy),
 			HostProxyBindURL:   cfg.ModelProxy.BindURL,
 			ProxyPort:          cfg.ModelProxy.BindPort,
-			Agent:              "claude_code",
-			AgentModel:         "sonnet",
-			AgentOutputFormat:  "stream-json",
+			DriverID:           "claude_code",
+			Model:              "sonnet",
+			OutputFormat:       "stream-json",
 		},
 	})
 	if err != nil {
@@ -3364,7 +3364,7 @@ func TestRunMaintenancePollsBridgeOutbox(t *testing.T) {
 		Type:         bridge.TypeHello,
 		SessionID:    session.ID,
 		GenerationID: allocation.GenerationID,
-		Payload:      serverBridgeHelloPayload(t, session.Agent),
+		Payload:      serverBridgeHelloPayload(t, session.DriverID),
 	}); err != nil {
 		t.Fatalf("write hello: %v", err)
 	}
@@ -3491,7 +3491,7 @@ func TestExpiredRuntimeRecoverySkipsRepairWhenRuntimeCleanupFails(t *testing.T) 
 		Owner:     store.GenerationLeaseOwner(owner.UUID),
 		LeaseTTL:  time.Minute,
 		Now:       now.Add(-3 * time.Minute),
-		Config:    serverTestAllocatorConfig(cfg, session.Agent),
+		Config:    serverTestAllocatorConfig(cfg, session.DriverID),
 	})
 	if err != nil {
 		t.Fatalf("allocate generation: %v", err)
@@ -3703,7 +3703,7 @@ func TestRunMaintenancePublishesBridgeOutputAndCompletion(t *testing.T) {
 	if _, err := st.DBForTest().ExecContext(ctx, `UPDATE sessions SET driver_id = 'sh', mode = 'shell' WHERE id = ?`, session.ID); err != nil {
 		t.Fatalf("set shell agent: %v", err)
 	}
-	session.Agent = "sh"
+	session.DriverID = "sh"
 	session.Mode = "shell"
 	cfg := testServerConfig(dir)
 	cfg.Harness.Bridge.PollInterval = config.Duration{Duration: 10 * time.Millisecond}
@@ -4861,7 +4861,7 @@ func writeServerBridgeBootstrapForRequest(req runtime.StartRequest) error {
 		return err
 	}
 	ctx := context.Background()
-	helloPayload, err := json.Marshal(map[string]any{"driver_id": req.Agent, "protocol_version": 2, "turn_input_schema": "RunTurn"})
+	helloPayload, err := json.Marshal(map[string]any{"driver_id": req.DriverID, "protocol_version": 2, "turn_input_schema": "RunTurn"})
 	if err != nil {
 		return err
 	}
@@ -5331,7 +5331,7 @@ func createServerTestSession(t *testing.T, ctx context.Context, st *store.Store,
 		ID:        id,
 		UserID:    labUserID,
 		Status:    status,
-		Agent:     "claude_code",
+		DriverID:  "claude_code",
 		CreatedAt: now,
 		UpdatedAt: now,
 		ExpiresAt: expiresAt,
@@ -5649,27 +5649,27 @@ func TestResourceAllocatorConfigUsesHarnessDeploymentConfig(t *testing.T) {
 	srv := &Server{cfg: cfg}
 
 	allocatorConfig := srv.resourceAllocatorConfig("claude_code")
-	if allocatorConfig.AgentModel != "opus" ||
-		allocatorConfig.AgentOutputFormat != "stream-json" ||
+	if allocatorConfig.Model != "opus" ||
+		allocatorConfig.OutputFormat != "stream-json" ||
 		allocatorConfig.DisableNonessentialTraffic ||
 		!allocatorConfig.ProviderCredentialsHostOnly {
 		t.Fatalf("allocator deployment config = %+v", allocatorConfig)
 	}
 }
 
-func serverTestAllocatorConfig(cfg config.Config, agent string) store.ResourceAllocatorConfig {
-	if driverID, err := agents.CanonicalDriverID(agent); err == nil {
-		agent = string(driverID)
+func serverTestAllocatorConfig(cfg config.Config, driverID string) store.ResourceAllocatorConfig {
+	if canonical, err := agents.CanonicalDriverID(driverID); err == nil {
+		driverID = string(canonical)
 	}
 	outputFormat := ""
 	modelAccess := false
-	if spec, ok := agents.DriverSpecFor(agent); ok {
+	if spec, ok := agents.DriverSpecFor(driverID); ok {
 		outputFormat = spec.OutputFormat
 		modelAccess = spec.ModelAccess
 	}
 	model := ""
 	disableNonessentialTraffic := false
-	if _, agentCfg, ok := config.EnabledAgentConfigForDriver(cfg.DeploymentAgents(), agent); ok {
+	if _, agentCfg, ok := config.EnabledAgentConfigForDriver(cfg.DeploymentAgents(), driverID); ok {
 		if agentCfg.DisableNonessentialTraffic != nil {
 			disableNonessentialTraffic = *agentCfg.DisableNonessentialTraffic
 		}
@@ -5688,9 +5688,9 @@ func serverTestAllocatorConfig(cfg config.Config, agent string) store.ResourceAl
 		EgressDNSPolicy:             string(cfg.Harness.Network.Egress.DNSPolicy),
 		HostProxyBindURL:            cfg.ModelProxy.BindURL,
 		ProxyPort:                   cfg.ModelProxy.BindPort,
-		Agent:                       agent,
-		AgentModel:                  model,
-		AgentOutputFormat:           outputFormat,
+		DriverID:                    driverID,
+		Model:                       model,
+		OutputFormat:                outputFormat,
 		DisableNonessentialTraffic:  disableNonessentialTraffic,
 		SandboxUID:                  cfg.Harness.SandboxIdentity.UID,
 		SandboxGID:                  cfg.Harness.SandboxIdentity.GID,

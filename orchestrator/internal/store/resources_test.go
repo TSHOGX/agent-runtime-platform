@@ -27,43 +27,43 @@ func TestResourceAllocatorConfigModelCredentialDefaultsUseDriverSpec(t *testing.
 	}{
 		{
 			name:         "claude default",
-			cfg:          ResourceAllocatorConfig{Agent: "claude_code"},
+			cfg:          ResourceAllocatorConfig{DriverID: "claude_code"},
 			wantAccess:   true,
 			wantHostOnly: true,
 		},
 		{
 			name:         "pi default",
-			cfg:          ResourceAllocatorConfig{Agent: "pi"},
+			cfg:          ResourceAllocatorConfig{DriverID: "pi"},
 			wantAccess:   true,
 			wantHostOnly: true,
 		},
 		{
 			name:         "shell default",
-			cfg:          ResourceAllocatorConfig{Agent: "sh"},
+			cfg:          ResourceAllocatorConfig{DriverID: "sh"},
 			wantAccess:   false,
 			wantHostOnly: false,
 		},
 		{
 			name:         "unknown default",
-			cfg:          ResourceAllocatorConfig{Agent: "unknown"},
+			cfg:          ResourceAllocatorConfig{DriverID: "unknown"},
 			wantAccess:   false,
 			wantHostOnly: false,
 		},
 		{
 			name:         "explicit claude deny",
-			cfg:          ResourceAllocatorConfig{Agent: "claude_code", ModelAccessAllowed: boolPtr(false)},
+			cfg:          ResourceAllocatorConfig{DriverID: "claude_code", ModelAccessAllowed: boolPtr(false)},
 			wantAccess:   false,
 			wantHostOnly: true,
 		},
 		{
 			name:         "explicit shell allow",
-			cfg:          ResourceAllocatorConfig{Agent: "sh", ModelAccessAllowed: boolPtr(true)},
+			cfg:          ResourceAllocatorConfig{DriverID: "sh", ModelAccessAllowed: boolPtr(true)},
 			wantAccess:   true,
 			wantHostOnly: false,
 		},
 		{
 			name:         "explicit unknown allow",
-			cfg:          ResourceAllocatorConfig{Agent: "unknown", ModelAccessAllowed: boolPtr(true)},
+			cfg:          ResourceAllocatorConfig{DriverID: "unknown", ModelAccessAllowed: boolPtr(true)},
 			wantAccess:   true,
 			wantHostOnly: false,
 		},
@@ -464,7 +464,7 @@ func TestAllocateGenerationSnapshotsSessionAutoCheckpointPolicy(t *testing.T) {
 		ID:                    "sess_policy",
 		UserID:                "lab",
 		Status:                string(sessionstate.Created),
-		Agent:                 "claude_code",
+		DriverID:              "claude_code",
 		AutoCheckpointEnabled: true,
 		CreatedAt:             now,
 		UpdatedAt:             now,
@@ -900,9 +900,9 @@ func TestAllocateShellGenerationHasNoSecretReferences(t *testing.T) {
 	st, owner := openOwnedStore(t, ctx)
 	createStoreSessionWithAgent(t, ctx, st, "sess_shell", "sh")
 	cfg := testAllocatorConfig(t)
-	cfg.Agent = "sh"
-	cfg.AgentModel = ""
-	cfg.AgentOutputFormat = "shell_pty"
+	cfg.DriverID = "sh"
+	cfg.Model = ""
+	cfg.OutputFormat = "shell_pty"
 
 	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
 		SessionID: "sess_shell",
@@ -918,7 +918,7 @@ func TestAllocateShellGenerationHasNoSecretReferences(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get shell generation details: %v", err)
 	}
-	if details.Agent != "sh" ||
+	if details.DriverID != "sh" ||
 		details.RequiresSecretDrop ||
 		details.SecretsDirPath != "" ||
 		details.AnthropicAPIKeySecretID != "" ||
@@ -950,7 +950,7 @@ func TestAllocateClaudeHostOnlyGenerationHasNoSecretReferences(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get host-only claude generation details: %v", err)
 	}
-	if details.Agent != "claude_code" ||
+	if details.DriverID != "claude_code" ||
 		details.RequiresSecretDrop ||
 		details.SecretsDirPath != "" ||
 		details.AnthropicAPIKeySecretID != "" ||
@@ -2286,7 +2286,7 @@ func TestSweepExpiredSessionsDestroysAndRejectsInputState(t *testing.T) {
 		ID:        "sess_expired",
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
-		Agent:     "claude_code",
+		DriverID:  "claude_code",
 		CreatedAt: now.Add(-time.Hour),
 		UpdatedAt: now.Add(-time.Hour),
 		ExpiresAt: &expiredAt,
@@ -2312,7 +2312,7 @@ func TestSweepExpiredSessionsDestroysAndRejectsInputState(t *testing.T) {
 		ID:        "sess_expired_allocated",
 		UserID:    "lab",
 		Status:    string(sessionstate.RunningIdle),
-		Agent:     "claude_code",
+		DriverID:  "claude_code",
 		CreatedAt: now.Add(-time.Hour),
 		UpdatedAt: now.Add(-time.Hour),
 		ExpiresAt: &expiredAt,
@@ -2361,7 +2361,7 @@ func TestSweepExpiredSessionsIgnoresNullExpiry(t *testing.T) {
 		ID:        "sess_no_expiry",
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
-		Agent:     "claude_code",
+		DriverID:  "claude_code",
 		CreatedAt: now.Add(-time.Hour),
 		UpdatedAt: now.Add(-time.Hour),
 		ExpiresAt: nil,
@@ -2395,7 +2395,7 @@ func TestClearActiveSessionExpiryClearsOnlyActiveSessions(t *testing.T) {
 			ID:        "sess_active_legacy_expiry",
 			UserID:    "lab",
 			Status:    string(sessionstate.RunningIdle),
-			Agent:     "claude_code",
+			DriverID:  "claude_code",
 			CreatedAt: now.Add(-2 * time.Hour),
 			UpdatedAt: now.Add(-2 * time.Hour),
 			ExpiresAt: &expiredAt,
@@ -2404,7 +2404,7 @@ func TestClearActiveSessionExpiryClearsOnlyActiveSessions(t *testing.T) {
 			ID:        "sess_failed_legacy_expiry",
 			UserID:    "lab",
 			Status:    string(sessionstate.Failed),
-			Agent:     "claude_code",
+			DriverID:  "claude_code",
 			CreatedAt: now.Add(-2 * time.Hour),
 			UpdatedAt: now.Add(-2 * time.Hour),
 			ExpiresAt: &expiredAt,
@@ -2413,7 +2413,7 @@ func TestClearActiveSessionExpiryClearsOnlyActiveSessions(t *testing.T) {
 			ID:        "sess_destroyed_legacy_expiry",
 			UserID:    "lab",
 			Status:    string(sessionstate.Destroyed),
-			Agent:     "claude_code",
+			DriverID:  "claude_code",
 			CreatedAt: now.Add(-2 * time.Hour),
 			UpdatedAt: now.Add(-2 * time.Hour),
 			ExpiresAt: &expiredAt,
@@ -2468,7 +2468,7 @@ func TestSweepExpiredSessionsCancelsUnstartedTurnsButPreservesAckStartedLease(t 
 		ID:        "sess_expired_queued",
 		UserID:    "lab",
 		Status:    string(sessionstate.RunningIdle),
-		Agent:     "claude_code",
+		DriverID:  "claude_code",
 		CreatedAt: now.Add(-time.Hour),
 		UpdatedAt: now.Add(-time.Hour),
 		ExpiresAt: &expiredAt,
@@ -2484,7 +2484,7 @@ func TestSweepExpiredSessionsCancelsUnstartedTurnsButPreservesAckStartedLease(t 
 		ID:        "sess_expired_ack",
 		UserID:    "lab",
 		Status:    string(sessionstate.RunningActive),
-		Agent:     "claude_code",
+		DriverID:  "claude_code",
 		CreatedAt: now.Add(-time.Hour),
 		UpdatedAt: now.Add(-time.Hour),
 		ExpiresAt: &expiredAt,
@@ -2819,7 +2819,7 @@ func createAutoCheckpointGeneration(t *testing.T, ctx context.Context, st *Store
 		ID:                    sessionID,
 		UserID:                "lab",
 		Status:                string(sessionstate.Created),
-		Agent:                 "claude_code",
+		DriverID:              "claude_code",
 		AutoCheckpointEnabled: true,
 		CreatedAt:             now.Add(-2 * time.Minute),
 		UpdatedAt:             now.Add(-2 * time.Minute),
@@ -3018,9 +3018,9 @@ func testAllocatorConfig(t *testing.T) ResourceAllocatorConfig {
 		EgressDNSPolicy:            "hostnames_only",
 		HostProxyBindURL:           "http://0.0.0.0:8082",
 		ProxyPort:                  8082,
-		Agent:                      "claude_code",
-		AgentModel:                 "sonnet",
-		AgentOutputFormat:          "stream-json",
+		DriverID:                   "claude_code",
+		Model:                      "sonnet",
+		OutputFormat:               "stream-json",
 		DisableNonessentialTraffic: true,
 		SandboxUID:                 7000,
 		SandboxGID:                 7001,

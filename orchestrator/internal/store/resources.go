@@ -37,9 +37,9 @@ type ResourceAllocatorConfig struct {
 	EgressDNSPolicy             string
 	HostProxyBindURL            string
 	ProxyPort                   int
-	Agent                       string
-	AgentModel                  string
-	AgentOutputFormat           string
+	DriverID                    string
+	Model                       string
+	OutputFormat                string
 	DisableNonessentialTraffic  bool
 	SandboxUID                  int
 	SandboxGID                  int
@@ -133,7 +133,7 @@ type RuntimeGenerationDetails struct {
 	DNSPolicy                       string
 	NetworkAllocationState          string
 	AutoCheckpointEnabled           bool
-	Agent                           string
+	DriverID                        string
 	Model                           string
 	OutputFormat                    string
 	DisableNonessentialTraffic      bool
@@ -305,10 +305,10 @@ func (s *Store) AllocateGeneration(ctx context.Context, p AllocateGenerationPara
 	if err := p.Config.validateSandboxModelProxyBaseURL(); err != nil {
 		return GenerationAllocation{}, err
 	}
-	if _, ok := agents.Lookup(p.Config.agent()); !ok {
-		return GenerationAllocation{}, fmt.Errorf("unsupported driver %q", p.Config.agent())
+	if _, ok := agents.Lookup(p.Config.driverID()); !ok {
+		return GenerationAllocation{}, fmt.Errorf("unsupported driver %q", p.Config.driverID())
 	}
-	if err := agents.EnsureDriverSupportedByProvider(p.Config.agent(), "local_runsc"); err != nil {
+	if err := agents.EnsureDriverSupportedByProvider(p.Config.driverID(), "local_runsc"); err != nil {
 		return GenerationAllocation{}, err
 	}
 
@@ -372,7 +372,7 @@ INSERT INTO agent_runtime_profiles (
   model_proxy_auth_token_secret_id, secret_version, created_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT DO NOTHING`,
-		agentRuntimeProfileID, p.Config.agent(), nullableString(p.Config.AgentModel), p.Config.outputFormat(),
+		agentRuntimeProfileID, p.Config.driverID(), nullableString(p.Config.Model), p.Config.outputFormat(),
 		boolInt(p.Config.DisableNonessentialTraffic), p.Config.sandboxUID(), p.Config.sandboxGID(), string(supplementalGIDsJSON),
 		0,
 		boolInt(p.Config.modelAccessAllowed()),
@@ -396,7 +396,7 @@ WHERE driver_id = ?
   AND COALESCE(model_proxy_api_key_secret_id, '') = COALESCE(?, '')
   AND COALESCE(model_proxy_auth_token_secret_id, '') = COALESCE(?, '')
   AND COALESCE(secret_version, '') = COALESCE(?, '')`,
-		p.Config.agent(), nullableString(p.Config.AgentModel), p.Config.outputFormat(),
+		p.Config.driverID(), nullableString(p.Config.Model), p.Config.outputFormat(),
 		boolInt(p.Config.DisableNonessentialTraffic), p.Config.sandboxUID(), p.Config.sandboxGID(), string(supplementalGIDsJSON),
 		0,
 		boolInt(p.Config.modelAccessAllowed()),
@@ -433,8 +433,8 @@ FROM sessions
 WHERE id = ?`, p.SessionID).Scan(&sessionDriverID); err != nil {
 		return GenerationAllocation{}, err
 	}
-	if sessionDriverID != p.Config.agent() {
-		return GenerationAllocation{}, fmt.Errorf("session driver %q does not match allocation driver %q", sessionDriverID, p.Config.agent())
+	if sessionDriverID != p.Config.driverID() {
+		return GenerationAllocation{}, fmt.Errorf("session driver %q does not match allocation driver %q", sessionDriverID, p.Config.driverID())
 	}
 	driverState, err := ensureAllocationDriverStateTx(ctx, tx, p.SessionID, generationID, sessionDriverID, p.Now)
 	if err != nil {
@@ -2391,7 +2391,7 @@ WHERE g.session_id = ?
 		&details.DNSPolicy,
 		&details.NetworkAllocationState,
 		&autoCheckpointEnabled,
-		&details.Agent,
+		&details.DriverID,
 		&details.Model,
 		&details.OutputFormat,
 		&disableNonessentialTraffic,
@@ -2775,21 +2775,21 @@ func agentRuntimeProfileID(generationID string) string {
 	return "arp_" + generationID
 }
 
-func (c ResourceAllocatorConfig) agent() string {
-	if strings.TrimSpace(c.Agent) != "" {
-		return strings.TrimSpace(c.Agent)
+func (c ResourceAllocatorConfig) driverID() string {
+	if strings.TrimSpace(c.DriverID) != "" {
+		return strings.TrimSpace(c.DriverID)
 	}
-	if strings.TrimSpace(c.AgentOutputFormat) == "shell_pty" {
+	if strings.TrimSpace(c.OutputFormat) == "shell_pty" {
 		return string(agents.Shell)
 	}
 	return string(agents.ClaudeCode)
 }
 
 func (c ResourceAllocatorConfig) outputFormat() string {
-	if strings.TrimSpace(c.AgentOutputFormat) == "" {
+	if strings.TrimSpace(c.OutputFormat) == "" {
 		return "stream-json"
 	}
-	return strings.TrimSpace(c.AgentOutputFormat)
+	return strings.TrimSpace(c.OutputFormat)
 }
 
 func (c ResourceAllocatorConfig) sandboxUID() int {
@@ -2836,7 +2836,7 @@ func (c ResourceAllocatorConfig) providerCredentialsHostOnly() bool {
 }
 
 func (c ResourceAllocatorConfig) driverSupportsModelAccess() bool {
-	spec, ok := agents.DriverSpecFor(c.agent())
+	spec, ok := agents.DriverSpecFor(c.driverID())
 	return ok && spec.ModelAccess
 }
 

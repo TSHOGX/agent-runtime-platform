@@ -21,17 +21,17 @@ import (
 	"harness-platform/orchestrator/internal/store"
 )
 
-func TestRuntimeStartRejectsUnsupportedAgent(t *testing.T) {
+func TestRuntimeStartRejectsUnsupportedDriver(t *testing.T) {
 	rt := New(Config{DefaultAgent: "claude_code"})
 	res := rt.Start(context.Background(), StartRequest{
 		SessionID: "sess_1",
-		Agent:     "opencode",
+		DriverID:  "opencode",
 	}, nil)
 	if res.Err == nil {
-		t.Fatal("expected unsupported agent error")
+		t.Fatal("expected unsupported driver error")
 	}
-	if !strings.Contains(res.Err.Error(), "unsupported agent") {
-		t.Fatalf("expected unsupported agent error, got %v", res.Err)
+	if !strings.Contains(res.Err.Error(), "unsupported driver") {
+		t.Fatalf("expected unsupported driver error, got %v", res.Err)
 	}
 }
 
@@ -62,7 +62,7 @@ func TestRuntimeStartRequiresGenerationDetailsForColdPath(t *testing.T) {
 	})
 	res := rt.Start(context.Background(), StartRequest{
 		SessionID: "sess_1",
-		Agent:     "claude_code",
+		DriverID:  "claude_code",
 	}, nil)
 	if res.Err == nil {
 		t.Fatal("expected missing generation details error")
@@ -112,7 +112,7 @@ func TestRuntimeStartRestoreRequiresCheckpointPath(t *testing.T) {
 	rt := New(Config{DefaultAgent: "claude_code"})
 	res := rt.Start(context.Background(), StartRequest{
 		SessionID:             "sess_missing_checkpoint",
-		Agent:                 "claude_code",
+		DriverID:              "claude_code",
 		RestoreFromCheckpoint: true,
 		Generation: store.RuntimeGenerationDetails{
 			SessionID:    "sess_missing_checkpoint",
@@ -143,7 +143,7 @@ func TestRuntimeStartRequiresExplicitRestoreEvenWhenCheckpointExists(t *testing.
 	res := rt.Start(context.Background(), StartRequest{
 		SessionID:    details.SessionID,
 		GenerationID: details.GenerationID,
-		Agent:        "claude_code",
+		DriverID:     "claude_code",
 		Generation:   details,
 	}, nil)
 	if res.Err == nil {
@@ -166,7 +166,7 @@ func TestRuntimeStartRestoreRequiresStoredArtifacts(t *testing.T) {
 	res := rt.Start(context.Background(), StartRequest{
 		SessionID:             details.SessionID,
 		GenerationID:          details.GenerationID,
-		Agent:                 "claude_code",
+		DriverID:              "claude_code",
 		RestoreFromCheckpoint: true,
 		Generation:            details,
 	}, nil)
@@ -382,7 +382,7 @@ func TestRuntimeStartRestoreRejectsMetadataBeforeRunscRestore(t *testing.T) {
 		SandboxGID:     testSandboxGID(),
 	})
 	details := testGenerationDetails(dir, "gen_restore_mismatch")
-	details.Agent = "sh"
+	details.DriverID = "sh"
 	details.OutputFormat = "shell_pty"
 	details.RequiresSecretDrop = false
 	details.ManifestAnthropicBaseURL = ""
@@ -406,7 +406,7 @@ func TestRuntimeStartRestoreRejectsMetadataBeforeRunscRestore(t *testing.T) {
 	res := rt.Start(context.Background(), StartRequest{
 		SessionID:             "sess_1",
 		GenerationID:          details.GenerationID,
-		Agent:                 "sh",
+		DriverID:              "sh",
 		RestoreFromCheckpoint: true,
 		Generation:            details,
 		PreparedArtifacts:     artifacts,
@@ -457,7 +457,7 @@ func TestRuntimeStartRejectsRunscPinMismatchBeforeRunscRun(t *testing.T) {
 	res := rt.Start(context.Background(), StartRequest{
 		SessionID:         details.SessionID,
 		GenerationID:      details.GenerationID,
-		Agent:             "claude_code",
+		DriverID:          "claude_code",
 		Generation:        details,
 		PreparedArtifacts: artifacts,
 	}, nil)
@@ -510,7 +510,7 @@ func TestRuntimeStartRestoreRejectsRunscBinaryMismatchBeforeRunscRestore(t *test
 	res := rt.Start(context.Background(), StartRequest{
 		SessionID:             details.SessionID,
 		GenerationID:          details.GenerationID,
-		Agent:                 "claude_code",
+		DriverID:              "claude_code",
 		RestoreFromCheckpoint: true,
 		Generation:            details,
 		PreparedArtifacts:     artifacts,
@@ -597,7 +597,7 @@ func TestRuntimeStartDoesNotReuseContainerForDifferentGeneration(t *testing.T) {
 		SessionID:        "sess_1",
 		GenerationID:     "gen_old",
 		RunscContainerID: "harness-gen-gen_old",
-		Agent:            "claude_code",
+		DriverID:         "claude_code",
 		Stdin:            stdin,
 		OutputHub:        NewOutputHub(),
 		Cancel:           func() { close(canceled) },
@@ -606,7 +606,7 @@ func TestRuntimeStartDoesNotReuseContainerForDifferentGeneration(t *testing.T) {
 	res := rt.Start(context.Background(), StartRequest{
 		SessionID:    "sess_1",
 		GenerationID: "gen_new",
-		Agent:        "claude_code",
+		DriverID:     "claude_code",
 		Generation: store.RuntimeGenerationDetails{
 			SessionID:    "sess_1",
 			GenerationID: "gen_new",
@@ -741,7 +741,7 @@ func TestRuntimeStartReusesExistingGenerationWithoutStdinTurn(t *testing.T) {
 		SessionID:        "sess_1",
 		GenerationID:     "gen_a",
 		RunscContainerID: "harness-gen-gen_a",
-		Agent:            "claude_code",
+		DriverID:         "claude_code",
 		Stdin:            stdin,
 		OutputHub:        hub,
 	}
@@ -751,7 +751,7 @@ func TestRuntimeStartReusesExistingGenerationWithoutStdinTurn(t *testing.T) {
 	res := rt.Start(context.Background(), StartRequest{
 		SessionID:    "sess_1",
 		GenerationID: "gen_a",
-		Agent:        "claude_code",
+		DriverID:     "claude_code",
 	}, func(Output) { outputs++ })
 	if res.Err != nil {
 		t.Fatalf("existing generation start failed: %v", res.Err)
@@ -1292,7 +1292,7 @@ func TestRenderRuntimeSpecUsesGenerationNetnsPath(t *testing.T) {
 	spec, _, err := rt.renderRuntimeSpec(withDataVolumePathsForTest(dir, StartRequest{
 		SessionID:    "sess_1",
 		GenerationID: details.GenerationID,
-		Agent:        "claude_code",
+		DriverID:     "claude_code",
 		Generation:   details,
 	}))
 	if err != nil {
@@ -1419,7 +1419,7 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndIsolatedRuntime(t *t
 	artifacts, err := rt.PrepareGeneration(context.Background(), withDataVolumePathsForTest(dir, StartRequest{
 		SessionID:    "sess_1",
 		GenerationID: details.GenerationID,
-		Agent:        "claude_code",
+		DriverID:     "claude_code",
 		Generation:   details,
 	}))
 	if err != nil {
@@ -1623,7 +1623,7 @@ func TestRuntimeBridgeMetadataComesFromDriverSpec(t *testing.T) {
 	req := withDataVolumePathsForTest(dir, StartRequest{
 		SessionID:    details.SessionID,
 		GenerationID: details.GenerationID,
-		Agent:        "claude_code",
+		DriverID:     "claude_code",
 		Generation:   details,
 	})
 
@@ -1667,7 +1667,7 @@ func TestPrepareClaudeHostOnlyGenerationHasNoSecretMount(t *testing.T) {
 	if _, err := rt.PrepareGeneration(context.Background(), withDataVolumePathsForTest(dir, StartRequest{
 		SessionID:    "sess_1",
 		GenerationID: details.GenerationID,
-		Agent:        "claude_code",
+		DriverID:     "claude_code",
 		Generation:   details,
 	})); err != nil {
 		t.Fatalf("prepare host-only claude generation: %v", err)
@@ -1723,7 +1723,7 @@ func TestPreparePiGenerationMaterializesReadOnlyConfig(t *testing.T) {
 	})
 	details := testGenerationDetails(dir, "gen_pi_config")
 	details.SessionID = "sess_pi"
-	details.Agent = "pi"
+	details.DriverID = "pi"
 	details.OutputFormat = "pi_rpc_events_v1.0"
 	details.Model = "sonnet"
 	details.ManifestAnthropicBaseURL = "http://harness-model-proxy.internal:8082"
@@ -1731,7 +1731,7 @@ func TestPreparePiGenerationMaterializesReadOnlyConfig(t *testing.T) {
 	artifacts, err := rt.PrepareGeneration(context.Background(), withDataVolumePathsForTest(dir, StartRequest{
 		SessionID:    "sess_pi",
 		GenerationID: details.GenerationID,
-		Agent:        "pi",
+		DriverID:     "pi",
 		Generation:   details,
 	}))
 	if err != nil {
@@ -1878,12 +1878,12 @@ func TestWriteDriverConfigProjectionReturnsNilWithoutSpecsOrRenderer(t *testing.
 	dir := t.TempDir()
 	rt := New(Config{})
 	details := testGenerationDetails(dir, "gen_shell_no_driver_config")
-	details.Agent = "sh"
+	details.DriverID = "sh"
 
 	entries, err := rt.writeDriverConfigProjection(StartRequest{
 		SessionID:    details.SessionID,
 		GenerationID: details.GenerationID,
-		Agent:        "sh",
+		DriverID:     "sh",
 		Generation:   details,
 	})
 	if err != nil {
@@ -1910,7 +1910,7 @@ func TestDriverConfigProjectionRenderersMatchMaterializationSpecs(t *testing.T) 
 		}
 
 		details := testGenerationDetails(t.TempDir(), "gen_"+string(driver.ID)+"_config_renderer")
-		details.Agent = string(driver.ID)
+		details.DriverID = string(driver.ID)
 		payloads, err := renderer(details)
 		if err != nil {
 			t.Errorf("%s driver config renderer failed for baseline generation details: %v", driver.ID, err)
@@ -1935,7 +1935,7 @@ func TestWriteDriverConfigProjectionFailsClosedWhenSpecsHaveNoRenderer(t *testin
 	rt := New(Config{})
 	details := testGenerationDetails(dir, "gen_pi_missing_renderer")
 	details.SessionID = "sess_pi_missing_renderer"
-	details.Agent = "pi"
+	details.DriverID = "pi"
 
 	renderer, ok := driverConfigProjectionRenderers[agents.Pi]
 	if !ok {
@@ -1949,7 +1949,7 @@ func TestWriteDriverConfigProjectionFailsClosedWhenSpecsHaveNoRenderer(t *testin
 	_, err := rt.writeDriverConfigProjection(StartRequest{
 		SessionID:    details.SessionID,
 		GenerationID: details.GenerationID,
-		Agent:        "pi",
+		DriverID:     "pi",
 		Generation:   details,
 	})
 	if err == nil {
@@ -2029,7 +2029,7 @@ func TestPrepareGenerationConcurrentSessionsUseDistinctControlManifests(t *testi
 			_, err := rt.PrepareGeneration(context.Background(), withDataVolumePathsForTest(dir, StartRequest{
 				SessionID:    tc.sessionID,
 				GenerationID: tc.details.GenerationID,
-				Agent:        "claude_code",
+				DriverID:     "claude_code",
 				Generation:   tc.details,
 			}))
 			if err != nil {
@@ -2079,7 +2079,7 @@ func TestPrepareShellGenerationHasNoSecretMount(t *testing.T) {
 	})
 	details := testGenerationDetails(dir, "gen_shell")
 	details.SessionID = "sess_shell"
-	details.Agent = "sh"
+	details.DriverID = "sh"
 	details.RequiresSecretDrop = false
 	details.ManifestAnthropicBaseURL = ""
 	details.AnthropicAPIKeySecretID = ""
@@ -2091,7 +2091,7 @@ func TestPrepareShellGenerationHasNoSecretMount(t *testing.T) {
 	if _, err := rt.PrepareGeneration(context.Background(), withDataVolumePathsForTest(dir, StartRequest{
 		SessionID:    "sess_shell",
 		GenerationID: details.GenerationID,
-		Agent:        "sh",
+		DriverID:     "sh",
 		Generation:   details,
 	})); err != nil {
 		t.Fatalf("prepare shell generation: %v", err)
@@ -2179,7 +2179,7 @@ func TestPrepareGenerationUsesProvidedDataVolumePaths(t *testing.T) {
 	})
 	details := testGenerationDetails(dir, "gen_data_volume_paths")
 	details.SessionID = "sess_data_volume_paths"
-	details.Agent = "sh"
+	details.DriverID = "sh"
 	details.OutputFormat = "shell_pty"
 	details.RequiresSecretDrop = false
 	details.ManifestAnthropicBaseURL = ""
@@ -2189,7 +2189,7 @@ func TestPrepareGenerationUsesProvidedDataVolumePaths(t *testing.T) {
 	if _, err := rt.PrepareGeneration(context.Background(), StartRequest{
 		SessionID:         details.SessionID,
 		GenerationID:      details.GenerationID,
-		Agent:             "sh",
+		DriverID:          "sh",
 		Generation:        details,
 		WorkspaceHostPath: workspacePath,
 		AgentHomeHostPath: agentHomePath,
@@ -2221,7 +2221,7 @@ func TestPrepareGenerationRequiresDataVolumePaths(t *testing.T) {
 	})
 	details := testGenerationDetails(dir, "gen_missing_data_volume_paths")
 	details.SessionID = "sess_missing_data_volume_paths"
-	details.Agent = "sh"
+	details.DriverID = "sh"
 	details.OutputFormat = "shell_pty"
 	details.RequiresSecretDrop = false
 	details.ManifestAnthropicBaseURL = ""
@@ -2229,7 +2229,7 @@ func TestPrepareGenerationRequiresDataVolumePaths(t *testing.T) {
 	_, err := rt.PrepareGeneration(context.Background(), StartRequest{
 		SessionID:    details.SessionID,
 		GenerationID: details.GenerationID,
-		Agent:        "sh",
+		DriverID:     "sh",
 		Generation:   details,
 	})
 	if err == nil || !strings.Contains(err.Error(), "data volume paths are required") {
@@ -2259,7 +2259,7 @@ func TestPrepareSandboxGenerationRejectsSecretReferences(t *testing.T) {
 			})
 			details := testGenerationDetails(dir, tc.generationID)
 			details.SessionID = tc.sessionID
-			details.Agent = tc.agent
+			details.DriverID = tc.agent
 			details.OutputFormat = tc.outputFormat
 			details.RequiresSecretDrop = true
 			details.SecretsDirPath = filepath.Join(dir, "run", "control", "gen-"+details.GenerationID, "secrets")
@@ -2270,7 +2270,7 @@ func TestPrepareSandboxGenerationRejectsSecretReferences(t *testing.T) {
 			_, err := rt.PrepareGeneration(context.Background(), StartRequest{
 				SessionID:    tc.sessionID,
 				GenerationID: details.GenerationID,
-				Agent:        tc.agent,
+				DriverID:     tc.agent,
 				Generation:   details,
 			})
 			if err == nil {
@@ -2296,7 +2296,7 @@ func TestPrepareGenerationRejectsMismatchedIdentity(t *testing.T) {
 	_, err := rt.PrepareGeneration(context.Background(), StartRequest{
 		SessionID:    "sess_wrong",
 		GenerationID: details.GenerationID,
-		Agent:        "claude_code",
+		DriverID:     "claude_code",
 		Generation:   details,
 	})
 	if err == nil {
@@ -2348,7 +2348,7 @@ func testGenerationDetails(dir, generationID string) store.RuntimeGenerationDeta
 		NetnsName:                  "harness-gen-" + generationID,
 		NftTableName:               hostEgressTableName(generationID),
 		EgressPolicyDigest:         "egress_digest",
-		Agent:                      "claude_code",
+		DriverID:                   "claude_code",
 		Model:                      "sonnet",
 		OutputFormat:               "stream-json",
 		DisableNonessentialTraffic: true,

@@ -113,7 +113,7 @@ func newArtifactTestStore(t *testing.T, ctx context.Context, workspaceRoot, sess
 		ID:        sessionID,
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
-		Agent:     "claude_code",
+		DriverID:  "claude_code",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}); err != nil {

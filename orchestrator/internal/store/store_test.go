@@ -45,7 +45,7 @@ func TestListMessages(t *testing.T) {
 		ID:        "sess_1",
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
-		Agent:     "claude_code",
+		DriverID:  "claude_code",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -57,7 +57,7 @@ func TestListMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get session: %v", err)
 	}
-	if got.ID != want.ID || got.Agent != want.Agent {
+	if got.ID != want.ID || got.DriverID != want.DriverID {
 		t.Fatalf("session mismatch: got=%+v want=%+v", got, want)
 	}
 
@@ -112,7 +112,7 @@ func TestFreshSchemaDoesNotCreateLegacySessionColumns(t *testing.T) {
 		ID:        "sess_no_workspace",
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
-		Agent:     "claude_code",
+		DriverID:  "claude_code",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}); err != nil {
@@ -183,7 +183,7 @@ func TestUpdateSessionStatusAndActivity(t *testing.T) {
 		ID:        "sess_test",
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
-		Agent:     "claude_code",
+		DriverID:  "claude_code",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -233,7 +233,7 @@ func TestFailSessionStoresTypedFailure(t *testing.T) {
 		ID:        "sess_fail",
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
-		Agent:     "claude_code",
+		DriverID:  "claude_code",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -282,7 +282,7 @@ func TestEnqueueTurnMessageCreatesQueuedTurnMessageAndActivatesSession(t *testin
 		ID:        "sess_enqueue",
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
-		Agent:     "claude_code",
+		DriverID:  "claude_code",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -341,7 +341,7 @@ func TestEnqueueTurnMessageRejectsBusySessionWithoutWrites(t *testing.T) {
 		ID:        "sess_busy_enqueue",
 		UserID:    "lab",
 		Status:    string(sessionstate.RunningActive),
-		Agent:     "claude_code",
+		DriverID:  "claude_code",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -389,7 +389,7 @@ func TestListSessionsByStatus(t *testing.T) {
 			ID:        "sess_1",
 			UserID:    "lab",
 			Status:    string(sessionstate.RunningIdle),
-			Agent:     "claude_code",
+			DriverID:  "claude_code",
 			CreatedAt: now,
 			UpdatedAt: now,
 		},
@@ -397,7 +397,7 @@ func TestListSessionsByStatus(t *testing.T) {
 			ID:        "sess_2",
 			UserID:    "lab",
 			Status:    string(sessionstate.RunningActive),
-			Agent:     "claude_code",
+			DriverID:  "claude_code",
 			CreatedAt: now,
 			UpdatedAt: now,
 		},
@@ -405,7 +405,7 @@ func TestListSessionsByStatus(t *testing.T) {
 			ID:        "sess_3",
 			UserID:    "lab",
 			Status:    string(sessionstate.RunningIdle),
-			Agent:     "claude_code",
+			DriverID:  "claude_code",
 			CreatedAt: now,
 			UpdatedAt: now,
 		},
@@ -462,7 +462,7 @@ func TestRejectsLegacyStatuses(t *testing.T) {
 		ID:        "sess_legacy",
 		UserID:    "lab",
 		Status:    "idle",
-		Agent:     "claude_code",
+		DriverID:  "claude_code",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -504,7 +504,7 @@ func TestCountActiveSessionsUsesCanonicalStatuses(t *testing.T) {
 			ID:        id,
 			UserID:    "lab",
 			Status:    string(status),
-			Agent:     "claude_code",
+			DriverID:  "claude_code",
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
@@ -538,7 +538,7 @@ func TestDeleteArtifactPathDeletesFileAndDescendants(t *testing.T) {
 		ID:        "sess_artifacts",
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
-		Agent:     "claude_code",
+		DriverID:  "claude_code",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}

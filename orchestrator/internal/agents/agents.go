@@ -463,19 +463,6 @@ func CanonicalDriverID(value string) (ID, error) {
 	}
 }
 
-func PublicAgentForDriver(value string) (string, bool) {
-	switch ID(strings.TrimSpace(value)) {
-	case ClaudeCode, Pi, Shell:
-		return strings.TrimSpace(value), true
-	default:
-		return "", false
-	}
-}
-
-func SandboxAgentForDriver(value string) (string, bool) {
-	return PublicAgentForDriver(value)
-}
-
 func normalizeDriverSpec(spec DriverSpec) DriverSpec {
 	sort.Strings(spec.RequiredRuntimeCapabilities)
 	sort.Strings(spec.Phase10Support)

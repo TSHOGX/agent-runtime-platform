@@ -20,7 +20,7 @@ type Session struct {
 	ID                    string     `json:"id"`
 	UserID                string     `json:"user_id"`
 	Status                string     `json:"status"`
-	Agent                 string     `json:"agent"`
+	DriverID              string     `json:"driver_id"`
 	Mode                  string     `json:"mode"`
 	ActiveGenerationID    string     `json:"active_generation_id,omitempty"`
 	RestoreMS             *int64     `json:"restore_ms,omitempty"`
@@ -128,22 +128,22 @@ func (s *Store) CreateSession(ctx context.Context, session Session) error {
 	if err := sessionstate.Validate(session.Status); err != nil {
 		return err
 	}
-	if _, ok := agents.Lookup(session.Agent); !ok {
-		return fmt.Errorf("unsupported driver %q", session.Agent)
+	if _, ok := agents.Lookup(session.DriverID); !ok {
+		return fmt.Errorf("unsupported driver %q", session.DriverID)
 	}
 	session.Mode = strings.TrimSpace(session.Mode)
 	if session.Mode == "" {
-		session.Mode = ModeForDriver(session.Agent)
+		session.Mode = ModeForDriver(session.DriverID)
 	}
 	if session.Mode == "" {
-		return fmt.Errorf("unsupported session mode for driver %q", session.Agent)
+		return fmt.Errorf("unsupported session mode for driver %q", session.DriverID)
 	}
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO sessions (
   id, user_id, status, driver_id, mode,
   created_at, updated_at, expires_at, auto_checkpoint_enabled
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		session.ID, session.UserID, session.Status, session.Agent, session.Mode,
+		session.ID, session.UserID, session.Status, session.DriverID, session.Mode,
 		formatTime(session.CreatedAt), formatTime(session.UpdatedAt), formatOptionalTime(session.ExpiresAt),
 		boolInt(session.AutoCheckpointEnabled),
 	)
@@ -547,7 +547,7 @@ func scanSession(row scanner) (Session, error) {
 	var checkpointPath, failureReason, errorClass sql.NullString
 	var autoCheckpointEnabled int
 	err := row.Scan(
-		&session.ID, &session.UserID, &session.Status, &session.Agent, &session.Mode,
+		&session.ID, &session.UserID, &session.Status, &session.DriverID, &session.Mode,
 		&activeGenerationID, &restoreMS, &createdAt, &updatedAt,
 		&expiresAt, &endedAt, &lastActivityAt, &checkpointPath, &autoCheckpointEnabled, &failureReason, &errorClass,
 	)
@@ -588,7 +588,7 @@ func scanSession(row scanner) (Session, error) {
 		session.ErrorClass = errorClass.String
 	}
 	if strings.TrimSpace(session.Mode) == "" {
-		session.Mode = ModeForDriver(session.Agent)
+		session.Mode = ModeForDriver(session.DriverID)
 	}
 	return session, nil
 }

@@ -438,7 +438,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		ID:                    id,
 		UserID:                labUserID,
 		Status:                string(sessionstate.Created),
-		Agent:                 string(driverID),
+		DriverID:              string(driverID),
 		Mode:                  mode,
 		AutoCheckpointEnabled: s.cfg.Harness.Checkpoint.AutoEnabled,
 		CreatedAt:             now,
@@ -651,7 +651,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 			return err
 		}
-		inputEvidence, err := s.sandboxContractInputEvidenceFor(session, generationDetails.Agent)
+		inputEvidence, err := s.sandboxContractInputEvidenceFor(session, generationDetails.DriverID)
 		if err != nil {
 			if leaseErr := leaseKeeper.err(); leaseErr != nil {
 				return leaseErr
@@ -1244,7 +1244,7 @@ func (s *Server) ensureActiveGenerationWithRestoreRefetch(ctx context.Context, s
 				IsNew: false,
 			}, nil
 		}
-		if _, capabilityErr := s.resolveDriverDeployment(store.ModeForDriver(session.Agent), agents.ID(session.Agent)); capabilityErr != nil {
+		if _, capabilityErr := s.resolveDriverDeployment(store.ModeForDriver(session.DriverID), agents.ID(session.DriverID)); capabilityErr != nil {
 			return ensuredGeneration{}, capabilityErr
 		}
 		allocation, err := s.store.AllocateGeneration(ctx, store.AllocateGenerationParams{
@@ -1253,14 +1253,14 @@ func (s *Server) ensureActiveGenerationWithRestoreRefetch(ctx context.Context, s
 			Owner:                owner,
 			LeaseTTL:             s.cfg.Harness.Bridge.LeaseTTL.Duration,
 			Now:                  time.Now().UTC(),
-			Config:               s.resourceAllocatorConfig(session.Agent),
+			Config:               s.resourceAllocatorConfig(session.DriverID),
 		})
 		if err != nil {
 			return ensuredGeneration{}, err
 		}
 		return ensuredGeneration{Allocation: allocation, IsNew: true}, nil
 	}
-	if _, capabilityErr := s.resolveDriverDeployment(store.ModeForDriver(session.Agent), agents.ID(session.Agent)); capabilityErr != nil {
+	if _, capabilityErr := s.resolveDriverDeployment(store.ModeForDriver(session.DriverID), agents.ID(session.DriverID)); capabilityErr != nil {
 		return ensuredGeneration{}, capabilityErr
 	}
 	allocation, err := s.store.AllocateGeneration(ctx, store.AllocateGenerationParams{
@@ -1268,7 +1268,7 @@ func (s *Server) ensureActiveGenerationWithRestoreRefetch(ctx context.Context, s
 		Owner:     owner,
 		LeaseTTL:  s.cfg.Harness.Bridge.LeaseTTL.Duration,
 		Now:       time.Now().UTC(),
-		Config:    s.resourceAllocatorConfig(session.Agent),
+		Config:    s.resourceAllocatorConfig(session.DriverID),
 	})
 	if err != nil {
 		return ensuredGeneration{}, err
@@ -1285,19 +1285,19 @@ func generationLifecycleBusy(status string) bool {
 	}
 }
 
-func (s *Server) resourceAllocatorConfig(agent string) store.ResourceAllocatorConfig {
-	if driverID, err := agents.CanonicalDriverID(agent); err == nil {
-		agent = string(driverID)
+func (s *Server) resourceAllocatorConfig(driverID string) store.ResourceAllocatorConfig {
+	if canonical, err := agents.CanonicalDriverID(driverID); err == nil {
+		driverID = string(canonical)
 	}
 	outputFormat := ""
 	providerCredentialsHostOnly := false
-	if driverSpec, ok := agents.DriverSpecFor(agent); ok {
+	if driverSpec, ok := agents.DriverSpecFor(driverID); ok {
 		outputFormat = driverSpec.OutputFormat
 		providerCredentialsHostOnly = driverSpec.ModelAccess
 	}
 	var model string
 	var disableNonessentialTraffic bool
-	if _, agentCfg, ok := s.enabledAgentConfigForDriver(agents.ID(agent)); ok {
+	if _, agentCfg, ok := s.enabledAgentConfigForDriver(agents.ID(driverID)); ok {
 		if agentCfg.DisableNonessentialTraffic != nil {
 			disableNonessentialTraffic = *agentCfg.DisableNonessentialTraffic
 		}
@@ -1316,9 +1316,9 @@ func (s *Server) resourceAllocatorConfig(agent string) store.ResourceAllocatorCo
 		EgressDNSPolicy:             string(s.cfg.Harness.Network.Egress.DNSPolicy),
 		HostProxyBindURL:            s.cfg.ModelProxy.BindURL,
 		ProxyPort:                   s.cfg.ModelProxy.BindPort,
-		Agent:                       agent,
-		AgentModel:                  model,
-		AgentOutputFormat:           outputFormat,
+		DriverID:                    driverID,
+		Model:                       model,
+		OutputFormat:                outputFormat,
 		DisableNonessentialTraffic:  disableNonessentialTraffic,
 		SandboxUID:                  s.cfg.Harness.SandboxIdentity.UID,
 		SandboxGID:                  s.cfg.Harness.SandboxIdentity.GID,
@@ -1360,7 +1360,7 @@ func (s *Server) runtimeStartRequest(session store.Session, generationID string,
 	return runtime.StartRequest{
 		SessionID:         session.ID,
 		GenerationID:      generationID,
-		Agent:             session.Agent,
+		DriverID:          session.DriverID,
 		Generation:        details,
 		PreparedArtifacts: artifacts,
 		WorkspaceHostPath: volumes.Workspace.HostPath,
@@ -1369,7 +1369,7 @@ func (s *Server) runtimeStartRequest(session store.Session, generationID string,
 }
 
 func validateDriverStateForRuntimeLaunch(details store.RuntimeGenerationDetails, volumes sessionRuntimeDataVolumes) error {
-	return store.ValidateDriverStatePayloadForRuntimeLaunch(details.Agent, details.DriverStatePayload, volumes.DriverHome.HostPath)
+	return store.ValidateDriverStatePayloadForRuntimeLaunch(details.DriverID, details.DriverStatePayload, volumes.DriverHome.HostPath)
 }
 
 func (s *Server) ensureSessionRuntimeDataVolumes(ctx context.Context, session store.Session) (sessionRuntimeDataVolumes, error) {
@@ -1388,7 +1388,7 @@ func (s *Server) ensureSessionRuntimeDataVolumes(ctx context.Context, session st
 	}
 	driverHome, err := s.store.ProvisionSessionDriverHome(ctx, store.ProvisionSessionDriverHomeParams{
 		SessionID: session.ID,
-		Driver:    session.Agent,
+		Driver:    session.DriverID,
 		Config:    volumeConfig,
 		Now:       now,
 	})
@@ -1474,7 +1474,7 @@ func (s *Server) sandboxContractPayload(session store.Session, details store.Run
 	if runscPlatform == "" {
 		runscPlatform = "systrap"
 	}
-	driverID := strings.TrimSpace(details.Agent)
+	driverID := strings.TrimSpace(details.DriverID)
 	driverSpec, ok := agents.DriverSpecFor(driverID)
 	if !ok {
 		return nil, fmt.Errorf("unsupported driver %q", driverID)
@@ -2697,13 +2697,13 @@ func (s *Server) handleBridgeOutput(ctx context.Context, envelope bridge.Envelop
 	if len(payload.Payload) == 0 {
 		return
 	}
-	agent := ""
+	driverID := ""
 	if session, err := s.store.GetSession(ctx, envelope.SessionID); err == nil {
-		agent = session.Agent
+		driverID = session.DriverID
 	} else {
 		s.log.Warn("failed to load session for bridge output", "session_id", envelope.SessionID, "error", err)
 	}
-	parser := s.bridgeStreamParser(envelope, agent)
+	parser := s.bridgeStreamParser(envelope, driverID)
 	parser.handleBridgeOutput(normalizerBridgeOutput{Stream: stream, Payload: payload.Payload})
 }
 
@@ -2714,10 +2714,10 @@ func (s *Server) handleBridgeCompletion(ctx context.Context, envelope bridge.Env
 	}
 }
 
-func (s *Server) bridgeStreamParser(envelope bridge.Envelope, agent string) *streamParser {
+func (s *Server) bridgeStreamParser(envelope bridge.Envelope, driverID string) *streamParser {
 	key, ok := bridgeParserKey(envelope)
 	if !ok {
-		return newStreamParser(s, envelope.SessionID, agent)
+		return newStreamParser(s, envelope.SessionID, driverID)
 	}
 	s.bridgeParserMu.Lock()
 	defer s.bridgeParserMu.Unlock()
@@ -2726,7 +2726,7 @@ func (s *Server) bridgeStreamParser(envelope bridge.Envelope, agent string) *str
 	}
 	parser := s.bridgeParsers[key]
 	if parser == nil {
-		parser = newStreamParser(s, envelope.SessionID, agent)
+		parser = newStreamParser(s, envelope.SessionID, driverID)
 		parser.turnID = key.TurnID
 		s.bridgeParsers[key] = parser
 	}
@@ -2912,7 +2912,7 @@ func (s *Server) interruptSession(w http.ResponseWriter, r *http.Request, sessio
 		writeError(w, http.StatusConflict, "session is not running")
 		return
 	}
-	if session.Agent != string(agents.Shell) {
+	if session.DriverID != string(agents.Shell) {
 		writeError(w, http.StatusConflict, "interrupt is only supported for shell sessions")
 		return
 	}

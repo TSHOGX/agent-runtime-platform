@@ -1231,7 +1231,7 @@ func createBridgeSession(t *testing.T, ctx context.Context, st *store.Store, id 
 		ID:        id,
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
-		Agent:     "claude_code",
+		DriverID:  "claude_code",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}); err != nil {
@@ -1255,9 +1255,9 @@ func allocateBridgeGeneration(t *testing.T, ctx context.Context, st *store.Store
 			EgressDNSPolicy:            "hostnames_only",
 			HostProxyBindURL:           "http://0.0.0.0:8082",
 			ProxyPort:                  8082,
-			Agent:                      "claude_code",
-			AgentModel:                 "sonnet",
-			AgentOutputFormat:          "stream-json",
+			DriverID:                   "claude_code",
+			Model:                      "sonnet",
+			OutputFormat:               "stream-json",
 			DisableNonessentialTraffic: true,
 		},
 	})

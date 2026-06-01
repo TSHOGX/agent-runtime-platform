@@ -69,9 +69,10 @@ func driverStateCodecRegistry() map[agents.ID]driverStateCodec {
 					return nil, fmt.Errorf("session id is required")
 				}
 				return map[string]any{
-					"schema_version":         1,
-					"driver_id":              string(agents.ClaudeCode),
-					"state_kind":             claudeDriverStateKind,
+					"schema_version": 1,
+					"driver_id":      string(agents.ClaudeCode),
+					"state_kind":     claudeDriverStateKind,
+					// Claude Code private resume state; not a session column or runtime manifest field.
 					"claude_session_uuid":    "bootstrap-" + sessionID,
 					"initialized":            false,
 					"last_completed_turn_id": nil,
