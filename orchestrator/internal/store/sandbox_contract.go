@@ -669,10 +669,8 @@ func validateSandboxContractV2Semantics(object map[string]any, gateVersion strin
 	if digest, _ := driverRuntime["initial_driver_state_digest"].(string); !strings.HasPrefix(digest, "sha256:") {
 		return fmt.Errorf("driver runtime initial_driver_state_digest is required")
 	}
-	if driverSpec.ID == agents.Pi {
-		if err := validatePiDriverConfigMaterialization(object, driverRuntime); err != nil {
-			return err
-		}
+	if err := validateDriverConfigMaterialization(object, driverRuntime, driverSpec.ID); err != nil {
+		return err
 	}
 	inputDigests, ok := object["input_digests"].(map[string]any)
 	if !ok {
@@ -709,67 +707,79 @@ func validateSandboxContractV2Semantics(object map[string]any, gateVersion strin
 	return validateCredentialPolicyGrantSemantics(policy, driverSpec, providerSpec, modelAccessEnabled)
 }
 
-func validatePiDriverConfigMaterialization(contract map[string]any, driverRuntime map[string]any) error {
+func validateDriverConfigMaterialization(contract map[string]any, driverRuntime map[string]any, driverID agents.ID) error {
+	specs := agents.DriverConfigMaterializationSpecsFor(driverID)
 	materialized, ok := driverRuntime["materialized_driver_config"].(map[string]any)
 	if !ok {
-		return fmt.Errorf("pi driver runtime missing materialized_driver_config")
+		if len(specs) == 0 {
+			return nil
+		}
+		return fmt.Errorf("%s driver runtime missing materialized_driver_config", driverID)
+	}
+	if len(specs) == 0 {
+		if len(materialized) != 0 {
+			return fmt.Errorf("driver %s does not support driver config materialization", driverID)
+		}
+		if mountPlan, ok := contract["mount_plan"].(map[string]any); ok {
+			if mountMaterialized, ok := mountPlan["driver_config_materializations"].(map[string]any); ok && len(mountMaterialized) != 0 {
+				return fmt.Errorf("driver %s does not support driver config materialization", driverID)
+			}
+		}
+		return nil
 	}
 	mountPlan, ok := contract["mount_plan"].(map[string]any)
 	if !ok {
-		return fmt.Errorf("pi sandbox contract missing mount_plan")
+		return fmt.Errorf("%s sandbox contract missing mount_plan", driverID)
 	}
 	mountMaterialized, ok := mountPlan["driver_config_materializations"].(map[string]any)
 	if !ok {
-		return fmt.Errorf("pi mount plan missing driver_config_materializations")
+		return fmt.Errorf("%s mount plan missing driver_config_materializations", driverID)
 	}
-	expected := map[string]struct {
-		source      string
-		destination string
-	}{
-		"models":   {source: agents.PiModelsConfigPath, destination: agents.PiModelsSandboxPath},
-		"settings": {source: agents.PiSettingsConfigPath, destination: agents.PiSettingsSandboxPath},
+	expected := map[string]agents.DriverConfigMaterializationSpec{}
+	for _, spec := range specs {
+		expected[spec.Name] = spec
 	}
 	if len(materialized) != len(expected) || len(mountMaterialized) != len(expected) {
-		return fmt.Errorf("pi driver config materialization must contain exactly models and settings")
+		return fmt.Errorf("%s driver config materialization must contain exactly %d projections", driverID, len(expected))
 	}
 	for name, want := range expected {
 		runtimeEntry, ok := materialized[name].(map[string]any)
 		if !ok {
-			return fmt.Errorf("pi driver runtime missing %s materialization", name)
+			return fmt.Errorf("%s driver runtime missing %s materialization", driverID, name)
 		}
 		mountEntry, ok := mountMaterialized[name].(map[string]any)
 		if !ok {
-			return fmt.Errorf("pi mount plan missing %s materialization", name)
+			return fmt.Errorf("%s mount plan missing %s materialization", driverID, name)
 		}
-		if source, _ := runtimeEntry["source_projection_path"].(string); source != want.source {
-			return fmt.Errorf("pi runtime %s source_projection_path = %q", name, source)
+		if source, _ := runtimeEntry["source_projection_path"].(string); source != want.SourceProjectionPath {
+			return fmt.Errorf("%s runtime %s source_projection_path = %q", driverID, name, source)
 		}
 		if digest, _ := runtimeEntry["source_digest"].(string); !strings.HasPrefix(digest, "sha256:") {
-			return fmt.Errorf("pi runtime %s source_digest is required", name)
+			return fmt.Errorf("%s runtime %s source_digest is required", driverID, name)
 		}
-		if destination, _ := runtimeEntry["sandbox_destination"].(string); destination != want.destination {
-			return fmt.Errorf("pi runtime %s sandbox_destination = %q", name, destination)
+		if destination, _ := runtimeEntry["sandbox_destination"].(string); destination != want.SandboxDestination {
+			return fmt.Errorf("%s runtime %s sandbox_destination = %q", driverID, name, destination)
 		}
-		if mutable, _ := runtimeEntry["destination_mutable_by_sandbox"].(bool); mutable {
-			return fmt.Errorf("pi runtime %s destination must be immutable", name)
+		if mutable, _ := runtimeEntry["destination_mutable_by_sandbox"].(bool); mutable != want.DestinationMutableBySandbox {
+			return fmt.Errorf("%s runtime %s destination mutability mismatch", driverID, name)
 		}
-		if typ, _ := mountEntry["type"].(string); typ != "bind" {
-			return fmt.Errorf("pi mount %s type = %q", name, typ)
+		if typ, _ := mountEntry["type"].(string); typ != want.MountType {
+			return fmt.Errorf("%s mount %s type = %q", driverID, name, typ)
 		}
-		if mode, _ := mountEntry["mode"].(string); mode != "ro" {
-			return fmt.Errorf("pi mount %s mode = %q", name, mode)
+		if mode, _ := mountEntry["mode"].(string); mode != want.MountMode {
+			return fmt.Errorf("%s mount %s mode = %q", driverID, name, mode)
 		}
-		if exact, _ := mountEntry["exact"].(bool); !exact {
-			return fmt.Errorf("pi mount %s must be exact", name)
+		if exact, _ := mountEntry["exact"].(bool); exact != want.MountExact {
+			return fmt.Errorf("%s mount %s exactness mismatch", driverID, name)
 		}
-		if source, _ := mountEntry["source_projection_path"].(string); source != want.source {
-			return fmt.Errorf("pi mount %s source_projection_path = %q", name, source)
+		if source, _ := mountEntry["source_projection_path"].(string); source != want.SourceProjectionPath {
+			return fmt.Errorf("%s mount %s source_projection_path = %q", driverID, name, source)
 		}
-		if destination, _ := mountEntry["sandbox_destination"].(string); destination != want.destination {
-			return fmt.Errorf("pi mount %s sandbox_destination = %q", name, destination)
+		if destination, _ := mountEntry["sandbox_destination"].(string); destination != want.SandboxDestination {
+			return fmt.Errorf("%s mount %s sandbox_destination = %q", driverID, name, destination)
 		}
-		if mutable, _ := mountEntry["destination_mutable_by_sandbox"].(bool); mutable {
-			return fmt.Errorf("pi mount %s destination must be immutable", name)
+		if mutable, _ := mountEntry["destination_mutable_by_sandbox"].(bool); mutable != want.DestinationMutableBySandbox {
+			return fmt.Errorf("%s mount %s destination mutability mismatch", driverID, name)
 		}
 	}
 	return nil

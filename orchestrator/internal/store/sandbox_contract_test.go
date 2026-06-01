@@ -241,7 +241,7 @@ func TestSandboxContractPiMaterializedConfigSemantics(t *testing.T) {
 				materialized := payload["driver_runtime"].(map[string]any)["materialized_driver_config"].(map[string]any)
 				materialized["models"].(map[string]any)["destination_mutable_by_sandbox"] = true
 			},
-			want: "destination must be immutable",
+			want: "mutability mismatch",
 		},
 		{
 			name: "copied destination",
@@ -278,6 +278,30 @@ func TestSandboxContractPiMaterializedConfigSemantics(t *testing.T) {
 				t.Fatalf("err=%v want %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestSandboxContractRejectsUnexpectedMaterializedConfigForNonPiDriver(t *testing.T) {
+	payload := testSandboxContractPayload(t, "sess_claude_materialized", GenerationAllocation{
+		GenerationID:          "gen_claude_materialized",
+		NetworkProfileID:      "net_claude_materialized",
+		AgentRuntimeProfileID: "arp_claude_materialized",
+		DriverState: DriverStateToken{
+			DriverID:    "claude_code",
+			StateDigest: "sha256:claude-state",
+		},
+	})
+	payload["driver_runtime"].(map[string]any)["materialized_driver_config"] = map[string]any{
+		"models": map[string]any{
+			"source_projection_path":         agents.PiModelsConfigPath,
+			"source_digest":                  "sha256:models",
+			"sandbox_destination":            agents.PiModelsSandboxPath,
+			"destination_mutable_by_sandbox": false,
+		},
+	}
+	err := sandboxContractSemanticsErrorForTest(payload)
+	if err == nil || !strings.Contains(err.Error(), "does not support driver config materialization") {
+		t.Fatalf("err=%v want unsupported materialization", err)
 	}
 }
 

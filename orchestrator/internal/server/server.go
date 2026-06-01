@@ -1447,43 +1447,41 @@ func sandboxContractID(generationID string) string {
 
 func driverConfigMaterializationPayload(driverID string, entries []runtime.DriverConfigMaterialization) (map[string]any, map[string]any, error) {
 	driverID = strings.TrimSpace(driverID)
-	if driverID != string(agents.Pi) {
+	specs := agents.DriverConfigMaterializationSpecsFor(agents.ID(driverID))
+	if len(specs) == 0 {
 		if len(entries) != 0 {
-			return nil, nil, fmt.Errorf("driver config materialization is only supported for pi")
+			return nil, nil, fmt.Errorf("driver %s does not support driver config materialization", driverID)
 		}
 		return map[string]any{}, nil, nil
 	}
-	if len(entries) != 2 {
-		return nil, nil, fmt.Errorf("pi driver config materialization requires models and settings projections")
+	if len(entries) != len(specs) {
+		return nil, nil, fmt.Errorf("driver %s config materialization requires %d projections", driverID, len(specs))
 	}
 	runtimePayload := map[string]any{}
 	mountPayload := map[string]any{}
-	expected := map[string]struct {
-		source      string
-		destination string
-	}{
-		"models":   {source: agents.PiModelsConfigPath, destination: agents.PiModelsSandboxPath},
-		"settings": {source: agents.PiSettingsConfigPath, destination: agents.PiSettingsSandboxPath},
+	expected := map[string]agents.DriverConfigMaterializationSpec{}
+	for _, spec := range specs {
+		expected[spec.Name] = spec
 	}
 	seen := map[string]struct{}{}
 	for _, entry := range entries {
 		name := strings.TrimSpace(entry.Name)
 		want, ok := expected[name]
 		if !ok {
-			return nil, nil, fmt.Errorf("unsupported pi driver config materialization %q", entry.Name)
+			return nil, nil, fmt.Errorf("unsupported %s driver config materialization %q", driverID, entry.Name)
 		}
 		if _, ok := seen[name]; ok {
-			return nil, nil, fmt.Errorf("duplicate pi driver config materialization %q", name)
+			return nil, nil, fmt.Errorf("duplicate %s driver config materialization %q", driverID, name)
 		}
 		seen[name] = struct{}{}
-		if entry.SourceProjectionPath != want.source || entry.SandboxDestination != want.destination {
-			return nil, nil, fmt.Errorf("pi driver config materialization %s path mismatch", name)
+		if entry.SourceProjectionPath != want.SourceProjectionPath || entry.SandboxDestination != want.SandboxDestination {
+			return nil, nil, fmt.Errorf("%s driver config materialization %s path mismatch", driverID, name)
 		}
 		if !strings.HasPrefix(strings.TrimSpace(entry.SourceDigest), "sha256:") {
-			return nil, nil, fmt.Errorf("pi driver config materialization %s digest is required", name)
+			return nil, nil, fmt.Errorf("%s driver config materialization %s digest is required", driverID, name)
 		}
-		if entry.DestinationMutableBySandbox {
-			return nil, nil, fmt.Errorf("pi driver config materialization %s must be read-only", name)
+		if entry.DestinationMutableBySandbox != want.DestinationMutableBySandbox {
+			return nil, nil, fmt.Errorf("%s driver config materialization %s mutability mismatch", driverID, name)
 		}
 		runtimePayload[name] = map[string]any{
 			"source_projection_path":         entry.SourceProjectionPath,
@@ -1492,16 +1490,16 @@ func driverConfigMaterializationPayload(driverID string, entries []runtime.Drive
 			"destination_mutable_by_sandbox": entry.DestinationMutableBySandbox,
 		}
 		mountPayload[name] = map[string]any{
-			"type":                           "bind",
-			"mode":                           "ro",
-			"exact":                          true,
+			"type":                           want.MountType,
+			"mode":                           want.MountMode,
+			"exact":                          want.MountExact,
 			"source_projection_path":         entry.SourceProjectionPath,
 			"sandbox_destination":            entry.SandboxDestination,
 			"destination_mutable_by_sandbox": entry.DestinationMutableBySandbox,
 		}
 	}
 	if len(seen) != len(expected) {
-		return nil, nil, fmt.Errorf("pi driver config materialization missing required projections")
+		return nil, nil, fmt.Errorf("%s driver config materialization missing required projections", driverID)
 	}
 	return runtimePayload, mountPayload, nil
 }

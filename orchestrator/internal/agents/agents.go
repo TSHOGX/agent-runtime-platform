@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -73,6 +74,22 @@ type DriverPackageFacts struct {
 	EventSchemaVersion string
 }
 
+type DriverConfigMaterializationSpec struct {
+	Name                        string
+	MountName                   string
+	ControlRelativePath         string
+	SourceProjectionPath        string
+	SandboxDestination          string
+	DestinationMutableBySandbox bool
+	MountType                   string
+	MountMode                   string
+	MountExact                  bool
+}
+
+func (s DriverConfigMaterializationSpec) HostSourcePath(controlDir string) string {
+	return filepath.Join(strings.TrimSpace(controlDir), filepath.FromSlash(s.ControlRelativePath))
+}
+
 type DriverSpec struct {
 	ID                          ID
 	Label                       string
@@ -89,6 +106,56 @@ type DriverSpec struct {
 	Phase10Support              []string
 	BinaryPath                  string
 	PackageFacts                DriverPackageFacts
+}
+
+var driverConfigMaterializationSpecs = map[ID][]DriverConfigMaterializationSpec{
+	Pi: {
+		{
+			Name:                        "models",
+			MountName:                   "pi_models_config",
+			ControlRelativePath:         "driver/pi/models.json",
+			SourceProjectionPath:        PiModelsConfigPath,
+			SandboxDestination:          PiModelsSandboxPath,
+			DestinationMutableBySandbox: false,
+			MountType:                   "bind",
+			MountMode:                   "ro",
+			MountExact:                  true,
+		},
+		{
+			Name:                        "settings",
+			MountName:                   "pi_settings_config",
+			ControlRelativePath:         "driver/pi/settings.json",
+			SourceProjectionPath:        PiSettingsConfigPath,
+			SandboxDestination:          PiSettingsSandboxPath,
+			DestinationMutableBySandbox: false,
+			MountType:                   "bind",
+			MountMode:                   "ro",
+			MountExact:                  true,
+		},
+	},
+}
+
+func DriverConfigMaterializationSpecsFor(driver ID) []DriverConfigMaterializationSpec {
+	specs := driverConfigMaterializationSpecs[ID(strings.TrimSpace(string(driver)))]
+	if len(specs) == 0 {
+		return nil
+	}
+	out := make([]DriverConfigMaterializationSpec, len(specs))
+	copy(out, specs)
+	return out
+}
+
+func AllDriverConfigMaterializationSpecs() []DriverConfigMaterializationSpec {
+	var out []DriverConfigMaterializationSpec
+	drivers := make([]string, 0, len(driverConfigMaterializationSpecs))
+	for driver := range driverConfigMaterializationSpecs {
+		drivers = append(drivers, string(driver))
+	}
+	sort.Strings(drivers)
+	for _, driver := range drivers {
+		out = append(out, DriverConfigMaterializationSpecsFor(ID(driver))...)
+	}
+	return out
 }
 
 type SnapshotPolicySpec struct {

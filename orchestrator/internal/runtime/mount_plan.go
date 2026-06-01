@@ -40,21 +40,31 @@ type allowedMountPlanSurface struct {
 	Mode        string
 }
 
-var contentMountPlanAllowList = map[string]allowedMountPlanSurface{
-	"workspace":          {Destination: "/workspace", Type: "bind", Mode: "rw"},
-	"agent_home":         {Destination: "/agent-home", Type: "bind", Mode: "rw"},
-	"control":            {Destination: "/harness-control", Type: "bind", Mode: "ro"},
-	"bridge":             {Destination: bridge.BridgeMountDestination, Type: "bind", Mode: "rw"},
-	"bridge_inbox":       {Destination: filepath.Join(bridge.BridgeMountDestination, bridge.InboxDir), Type: "bind", Mode: "ro"},
-	"bridge_host_tmp":    {Destination: filepath.Join(bridge.BridgeMountDestination, bridge.HostTmpDir), Type: "bind", Mode: "ro"},
-	"network_hosts":      {Destination: "/etc/hosts", Type: "bind", Mode: "ro"},
-	"pi_models_config":   {Destination: agents.PiModelsSandboxPath, Type: "bind", Mode: "ro"},
-	"pi_settings_config": {Destination: agents.PiSettingsSandboxPath, Type: "bind", Mode: "ro"},
-}
+var contentMountPlanAllowList = contentMountPlanSurfaces()
 
 var scratchMountPlanAllowList = map[string]allowedMountPlanSurface{
 	"tmp":     {Destination: "/tmp", Type: "tmpfs", Mode: "rw"},
 	"var_tmp": {Destination: "/var/tmp", Type: "tmpfs", Mode: "rw"},
+}
+
+func contentMountPlanSurfaces() map[string]allowedMountPlanSurface {
+	allow := map[string]allowedMountPlanSurface{
+		"workspace":       {Destination: "/workspace", Type: "bind", Mode: "rw"},
+		"agent_home":      {Destination: "/agent-home", Type: "bind", Mode: "rw"},
+		"control":         {Destination: "/harness-control", Type: "bind", Mode: "ro"},
+		"bridge":          {Destination: bridge.BridgeMountDestination, Type: "bind", Mode: "rw"},
+		"bridge_inbox":    {Destination: filepath.Join(bridge.BridgeMountDestination, bridge.InboxDir), Type: "bind", Mode: "ro"},
+		"bridge_host_tmp": {Destination: filepath.Join(bridge.BridgeMountDestination, bridge.HostTmpDir), Type: "bind", Mode: "ro"},
+		"network_hosts":   {Destination: "/etc/hosts", Type: "bind", Mode: "ro"},
+	}
+	for _, spec := range agents.AllDriverConfigMaterializationSpecs() {
+		allow[spec.MountName] = allowedMountPlanSurface{
+			Destination: spec.SandboxDestination,
+			Type:        spec.MountType,
+			Mode:        spec.MountMode,
+		}
+	}
+	return allow
 }
 
 func BuildSandboxMountPlan(input SandboxMountPlanInputs) (MountPlan, error) {
@@ -79,11 +89,8 @@ func BuildSandboxMountPlan(input SandboxMountPlanInputs) (MountPlan, error) {
 	if strings.TrimSpace(input.NetworkHostsPath) != "" {
 		plan.Content = append(plan.Content, exactBindMount("network_hosts", input.NetworkHostsPath, "/etc/hosts", "ro", []string{"bind", "ro", "nosuid", "nodev", "noexec"}, nil))
 	}
-	if strings.TrimSpace(details.Agent) == string(agents.Pi) {
-		plan.Content = append(plan.Content,
-			exactBindMount("pi_models_config", filepath.Join(details.ControlDirPath, "driver", "pi", "models.json"), agents.PiModelsSandboxPath, "ro", []string{"bind", "ro", "nosuid", "nodev", "noexec"}, nil),
-			exactBindMount("pi_settings_config", filepath.Join(details.ControlDirPath, "driver", "pi", "settings.json"), agents.PiSettingsSandboxPath, "ro", []string{"bind", "ro", "nosuid", "nodev", "noexec"}, nil),
-		)
+	for _, spec := range agents.DriverConfigMaterializationSpecsFor(agents.ID(strings.TrimSpace(details.Agent))) {
+		plan.Content = append(plan.Content, exactBindMount(spec.MountName, spec.HostSourcePath(details.ControlDirPath), spec.SandboxDestination, spec.MountMode, driverConfigMaterializationMountOptions(spec), nil))
 	}
 	if err := plan.Validate(); err != nil {
 		return MountPlan{}, err
@@ -251,6 +258,13 @@ func exactBindMount(name, source, destination, mode string, options []string, an
 		Options:     append([]string(nil), options...),
 		Annotations: copyStringMap(annotations),
 	}
+}
+
+func driverConfigMaterializationMountOptions(spec agents.DriverConfigMaterializationSpec) []string {
+	if spec.MountType != "bind" {
+		return nil
+	}
+	return []string{"bind", spec.MountMode, "nosuid", "nodev", "noexec"}
 }
 
 func tmpfsMount(name, destination string) MountPlanMount {

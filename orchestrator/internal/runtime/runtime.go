@@ -1276,29 +1276,30 @@ func (r *Runtime) writeDriverConfigProjection(req StartRequest) ([]DriverConfigM
 		return nil, nil
 	}
 	details := req.Generation
+	specs := agents.DriverConfigMaterializationSpecsFor(agents.Pi)
+	if len(specs) == 0 {
+		return nil, fmt.Errorf("pi driver config materialization spec is missing")
+	}
 	projection, err := buildPiDriverConfigProjection(details)
 	if err != nil {
 		return nil, err
 	}
-	entries := []DriverConfigMaterialization{
-		{
-			Name:                        "models",
-			SourceProjectionPath:        agents.PiModelsConfigPath,
-			HostSourcePath:              filepath.Join(details.ControlDirPath, "driver", "pi", "models.json"),
-			SandboxDestination:          agents.PiModelsSandboxPath,
-			DestinationMutableBySandbox: false,
-		},
-		{
-			Name:                        "settings",
-			SourceProjectionPath:        agents.PiSettingsConfigPath,
-			HostSourcePath:              filepath.Join(details.ControlDirPath, "driver", "pi", "settings.json"),
-			SandboxDestination:          agents.PiSettingsSandboxPath,
-			DestinationMutableBySandbox: false,
-		},
-	}
 	payloads := map[string]any{
 		"models":   projection.Models,
 		"settings": projection.Settings,
+	}
+	entries := make([]DriverConfigMaterialization, 0, len(specs))
+	for _, spec := range specs {
+		if _, ok := payloads[spec.Name]; !ok {
+			return nil, fmt.Errorf("pi %s config renderer is missing", spec.Name)
+		}
+		entries = append(entries, DriverConfigMaterialization{
+			Name:                        spec.Name,
+			SourceProjectionPath:        spec.SourceProjectionPath,
+			HostSourcePath:              spec.HostSourcePath(details.ControlDirPath),
+			SandboxDestination:          spec.SandboxDestination,
+			DestinationMutableBySandbox: spec.DestinationMutableBySandbox,
+		})
 	}
 	for i := range entries {
 		payload, err := canonicalJSON(payloads[entries[i].Name])
