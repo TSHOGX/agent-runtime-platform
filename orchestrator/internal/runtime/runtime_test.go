@@ -1374,6 +1374,31 @@ func TestRunscRunningEvidenceRetriesTransientStateMiss(t *testing.T) {
 	}
 }
 
+func TestRunscHelpersRequireExplicitBinary(t *testing.T) {
+	rt := New(Config{CommandRunner: &recordingCommandRunner{}})
+	ctx := context.Background()
+	for name, run := range map[string]func() error{
+		"running evidence": func() error {
+			_, err := rt.runscContainerRunningEvidence(ctx, "", "harness-gen-missing")
+			return err
+		},
+		"absence evidence": func() error {
+			_, err := rt.runscContainerAbsenceEvidence(ctx, " ", "harness-gen-missing")
+			return err
+		},
+		"delete": func() error {
+			_, err := rt.deleteRunscContainerDetailed(ctx, "", "harness-gen-missing")
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := run(); err == nil || !strings.Contains(err.Error(), "runsc binary path is required") {
+				t.Fatalf("expected explicit runsc binary error, got %v", err)
+			}
+		})
+	}
+}
+
 func TestDestroyTreatsMissingRunscContainerAsAbsent(t *testing.T) {
 	runner := &recordingCommandRunner{
 		sequence: map[string][]commandResult{

@@ -590,7 +590,10 @@ func (r *Runtime) recordGenerationResourceAbsenceEvidence(ctx context.Context, d
 }
 
 func (r *Runtime) runscContainerAbsenceEvidence(ctx context.Context, runscBinary, containerID string) (string, error) {
-	runscBinary = defaultString(runscBinary, "runsc")
+	runscBinary, err := requiredRunscBinary(runscBinary)
+	if err != nil {
+		return "", err
+	}
 	output, err := r.runner.CombinedOutput(ctx, runscBinary, "-root", r.cfg.RunscRoot, "state", containerID)
 	if err != nil {
 		if commandFailureContains(output, err, "does not exist", "not found", "no such container", "no such file") {
@@ -700,7 +703,10 @@ func (r *Runtime) runtimePostStartProof(ctx context.Context, details store.Runti
 }
 
 func (r *Runtime) runscContainerRunningEvidence(ctx context.Context, runscBinary, containerID string) (string, error) {
-	runscBinary = defaultString(runscBinary, "runsc")
+	runscBinary, err := requiredRunscBinary(runscBinary)
+	if err != nil {
+		return "", err
+	}
 	deadline := time.Now().Add(runscRunningProofTimeout)
 	var lastErr error
 	for {
@@ -1024,7 +1030,10 @@ func (r *Runtime) deleteRunscContainer(ctx context.Context, runscBinary, contain
 }
 
 func (r *Runtime) deleteRunscContainerDetailed(ctx context.Context, runscBinary, containerID string) (runscContainerDeleteResult, error) {
-	runscBinary = defaultString(runscBinary, "runsc")
+	runscBinary, err := requiredRunscBinary(runscBinary)
+	if err != nil {
+		return runscContainerDeleteResult{}, err
+	}
 	_, _ = r.runner.CombinedOutput(ctx, runscBinary, "-root", r.cfg.RunscRoot, "kill", containerID, "KILL")
 	output, err := r.runner.CombinedOutput(ctx, runscBinary, "-root", r.cfg.RunscRoot, "delete", "-force", containerID)
 	if err != nil {
@@ -2014,11 +2023,12 @@ func runscBinaryMetadata() (string, string, error) {
 	return canonical, "sha256:" + digest, nil
 }
 
-func defaultString(value, defaultValue string) string {
-	if strings.TrimSpace(value) == "" {
-		return defaultValue
+func requiredRunscBinary(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("runsc binary path is required")
 	}
-	return strings.TrimSpace(value)
+	return value, nil
 }
 
 func (r *Runtime) runscNetwork(details store.RuntimeGenerationDetails) (string, error) {
