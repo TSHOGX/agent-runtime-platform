@@ -10,7 +10,7 @@ import (
 	"harness-platform/orchestrator/internal/sessionstate"
 )
 
-var legacySessionColumns = []string{
+var obsoleteSessionColumns = []string{
 	"workspace",
 	"restore_id",
 	"claude_session_uuid",
@@ -633,21 +633,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS runtime_resource_instances_log_dir_path_active
 	if err != nil {
 		return err
 	}
-	return s.dropLegacySessionColumns(ctx)
+	return s.rejectObsoleteSessionColumns(ctx)
 }
 
-func (s *Store) dropLegacySessionColumns(ctx context.Context) error {
-	for _, column := range legacySessionColumns {
+func (s *Store) rejectObsoleteSessionColumns(ctx context.Context) error {
+	for _, column := range obsoleteSessionColumns {
 		exists, err := tableColumnExists(ctx, s.db, "sessions", column)
 		if err != nil {
-			return fmt.Errorf("check legacy sessions.%s: %w", column, err)
+			return fmt.Errorf("check obsolete sessions.%s: %w", column, err)
 		}
-		if !exists {
-			continue
-		}
-		_, err = s.db.ExecContext(ctx, `ALTER TABLE `+quoteSQLiteIdent("sessions")+` DROP COLUMN `+quoteSQLiteIdent(column))
-		if err != nil {
-			return fmt.Errorf("drop legacy sessions.%s: %w", column, err)
+		if exists {
+			return fmt.Errorf("obsolete sessions.%s column is present; run the destructive cutover cleanup before starting this build", column)
 		}
 	}
 	return nil

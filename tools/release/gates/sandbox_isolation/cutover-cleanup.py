@@ -14,11 +14,13 @@ CONTRACT = "sandbox-isolation-v1"
 CONTENT_ROOTS = {
     "sessions_root",
     "agent_homes_root",
-    "checkpoints_root",
+    "legacy_checkpoints_root",
     "prepared_bundle_root",
     "run_control_root",
     "run_runtime_root",
     "run_bridge_root",
+    "run_network_root",
+    "run_logs_root",
     "proxy_internal_root",
 }
 ROOTS_TO_DELETE = {"legacy_secret_root"}

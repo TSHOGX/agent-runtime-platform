@@ -25,8 +25,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gorilla/websocket"
-
 	"harness-platform/orchestrator/internal/agents"
 	"harness-platform/orchestrator/internal/artifacts"
 	"harness-platform/orchestrator/internal/bridge"
@@ -65,7 +63,6 @@ type Server struct {
 	watcher   *artifacts.Watcher
 	hub       *events.Hub
 	log       *slog.Logger
-	upgrader  websocket.Upgrader
 	ownerUUID string
 
 	bridgeParserMu sync.Mutex
@@ -126,9 +123,6 @@ func New(
 		watcher: watcher,
 		hub:     hub,
 		log:     log,
-		upgrader: websocket.Upgrader{
-			CheckOrigin: func(r *http.Request) bool { return true },
-		},
 	}
 }
 
@@ -291,8 +285,6 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.getQuota(w, r)
 	case r.URL.Path == "/api/deployment-capabilities" && r.Method == http.MethodGet:
 		s.deploymentCapabilities(w, r)
-	case r.URL.Path == "/api/events" && r.Method == http.MethodGet:
-		s.events(w, r)
 	case r.URL.Path == "/api/events/stream" && r.Method == http.MethodGet:
 		s.eventsStream(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/sessions/"):
@@ -1763,38 +1755,6 @@ func effectiveString(value, fallback string) string {
 	return value
 }
 
-func driverInstallDigest(driverID agents.ID) (string, error) {
-	spec, ok := agents.DriverSpecFor(string(driverID))
-	if !ok {
-		return "", fmt.Errorf("unsupported driver %q", driverID)
-	}
-	binaryPath, err := expectedDriverBinaryPath(driverID)
-	if err != nil {
-		return "", err
-	}
-	payload := map[string]any{
-		"driver_id": string(driverID),
-		"path":      binaryPath,
-	}
-	facts := spec.PackageFacts
-	if strings.TrimSpace(facts.Name) != "" {
-		payload["package"] = facts.Name
-	}
-	if strings.TrimSpace(facts.Version) != "" {
-		payload["package_version"] = facts.Version
-	}
-	if strings.TrimSpace(facts.Shasum) != "" {
-		payload["package_shasum"] = facts.Shasum
-	}
-	if strings.TrimSpace(facts.Integrity) != "" {
-		payload["package_integrity"] = facts.Integrity
-	}
-	if strings.TrimSpace(facts.EventSchemaVersion) != "" {
-		payload["event_schema"] = facts.EventSchemaVersion
-	}
-	return sandboxContractDigestForPayload(payload), nil
-}
-
 func sandboxContractDigestForPayload(value any) string {
 	payload, err := store.CanonicalSandboxContractPayload(value)
 	if err != nil {
@@ -2329,7 +2289,6 @@ func (s *Server) runtimeResourceRootPrefixes() map[string]string {
 		"sessions_root":             roots.SessionsRoot,
 		"agent_homes_root":          roots.AgentHomesRoot,
 		"run_dir":                   roots.RunDir,
-		"checkpoints_root":          roots.CheckpointsRoot,
 		"prepared_bundle_root":      roots.PreparedBundleRoot,
 		"rootfs_path":               roots.RootFSPath,
 		"db_path":                   roots.DBPath,
@@ -3148,24 +3107,6 @@ func rejectSymlinkComponents(root, slashPath string) (int, string) {
 func isPathInside(root, candidate string) bool {
 	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(candidate))
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
-func (s *Server) events(w http.ResponseWriter, r *http.Request) {
-	conn, err := s.upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		return
-	}
-	defer conn.Close()
-
-	sessionID := r.URL.Query().Get("session_id")
-	ch, cancel := s.hub.Subscribe(sessionID)
-	defer cancel()
-
-	for event := range ch {
-		if err := conn.WriteJSON(publicEvent(event)); err != nil {
-			return
-		}
-	}
 }
 
 func (s *Server) eventsStream(w http.ResponseWriter, r *http.Request) {

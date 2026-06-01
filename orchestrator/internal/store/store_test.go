@@ -86,45 +86,6 @@ func TestListMessages(t *testing.T) {
 	}
 }
 
-func TestCreateSessionDoesNotWriteLegacyAgentHomePathColumn(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
-
-	ctx := context.Background()
-	st, err := Open(ctx, dbPath)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
-	if _, err := st.db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN agent_home_path TEXT`); err != nil {
-		t.Fatalf("add legacy agent_home_path column: %v", err)
-	}
-
-	now := time.Now().UTC()
-	if err := st.CreateSession(ctx, Session{
-		ID:        "sess_legacy_home",
-		UserID:    "lab",
-		Status:    string(sessionstate.Created),
-		Agent:     "claude_code",
-		CreatedAt: now,
-		UpdatedAt: now,
-	}); err != nil {
-		t.Fatalf("create session: %v", err)
-	}
-
-	var nonNullCount int
-	if err := st.db.QueryRowContext(ctx, `
-SELECT COUNT(*)
-FROM sessions
-WHERE id = ?
-  AND agent_home_path IS NOT NULL`, "sess_legacy_home").Scan(&nonNullCount); err != nil {
-		t.Fatalf("query legacy agent_home_path: %v", err)
-	}
-	if nonNullCount != 0 {
-		t.Fatalf("new session wrote legacy agent_home_path")
-	}
-}
-
 func TestFreshSchemaDoesNotCreateLegacySessionColumns(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
@@ -159,7 +120,7 @@ func TestFreshSchemaDoesNotCreateLegacySessionColumns(t *testing.T) {
 	}
 }
 
-func TestMigrateDropsLegacySessionColumns(t *testing.T) {
+func TestMigrateRejectsLegacySessionColumns(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -192,21 +153,13 @@ func TestMigrateDropsLegacySessionColumns(t *testing.T) {
 	}
 
 	st, err = Open(ctx, dbPath)
-	if err != nil {
-		t.Fatalf("reopen store: %v", err)
+	if err == nil {
+		_ = st.Close()
+		t.Fatalf("reopen store should reject legacy session columns")
 	}
-	t.Cleanup(func() { _ = st.Close() })
-	for _, column := range removedLegacySessionColumnsForTest() {
-		exists, err := tableColumnExists(ctx, st.db, "sessions", column)
-		if err != nil {
-			t.Fatalf("check migrated %s column: %v", column, err)
-		}
-		if exists {
-			t.Fatalf("migration should drop legacy sessions.%s", column)
-		}
-	}
-	if err := st.migrate(ctx); err != nil {
-		t.Fatalf("rerun migrate after dropping legacy columns: %v", err)
+	if !strings.Contains(err.Error(), "obsolete sessions.") ||
+		!strings.Contains(err.Error(), "destructive cutover cleanup") {
+		t.Fatalf("unexpected legacy column rejection: %v", err)
 	}
 }
 

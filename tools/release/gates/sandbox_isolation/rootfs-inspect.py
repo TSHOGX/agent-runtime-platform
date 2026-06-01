@@ -115,29 +115,6 @@ def require_absent_or_empty(rootfs, rel):
     )
 
 
-def require_absent_or_harmless_legacy_dir(rootfs, rel):
-    path = rootfs / rel
-    info = lstat_info(path)
-    if not info["exists"]:
-        passed = True
-    else:
-        mode = int(info.get("mode", "0"), 8)
-        passed = (
-            info.get("kind") == "directory"
-            and info.get("uid") == 0
-            and info.get("gid") == 0
-            and mode & 0o022 == 0
-            and is_empty_directory(path)
-        )
-    return check_result(
-        f"{rel}_absent_or_harmless",
-        path,
-        passed,
-        f"/{rel} must be absent or empty, root-owned, and not group/world-writable",
-        info,
-    )
-
-
 def check_no_gvisor_filestore(rootfs):
     paths = sorted(rootfs.glob(".gvisor.filestore.*")) if rootfs.exists() else []
     return {
@@ -197,8 +174,8 @@ def inspect_rootfs(rootfs):
                 require_empty_real_dir(rootfs, "workspace"),
                 require_empty_real_dir(rootfs, "agent-home"),
                 require_real_file(rootfs, "etc/hosts"),
-                require_absent_or_harmless_legacy_dir(rootfs, "sessions"),
-                require_absent_or_harmless_legacy_dir(rootfs, "agent-homes"),
+                require_absent(rootfs, "sessions"),
+                require_absent(rootfs, "agent-homes"),
                 require_absent(rootfs, "harness-secrets"),
                 require_absent_or_empty(rootfs, "root/.claude"),
                 require_absent_or_empty(rootfs, "root/.cache"),

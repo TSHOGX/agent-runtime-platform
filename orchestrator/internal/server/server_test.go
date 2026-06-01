@@ -93,16 +93,12 @@ func TestCreateSessionModeMapping(t *testing.T) {
 				t.Fatalf("open store: %v", err)
 			}
 			t.Cleanup(func() { _ = st.Close() })
+			cfg := testServerConfig(dir)
 			srv := &Server{
-				cfg: config.Config{
-					SessionsRoot:     dir,
-					SessionRetention: time.Hour,
-					MaxSessions:      10,
-					DefaultAgent:     "claude_code",
-				},
+				cfg:     cfg,
 				store:   st,
 				runtime: runtime.New(runtime.Config{}),
-				watcher: newServerTestWatcher(t, dir, st, events.NewHub()),
+				watcher: newServerTestWatcher(t, cfg.SessionsRoot, st, events.NewHub()),
 				hub:     events.NewHub(),
 				log:     slog.Default(),
 			}
@@ -234,8 +230,9 @@ func TestCreateSessionAgentModeRejectsShellDefault(t *testing.T) {
 }
 
 func TestDeploymentCapabilitiesAreProductSafe(t *testing.T) {
+	dir := t.TempDir()
 	srv := &Server{
-		cfg: config.Config{DefaultAgent: "claude_code"},
+		cfg: testServerConfig(dir),
 	}
 	req := httptest.NewRequest(http.MethodGet, "/api/deployment-capabilities", nil)
 	rec := httptest.NewRecorder()
@@ -288,12 +285,11 @@ func TestDeploymentCapabilitiesUseImageManifestGate(t *testing.T) {
 	t.Cleanup(func() { _ = st.Close() })
 	srv := &Server{
 		cfg: config.Config{
-			SessionsRoot:         dir,
-			SessionRetention:     time.Hour,
-			MaxSessions:          10,
-			DefaultAgent:         "claude_code",
-			RootFSPath:           rootfs,
-			RequireAgentManifest: true,
+			SessionsRoot:     dir,
+			SessionRetention: time.Hour,
+			MaxSessions:      10,
+			DefaultAgent:     "claude_code",
+			RootFSPath:       rootfs,
 		},
 		store:   st,
 		runtime: runtime.New(runtime.Config{}),
@@ -370,12 +366,11 @@ func TestCreateSessionFailsClosedWhenRequiredManifestMissing(t *testing.T) {
 	t.Cleanup(func() { _ = st.Close() })
 	srv := &Server{
 		cfg: config.Config{
-			SessionsRoot:         dir,
-			SessionRetention:     time.Hour,
-			MaxSessions:          10,
-			DefaultAgent:         "claude_code",
-			RootFSPath:           filepath.Join(dir, "missing-rootfs"),
-			RequireAgentManifest: true,
+			SessionsRoot:     dir,
+			SessionRetention: time.Hour,
+			MaxSessions:      10,
+			DefaultAgent:     "claude_code",
+			RootFSPath:       filepath.Join(dir, "missing-rootfs"),
 		},
 		store:   st,
 		runtime: runtime.New(runtime.Config{}),
@@ -404,9 +399,8 @@ func TestDriverManifestInputDigestsUseSourceConfigAndImageManifest(t *testing.T)
 	rootfs := filepath.Join(dir, "rootfs")
 	writeServerTestAgentImageManifest(t, rootfs, agents.ClaudeCode, agents.Shell)
 	cfg := config.Config{
-		DefaultAgent:         "claude_code",
-		RootFSPath:           rootfs,
-		RequireAgentManifest: true,
+		DefaultAgent: "claude_code",
+		RootFSPath:   rootfs,
 	}
 	srv := &Server{cfg: cfg}
 	deployment, capabilityErr := srv.resolveModeDeployment("shell")
@@ -481,17 +475,15 @@ func TestCreateSessionSoftLimitUsesPoolExhaustedEnvelope(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	createServerTestSession(t, ctx, st, dir, "sess_existing", string(sessionstate.Created), time.Now().UTC(), nil)
+	cfg := testServerConfig(dir)
+	cfg.MaxSessions = 1
+	cfg.Harness.MaxSessions = 1
 
 	srv := &Server{
-		cfg: config.Config{
-			SessionsRoot:     dir,
-			SessionRetention: time.Hour,
-			MaxSessions:      1,
-			DefaultAgent:     "claude_code",
-		},
+		cfg:     cfg,
 		store:   st,
 		runtime: runtime.New(runtime.Config{}),
-		watcher: newServerTestWatcher(t, dir, st, events.NewHub()),
+		watcher: newServerTestWatcher(t, cfg.SessionsRoot, st, events.NewHub()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
@@ -640,17 +632,15 @@ func TestCreateSessionUsesNullExpiryWhenSessionRetentionDisabled(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
+	cfg := testServerConfig(dir)
+	cfg.SessionRetention = 0
+	cfg.Harness.SessionRetention = config.Duration{Duration: 0}
 
 	srv := &Server{
-		cfg: config.Config{
-			SessionsRoot:     dir,
-			SessionRetention: 0,
-			MaxSessions:      10,
-			DefaultAgent:     "claude_code",
-		},
+		cfg:     cfg,
 		store:   st,
 		runtime: runtime.New(runtime.Config{}),
-		watcher: newServerTestWatcher(t, dir, st, events.NewHub()),
+		watcher: newServerTestWatcher(t, cfg.SessionsRoot, st, events.NewHub()),
 		hub:     events.NewHub(),
 		log:     slog.Default(),
 	}
@@ -753,16 +743,12 @@ func TestCreateSessionUsesPublicSessionDTO(t *testing.T) {
 	hub := events.NewHub()
 	eventsCh, cancelEvents := hub.Subscribe("")
 	defer cancelEvents()
+	cfg := testServerConfig(dir)
 	srv := &Server{
-		cfg: config.Config{
-			SessionsRoot:     dir,
-			SessionRetention: time.Hour,
-			MaxSessions:      10,
-			DefaultAgent:     "claude_code",
-		},
+		cfg:     cfg,
 		store:   st,
 		runtime: runtime.New(runtime.Config{}),
-		watcher: newServerTestWatcher(t, dir, st, events.NewHub()),
+		watcher: newServerTestWatcher(t, cfg.SessionsRoot, st, events.NewHub()),
 		hub:     hub,
 		log:     slog.Default(),
 	}
@@ -1888,7 +1874,6 @@ WHERE generation_id = ?`, checkpointPath, old.GenerationID); err != nil {
 		DefaultAgent:    "sh",
 		SessionsRoot:    cfg.SessionsRoot,
 		AgentHomesRoot:  filepath.Join(dir, "agent-homes"),
-		CheckpointsRoot: filepath.Join(dir, "checkpoints"),
 		RootFSPath:      filepath.Join(dir, "rootfs"),
 		BundleRoot:      filepath.Join(dir, "run", "runtime"),
 		RunscNetwork:    "host",
@@ -2817,7 +2802,9 @@ func TestSandboxContractPayloadRecordsPiMaterializedConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare pi runtime artifacts: %v", err)
 	}
-	srv := &Server{cfg: config.Config{DefaultAgent: "pi"}, store: st, runtime: rt}
+	cfg := testServerConfig(dir)
+	cfg.DefaultAgent = "pi"
+	srv := &Server{cfg: cfg, store: st, runtime: rt}
 	payload, err := srv.sandboxContractPayload(session, details, artifacts, "sha256:resource-identity", sessionRuntimeDataVolumes{
 		Workspace: store.SessionWorkspaceVolume{
 			SessionID:                session.ID,
@@ -3670,11 +3657,10 @@ func TestDestroyReclaimableGenerationResourcesRemovesFilesystemWithRealRuntime(t
 	createServerGenerationFilesystem(t, details)
 
 	realRuntime := runtime.New(runtime.Config{
-		RunscNetwork:    "sandbox",
-		RunscOverlay2:   "none",
-		RunscRoot:       filepath.Join(dir, "runsc-root"),
-		RunDir:          cfg.Harness.RunDir,
-		CheckpointsRoot: filepath.Join(dir, "checkpoints"),
+		RunscNetwork:  "sandbox",
+		RunscOverlay2: "none",
+		RunscRoot:     filepath.Join(dir, "runsc-root"),
+		RunDir:        cfg.Harness.RunDir,
 		CommandRunner: serverCommandRunner{fail: map[string]error{
 			"runsc -root " + filepath.Join(dir, "runsc-root") + " state " + details.RunscContainerID: errors.New("not found"),
 			"ip link show " + details.HostVeth:                                         errors.New("does not exist"),
@@ -4481,7 +4467,6 @@ func testArtifactDownloadConfig(t *testing.T, dir string) config.Config {
 	t.Helper()
 	cfg := testServerConfig(dir)
 	cfg.AgentHomesRoot = filepath.Join(dir, "agent-homes")
-	cfg.CheckpointsRoot = filepath.Join(dir, "checkpoints")
 	cfg.BundleRoot = filepath.Join(dir, "bundle")
 	cfg.RootFSPath = filepath.Join(dir, "rootfs")
 	cfg.DBPath = filepath.Join(dir, "state", "orchestrator.db")
@@ -5003,29 +4988,45 @@ func currentRunscBinaryMetadataForServerTest() (string, string) {
 
 func writeServerTestAgentImageManifest(t *testing.T, rootfs string, drivers ...agents.ID) string {
 	t.Helper()
+	manifestPath, err := serverTestAgentImageManifest(rootfs, drivers...)
+	if err != nil {
+		t.Fatalf("write test agent image manifest: %v", err)
+	}
+	return manifestPath
+}
+
+func mustWriteServerTestAgentImageManifest(rootfs string, drivers ...agents.ID) string {
+	manifestPath, err := serverTestAgentImageManifest(rootfs, drivers...)
+	if err != nil {
+		panic(err)
+	}
+	return manifestPath
+}
+
+func serverTestAgentImageManifest(rootfs string, drivers ...agents.ID) (string, error) {
 	entries := make([]imageManifestDriver, 0, len(drivers))
 	buildDrivers := make([]string, 0, len(drivers))
 	for _, driverID := range drivers {
 		spec, ok := agents.DriverSpecFor(string(driverID))
 		if !ok {
-			t.Fatalf("missing driver spec for %s", driverID)
+			return "", fmt.Errorf("missing driver spec for %s", driverID)
 		}
 		binaryPath, err := expectedDriverBinaryPath(driverID)
 		if err != nil {
-			t.Fatalf("expected driver binary path: %v", err)
+			return "", fmt.Errorf("expected driver binary path: %w", err)
 		}
 		hostPath := filepath.Join(rootfs, strings.TrimPrefix(binaryPath, "/"))
 		if err := os.MkdirAll(filepath.Dir(hostPath), 0o755); err != nil {
-			t.Fatalf("mkdir driver binary parent: %v", err)
+			return "", fmt.Errorf("mkdir driver binary parent: %w", err)
 		}
 		content := []byte("test binary for " + string(driverID) + "\n")
 		if err := os.WriteFile(hostPath, content, 0o755); err != nil {
-			t.Fatalf("write driver binary: %v", err)
+			return "", fmt.Errorf("write driver binary: %w", err)
 		}
 		sum := sha256.Sum256(content)
-		entry, err := syntheticManifestDriver(spec)
+		entry, err := manifestDriverFromSpec(spec)
 		if err != nil {
-			t.Fatalf("synthetic manifest driver: %v", err)
+			return "", fmt.Errorf("manifest driver from spec: %w", err)
 		}
 		entry.InstalledBinaryDigest = fmt.Sprintf("sha256:%x", sum[:])
 		entries = append(entries, entry)
@@ -5040,26 +5041,23 @@ func writeServerTestAgentImageManifest(t *testing.T, rootfs string, drivers ...a
 	}
 	data, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
-		t.Fatalf("marshal manifest: %v", err)
+		return "", fmt.Errorf("marshal manifest: %w", err)
 	}
 	data = append(data, '\n')
 	manifestPath := filepath.Join(rootfs, "etc", "harness-image", "agents.json")
 	if err := os.MkdirAll(filepath.Dir(manifestPath), 0o755); err != nil {
-		t.Fatalf("mkdir manifest parent: %v", err)
+		return "", fmt.Errorf("mkdir manifest parent: %w", err)
 	}
 	if err := os.WriteFile(manifestPath, data, 0o644); err != nil {
-		t.Fatalf("write manifest: %v", err)
+		return "", fmt.Errorf("write manifest: %w", err)
 	}
-	return manifestPath
+	return manifestPath, nil
 }
 
 func TestDriverManifestHelpersFailClosedForUnknownDriver(t *testing.T) {
 	unknown := agents.ID("opencode")
 	if _, err := expectedDriverBinaryPath(unknown); err == nil || !strings.Contains(err.Error(), `unsupported driver "opencode"`) {
 		t.Fatalf("expected unknown driver binary path error, got %v", err)
-	}
-	if _, err := driverInstallDigest(unknown); err == nil || !strings.Contains(err.Error(), `unsupported driver "opencode"`) {
-		t.Fatalf("expected unknown driver install digest error, got %v", err)
 	}
 }
 
@@ -5515,12 +5513,13 @@ func serverDataVolumeConfigForTest(cfg config.Config) (store.DataVolumeProvision
 }
 
 func testServerConfig(dir string) config.Config {
+	rootfs := filepath.Join(dir, "rootfs")
+	mustWriteServerTestAgentImageManifest(rootfs, agents.ClaudeCode, agents.Pi, agents.Shell)
 	return config.Config{
 		SessionsRoot:     filepath.Join(dir, "sessions"),
 		AgentHomesRoot:   filepath.Join(dir, "agent-homes"),
-		CheckpointsRoot:  filepath.Join(dir, "checkpoints"),
 		BundleRoot:       filepath.Join(dir, "bundle"),
-		RootFSPath:       filepath.Join(dir, "rootfs"),
+		RootFSPath:       rootfs,
 		DBPath:           filepath.Join(dir, "state", "orchestrator.db"),
 		RepoRoot:         dir,
 		SessionRetention: time.Hour,

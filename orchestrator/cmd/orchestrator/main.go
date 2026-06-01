@@ -71,7 +71,6 @@ func main() {
 				RunscOverlay2:           cfg.RunscOverlay2,
 				SessionsRoot:            cfg.SessionsRoot,
 				AgentHomesRoot:          cfg.AgentHomesRoot,
-				CheckpointsRoot:         cfg.CheckpointsRoot,
 				BundleRoot:              cfg.BundleRoot,
 				RootFSPath:              cfg.RootFSPath,
 				DefaultAgent:            cfg.DefaultAgent,

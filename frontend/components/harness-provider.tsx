@@ -24,7 +24,7 @@ import {
   postMessage as apiPostMessage
 } from "@/lib/api";
 import { reduceSessionEvent } from "@/lib/session-events";
-import { buildEventsStreamUrl } from "@/lib/ws";
+import { buildEventsStreamUrl } from "@/lib/events";
 import type {
   ApiArtifact,
   DeploymentCapabilities,

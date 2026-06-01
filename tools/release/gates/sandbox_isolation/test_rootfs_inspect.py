@@ -49,18 +49,17 @@ class RootFSInspectTest(unittest.TestCase):
             failed = {check["name"] for check in payload["checks"] if check["status"] == "failed"}
             self.assertIn("root_.claude_absent_or_empty", failed)
 
-    def test_legacy_session_dir_with_content_fails(self):
+    def test_legacy_session_dir_fails_even_when_empty(self):
         with tempfile.TemporaryDirectory() as tmp:
             rootfs = valid_rootfs(tmp)
             sessions = rootfs / "sessions"
             sessions.mkdir()
-            (sessions / "sess_old").mkdir()
 
             payload = MODULE.inspect_rootfs(rootfs)
 
             self.assertEqual(payload["status"], "failed")
             failed = {check["name"] for check in payload["checks"] if check["status"] == "failed"}
-            self.assertIn("sessions_absent_or_harmless", failed)
+            self.assertIn("sessions_absent", failed)
 
     def test_write_output(self):
         with tempfile.TemporaryDirectory() as tmp:

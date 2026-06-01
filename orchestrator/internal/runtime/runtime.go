@@ -33,7 +33,6 @@ type Config struct {
 	RunscOverlay2           string
 	SessionsRoot            string
 	AgentHomesRoot          string
-	CheckpointsRoot         string
 	BundleRoot              string
 	RootFSPath              string
 	DefaultAgent            string
@@ -536,7 +535,7 @@ func (r *Runtime) generationFilesystemCleanupTargets(details store.RuntimeGenera
 		}
 	}
 
-	checkpointPath, err := validateCheckpointCleanupTarget(details, runRoot, generationDir, r.cfg.CheckpointsRoot)
+	checkpointPath, err := validateCheckpointCleanupTarget(details, runRoot, generationDir)
 	if err != nil {
 		return nil, err
 	}
@@ -791,25 +790,12 @@ func filesystemAbsenceEvidence(targets []filesystemCleanupTarget) (map[string]st
 	return evidence, nil
 }
 
-func validateCheckpointCleanupTarget(details store.RuntimeGenerationDetails, runRoot, generationDir, checkpointsRoot string) (filesystemCleanupTarget, error) {
+func validateCheckpointCleanupTarget(details store.RuntimeGenerationDetails, runRoot, generationDir string) (filesystemCleanupTarget, error) {
 	expectedGenerationCheckpoint := filepath.Join(runRoot, generationDir, "checkpoint")
-	if err := validateFilesystemCleanupTarget(cleanupTargetCheckpoint, details.CheckpointPath, expectedGenerationCheckpoint, runRoot); err == nil {
-		return filesystemCleanupTarget{kind: cleanupTargetCheckpoint, path: cleanAbsolutePath(details.CheckpointPath), root: runRoot}, nil
-	}
-
-	root, err := cleanAbsoluteRoot(checkpointsRoot, "checkpoints root")
-	if err != nil {
-		return filesystemCleanupTarget{}, fmt.Errorf("checkpoint cleanup target %q is not the generation checkpoint path and legacy cleanup is unavailable: %w", details.CheckpointPath, err)
-	}
-	sessionComponent, err := safePathComponent("session id", strings.TrimSpace(details.SessionID))
-	if err != nil {
+	if err := validateFilesystemCleanupTarget(cleanupTargetCheckpoint, details.CheckpointPath, expectedGenerationCheckpoint, runRoot); err != nil {
 		return filesystemCleanupTarget{}, err
 	}
-	expectedLegacy := filepath.Join(root, sessionComponent)
-	if err := validateFilesystemCleanupTarget(cleanupTargetCheckpoint, details.CheckpointPath, expectedLegacy, root); err != nil {
-		return filesystemCleanupTarget{}, err
-	}
-	return filesystemCleanupTarget{kind: cleanupTargetCheckpoint, path: cleanAbsolutePath(details.CheckpointPath), root: root}, nil
+	return filesystemCleanupTarget{kind: cleanupTargetCheckpoint, path: cleanAbsolutePath(details.CheckpointPath), root: runRoot}, nil
 }
 
 func validateFilesystemCleanupTarget(kind cleanupTargetKind, actual, expected, root string) error {

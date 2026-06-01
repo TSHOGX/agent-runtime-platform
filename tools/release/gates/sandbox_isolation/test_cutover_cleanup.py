@@ -18,6 +18,8 @@ class CutoverCleanupTest(unittest.TestCase):
             base = Path(tmp)
             (base / "sessions").mkdir()
             (base / "sessions" / "old-session").mkdir()
+            (base / "run" / "network" / "gen-old").mkdir(parents=True)
+            (base / "run" / "logs" / "gen-old").mkdir(parents=True)
             (base / "secrets" / "key").mkdir(parents=True)
             inventory_path = write_inventory(base, inventory_for(base))
 
@@ -27,6 +29,8 @@ class CutoverCleanupTest(unittest.TestCase):
             delete_sources = {action["source"] for action in payload["actions"] if action["type"] == "delete_path"}
             commands = {tuple(action["command"]) for action in payload["actions"] if action["type"] == "run_command"}
             self.assertIn(str(base / "sessions" / "old-session"), delete_sources)
+            self.assertIn(str(base / "run" / "network" / "gen-old"), delete_sources)
+            self.assertIn(str(base / "run" / "logs" / "gen-old"), delete_sources)
             self.assertIn(str(base / "secrets"), delete_sources)
             self.assertIn(("runsc", "-root", "/tmp/runsc-root", "delete", "-force", "phase3-sess_old"), commands)
             self.assertIn(("ip", "netns", "delete", "harness-gen-old"), commands)
@@ -169,6 +173,16 @@ def inventory_for(base):
         "roots": {
             "sessions_root": {
                 "path": str(sessions),
+                "info": {"exists": True, "kind": "directory"},
+                "entries": 1,
+            },
+            "run_network_root": {
+                "path": str(base / "run" / "network"),
+                "info": {"exists": True, "kind": "directory"},
+                "entries": 1,
+            },
+            "run_logs_root": {
+                "path": str(base / "run" / "logs"),
                 "info": {"exists": True, "kind": "directory"},
                 "entries": 1,
             },

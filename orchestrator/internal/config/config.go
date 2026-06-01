@@ -21,30 +21,28 @@ import (
 )
 
 type Config struct {
-	Addr                 string
-	SharedSecret         string
-	CookieName           string
-	SessionRetention     time.Duration
-	RepoRoot             string
-	RunscRoot            string
-	SessionsRoot         string
-	AgentHomesRoot       string
-	CheckpointsRoot      string
-	BundleRoot           string
-	RootFSPath           string
-	AgentManifestPath    string
-	RequireAgentManifest bool
-	DBPath               string
-	DefaultAgent         string
-	MaxSessions          int
-	RunscNetwork         string
-	RunscOverlay2        string
-	Agents               map[string]AgentConfig
-	ModelProfiles        map[string]ModelProfileConfig
-	RuntimeProviders     map[string]RuntimeProviderConfig
-	ModelProxy           ModelProxyConfig
-	Harness              HarnessConfig
-	Warnings             []string
+	Addr              string
+	SharedSecret      string
+	CookieName        string
+	SessionRetention  time.Duration
+	RepoRoot          string
+	RunscRoot         string
+	SessionsRoot      string
+	AgentHomesRoot    string
+	BundleRoot        string
+	RootFSPath        string
+	AgentManifestPath string
+	DBPath            string
+	DefaultAgent      string
+	MaxSessions       int
+	RunscNetwork      string
+	RunscOverlay2     string
+	Agents            map[string]AgentConfig
+	ModelProfiles     map[string]ModelProfileConfig
+	RuntimeProviders  map[string]RuntimeProviderConfig
+	ModelProxy        ModelProxyConfig
+	Harness           HarnessConfig
+	Warnings          []string
 }
 
 type ModelProxyConfig struct {
@@ -203,7 +201,6 @@ type IsolationRoots struct {
 	SessionsRoot           string
 	AgentHomesRoot         string
 	RunDir                 string
-	CheckpointsRoot        string
 	PreparedBundleRoot     string
 	RootFSPath             string
 	DBPath                 string
@@ -217,7 +214,6 @@ type CanonicalIsolationRoots struct {
 	SessionsRoot           string
 	AgentHomesRoot         string
 	RunDir                 string
-	CheckpointsRoot        string
 	PreparedBundleRoot     string
 	RootFSPath             string
 	DBStateRoot            string
@@ -292,26 +288,24 @@ func Load() (Config, error) {
 	}
 	maxSessions := intEnv("HARNESS_MAX_SESSIONS", projectConfig.Harness.MaxSessions)
 	cfg := Config{
-		Addr:                 getenv("HARNESS_ORCHESTRATOR_ADDR", ":8090"),
-		SharedSecret:         os.Getenv("HARNESS_LAB_PASSWORD"),
-		CookieName:           getenv("HARNESS_COOKIE_NAME", "harness_auth"),
-		SessionRetention:     sessionRetention,
-		RepoRoot:             getenv("HARNESS_REPO_ROOT", repoRoot),
-		RunscRoot:            getenv("RUNSC_ROOT", "/var/lib/harness/runsc"),
-		SessionsRoot:         sessionsRoot,
-		AgentHomesRoot:       getenv("HARNESS_AGENT_HOMES_ROOT", "/var/lib/harness/agent-homes"),
-		CheckpointsRoot:      getenv("HARNESS_CHECKPOINTS_ROOT", "/var/lib/harness/checkpoints"),
-		BundleRoot:           getenv("HARNESS_BUNDLE_ROOT", filepath.Join(repoRoot, "bundle", "out")),
-		RootFSPath:           getenv("HARNESS_ROOTFS_PATH", filepath.Join(repoRoot, "sandbox-image", "rootfs")),
-		AgentManifestPath:    os.Getenv("HARNESS_AGENT_IMAGE_MANIFEST_PATH"),
-		RequireAgentManifest: true,
-		DBPath:               getenv("HARNESS_DB_PATH", "/var/lib/harness/state/orchestrator.db"),
-		DefaultAgent:         string(defaultDriver),
-		MaxSessions:          maxSessions,
-		RunscNetwork:         "sandbox",
-		RunscOverlay2:        "none",
-		ModelProxy:           projectConfig.Harness.ModelProxy,
-		Harness:              projectConfig.Harness,
+		Addr:              getenv("HARNESS_ORCHESTRATOR_ADDR", ":8090"),
+		SharedSecret:      os.Getenv("HARNESS_LAB_PASSWORD"),
+		CookieName:        getenv("HARNESS_COOKIE_NAME", "harness_auth"),
+		SessionRetention:  sessionRetention,
+		RepoRoot:          getenv("HARNESS_REPO_ROOT", repoRoot),
+		RunscRoot:         getenv("RUNSC_ROOT", "/var/lib/harness/runsc"),
+		SessionsRoot:      sessionsRoot,
+		AgentHomesRoot:    getenv("HARNESS_AGENT_HOMES_ROOT", "/var/lib/harness/agent-homes"),
+		BundleRoot:        getenv("HARNESS_BUNDLE_ROOT", filepath.Join(repoRoot, "bundle", "out")),
+		RootFSPath:        getenv("HARNESS_ROOTFS_PATH", filepath.Join(repoRoot, "sandbox-image", "rootfs")),
+		AgentManifestPath: os.Getenv("HARNESS_AGENT_IMAGE_MANIFEST_PATH"),
+		DBPath:            getenv("HARNESS_DB_PATH", "/var/lib/harness/state/orchestrator.db"),
+		DefaultAgent:      string(defaultDriver),
+		MaxSessions:       maxSessions,
+		RunscNetwork:      "sandbox",
+		RunscOverlay2:     "none",
+		ModelProxy:        projectConfig.Harness.ModelProxy,
+		Harness:           projectConfig.Harness,
 	}
 	cfg.Harness.SessionRetention = Duration{Duration: sessionRetention}
 	cfg.Harness.MaxSessions = maxSessions
@@ -639,7 +633,6 @@ func (c Config) IsolationRoots() IsolationRoots {
 		SessionsRoot:           c.SessionsRoot,
 		AgentHomesRoot:         c.AgentHomesRoot,
 		RunDir:                 c.Harness.RunDir,
-		CheckpointsRoot:        c.CheckpointsRoot,
 		PreparedBundleRoot:     c.BundleRoot,
 		RootFSPath:             c.RootFSPath,
 		DBPath:                 c.DBPath,
@@ -659,7 +652,6 @@ func ValidateIsolationRoots(roots IsolationRoots) (CanonicalIsolationRoots, erro
 		{label: "sessions root", value: roots.SessionsRoot, set: func(path string) { canonical.SessionsRoot = path }},
 		{label: "agent homes root", value: roots.AgentHomesRoot, set: func(path string) { canonical.AgentHomesRoot = path }},
 		{label: "run dir", value: roots.RunDir, set: func(path string) { canonical.RunDir = path }},
-		{label: "checkpoints root", value: roots.CheckpointsRoot, set: func(path string) { canonical.CheckpointsRoot = path }},
 		{label: "prepared bundle root", value: roots.PreparedBundleRoot, set: func(path string) { canonical.PreparedBundleRoot = path }},
 		{label: "rootfs path", value: roots.RootFSPath, set: func(path string) { canonical.RootFSPath = path }},
 	}
@@ -708,7 +700,6 @@ func ValidateIsolationRoots(roots IsolationRoots) (CanonicalIsolationRoots, erro
 		{label: "sessions root", path: canonical.SessionsRoot},
 		{label: "agent homes root", path: canonical.AgentHomesRoot},
 		{label: "run dir", path: canonical.RunDir},
-		{label: "checkpoints root", path: canonical.CheckpointsRoot},
 		{label: "prepared bundle root", path: canonical.PreparedBundleRoot},
 		{label: "rootfs path", path: canonical.RootFSPath},
 		{label: "db state root", path: canonical.DBStateRoot},
@@ -815,8 +806,10 @@ func validateReservedHostRoot(label, path string, roots CanonicalIsolationRoots,
 		{label: "sessions root", path: roots.SessionsRoot},
 		{label: "agent homes root", path: roots.AgentHomesRoot},
 		{label: "run control root", path: filepath.Join(roots.RunDir, "control")},
+		{label: "run runtime root", path: filepath.Join(roots.RunDir, "runtime")},
 		{label: "run bridge root", path: filepath.Join(roots.RunDir, "bridge")},
 		{label: "run network root", path: filepath.Join(roots.RunDir, "network")},
+		{label: "run logs root", path: filepath.Join(roots.RunDir, "logs")},
 	}
 	if roots.SchemaPackRoot != "" {
 		sandboxBindable = append(sandboxBindable, isolationRoot{label: "schema pack root", path: roots.SchemaPackRoot})

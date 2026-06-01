@@ -44,7 +44,6 @@ Useful environment variables:
 - `HARNESS_REPO_ROOT` defaults to the repository root.
 - `HARNESS_SESSIONS_ROOT` defaults to `/var/lib/harness/sessions`.
 - `HARNESS_AGENT_HOMES_ROOT` defaults to `/var/lib/harness/agent-homes`.
-- `HARNESS_CHECKPOINTS_ROOT` defaults to `/var/lib/harness/checkpoints`.
 - `HARNESS_BUNDLE_ROOT` defaults to `<repo>/bundle/out`.
 - `HARNESS_DB_PATH` defaults to `/var/lib/harness/state/orchestrator.db`.
 - `HARNESS_DEFAULT_AGENT` overrides `harness.default_agent`; the checked-in
@@ -172,7 +171,6 @@ bundle/restore smoke tooling has been removed from the runtime surface.
 
 ## Event Streams
 
-- `GET /api/events` - WebSocket compatibility endpoint
 - `GET /api/events/stream?session_id=<id>` - SSE endpoint used by the frontend
 - Artifact watcher events include `artifact.updated` for file create/write metadata and `artifact.deleted` for remove/rename cleanup.
 

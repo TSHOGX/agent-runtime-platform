@@ -822,6 +822,16 @@ func TestValidateIsolationRootsRejectsProxyInternalUnderControlRoot(t *testing.T
 	}
 }
 
+func TestValidateIsolationRootsRejectsProxyInternalUnderLogsRoot(t *testing.T) {
+	roots := isolationRootsForTest(t)
+	roots.ProxyInternalRoot = filepath.Join(roots.RunDir, "logs", "proxy-internal")
+
+	_, err := ValidateIsolationRoots(roots)
+	if err == nil || !strings.Contains(err.Error(), "overlaps sandbox-bindable run logs root") {
+		t.Fatalf("expected proxy internal overlap rejection, got %v", err)
+	}
+}
+
 func TestValidateIsolationRootsRejectsEvidenceUnderSandboxRoot(t *testing.T) {
 	roots := isolationRootsForTest(t)
 	roots.DataVolumeEvidenceRoot = filepath.Join(roots.AgentHomesRoot, "evidence")
@@ -1065,7 +1075,6 @@ func isolationRootsForTest(t *testing.T) IsolationRoots {
 		SessionsRoot:           filepath.Join(base, "sessions"),
 		AgentHomesRoot:         filepath.Join(base, "agent-homes"),
 		RunDir:                 filepath.Join(base, "run"),
-		CheckpointsRoot:        filepath.Join(base, "checkpoints"),
 		PreparedBundleRoot:     filepath.Join(base, "prepared-bundles"),
 		RootFSPath:             filepath.Join(base, "rootfs"),
 		DBPath:                 filepath.Join(base, "state", "orchestrator.db"),
@@ -1077,7 +1086,6 @@ func isolationRootsForTest(t *testing.T) IsolationRoots {
 		roots.SessionsRoot,
 		roots.AgentHomesRoot,
 		roots.RunDir,
-		roots.CheckpointsRoot,
 		roots.PreparedBundleRoot,
 		roots.RootFSPath,
 		filepath.Dir(roots.DBPath),

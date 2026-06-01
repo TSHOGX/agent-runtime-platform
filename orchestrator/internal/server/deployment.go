@@ -3,12 +3,10 @@ package server
 import (
 	"crypto/sha256"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"harness-platform/orchestrator/internal/agents"
@@ -178,7 +176,6 @@ type imageAgentManifest struct {
 	Payload       map[string]any        `json:"-"`
 	Path          string                `json:"-"`
 	Digest        string                `json:"-"`
-	Synthetic     bool                  `json:"-"`
 }
 
 type imageManifestDriver struct {
@@ -213,12 +210,12 @@ func (m imageAgentManifest) driver(driverID string) (imageManifestDriver, bool) 
 
 func (s *Server) loadAgentImageManifest() (imageAgentManifest, error) {
 	path := s.agentImageManifestPath()
+	if strings.TrimSpace(path) == "" {
+		return imageAgentManifest{}, fmt.Errorf("agent image manifest path is required")
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if !s.cfg.RequireAgentManifest && (errors.Is(err, os.ErrNotExist) || path == "") {
-			return s.syntheticAgentImageManifest()
-		}
-		return imageAgentManifest{}, fmt.Errorf("load agent image manifest: %w", err)
+		return imageAgentManifest{}, fmt.Errorf("load agent image manifest %s: %w", path, err)
 	}
 	manifest, err := parseAgentImageManifest(data)
 	if err != nil {
@@ -288,63 +285,8 @@ func validateAgentImageManifestShape(manifest imageAgentManifest) error {
 	return nil
 }
 
-func (s *Server) syntheticAgentImageManifest() (imageAgentManifest, error) {
-	agentConfigs := s.cfg.DeploymentAgents()
-	keys := make([]string, 0, len(agentConfigs))
-	for key, cfg := range agentConfigs {
-		if deploymentConfigEnabled(cfg.Enabled) {
-			keys = append(keys, key)
-		}
-	}
-	sort.Strings(keys)
-	drivers := make([]imageManifestDriver, 0, len(keys))
-	buildDrivers := make([]string, 0, len(keys))
-	for _, key := range keys {
-		cfg := agentConfigs[key]
-		driverID, err := agents.CanonicalDriverID(effectiveString(cfg.DriverID, key))
-		if err != nil {
-			continue
-		}
-		spec, ok := agents.DriverSpecFor(string(driverID))
-		if !ok {
-			continue
-		}
-		driver, err := syntheticManifestDriver(spec)
-		if err != nil {
-			return imageAgentManifest{}, err
-		}
-		drivers = append(drivers, driver)
-		buildDrivers = append(buildDrivers, string(driverID))
-	}
-	manifest := imageAgentManifest{
-		SchemaVersion: 1,
-		BuildInput:    map[string]any{"sandbox_agent_drivers": buildDrivers, "source": "registry_fallback"},
-		Drivers:       drivers,
-		Synthetic:     true,
-	}
-	if len(manifest.Drivers) == 0 {
-		return imageAgentManifest{}, fmt.Errorf("synthetic agent manifest has no drivers")
-	}
-	payload := map[string]any{
-		"schema_version": manifest.SchemaVersion,
-		"build_input":    manifest.BuildInput,
-		"drivers":        drivers,
-	}
-	canonical, err := store.CanonicalSandboxContractPayload(payload)
-	if err != nil {
-		return imageAgentManifest{}, err
-	}
-	manifest.Digest = store.SandboxContractDigest(canonical)
-	manifest.Payload = payload
-	return manifest, nil
-}
-
-func syntheticManifestDriver(spec agents.DriverSpec) (imageManifestDriver, error) {
+func manifestDriverFromSpec(spec agents.DriverSpec) (imageManifestDriver, error) {
 	binaryPath, err := expectedDriverBinaryPath(spec.ID)
-	if err != nil {
-		return imageManifestDriver{}, err
-	}
-	installDigest, err := driverInstallDigest(spec.ID)
 	if err != nil {
 		return imageManifestDriver{}, err
 	}
@@ -353,7 +295,7 @@ func syntheticManifestDriver(spec agents.DriverSpec) (imageManifestDriver, error
 		Label:                 spec.Label,
 		Kind:                  string(spec.Kind),
 		BinaryPath:            binaryPath,
-		InstalledBinaryDigest: installDigest,
+		InstalledBinaryDigest: "",
 		BridgeProtocol:        spec.BridgeProtocol,
 		BridgeProtocolVersion: spec.BridgeProtocolVersion,
 		TurnInputSchema:       spec.TurnInputSchema,
@@ -407,8 +349,8 @@ func (s *Server) validateManifestDriver(manifest imageAgentManifest, driver imag
 	if err := validateDriverPackageFacts(driver, spec.ID); err != nil {
 		return err
 	}
-	if manifest.Synthetic || strings.TrimSpace(s.cfg.RootFSPath) == "" {
-		return nil
+	if strings.TrimSpace(s.cfg.RootFSPath) == "" {
+		return fmt.Errorf("rootfs path is required to validate agent image manifest driver %s", spec.ID)
 	}
 	actualDigest, err := rootfsFileDigest(s.cfg.RootFSPath, driver.BinaryPath)
 	if err != nil {

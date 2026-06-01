@@ -12,5 +12,3 @@ export function buildEventsStreamUrl(sessionId?: string, lastEventId?: number | 
   }
   return url.toString();
 }
-
-export const buildEventsWebSocketUrl = buildEventsStreamUrl;
