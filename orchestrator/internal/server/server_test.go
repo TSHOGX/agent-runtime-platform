@@ -597,6 +597,13 @@ func TestSandboxContractPayloadRequiresRunscPlatformAndSessionMode(t *testing.T)
 		t.Fatalf("expected missing runtime resource runsc platform error, got %v", err)
 	}
 
+	missingDriverStateDigest := details
+	missingDriverStateDigest.DriverStateDigest = ""
+	if _, err := srv.sandboxContractPayload(session, missingDriverStateDigest, runtime.GenerationArtifacts{}, "sha256:resource-identity", sessionRuntimeDataVolumes{}); err == nil || !strings.Contains(err.Error(), "initial driver state digest is required") {
+		t.Fatalf("expected missing driver state digest error, got %v", err)
+	}
+
+	details.DriverStateDigest = "sha256:driver-state"
 	session.Mode = ""
 	if _, err := srv.sandboxContractPayload(session, details, runtime.GenerationArtifacts{}, "sha256:resource-identity", sessionRuntimeDataVolumes{}); err == nil || !strings.Contains(err.Error(), "session mode is required") {
 		t.Fatalf("expected missing session mode error, got %v", err)

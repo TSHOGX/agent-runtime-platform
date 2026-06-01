@@ -1454,15 +1454,7 @@ func (s *Server) sandboxContractPayload(session store.Session, details store.Run
 	providerSpec := deployment.ProviderSpec
 	initialDriverStateDigest := strings.TrimSpace(details.DriverStateDigest)
 	if initialDriverStateDigest == "" {
-		digest, err := sandboxContractDigestForPayload(map[string]any{
-			"schema_version": 1,
-			"driver_id":      driverID,
-			"state_kind":     "missing_driver_state",
-		})
-		if err != nil {
-			return nil, fmt.Errorf("initial driver state digest: %w", err)
-		}
-		initialDriverStateDigest = digest
+		return nil, fmt.Errorf("initial driver state digest is required")
 	}
 	sandboxIP, err := runtimeResourceSandboxIP(details.SandboxIPCIDR)
 	if err != nil {
