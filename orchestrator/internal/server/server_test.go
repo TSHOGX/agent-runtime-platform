@@ -1901,7 +1901,7 @@ SET checkpoint_path = ?
 WHERE generation_id = ?`, checkpointPath, old.GenerationID); err != nil {
 		t.Fatalf("record checkpoint path: %v", err)
 	}
-	runscPath, runscDigest := currentRunscBinaryMetadataForServerTest()
+	runscPath, runscDigest := currentRunscBinaryMetadataForServerTest(t)
 	recordServerRuntimeArtifactsWithRunsc(t, ctx, st, old.GenerationID, "restore_manifest_digest", "runsc test", runscPath, runscDigest)
 	markServerGenerationCheckpointed(t, ctx, st, session.ID, old.GenerationID, time.Now().UTC())
 
@@ -2729,6 +2729,7 @@ func TestSandboxContractPayloadRecordsPiMaterializedConfig(t *testing.T) {
 		BridgeHeartbeat:    20 * time.Second,
 		BridgePollInterval: 5 * time.Millisecond,
 		CommandRunner: serverCommandRunner{outputs: map[string][]byte{
+			"runsc --version": []byte("runsc test"),
 			"ip netns exec " + details.NetnsName + " curl -sS --max-time 2 -o /dev/null -w %{http_code} " + strings.TrimRight(details.ProbeURL, "/") + "/healthz": []byte("200"),
 		}},
 	})
@@ -3689,25 +3690,23 @@ func TestDestroyReclaimableGenerationResourcesRemovesFilesystemWithRealRuntime(t
 		t.Fatalf("get runtime generation details: %v", err)
 	}
 	createServerGenerationFilesystem(t, details)
-	currentRunscBinary := "runsc"
-	if path, err := exec.LookPath("runsc"); err == nil {
-		if canonical, err := filepath.EvalSymlinks(path); err == nil {
-			currentRunscBinary = canonical
-		} else {
-			currentRunscBinary = filepath.Clean(path)
-		}
-	}
+	currentRunscBinary, _ := currentRunscBinaryMetadataForServerTest(t)
 
 	realRuntime := runtime.New(runtime.Config{
 		RunscNetwork:  "sandbox",
 		RunscOverlay2: "none",
 		RunscRoot:     filepath.Join(dir, "runsc-root"),
 		RunDir:        cfg.Harness.RunDir,
-		CommandRunner: serverCommandRunner{fail: map[string]error{
-			currentRunscBinary + " -root " + filepath.Join(dir, "runsc-root") + " state " + details.RunscContainerID: errors.New("not found"),
-			"ip link show " + details.HostVeth:                                         errors.New("does not exist"),
-			"nft list table inet " + runtimeResourceNftTableName(details.GenerationID): errors.New("No such table"),
-		}},
+		CommandRunner: serverCommandRunner{
+			outputs: map[string][]byte{
+				"runsc --version": []byte("runsc test"),
+			},
+			fail: map[string]error{
+				currentRunscBinary + " -root " + filepath.Join(dir, "runsc-root") + " state " + details.RunscContainerID: errors.New("not found"),
+				"ip link show " + details.HostVeth:                                         errors.New("does not exist"),
+				"nft list table inet " + runtimeResourceNftTableName(details.GenerationID): errors.New("No such table"),
+			},
+		},
 	})
 	srv := &Server{
 		cfg:     cfg,
@@ -5007,18 +5006,19 @@ func recordServerRuntimeArtifactsWithRunsc(t *testing.T, ctx context.Context, st
 	}
 }
 
-func currentRunscBinaryMetadataForServerTest() (string, string) {
+func currentRunscBinaryMetadataForServerTest(t *testing.T) (string, string) {
+	t.Helper()
 	path, err := exec.LookPath("runsc")
 	if err != nil {
-		return "runsc", "unavailable:" + err.Error()
+		t.Fatalf("lookup runsc binary: %v", err)
 	}
 	canonical, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		canonical = filepath.Clean(path)
+		t.Fatalf("resolve runsc binary %q: %v", path, err)
 	}
 	data, err := os.ReadFile(canonical)
 	if err != nil {
-		return canonical, "unavailable:" + err.Error()
+		t.Fatalf("read runsc binary %q: %v", canonical, err)
 	}
 	sum := sha256.Sum256(data)
 	return canonical, fmt.Sprintf("sha256:%x", sum[:])

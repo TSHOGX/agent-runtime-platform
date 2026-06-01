@@ -364,6 +364,7 @@ func TestValidateCheckpointRestoreRejectsExtraCheckpointImageManifestMismatch(t 
 
 func TestRuntimeStartRestoreRejectsMetadataBeforeRunscRestore(t *testing.T) {
 	dir := t.TempDir()
+	currentRunscPath, currentRunscDigest := installFakeRunsc(t, dir, "current")
 	checkpointPath := filepath.Join(dir, "checkpoint")
 	writeCheckpointFiles(t, checkpointPath)
 	runner := &recordingCommandRunner{
@@ -400,7 +401,9 @@ func TestRuntimeStartRestoreRejectsMetadataBeforeRunscRestore(t *testing.T) {
 	details.CheckpointBundleDigest = "bundle_digest"
 	details.CheckpointRuntimeConfigDigest = "runtime_config_digest"
 	details.CheckpointControlManifestDigest = "control_manifest_digest"
-	currentRunscPath, currentRunscDigest := runscBinaryMetadata()
+	details.RunscVersion = "runsc current"
+	details.RunscBinaryPath = currentRunscPath
+	details.RunscBinaryDigest = currentRunscDigest
 	artifacts := restorePreparedArtifacts(details, "runsc current", currentRunscPath, currentRunscDigest)
 
 	res := rt.Start(context.Background(), StartRequest{
@@ -505,6 +508,9 @@ func TestRuntimeStartRestoreRejectsRunscBinaryMismatchBeforeRunscRestore(t *test
 	details.CheckpointBundleDigest = "bundle_digest"
 	details.CheckpointRuntimeConfigDigest = "runtime_config_digest"
 	details.CheckpointControlManifestDigest = "control_manifest_digest"
+	details.RunscVersion = "runsc current"
+	details.RunscBinaryPath = runscPath
+	details.RunscBinaryDigest = digest
 	artifacts := restorePreparedArtifacts(details, "runsc current", runscPath, digest)
 
 	res := rt.Start(context.Background(), StartRequest{
@@ -875,10 +881,14 @@ func TestProbeSandboxNetworkRetriesAndUsesConfiguredHealthzStatuses(t *testing.T
 
 func TestDestroyGenerationResourcesDeletesPerGenerationNetwork(t *testing.T) {
 	dir := t.TempDir()
+	runscPath, runscDigest := installFakeRunsc(t, dir, "cleanup")
 	runscRoot := filepath.Join(dir, "runsc-root")
 	runner := &recordingCommandRunner{
+		outputs: map[string][]byte{
+			"runsc --version": []byte("runsc cleanup"),
+		},
 		fail: map[string]error{
-			"runsc -root " + runscRoot + " state harness-gen-gen_a": errors.New("not found"),
+			runscPath + " -root " + runscRoot + " state harness-gen-gen_a": errors.New("not found"),
 			"ip link show hgenah":                   errors.New("does not exist"),
 			"nft list table inet harness_gen_gen_a": errors.New("No such table"),
 		},
@@ -894,6 +904,9 @@ func TestDestroyGenerationResourcesDeletesPerGenerationNetwork(t *testing.T) {
 	details.RunscNetwork = "sandbox"
 	details.NetnsName = "harness-gen-a"
 	details.HostVeth = "hgenah"
+	details.RunscVersion = "runsc cleanup"
+	details.RunscBinaryPath = runscPath
+	details.RunscBinaryDigest = runscDigest
 
 	cleanup, err := rt.DestroyGenerationResources(context.Background(), details)
 	if err != nil {
@@ -907,18 +920,49 @@ func TestDestroyGenerationResourcesDeletesPerGenerationNetwork(t *testing.T) {
 	}
 
 	want := []string{
-		"runsc -root " + filepath.Join(dir, "runsc-root") + " kill harness-gen-gen_a KILL",
-		"runsc -root " + filepath.Join(dir, "runsc-root") + " delete -force harness-gen-gen_a",
+		"runsc --version",
+		runscPath + " -root " + filepath.Join(dir, "runsc-root") + " kill harness-gen-gen_a KILL",
+		runscPath + " -root " + filepath.Join(dir, "runsc-root") + " delete -force harness-gen-gen_a",
 		"nft delete table inet harness_gen_gen_a",
 		"ip link delete hgenah",
 		"ip netns delete harness-gen-a",
-		"runsc -root " + filepath.Join(dir, "runsc-root") + " state harness-gen-gen_a",
+		runscPath + " -root " + filepath.Join(dir, "runsc-root") + " state harness-gen-gen_a",
 		"ip netns list",
 		"ip link show hgenah",
 		"nft list table inet harness_gen_gen_a",
 	}
 	if got := runner.Commands(); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("unexpected commands:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func TestDestroyGenerationResourcesRejectsMissingRunscPin(t *testing.T) {
+	dir := t.TempDir()
+	runscRoot := filepath.Join(dir, "runsc-root")
+	runner := &recordingCommandRunner{}
+	rt := New(Config{
+		RunscNetwork:  "host",
+		RunscRoot:     runscRoot,
+		RunDir:        filepath.Join(dir, "run"),
+		CommandRunner: runner,
+	})
+	details := testGenerationDetails(dir, "gen_missing_pin")
+	details.RunscNetwork = "host"
+
+	cleanup, err := rt.DestroyGenerationResources(context.Background(), details)
+	if err == nil {
+		t.Fatal("expected missing runsc pin error")
+	}
+	if !strings.Contains(err.Error(), "runsc pin missing") || !strings.Contains(err.Error(), "runsc_version") {
+		t.Fatalf("expected missing runsc pin error, got %v", err)
+	}
+	if cleanup.RunscDeleted {
+		t.Fatalf("runsc deletion should fail without recorded pin: %+v", cleanup)
+	}
+	for _, command := range runner.Commands() {
+		if strings.Contains(command, " -root "+runscRoot+" ") {
+			t.Fatalf("runsc command executed despite missing pin: %v", runner.Commands())
+		}
 	}
 }
 
@@ -980,18 +1024,27 @@ func TestDestroyGenerationResourcesReturnsCurrentPinMismatchWhenCurrentDeleteFai
 
 func TestDestroyGenerationResourcesDeletesFilesystemInNonSandboxMode(t *testing.T) {
 	dir := t.TempDir()
+	runscPath, runscDigest := installFakeRunsc(t, dir, "cleanup")
 	runscRoot := filepath.Join(dir, "runsc-root")
 	rt := New(Config{
 		RunscNetwork: "host",
 		RunscRoot:    runscRoot,
 		RunDir:       filepath.Join(dir, "run"),
-		CommandRunner: &recordingCommandRunner{fail: map[string]error{
-			"runsc -root " + runscRoot + " state harness-gen-gen_cleanup": errors.New("not found"),
-		}},
+		CommandRunner: &recordingCommandRunner{
+			outputs: map[string][]byte{
+				"runsc --version": []byte("runsc cleanup"),
+			},
+			fail: map[string]error{
+				runscPath + " -root " + runscRoot + " state harness-gen-gen_cleanup": errors.New("not found"),
+			},
+		},
 	})
 	details := testGenerationDetails(dir, "gen_cleanup")
 	details.RunscNetwork = "host"
 	details.NetworkHostsPath = filepath.Join(dir, "run", "network", "gen-"+details.GenerationID, "hosts")
+	details.RunscVersion = "runsc cleanup"
+	details.RunscBinaryPath = runscPath
+	details.RunscBinaryDigest = runscDigest
 	createGenerationFilesystem(t, details)
 
 	cleanup, err := rt.DestroyGenerationResources(context.Background(), details)
@@ -1089,11 +1142,15 @@ func TestDestroyGenerationResourcesRejectsUnsafeFilesystemPaths(t *testing.T) {
 
 func TestDestroyGenerationResourcesCleansFilesystemWithIncompleteSandboxMetadata(t *testing.T) {
 	dir := t.TempDir()
+	runscPath, runscDigest := installFakeRunsc(t, dir, "cleanup")
 	runscRoot := filepath.Join(dir, "runsc-root")
 	runner := &recordingCommandRunner{
+		outputs: map[string][]byte{
+			"runsc --version": []byte("runsc cleanup"),
+		},
 		fail: map[string]error{
-			"runsc -root " + runscRoot + " state harness-gen-gen_missing_net": errors.New("not found"),
-			"nft list table inet harness_gen_gen_missing_net":                 errors.New("No such table"),
+			runscPath + " -root " + runscRoot + " state harness-gen-gen_missing_net": errors.New("not found"),
+			"nft list table inet harness_gen_gen_missing_net":                        errors.New("No such table"),
 		},
 	}
 	rt := New(Config{
@@ -1106,6 +1163,9 @@ func TestDestroyGenerationResourcesCleansFilesystemWithIncompleteSandboxMetadata
 	details.RunscNetwork = "sandbox"
 	details.NetnsName = ""
 	details.HostVeth = ""
+	details.RunscVersion = "runsc cleanup"
+	details.RunscBinaryPath = runscPath
+	details.RunscBinaryDigest = runscDigest
 	createGenerationFilesystem(t, details)
 
 	cleanup, err := rt.DestroyGenerationResources(context.Background(), details)
@@ -1121,10 +1181,11 @@ func TestDestroyGenerationResourcesCleansFilesystemWithIncompleteSandboxMetadata
 	assertGenerationFilesystemMissing(t, generationFilesystemPaths(details))
 
 	want := []string{
-		"runsc -root " + filepath.Join(dir, "runsc-root") + " kill harness-gen-gen_missing_net KILL",
-		"runsc -root " + filepath.Join(dir, "runsc-root") + " delete -force harness-gen-gen_missing_net",
+		"runsc --version",
+		runscPath + " -root " + filepath.Join(dir, "runsc-root") + " kill harness-gen-gen_missing_net KILL",
+		runscPath + " -root " + filepath.Join(dir, "runsc-root") + " delete -force harness-gen-gen_missing_net",
 		"nft delete table inet harness_gen_gen_missing_net",
-		"runsc -root " + filepath.Join(dir, "runsc-root") + " state harness-gen-gen_missing_net",
+		runscPath + " -root " + filepath.Join(dir, "runsc-root") + " state harness-gen-gen_missing_net",
 		"nft list table inet harness_gen_gen_missing_net",
 	}
 	if got := runner.Commands(); strings.Join(got, "\n") != strings.Join(want, "\n") {

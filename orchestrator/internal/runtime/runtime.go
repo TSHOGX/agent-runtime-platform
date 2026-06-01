@@ -940,12 +940,15 @@ func (r *Runtime) deleteNetworkResource(ctx context.Context, name string, args [
 }
 
 func (r *Runtime) deleteGenerationRunscContainer(ctx context.Context, details store.RuntimeGenerationDetails, containerID string) (string, string, error) {
-	if !hasRecordedRunscBinaryPin(details) {
-		return "runsc", "", r.deleteRunscContainer(ctx, "runsc", containerID)
-	}
-	current := r.currentRunscPin(ctx)
-	currentBinary := defaultString(current.BinaryPath, "runsc")
 	pinned := runscPinFromDetails(details)
+	if err := requireCompleteRunscPin("generation details", pinned); err != nil {
+		return "", "", err
+	}
+	current, err := r.currentRunscPin(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	currentBinary := current.BinaryPath
 	if cleanupRunscPinMatches(current, pinned) {
 		return currentBinary, "", r.deleteRunscContainer(ctx, currentBinary, containerID)
 	}
@@ -958,10 +961,6 @@ func (r *Runtime) deleteGenerationRunscContainer(ctx context.Context, details st
 		currentErr = fmt.Errorf("current runsc reported container missing under mismatched pin")
 	}
 	return currentBinary, evidence, fmt.Errorf("current runsc pin mismatch; current delete failed: %w", currentErr)
-}
-
-func hasRecordedRunscBinaryPin(details store.RuntimeGenerationDetails) bool {
-	return strings.TrimSpace(details.RunscBinaryPath) != "" && strings.TrimSpace(details.RunscBinaryDigest) != ""
 }
 
 func cleanupRunscPinMatches(current, pinned runscPin) bool {
@@ -1099,7 +1098,10 @@ func (r *Runtime) renderGenerationArtifacts(ctx context.Context, req StartReques
 	if err := writeJSONFileAtomic(details.SpecPath, spec, 0o644); err != nil {
 		return GenerationArtifacts{}, fmt.Errorf("write runtime spec: %w", err)
 	}
-	currentRunsc := r.currentRunscPin(ctx)
+	currentRunsc, err := r.currentRunscPin(ctx)
+	if err != nil {
+		return GenerationArtifacts{}, err
+	}
 	bundleDigestPayload, err := canonicalJSON(map[string]any{
 		"bundle_dir":  filepath.Clean(details.BundleDirPath),
 		"rootfs":      spec.Root.Path,
@@ -1786,22 +1788,33 @@ func formatSeconds(value time.Duration) string {
 	return strconv.FormatFloat(float64(value)/float64(time.Second), 'f', -1, 64)
 }
 
-func (r *Runtime) runscVersion(ctx context.Context) string {
+func (r *Runtime) runscVersion(ctx context.Context) (string, error) {
 	out, err := r.runner.CombinedOutput(ctx, "runsc", "--version")
 	if err != nil {
-		return "unknown"
+		return "", fmt.Errorf("lookup current runsc version: %w: %s", err, strings.TrimSpace(string(out)))
 	}
-	return strings.TrimSpace(strings.Join(strings.Fields(string(out)), " "))
+	version := strings.TrimSpace(strings.Join(strings.Fields(string(out)), " "))
+	if version == "" {
+		return "", fmt.Errorf("lookup current runsc version: empty output")
+	}
+	return version, nil
 }
 
-func (r *Runtime) currentRunscPin(ctx context.Context) runscPin {
-	path, digest := runscBinaryMetadata()
+func (r *Runtime) currentRunscPin(ctx context.Context) (runscPin, error) {
+	path, digest, err := runscBinaryMetadata()
+	if err != nil {
+		return runscPin{}, err
+	}
+	version, err := r.runscVersion(ctx)
+	if err != nil {
+		return runscPin{}, err
+	}
 	return runscPin{
 		Platform:     defaultRunscPlatform,
-		Version:      r.runscVersion(ctx),
+		Version:      version,
 		BinaryPath:   path,
 		BinaryDigest: digest,
-	}
+	}, nil
 }
 
 func effectiveRunscPlatform(details store.RuntimeGenerationDetails) string {
@@ -1827,18 +1840,24 @@ func runscPinFromDetails(details store.RuntimeGenerationDetails) runscPin {
 }
 
 func (r *Runtime) verifyLaunchRunscPin(ctx context.Context, operation string, details store.RuntimeGenerationDetails, artifacts GenerationArtifacts) (runscPin, error) {
-	current := r.currentRunscPin(ctx)
+	current, err := r.currentRunscPin(ctx)
+	if err != nil {
+		return runscPin{}, err
+	}
 	if err := verifyRequiredRunscPin(operation, "prepared artifacts", current, runscPinFromArtifacts(details, artifacts)); err != nil {
 		return current, err
 	}
-	if err := verifyOptionalRunscPin(operation, "resource instance", current, runscPinFromDetails(details)); err != nil {
+	if err := verifyRequiredRunscPin(operation, "resource instance", current, runscPinFromDetails(details)); err != nil {
 		return current, err
 	}
 	return current, nil
 }
 
 func (r *Runtime) verifyGenerationRunscPin(ctx context.Context, operation string, details store.RuntimeGenerationDetails) (runscPin, error) {
-	current := r.currentRunscPin(ctx)
+	current, err := r.currentRunscPin(ctx)
+	if err != nil {
+		return runscPin{}, err
+	}
 	if err := verifyRequiredRunscPin(operation, "resource instance", current, runscPinFromDetails(details)); err != nil {
 		return current, err
 	}
@@ -1867,42 +1886,38 @@ func verifyRequiredRunscPin(operation, source string, current, pinned runscPin) 
 	return nil
 }
 
-func verifyOptionalRunscPin(operation, source string, current, pinned runscPin) error {
+func requireCompleteRunscPin(source string, pinned runscPin) error {
 	checks := []struct {
-		field   string
-		current string
-		pinned  string
+		field string
+		value string
 	}{
-		{"runsc_platform", current.Platform, pinned.Platform},
-		{"runsc_version", current.Version, pinned.Version},
-		{"runsc_binary_path", current.BinaryPath, pinned.BinaryPath},
-		{"runsc_binary_digest", current.BinaryDigest, pinned.BinaryDigest},
+		{"runsc_platform", pinned.Platform},
+		{"runsc_version", pinned.Version},
+		{"runsc_binary_path", pinned.BinaryPath},
+		{"runsc_binary_digest", pinned.BinaryDigest},
 	}
 	for _, check := range checks {
-		if strings.TrimSpace(check.pinned) == "" {
-			continue
-		}
-		if check.current != check.pinned {
-			return fmt.Errorf("runsc pin mismatch before %s: %s %s current %q pinned %q", operation, source, check.field, check.current, check.pinned)
+		if strings.TrimSpace(check.value) == "" {
+			return fmt.Errorf("runsc pin missing: %s %s", source, check.field)
 		}
 	}
 	return nil
 }
 
-func runscBinaryMetadata() (string, string) {
+func runscBinaryMetadata() (string, string, error) {
 	path, err := exec.LookPath("runsc")
 	if err != nil {
-		return "runsc", "unavailable:" + err.Error()
+		return "", "", fmt.Errorf("lookup current runsc binary: %w", err)
 	}
 	canonical, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		canonical = filepath.Clean(path)
+		return "", "", fmt.Errorf("resolve current runsc binary %q: %w", path, err)
 	}
 	digest, err := fileSHA256(canonical)
 	if err != nil {
-		return canonical, "unavailable:" + err.Error()
+		return "", "", fmt.Errorf("hash current runsc binary %q: %w", canonical, err)
 	}
-	return canonical, "sha256:" + digest
+	return canonical, "sha256:" + digest, nil
 }
 
 func defaultString(value, defaultValue string) string {
