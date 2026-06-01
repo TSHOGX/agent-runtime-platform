@@ -52,7 +52,7 @@ type Config struct {
 const controlFileName = "session.json"
 const checkpointImageManifestFileName = "harness-checkpoint-manifest.json"
 const checkpointImageManifestVersion = 1
-const defaultRunscPlatform = "systrap"
+const supportedRunscPlatform = "systrap"
 const runscRunningProofTimeout = 2 * time.Second
 const runscRunningProofPollInterval = 25 * time.Millisecond
 
@@ -442,7 +442,11 @@ func (r *Runtime) DestroyGenerationResources(ctx context.Context, details store.
 		cleanup.RunscDeleted = true
 	}
 
-	if strings.EqualFold(strings.TrimSpace(r.runscNetwork(details)), "sandbox") {
+	runscNetwork, err := r.runscNetwork(details)
+	if err != nil {
+		return cleanup, err
+	}
+	if strings.EqualFold(runscNetwork, "sandbox") {
 		tableName := generationNftTableName(details)
 		if err := r.deleteNetworkResource(ctx, "nft", []string{"delete", "table", "inet", tableName}, true); err != nil {
 			errs = append(errs, err)
@@ -549,7 +553,11 @@ func (r *Runtime) recordGenerationResourceAbsenceEvidence(ctx context.Context, d
 		return err
 	}
 	cleanup.RunscState = appendEvidence(runscState, cleanup.RunscPinEvidence)
-	if strings.EqualFold(strings.TrimSpace(r.runscNetwork(details)), "sandbox") {
+	runscNetwork, err := r.runscNetwork(details)
+	if err != nil {
+		return err
+	}
+	if strings.EqualFold(runscNetwork, "sandbox") {
 		ipNetns, err := r.netnsAbsenceEvidence(ctx, details.NetnsName)
 		if err != nil {
 			return err
@@ -652,7 +660,11 @@ func (r *Runtime) runtimePostStartProof(ctx context.Context, details store.Runti
 		return store.RuntimeResourcePostStartProof{}, err
 	}
 	ipNetns, ipLink, nft := "network_namespace:present; check=runsc_network_not_sandbox", "host_veth:present; check=runsc_network_not_sandbox", "nft_table:present; check=runsc_network_not_sandbox"
-	if strings.EqualFold(strings.TrimSpace(r.runscNetwork(details)), "sandbox") {
+	runscNetwork, err := r.runscNetwork(details)
+	if err != nil {
+		return store.RuntimeResourcePostStartProof{}, err
+	}
+	if strings.EqualFold(runscNetwork, "sandbox") {
 		ipNetns, err = r.netnsPresenceEvidence(ctx, details.NetnsName)
 		if err != nil {
 			return store.RuntimeResourcePostStartProof{}, err
@@ -1102,6 +1114,14 @@ func (r *Runtime) renderGenerationArtifacts(ctx context.Context, req StartReques
 	if err != nil {
 		return GenerationArtifacts{}, err
 	}
+	runscNetwork, err := r.runscNetwork(details)
+	if err != nil {
+		return GenerationArtifacts{}, err
+	}
+	runscOverlay2, err := r.runscOverlay2(details)
+	if err != nil {
+		return GenerationArtifacts{}, err
+	}
 	bundleDigestPayload, err := canonicalJSON(map[string]any{
 		"bundle_dir":  filepath.Clean(details.BundleDirPath),
 		"rootfs":      spec.Root.Path,
@@ -1112,8 +1132,8 @@ func (r *Runtime) renderGenerationArtifacts(ctx context.Context, req StartReques
 	}
 	bundleDigest := digestHex(bundleDigestPayload)
 	runtimeConfigDigestPayload, err := canonicalJSON(map[string]any{
-		"runsc_network":       r.runscNetwork(details),
-		"runsc_overlay2":      r.runscOverlay2(details),
+		"runsc_network":       runscNetwork,
+		"runsc_overlay2":      runscOverlay2,
 		"runsc_platform":      currentRunsc.Platform,
 		"runsc_binary_path":   currentRunsc.BinaryPath,
 		"runsc_binary_digest": currentRunsc.BinaryDigest,
@@ -1373,10 +1393,17 @@ func (r *Runtime) buildGenerationManifest(req StartRequest, driverSpec agents.Dr
 	if !isSandboxIsolatedDriverSpec(driverSpec) {
 		return controlManifest{}, fmt.Errorf("unsupported driver %q", selectedDriver)
 	}
+	if err := validateSandboxContractVersion(details); err != nil {
+		return controlManifest{}, err
+	}
+	runscPlatform, err := requiredRunscPlatform(details)
+	if err != nil {
+		return controlManifest{}, err
+	}
 	manifest := controlManifest{
 		SessionID:                req.SessionID,
 		GenerationID:             details.GenerationID,
-		SandboxContractVersion:   defaultString(details.SandboxContractVersion, store.SandboxContractVersion),
+		SandboxContractVersion:   strings.TrimSpace(details.SandboxContractVersion),
 		CreatedAt:                time.Now().UTC().Format(time.RFC3339Nano),
 		AttemptID:                "attempt-0",
 		NetworkProfileID:         details.NetworkProfileID,
@@ -1384,7 +1411,7 @@ func (r *Runtime) buildGenerationManifest(req StartRequest, driverSpec agents.Dr
 		DriverID:                 selectedDriver,
 		BridgeProtocolVersion:    driverSpec.BridgeProtocolVersion,
 		TurnInputSchema:          driverSpec.TurnInputSchema,
-		RunscPlatform:            effectiveRunscPlatform(details),
+		RunscPlatform:            runscPlatform,
 		RunscVersion:             runscVersion,
 		SandboxModelProxyBaseURL: details.ManifestAnthropicBaseURL,
 		Model:                    details.Model,
@@ -1449,8 +1476,11 @@ func validateGenerationDetails(req StartRequest) error {
 	if !isSandboxIsolatedRequest(req) {
 		return fmt.Errorf("unsupported driver %q", selectedDriver)
 	}
-	if platform := effectiveRunscPlatform(details); platform != defaultRunscPlatform {
-		return fmt.Errorf("unsupported runsc platform %q", platform)
+	if err := validateSandboxContractVersion(details); err != nil {
+		return err
+	}
+	if _, err := requiredRunscPlatform(details); err != nil {
+		return err
 	}
 	if details.RequiresSecretDrop ||
 		strings.TrimSpace(details.SecretsDirPath) != "" ||
@@ -1592,6 +1622,10 @@ func (r *Runtime) renderSandboxIsolatedRuntimeSpec(req StartRequest, driverSpec 
 	if err != nil {
 		return runtimeSpec{}, "", err
 	}
+	bridgeProbeConfig, err := r.requiredBridgeProbeConfig()
+	if err != nil {
+		return runtimeSpec{}, "", err
+	}
 	spec.OCIVersion = "1.0.2"
 	spec.Process.Terminal = false
 	spec.Process.User = specUser{UID: identity.UID, GID: identity.GID, AdditionalGIDs: identity.SupplementalGIDs}
@@ -1617,11 +1651,11 @@ func (r *Runtime) renderSandboxIsolatedRuntimeSpec(req StartRequest, driverSpec 
 		fmt.Sprintf("HARNESS_AGENT_UID=%d", identity.UID),
 		fmt.Sprintf("HARNESS_AGENT_GID=%d", identity.GID),
 		"HARNESS_BRIDGE_DIR=" + bridge.BridgeMountDestination,
-		"HARNESS_BRIDGE_MODE=" + defaultString(r.cfg.BridgeMode, "claim-loop"),
-		"HARNESS_BRIDGE_HEARTBEAT_INTERVAL=" + formatSeconds(defaultDuration(r.cfg.BridgeHeartbeat, 30*time.Second)),
-		"HARNESS_BRIDGE_POLL_INTERVAL=" + formatSeconds(defaultDuration(r.cfg.BridgePollInterval, 5*time.Millisecond)),
-		"HARNESS_BRIDGE_IDLE_INTERVAL=" + formatSeconds(defaultDuration(r.cfg.BridgePollInterval, 5*time.Millisecond)),
-		"HARNESS_PROBE_HEALTHZ_STATUSES=" + joinInts(defaultIntSlice(r.cfg.ProbeHealthzStatuses, []int{200})),
+		"HARNESS_BRIDGE_MODE=" + bridgeProbeConfig.bridgeMode,
+		"HARNESS_BRIDGE_HEARTBEAT_INTERVAL=" + formatSeconds(bridgeProbeConfig.heartbeat),
+		"HARNESS_BRIDGE_POLL_INTERVAL=" + formatSeconds(bridgeProbeConfig.pollInterval),
+		"HARNESS_BRIDGE_IDLE_INTERVAL=" + formatSeconds(bridgeProbeConfig.pollInterval),
+		"HARNESS_PROBE_HEALTHZ_STATUSES=" + joinInts(bridgeProbeConfig.healthzStatuses),
 	}
 	if layout, ok := agents.DriverRuntimeLayoutSpecFor(agents.ID(selectedDriver)); ok {
 		spec.Process.Env = append(spec.Process.Env, driverRuntimeEnv(layout.Env)...)
@@ -1650,7 +1684,11 @@ func (r *Runtime) renderSandboxIsolatedRuntimeSpec(req StartRequest, driverSpec 
 			{"type": "mount"},
 		},
 	}
-	if strings.EqualFold(strings.TrimSpace(r.runscNetwork(details)), "sandbox") {
+	runscNetwork, err := r.runscNetwork(details)
+	if err != nil {
+		return runtimeSpec{}, "", err
+	}
+	if strings.EqualFold(runscNetwork, "sandbox") {
 		if strings.TrimSpace(details.NetnsPath) == "" {
 			return runtimeSpec{}, "", fmt.Errorf("sandbox generation requires netns path")
 		}
@@ -1774,11 +1812,38 @@ func joinInts(values []int) string {
 	return strings.Join(parts, ",")
 }
 
-func defaultDuration(value, defaultValue time.Duration) time.Duration {
-	if value > 0 {
-		return value
+type bridgeProbeRuntimeConfig struct {
+	bridgeMode      string
+	heartbeat       time.Duration
+	pollInterval    time.Duration
+	healthzStatuses []int
+}
+
+func (r *Runtime) requiredBridgeProbeConfig() (bridgeProbeRuntimeConfig, error) {
+	cfg := bridgeProbeRuntimeConfig{
+		bridgeMode:      strings.TrimSpace(r.cfg.BridgeMode),
+		heartbeat:       r.cfg.BridgeHeartbeat,
+		pollInterval:    r.cfg.BridgePollInterval,
+		healthzStatuses: append([]int(nil), r.cfg.ProbeHealthzStatuses...),
 	}
-	return defaultValue
+	if cfg.bridgeMode == "" {
+		return bridgeProbeRuntimeConfig{}, fmt.Errorf("bridge mode is required")
+	}
+	if cfg.heartbeat <= 0 {
+		return bridgeProbeRuntimeConfig{}, fmt.Errorf("bridge heartbeat interval is required")
+	}
+	if cfg.pollInterval <= 0 {
+		return bridgeProbeRuntimeConfig{}, fmt.Errorf("bridge poll interval is required")
+	}
+	if len(cfg.healthzStatuses) == 0 {
+		return bridgeProbeRuntimeConfig{}, fmt.Errorf("probe healthz statuses are required")
+	}
+	for _, status := range cfg.healthzStatuses {
+		if status < 100 || status > 599 {
+			return bridgeProbeRuntimeConfig{}, fmt.Errorf("invalid probe healthz status %d", status)
+		}
+	}
+	return cfg, nil
 }
 
 func formatSeconds(value time.Duration) string {
@@ -1810,20 +1875,38 @@ func (r *Runtime) currentRunscPin(ctx context.Context) (runscPin, error) {
 		return runscPin{}, err
 	}
 	return runscPin{
-		Platform:     defaultRunscPlatform,
+		Platform:     supportedRunscPlatform,
 		Version:      version,
 		BinaryPath:   path,
 		BinaryDigest: digest,
 	}, nil
 }
 
-func effectiveRunscPlatform(details store.RuntimeGenerationDetails) string {
-	return defaultString(details.RunscPlatform, defaultRunscPlatform)
+func validateSandboxContractVersion(details store.RuntimeGenerationDetails) error {
+	contract := strings.TrimSpace(details.SandboxContractVersion)
+	if contract == "" {
+		return fmt.Errorf("sandbox contract version is required")
+	}
+	if contract != store.SandboxContractVersion {
+		return fmt.Errorf("unsupported sandbox contract version %q", contract)
+	}
+	return nil
+}
+
+func requiredRunscPlatform(details store.RuntimeGenerationDetails) (string, error) {
+	platform := strings.TrimSpace(details.RunscPlatform)
+	if platform == "" {
+		return "", fmt.Errorf("runsc platform is required")
+	}
+	if platform != supportedRunscPlatform {
+		return "", fmt.Errorf("unsupported runsc platform %q", platform)
+	}
+	return platform, nil
 }
 
 func runscPinFromArtifacts(details store.RuntimeGenerationDetails, artifacts GenerationArtifacts) runscPin {
 	return runscPin{
-		Platform:     effectiveRunscPlatform(details),
+		Platform:     strings.TrimSpace(details.RunscPlatform),
 		Version:      artifacts.RunscVersion,
 		BinaryPath:   artifacts.RunscBinaryPath,
 		BinaryDigest: artifacts.RunscBinaryDigest,
@@ -1832,7 +1915,7 @@ func runscPinFromArtifacts(details store.RuntimeGenerationDetails, artifacts Gen
 
 func runscPinFromDetails(details store.RuntimeGenerationDetails) runscPin {
 	return runscPin{
-		Platform:     effectiveRunscPlatform(details),
+		Platform:     strings.TrimSpace(details.RunscPlatform),
 		Version:      details.RunscVersion,
 		BinaryPath:   details.RunscBinaryPath,
 		BinaryDigest: details.RunscBinaryDigest,
@@ -1927,12 +2010,20 @@ func defaultString(value, defaultValue string) string {
 	return strings.TrimSpace(value)
 }
 
-func (r *Runtime) runscNetwork(details store.RuntimeGenerationDetails) string {
-	return defaultString(details.RunscNetwork, r.cfg.RunscNetwork)
+func (r *Runtime) runscNetwork(details store.RuntimeGenerationDetails) (string, error) {
+	network := strings.TrimSpace(details.RunscNetwork)
+	if network == "" {
+		return "", fmt.Errorf("runsc network is required")
+	}
+	return network, nil
 }
 
-func (r *Runtime) runscOverlay2(details store.RuntimeGenerationDetails) string {
-	return defaultString(details.RunscOverlay2, r.cfg.RunscOverlay2)
+func (r *Runtime) runscOverlay2(details store.RuntimeGenerationDetails) (string, error) {
+	overlay2 := strings.TrimSpace(details.RunscOverlay2)
+	if overlay2 == "" {
+		return "", fmt.Errorf("runsc overlay2 is required")
+	}
+	return overlay2, nil
 }
 
 type runtimeSandboxIdentity struct {
@@ -2240,7 +2331,11 @@ func ensureSandboxOwnership(path string, info os.FileInfo, uid, gid int) error {
 }
 
 func (r *Runtime) ensureSandboxNetwork(ctx context.Context, details store.RuntimeGenerationDetails) error {
-	if !strings.EqualFold(strings.TrimSpace(r.runscNetwork(details)), "sandbox") {
+	runscNetwork, err := r.runscNetwork(details)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(runscNetwork, "sandbox") {
 		return nil
 	}
 	if strings.TrimSpace(details.NetnsName) == "" ||
@@ -2481,13 +2576,17 @@ func (r *Runtime) probeSandboxNetwork(ctx context.Context, details store.Runtime
 
 func (r *Runtime) runSandboxNetworkProbeOnce(ctx context.Context, details store.RuntimeGenerationDetails) error {
 	baseURL := strings.TrimRight(details.ProbeURL, "/")
+	bridgeProbeConfig, err := r.requiredBridgeProbeConfig()
+	if err != nil {
+		return err
+	}
 	probes := []struct {
 		args           []string
 		acceptStatuses []int
 	}{
 		{
 			args:           []string{"netns", "exec", details.NetnsName, "curl", "-sS", "--max-time", "2", "-o", "/dev/null", "-w", "%{http_code}", baseURL + "/healthz"},
-			acceptStatuses: defaultIntSlice(r.cfg.ProbeHealthzStatuses, []int{200}),
+			acceptStatuses: bridgeProbeConfig.healthzStatuses,
 		},
 	}
 	for _, probe := range probes {
@@ -2504,13 +2603,6 @@ func (r *Runtime) runSandboxNetworkProbeOnce(ctx context.Context, details store.
 		}
 	}
 	return nil
-}
-
-func defaultIntSlice(values, defaultValue []int) []int {
-	if len(values) == 0 {
-		return defaultValue
-	}
-	return values
 }
 
 func statusAccepted(status int, accepted []int) bool {
@@ -2635,6 +2727,14 @@ func (r *Runtime) startFresh(ctx context.Context, req StartRequest, _ func(Outpu
 	if err != nil {
 		return Result{Err: err}
 	}
+	runscOverlay2, err := r.runscOverlay2(req.Generation)
+	if err != nil {
+		return Result{Err: err}
+	}
+	runscNetwork, err := r.runscNetwork(req.Generation)
+	if err != nil {
+		return Result{Err: err}
+	}
 	bundlePath := artifacts.BundleDir
 	hub.Publish(OutputEvent{Stream: "runtime", Line: "using per-generation runtime bundle"})
 	r.cleanupRunscContainer(ctx, containerID)
@@ -2643,8 +2743,8 @@ func (r *Runtime) startFresh(ctx context.Context, req StartRequest, _ func(Outpu
 	cmd := exec.CommandContext(cmdCtx, currentRunsc.BinaryPath,
 		"-root", r.cfg.RunscRoot,
 		"-platform", currentRunsc.Platform,
-		"-overlay2", r.runscOverlay2(req.Generation),
-		"-network", r.runscNetwork(req.Generation),
+		"-overlay2", runscOverlay2,
+		"-network", runscNetwork,
 		"run",
 		"-bundle", bundlePath,
 		containerID,
@@ -2748,6 +2848,14 @@ func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, _ 
 	if err != nil {
 		return Result{Err: err}
 	}
+	runscOverlay2, err := r.runscOverlay2(req.Generation)
+	if err != nil {
+		return Result{Err: err}
+	}
+	runscNetwork, err := r.runscNetwork(req.Generation)
+	if err != nil {
+		return Result{Err: err}
+	}
 	bundlePath := artifacts.BundleDir
 	r.cleanupRunscContainer(ctx, containerID)
 
@@ -2755,8 +2863,8 @@ func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, _ 
 	cmd := exec.CommandContext(cmdCtx, currentRunsc.BinaryPath,
 		"-root", r.cfg.RunscRoot,
 		"-platform", currentRunsc.Platform,
-		"-overlay2", r.runscOverlay2(req.Generation),
-		"-network", r.runscNetwork(req.Generation),
+		"-overlay2", runscOverlay2,
+		"-network", runscNetwork,
 		"restore",
 		"-bundle", bundlePath,
 		"-image-path", checkpointPath,
@@ -2841,6 +2949,10 @@ func validateCheckpointRestore(details store.RuntimeGenerationDetails, artifacts
 	if err := validateCheckpointImageManifest(checkpointPath); err != nil {
 		return err
 	}
+	runscPlatform, err := requiredRunscPlatform(details)
+	if err != nil {
+		return err
+	}
 	checks := []struct {
 		field string
 		got   string
@@ -2848,7 +2960,7 @@ func validateCheckpointRestore(details store.RuntimeGenerationDetails, artifacts
 	}{
 		{"checkpoint_network_profile_id", details.NetworkProfileID, details.CheckpointNetworkProfileID},
 		{"checkpoint_agent_runtime_profile_id", details.AgentRuntimeProfileID, details.CheckpointAgentRuntimeProfileID},
-		{"checkpoint_runsc_platform", effectiveRunscPlatform(details), details.CheckpointRunscPlatform},
+		{"checkpoint_runsc_platform", runscPlatform, details.CheckpointRunscPlatform},
 		{"checkpoint_runsc_version", artifacts.RunscVersion, details.CheckpointRunscVersion},
 		{"checkpoint_runsc_binary_path", artifacts.RunscBinaryPath, details.CheckpointRunscBinaryPath},
 		{"checkpoint_runsc_binary_digest", artifacts.RunscBinaryDigest, details.CheckpointRunscBinaryDigest},
@@ -3024,6 +3136,10 @@ func (r *Runtime) Checkpoint(ctx context.Context, req CheckpointRequest) error {
 	if err != nil {
 		return err
 	}
+	runscOverlay2, err := r.runscOverlay2(req.Generation)
+	if err != nil {
+		return err
+	}
 
 	if err := os.MkdirAll(filepath.Dir(checkpointPath), 0o755); err != nil {
 		return fmt.Errorf("create checkpoint dir: %w", err)
@@ -3038,7 +3154,7 @@ func (r *Runtime) Checkpoint(ctx context.Context, req CheckpointRequest) error {
 	// Create checkpoint
 	cmd := exec.CommandContext(ctx, currentRunsc.BinaryPath,
 		"-root", r.cfg.RunscRoot,
-		"-overlay2", r.runscOverlay2(req.Generation),
+		"-overlay2", runscOverlay2,
 		"checkpoint",
 		"-image-path", checkpointPath,
 		container.RunscContainerID,

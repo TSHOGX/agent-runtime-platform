@@ -2733,10 +2733,12 @@ func TestSandboxContractPayloadRecordsPiMaterializedConfig(t *testing.T) {
 		t.Fatalf("get generation details: %v", err)
 	}
 	rt := runtime.New(runtime.Config{
-		BundleRoot:         filepath.Join(dir, "bundle", "out"),
-		RootFSPath:         filepath.Join(dir, "rootfs"),
-		BridgeHeartbeat:    20 * time.Second,
-		BridgePollInterval: 5 * time.Millisecond,
+		BundleRoot:           filepath.Join(dir, "bundle", "out"),
+		RootFSPath:           filepath.Join(dir, "rootfs"),
+		BridgeMode:           "claim-loop",
+		BridgeHeartbeat:      20 * time.Second,
+		BridgePollInterval:   5 * time.Millisecond,
+		ProbeHealthzStatuses: []int{200},
 		CommandRunner: serverCommandRunner{outputs: map[string][]byte{
 			"runsc --version": []byte("runsc test"),
 			"ip netns exec " + details.NetnsName + " curl -sS --max-time 2 -o /dev/null -w %{http_code} " + strings.TrimRight(details.ProbeURL, "/") + "/healthz": []byte("200"),

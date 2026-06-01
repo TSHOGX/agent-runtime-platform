@@ -72,6 +72,68 @@ func TestRuntimeStartRequiresGenerationDetailsForColdPath(t *testing.T) {
 	}
 }
 
+func TestValidateGenerationDetailsRequiresExplicitSandboxContractVersion(t *testing.T) {
+	details := testGenerationDetails(t.TempDir(), "gen_missing_contract")
+	details.SandboxContractVersion = ""
+
+	err := validateGenerationDetails(StartRequest{
+		SessionID:    details.SessionID,
+		GenerationID: details.GenerationID,
+		DriverID:     "claude_code",
+		Generation:   details,
+	})
+	if err == nil || !strings.Contains(err.Error(), "sandbox contract version is required") {
+		t.Fatalf("expected missing sandbox contract error, got %v", err)
+	}
+
+	details.SandboxContractVersion = "sandbox-legacy-v0"
+	err = validateGenerationDetails(StartRequest{
+		SessionID:    details.SessionID,
+		GenerationID: details.GenerationID,
+		DriverID:     "claude_code",
+		Generation:   details,
+	})
+	if err == nil || !strings.Contains(err.Error(), `unsupported sandbox contract version "sandbox-legacy-v0"`) {
+		t.Fatalf("expected unsupported sandbox contract error, got %v", err)
+	}
+}
+
+func TestValidateGenerationDetailsRequiresExplicitRunscPlatform(t *testing.T) {
+	details := testGenerationDetails(t.TempDir(), "gen_missing_platform")
+	details.RunscPlatform = ""
+
+	err := validateGenerationDetails(StartRequest{
+		SessionID:    details.SessionID,
+		GenerationID: details.GenerationID,
+		DriverID:     "claude_code",
+		Generation:   details,
+	})
+	if err == nil || !strings.Contains(err.Error(), "runsc platform is required") {
+		t.Fatalf("expected missing runsc platform error, got %v", err)
+	}
+}
+
+func TestRenderRuntimeSpecRequiresExplicitBridgeProbeConfig(t *testing.T) {
+	dir := t.TempDir()
+	rt := New(Config{
+		SessionsRoot:   filepath.Join(dir, "sessions"),
+		AgentHomesRoot: filepath.Join(dir, "agent-homes"),
+		BundleRoot:     filepath.Join(dir, "bundle", "out"),
+		RootFSPath:     filepath.Join(dir, "rootfs"),
+	})
+	details := testGenerationDetails(dir, "gen_missing_bridge_config")
+
+	_, _, err := rt.renderRuntimeSpec(withDataVolumePathsForTest(dir, StartRequest{
+		SessionID:    details.SessionID,
+		GenerationID: details.GenerationID,
+		DriverID:     "claude_code",
+		Generation:   details,
+	}))
+	if err == nil || !strings.Contains(err.Error(), "bridge mode is required") {
+		t.Fatalf("expected missing bridge config error, got %v", err)
+	}
+}
+
 func TestResolveCheckpointPathUsesGenerationPath(t *testing.T) {
 	dir := t.TempDir()
 	generationPath := filepath.Join(dir, "run", "gen_a", "checkpoint")
@@ -614,8 +676,10 @@ func TestRuntimeStartDoesNotReuseContainerForDifferentGeneration(t *testing.T) {
 		GenerationID: "gen_new",
 		DriverID:     "claude_code",
 		Generation: store.RuntimeGenerationDetails{
-			SessionID:    "sess_1",
-			GenerationID: "gen_new",
+			SessionID:              "sess_1",
+			GenerationID:           "gen_new",
+			SandboxContractVersion: store.SandboxContractVersion,
+			RunscPlatform:          "systrap",
 		},
 	}, nil)
 	if res.Err == nil || !strings.Contains(res.Err.Error(), "generation resource paths are required") {
@@ -786,9 +850,13 @@ func TestEnsureSandboxNetworkUsesGenerationAllocationAndProbes(t *testing.T) {
 		},
 	}
 	rt := New(Config{
-		RunscNetwork:  "sandbox",
-		RunscOverlay2: "none",
-		CommandRunner: runner,
+		RunscNetwork:         "sandbox",
+		RunscOverlay2:        "none",
+		CommandRunner:        runner,
+		BridgeMode:           "claim-loop",
+		BridgeHeartbeat:      20 * time.Second,
+		BridgePollInterval:   5 * time.Millisecond,
+		ProbeHealthzStatuses: []int{200},
 	})
 	details := testGenerationDetails(t.TempDir(), "gen_a")
 	details.RunscNetwork = "sandbox"
@@ -865,6 +933,9 @@ func TestProbeSandboxNetworkRetriesAndUsesConfiguredHealthzStatuses(t *testing.T
 		PreStartProbeAttempts: 2,
 		PreStartProbeInterval: time.Nanosecond,
 		ProbeHealthzStatuses:  []int{204},
+		BridgeMode:            "claim-loop",
+		BridgeHeartbeat:       20 * time.Second,
+		BridgePollInterval:    5 * time.Millisecond,
 	})
 	details := testGenerationDetails(t.TempDir(), "gen_a")
 	details.NetnsName = "harness-gen-a"
@@ -1304,13 +1375,18 @@ func TestDestroyTreatsMissingRunscContainerAsAbsent(t *testing.T) {
 func TestRenderRuntimeSpecUsesGenerationNetnsPath(t *testing.T) {
 	dir := t.TempDir()
 	rt := New(Config{
-		SessionsRoot:   filepath.Join(dir, "sessions"),
-		AgentHomesRoot: filepath.Join(dir, "agent-homes"),
-		BundleRoot:     filepath.Join(dir, "bundle", "out"),
-		RootFSPath:     filepath.Join(dir, "rootfs"),
-		RunscNetwork:   "sandbox",
+		SessionsRoot:         filepath.Join(dir, "sessions"),
+		AgentHomesRoot:       filepath.Join(dir, "agent-homes"),
+		BundleRoot:           filepath.Join(dir, "bundle", "out"),
+		RootFSPath:           filepath.Join(dir, "rootfs"),
+		RunscNetwork:         "sandbox",
+		BridgeMode:           "claim-loop",
+		BridgeHeartbeat:      20 * time.Second,
+		BridgePollInterval:   5 * time.Millisecond,
+		ProbeHealthzStatuses: []int{200},
 	})
 	details := testGenerationDetails(dir, "gen_netns")
+	details.RunscNetwork = "sandbox"
 	details.NetnsPath = "/var/run/netns/harness-gen-netns"
 	spec, _, err := rt.renderRuntimeSpec(withDataVolumePathsForTest(dir, StartRequest{
 		SessionID:    "sess_1",
@@ -1429,12 +1505,14 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndIsolatedRuntime(t *t
 
 	dir := t.TempDir()
 	rt := New(Config{
-		SessionsRoot:       filepath.Join(dir, "sessions"),
-		AgentHomesRoot:     filepath.Join(dir, "agent-homes"),
-		BundleRoot:         filepath.Join(dir, "bundle", "out"),
-		RootFSPath:         filepath.Join(dir, "rootfs"),
-		BridgeHeartbeat:    20 * time.Second,
-		BridgePollInterval: 5 * time.Millisecond,
+		SessionsRoot:         filepath.Join(dir, "sessions"),
+		AgentHomesRoot:       filepath.Join(dir, "agent-homes"),
+		BundleRoot:           filepath.Join(dir, "bundle", "out"),
+		RootFSPath:           filepath.Join(dir, "rootfs"),
+		BridgeMode:           "claim-loop",
+		BridgeHeartbeat:      20 * time.Second,
+		BridgePollInterval:   5 * time.Millisecond,
+		ProbeHealthzStatuses: []int{200},
 	})
 	details := testGenerationDetails(dir, "gen_a")
 
@@ -1631,10 +1709,14 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndIsolatedRuntime(t *t
 func TestRuntimeBridgeMetadataComesFromDriverSpec(t *testing.T) {
 	dir := t.TempDir()
 	rt := New(Config{
-		SessionsRoot:   filepath.Join(dir, "sessions"),
-		AgentHomesRoot: filepath.Join(dir, "agent-homes"),
-		BundleRoot:     filepath.Join(dir, "bundle", "out"),
-		RootFSPath:     filepath.Join(dir, "rootfs"),
+		SessionsRoot:         filepath.Join(dir, "sessions"),
+		AgentHomesRoot:       filepath.Join(dir, "agent-homes"),
+		BundleRoot:           filepath.Join(dir, "bundle", "out"),
+		RootFSPath:           filepath.Join(dir, "rootfs"),
+		BridgeMode:           "claim-loop",
+		BridgeHeartbeat:      20 * time.Second,
+		BridgePollInterval:   5 * time.Millisecond,
+		ProbeHealthzStatuses: []int{200},
 	})
 	details := testGenerationDetails(dir, "gen_driver_metadata")
 	driverSpec, ok := agents.DriverSpecFor("claude_code")
@@ -1671,12 +1753,14 @@ func TestRuntimeBridgeMetadataComesFromDriverSpec(t *testing.T) {
 func TestPrepareClaudeHostOnlyGenerationHasNoSecretMount(t *testing.T) {
 	dir := t.TempDir()
 	rt := New(Config{
-		SessionsRoot:       filepath.Join(dir, "sessions"),
-		AgentHomesRoot:     filepath.Join(dir, "agent-homes"),
-		BundleRoot:         filepath.Join(dir, "bundle", "out"),
-		RootFSPath:         filepath.Join(dir, "rootfs"),
-		BridgeHeartbeat:    20 * time.Second,
-		BridgePollInterval: 5 * time.Millisecond,
+		SessionsRoot:         filepath.Join(dir, "sessions"),
+		AgentHomesRoot:       filepath.Join(dir, "agent-homes"),
+		BundleRoot:           filepath.Join(dir, "bundle", "out"),
+		RootFSPath:           filepath.Join(dir, "rootfs"),
+		BridgeMode:           "claim-loop",
+		BridgeHeartbeat:      20 * time.Second,
+		BridgePollInterval:   5 * time.Millisecond,
+		ProbeHealthzStatuses: []int{200},
 	})
 	details := testGenerationDetails(dir, "gen_host_only")
 	details.RequiresSecretDrop = false
@@ -1737,12 +1821,14 @@ func TestPrepareClaudeHostOnlyGenerationHasNoSecretMount(t *testing.T) {
 func TestPreparePiGenerationMaterializesReadOnlyConfig(t *testing.T) {
 	dir := t.TempDir()
 	rt := New(Config{
-		SessionsRoot:       filepath.Join(dir, "sessions"),
-		AgentHomesRoot:     filepath.Join(dir, "agent-homes"),
-		BundleRoot:         filepath.Join(dir, "bundle", "out"),
-		RootFSPath:         filepath.Join(dir, "rootfs"),
-		BridgeHeartbeat:    20 * time.Second,
-		BridgePollInterval: 5 * time.Millisecond,
+		SessionsRoot:         filepath.Join(dir, "sessions"),
+		AgentHomesRoot:       filepath.Join(dir, "agent-homes"),
+		BundleRoot:           filepath.Join(dir, "bundle", "out"),
+		RootFSPath:           filepath.Join(dir, "rootfs"),
+		BridgeMode:           "claim-loop",
+		BridgeHeartbeat:      20 * time.Second,
+		BridgePollInterval:   5 * time.Millisecond,
+		ProbeHealthzStatuses: []int{200},
 	})
 	details := testGenerationDetails(dir, "gen_pi_config")
 	details.SessionID = "sess_pi"
@@ -2026,10 +2112,14 @@ func TestRenderNetworkHostsProjectionRejectsNonAliasModelProxyHosts(t *testing.T
 func TestPrepareGenerationConcurrentSessionsUseDistinctControlManifests(t *testing.T) {
 	dir := t.TempDir()
 	rt := New(Config{
-		SessionsRoot:   filepath.Join(dir, "sessions"),
-		AgentHomesRoot: filepath.Join(dir, "agent-homes"),
-		BundleRoot:     filepath.Join(dir, "bundle", "out"),
-		RootFSPath:     filepath.Join(dir, "rootfs"),
+		SessionsRoot:         filepath.Join(dir, "sessions"),
+		AgentHomesRoot:       filepath.Join(dir, "agent-homes"),
+		BundleRoot:           filepath.Join(dir, "bundle", "out"),
+		RootFSPath:           filepath.Join(dir, "rootfs"),
+		BridgeMode:           "claim-loop",
+		BridgeHeartbeat:      20 * time.Second,
+		BridgePollInterval:   5 * time.Millisecond,
+		ProbeHealthzStatuses: []int{200},
 	})
 	type prepareCase struct {
 		sessionID string
@@ -2093,12 +2183,16 @@ func TestPrepareGenerationConcurrentSessionsUseDistinctControlManifests(t *testi
 func TestPrepareShellGenerationHasNoSecretMount(t *testing.T) {
 	dir := t.TempDir()
 	rt := New(Config{
-		SessionsRoot:   filepath.Join(dir, "sessions"),
-		AgentHomesRoot: filepath.Join(dir, "agent-homes"),
-		BundleRoot:     filepath.Join(dir, "bundle", "out"),
-		RootFSPath:     filepath.Join(dir, "rootfs"),
-		SandboxUID:     testSandboxUID(),
-		SandboxGID:     testSandboxGID(),
+		SessionsRoot:         filepath.Join(dir, "sessions"),
+		AgentHomesRoot:       filepath.Join(dir, "agent-homes"),
+		BundleRoot:           filepath.Join(dir, "bundle", "out"),
+		RootFSPath:           filepath.Join(dir, "rootfs"),
+		SandboxUID:           testSandboxUID(),
+		SandboxGID:           testSandboxGID(),
+		BridgeMode:           "claim-loop",
+		BridgeHeartbeat:      20 * time.Second,
+		BridgePollInterval:   5 * time.Millisecond,
+		ProbeHealthzStatuses: []int{200},
 	})
 	details := testGenerationDetails(dir, "gen_shell")
 	details.SessionID = "sess_shell"
@@ -2192,13 +2286,17 @@ func TestPrepareShellGenerationHasNoSecretMount(t *testing.T) {
 func TestPrepareGenerationUsesProvidedDataVolumePaths(t *testing.T) {
 	dir := t.TempDir()
 	rt := New(Config{
-		SessionsRoot:   filepath.Join(dir, "unused-sessions"),
-		AgentHomesRoot: filepath.Join(dir, "unused-agent-homes"),
-		BundleRoot:     filepath.Join(dir, "bundle", "out"),
-		RootFSPath:     filepath.Join(dir, "rootfs"),
-		RunscNetwork:   "host",
-		SandboxUID:     testSandboxUID(),
-		SandboxGID:     testSandboxGID(),
+		SessionsRoot:         filepath.Join(dir, "unused-sessions"),
+		AgentHomesRoot:       filepath.Join(dir, "unused-agent-homes"),
+		BundleRoot:           filepath.Join(dir, "bundle", "out"),
+		RootFSPath:           filepath.Join(dir, "rootfs"),
+		RunscNetwork:         "host",
+		SandboxUID:           testSandboxUID(),
+		SandboxGID:           testSandboxGID(),
+		BridgeMode:           "claim-loop",
+		BridgeHeartbeat:      20 * time.Second,
+		BridgePollInterval:   5 * time.Millisecond,
+		ProbeHealthzStatuses: []int{200},
 	})
 	details := testGenerationDetails(dir, "gen_data_volume_paths")
 	details.SessionID = "sess_data_volume_paths"
@@ -2354,6 +2452,8 @@ func testGenerationDetails(dir, generationID string) store.RuntimeGenerationDeta
 		NetworkProfileID:           "net_" + generationID,
 		AgentRuntimeProfileID:      "arp_" + generationID,
 		RunscPlatform:              "systrap",
+		RunscNetwork:               "host",
+		RunscOverlay2:              "none",
 		SandboxContractVersion:     store.SandboxContractVersion,
 		ControlDirPath:             filepath.Join(dir, "run", "control", "gen-"+generationID),
 		ControlManifestPath:        filepath.Join(dir, "run", "control", "gen-"+generationID, "session.json"),

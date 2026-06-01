@@ -81,6 +81,7 @@ func main() {
 				PreStartProbeAttempts:   cfg.Harness.Probe.PreStartAttempts,
 				PreStartProbeInterval:   cfg.Harness.Probe.PreStartInterval.Duration,
 				ProbeHealthzStatuses:    cfg.Harness.Probe.AcceptStatus.GetHealthz,
+				BridgeMode:              "claim-loop",
 				BridgeHeartbeat:         cfg.Harness.Bridge.HeartbeatInterval.Duration,
 				BridgePollInterval:      cfg.Harness.Bridge.PollInterval.Duration,
 			})
