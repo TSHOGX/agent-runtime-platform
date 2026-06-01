@@ -103,10 +103,7 @@ type StartRequest struct {
 	SessionID             string
 	GenerationID          string
 	Agent                 string
-	FirstMessage          string
-	WaitForTurn           bool
 	RestoreFromCheckpoint bool
-	Done                  <-chan struct{}
 	Generation            store.RuntimeGenerationDetails
 	PreparedArtifacts     GenerationArtifacts
 	WorkspaceHostPath     string
@@ -292,10 +289,9 @@ func (r *Runtime) Start(ctx context.Context, req StartRequest, output func(Outpu
 
 	if exists {
 		if container.GenerationID == req.GenerationID {
-			if !req.WaitForTurn {
-				return Result{}
-			}
-			return r.sendMessage(ctx, container, req.FirstMessage, req.Done, output)
+			// Turns are delivered by the bridge claim/ack loop, not by writing
+			// directly to the runtime process stdin.
+			return Result{}
 		}
 		r.stopContainer(container)
 	}
@@ -304,9 +300,8 @@ func (r *Runtime) Start(ctx context.Context, req StartRequest, output func(Outpu
 		return r.resumeFromCheckpoint(ctx, req, output)
 	}
 
-	// Check if checkpoint exists (legacy resume path). This stays opt-in because
-	// runsc restore currently cannot reliably reconnect the long-lived stdin
-	// turn channel used by the agent entrypoint.
+	// Check if checkpoint exists (legacy resume path). Bridge-managed restore
+	// callers set RestoreFromCheckpoint explicitly with generation artifacts.
 	if r.cfg.RestoreFromCheckpoint {
 		if _, err := r.resolveCheckpointPath(req); err == nil {
 			return r.resumeFromCheckpoint(ctx, req, output)
@@ -2667,72 +2662,9 @@ func parseAllowedEgressRule(value string) (egressRule, error) {
 	return egressRule{Proto: parts[0], Host: parts[1], Port: port}, nil
 }
 
-type claudeInputFrame struct {
-	Type    string             `json:"type"`
-	Message claudeInputMessage `json:"message"`
-}
-
-type claudeInputMessage struct {
-	Role    string               `json:"role"`
-	Content []claudeContentBlock `json:"content"`
-}
-
-type claudeContentBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-}
-
 type shellInputFrame struct {
 	Type    string `json:"type"`
 	Content string `json:"content,omitempty"`
-}
-
-// writeUserTurn delivers a user message to the agent's stdin.
-//
-// Claude Code runs with `--input-format stream-json`, which expects one JSONL
-// frame per turn and keeps stdin open between turns. Shell runs a JSON turn
-// protocol over a PTY-backed shim. The server holds the session in
-// running_active until the current turn's parser sees a completion event.
-func writeUserTurn(stdin io.Writer, agent, message string) error {
-	def, ok := agents.Lookup(agent)
-	if !ok {
-		return fmt.Errorf("unsupported agent %q", agent)
-	}
-	if def.Protocol == agents.ProtocolClaudeStreamJSON {
-		frame := claudeInputFrame{
-			Type: "user",
-			Message: claudeInputMessage{
-				Role: "user",
-				Content: []claudeContentBlock{
-					{Type: "text", Text: message},
-				},
-			},
-		}
-		encoded, err := json.Marshal(frame)
-		if err != nil {
-			return fmt.Errorf("encode user turn: %w", err)
-		}
-		if _, err := stdin.Write(append(encoded, '\n')); err != nil {
-			return err
-		}
-		return nil
-	}
-	if def.Protocol == agents.ProtocolShellPTY {
-		frame := shellInputFrame{
-			Type:    "turn",
-			Content: message,
-		}
-		encoded, err := json.Marshal(frame)
-		if err != nil {
-			return fmt.Errorf("encode shell turn: %w", err)
-		}
-		if _, err := stdin.Write(append(encoded, '\n')); err != nil {
-			return err
-		}
-		return nil
-	}
-	_, err := fmt.Fprintln(stdin, message)
-	return err
 }
 
 func writeInterrupt(stdin io.Writer, agent string) error {
@@ -2760,71 +2692,8 @@ func (r *Runtime) writeContainerInput(container *Container, fn func(io.Writer) e
 	return fn(container.Stdin)
 }
 
-func forwardOutput(ctx context.Context, outputCh <-chan OutputEvent, done <-chan struct{}, output func(Output)) Result {
-	for {
-		select {
-		case event, ok := <-outputCh:
-			if !ok {
-				select {
-				case <-done:
-					return Result{}
-				default:
-					return Result{Err: errors.New("runtime output closed before turn completed")}
-				}
-			}
-			if output != nil {
-				output(Output{Stream: event.Stream, Line: event.Line})
-			}
-		case <-done:
-			return Result{}
-		case <-ctx.Done():
-			return Result{Err: ctx.Err()}
-		}
-	}
-}
-
-func forwardUntilClosed(ctx context.Context, outputCh <-chan OutputEvent, output func(Output)) Result {
-	for {
-		select {
-		case event, ok := <-outputCh:
-			if !ok {
-				return Result{}
-			}
-			if output != nil {
-				output(Output{Stream: event.Stream, Line: event.Line})
-			}
-		case <-ctx.Done():
-			return Result{Err: ctx.Err()}
-		}
-	}
-}
-
-func (r *Runtime) sendMessage(ctx context.Context, container *Container, message string, done <-chan struct{}, output func(Output)) Result {
-	outputCh, cancel := container.OutputHub.Subscribe()
-	defer cancel()
-
-	// The sandbox network namespace must not be reconfigured while a gVisor
-	// sandbox is attached to it. Replacing the address or default route on a
-	// live netns breaks the sentry netstack and subsequent TCP writes fail with
-	// ECONNRESET before requests reach the local proxy.
-	if err := r.writeContainerInput(container, func(stdin io.Writer) error {
-		return writeUserTurn(stdin, container.Agent, message)
-	}); err != nil {
-		r.stopContainer(container)
-		return Result{Err: fmt.Errorf("write to stdin: %w", err)}
-	}
-
-	result := forwardOutput(ctx, outputCh, done, output)
-	if result.Err != nil {
-		r.stopContainer(container)
-	}
-	return result
-}
-
-func (r *Runtime) startFresh(ctx context.Context, req StartRequest, output func(Output)) Result {
+func (r *Runtime) startFresh(ctx context.Context, req StartRequest, _ func(Output)) Result {
 	hub := NewOutputHub()
-	outputCh, cancel := hub.Subscribe()
-	defer cancel()
 
 	hub.Publish(OutputEvent{Stream: "runtime", Line: "starting fresh container"})
 
@@ -2925,38 +2794,16 @@ func (r *Runtime) startFresh(ctx context.Context, req StartRequest, output func(
 		r.stopContainer(container)
 		return Result{Err: err}
 	}
-	if !req.WaitForTurn {
-		return Result{
-			ControlManifestDigest: req.PreparedArtifacts.ManifestDigest,
-			RunscVersion:          req.PreparedArtifacts.RunscVersion,
-			PostStartProof:        &postStartProof,
-		}
-	}
 
-	// Send first message
-	if req.FirstMessage != "" {
-		if err := r.writeContainerInput(container, func(stdin io.Writer) error {
-			return writeUserTurn(stdin, req.Agent, req.FirstMessage)
-		}); err != nil {
-			r.stopContainer(container)
-			return Result{Err: fmt.Errorf("write first message: %w", err)}
-		}
+	return Result{
+		ControlManifestDigest: req.PreparedArtifacts.ManifestDigest,
+		RunscVersion:          req.PreparedArtifacts.RunscVersion,
+		PostStartProof:        &postStartProof,
 	}
-
-	result := forwardOutput(ctx, outputCh, req.Done, output)
-	if result.Err != nil {
-		r.stopContainer(container)
-	}
-	result.ControlManifestDigest = req.PreparedArtifacts.ManifestDigest
-	result.RunscVersion = req.PreparedArtifacts.RunscVersion
-	result.PostStartProof = &postStartProof
-	return result
 }
 
-func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, output func(Output)) Result {
+func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, _ func(Output)) Result {
 	hub := NewOutputHub()
-	outputCh, cancel := hub.Subscribe()
-	defer cancel()
 
 	hub.Publish(OutputEvent{Stream: "runtime", Line: "resuming from checkpoint"})
 
@@ -3056,31 +2903,12 @@ func (r *Runtime) resumeFromCheckpoint(ctx context.Context, req StartRequest, ou
 		r.stopContainer(container)
 		return Result{Err: err}
 	}
-	if !req.WaitForTurn {
-		return Result{
-			ControlManifestDigest: req.PreparedArtifacts.ManifestDigest,
-			RunscVersion:          req.PreparedArtifacts.RunscVersion,
-			PostStartProof:        &postStartProof,
-		}
-	}
 
-	if req.FirstMessage != "" {
-		if err := r.writeContainerInput(container, func(stdin io.Writer) error {
-			return writeUserTurn(stdin, req.Agent, req.FirstMessage)
-		}); err != nil {
-			r.stopContainer(container)
-			return Result{Err: fmt.Errorf("write first message: %w", err)}
-		}
+	return Result{
+		ControlManifestDigest: req.PreparedArtifacts.ManifestDigest,
+		RunscVersion:          req.PreparedArtifacts.RunscVersion,
+		PostStartProof:        &postStartProof,
 	}
-
-	result := forwardOutput(ctx, outputCh, req.Done, output)
-	if result.Err != nil {
-		r.stopContainer(container)
-	}
-	result.ControlManifestDigest = req.PreparedArtifacts.ManifestDigest
-	result.RunscVersion = req.PreparedArtifacts.RunscVersion
-	result.PostStartProof = &postStartProof
-	return result
 }
 
 func (r *Runtime) resolveCheckpointPath(req StartRequest) (string, error) {

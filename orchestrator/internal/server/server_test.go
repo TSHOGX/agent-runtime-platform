@@ -1349,8 +1349,7 @@ WHERE session_id = ?
 	if len(prepareRequests) != 1 || len(startRequests) != 1 {
 		t.Fatalf("runtime calls prepare=%d start=%d", len(prepareRequests), len(startRequests))
 	}
-	if startRequests[0].GenerationID != gotSession.ActiveGenerationID ||
-		startRequests[0].WaitForTurn {
+	if startRequests[0].GenerationID != gotSession.ActiveGenerationID {
 		t.Fatalf("unexpected replacement start request: %+v", startRequests[0])
 	}
 }
@@ -1435,7 +1434,6 @@ WHERE session_id = ?
 	start := startRequests[0]
 	if start.GenerationID != allocation.GenerationID ||
 		!start.RestoreFromCheckpoint ||
-		start.WaitForTurn ||
 		start.PreparedArtifacts.ManifestDigest != "restore_manifest_digest" ||
 		start.PreparedArtifacts.RunscVersion != "runsc restore-test" ||
 		start.PreparedArtifacts.RunscBinaryPath != "/usr/local/bin/runsc-test" ||

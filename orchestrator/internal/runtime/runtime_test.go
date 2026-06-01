@@ -64,7 +64,6 @@ func TestRuntimeStartRequiresGenerationDetailsForColdPath(t *testing.T) {
 	res := rt.Start(context.Background(), StartRequest{
 		SessionID: "sess_1",
 		Agent:     "claude_code",
-		Done:      closedDone(),
 	}, nil)
 	if res.Err == nil {
 		t.Fatal("expected missing generation details error")
@@ -579,9 +578,6 @@ func TestRuntimeStartDoesNotReuseContainerForDifferentGeneration(t *testing.T) {
 		SessionID:    "sess_1",
 		GenerationID: "gen_new",
 		Agent:        "claude_code",
-		FirstMessage: "hello stale generation",
-		WaitForTurn:  true,
-		Done:         closedDone(),
 		Generation: store.RuntimeGenerationDetails{
 			SessionID:    "sess_1",
 			GenerationID: "gen_new",
@@ -709,7 +705,7 @@ func TestCheckpointRequiresGenerationScopedPath(t *testing.T) {
 	}
 }
 
-func TestSendMessageDoesNotReconfigureLiveSandboxNetwork(t *testing.T) {
+func TestRuntimeStartReusesExistingGenerationWithoutStdinTurn(t *testing.T) {
 	rt := New(Config{
 		DefaultAgent: "claude_code",
 		RunscNetwork: "sandbox",
@@ -718,30 +714,34 @@ func TestSendMessageDoesNotReconfigureLiveSandboxNetwork(t *testing.T) {
 	stdin := &recordingWriteCloser{}
 	container := &Container{
 		SessionID:        "sess_1",
+		GenerationID:     "gen_a",
 		RunscContainerID: "harness-gen-gen_a",
 		Agent:            "claude_code",
 		Stdin:            stdin,
 		OutputHub:        hub,
 	}
+	rt.containers["sess_1"] = container
 
-	done := make(chan struct{})
-	go func() {
-		for {
-			stdin.mu.Lock()
-			written := stdin.buf.Len() > 0
-			stdin.mu.Unlock()
-			if written {
-				hub.Publish(OutputEvent{Stream: "stdout", Line: `{"type":"result","subtype":"success","result":"ok"}`})
-				close(done)
-				return
-			}
-			time.Sleep(time.Millisecond)
-		}
-	}()
-
-	res := rt.sendMessage(context.Background(), container, "hello", done, nil)
+	outputs := 0
+	res := rt.Start(context.Background(), StartRequest{
+		SessionID:    "sess_1",
+		GenerationID: "gen_a",
+		Agent:        "claude_code",
+	}, func(Output) { outputs++ })
 	if res.Err != nil {
-		t.Fatalf("sendMessage should not attempt live sandbox network reconfiguration: %v", res.Err)
+		t.Fatalf("existing generation start failed: %v", res.Err)
+	}
+	if outputs != 0 {
+		t.Fatalf("existing generation start should not forward process output, got %d callbacks", outputs)
+	}
+	stdin.mu.Lock()
+	written := stdin.buf.String()
+	stdin.mu.Unlock()
+	if written != "" {
+		t.Fatalf("existing generation start wrote direct stdin turn: %q", written)
+	}
+	if got := rt.containers["sess_1"]; got != container {
+		t.Fatalf("existing generation container was replaced: got %+v", got)
 	}
 }
 
@@ -909,7 +909,7 @@ func TestDestroyGenerationResourcesFallsBackToRecordedRunscOnPinMismatch(t *test
 		},
 		fail: map[string]error{
 			currentRunscPath + " -root " + runscRoot + " delete -force harness-gen-gen_pin": errors.New("incompatible runsc root"),
-			oldRunscPath + " -root " + runscRoot + " state harness-gen-gen_pin":      errors.New("not found"),
+			oldRunscPath + " -root " + runscRoot + " state harness-gen-gen_pin":             errors.New("not found"),
 		},
 	}
 	rt := New(Config{
@@ -1474,89 +1474,6 @@ func installFakeRunsc(t *testing.T, dir, label string) (string, string) {
 	return path, "sha256:" + digest
 }
 
-func TestWriteUserTurnClaudeJSONLFraming(t *testing.T) {
-	var buf bytes.Buffer
-	if err := writeUserTurn(&buf, "claude_code", "hello world"); err != nil {
-		t.Fatalf("writeUserTurn: %v", err)
-	}
-
-	out := buf.String()
-	if !strings.HasSuffix(out, "\n") {
-		t.Fatalf("expected trailing newline for JSONL framing, got %q", out)
-	}
-	if strings.Count(out, "\n") != 1 {
-		t.Fatalf("expected exactly one JSONL frame, got %q", out)
-	}
-
-	var frame struct {
-		Type    string `json:"type"`
-		Message struct {
-			Role    string `json:"role"`
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"message"`
-	}
-	if err := json.Unmarshal([]byte(strings.TrimSuffix(out, "\n")), &frame); err != nil {
-		t.Fatalf("invalid JSON frame %q: %v", out, err)
-	}
-	if frame.Type != "user" || frame.Message.Role != "user" {
-		t.Fatalf("unexpected frame: %+v", frame)
-	}
-	if len(frame.Message.Content) != 1 {
-		t.Fatalf("expected one content block, got %+v", frame.Message.Content)
-	}
-	if frame.Message.Content[0].Type != "text" || frame.Message.Content[0].Text != "hello world" {
-		t.Fatalf("unexpected content block: %+v", frame.Message.Content[0])
-	}
-}
-
-func TestWriteUserTurnClaudeEscapesNewlines(t *testing.T) {
-	// Multi-line user input must stay on a single JSONL line.
-	var buf bytes.Buffer
-	if err := writeUserTurn(&buf, "claude_code", "line1\nline2"); err != nil {
-		t.Fatalf("writeUserTurn: %v", err)
-	}
-	if strings.Count(buf.String(), "\n") != 1 {
-		t.Fatalf("multi-line input must produce one JSONL frame, got %q", buf.String())
-	}
-	var frame struct {
-		Message struct {
-			Content []struct {
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"message"`
-	}
-	if err := json.Unmarshal([]byte(strings.TrimSuffix(buf.String(), "\n")), &frame); err != nil {
-		t.Fatalf("invalid JSON frame %q: %v", buf.String(), err)
-	}
-	if len(frame.Message.Content) != 1 || frame.Message.Content[0].Text != "line1\nline2" {
-		t.Fatalf("unexpected multi-line content: %+v", frame.Message.Content)
-	}
-}
-
-func TestWriteUserTurnShellJSONFraming(t *testing.T) {
-	var buf bytes.Buffer
-	if err := writeUserTurn(&buf, "sh", "ls -la"); err != nil {
-		t.Fatalf("writeUserTurn: %v", err)
-	}
-	out := buf.String()
-	if !strings.HasSuffix(out, "\n") {
-		t.Fatalf("expected trailing newline for shell JSON framing, got %q", out)
-	}
-	var frame struct {
-		Type    string `json:"type"`
-		Content string `json:"content"`
-	}
-	if err := json.Unmarshal([]byte(strings.TrimSuffix(out, "\n")), &frame); err != nil {
-		t.Fatalf("invalid JSON frame %q: %v", out, err)
-	}
-	if frame.Type != "turn" || frame.Content != "ls -la" {
-		t.Fatalf("unexpected shell frame: %+v", frame)
-	}
-}
-
 func TestWriteInterruptShellJSONFraming(t *testing.T) {
 	var buf bytes.Buffer
 	if err := writeInterrupt(&buf, "sh"); err != nil {
@@ -1570,17 +1487,6 @@ func TestWriteInterruptShellJSONFraming(t *testing.T) {
 	}
 	if frame.Type != "interrupt" {
 		t.Fatalf("unexpected interrupt frame: %+v", frame)
-	}
-}
-
-func TestWriteUserTurnRejectsUnsupportedAgent(t *testing.T) {
-	var buf bytes.Buffer
-	err := writeUserTurn(&buf, "opencode", "hello")
-	if err == nil {
-		t.Fatal("expected unsupported agent error")
-	}
-	if !strings.Contains(err.Error(), "unsupported agent") {
-		t.Fatalf("expected unsupported agent error, got %v", err)
 	}
 }
 
@@ -2873,12 +2779,6 @@ func controlManifestForbiddenHostValues(details store.RuntimeGenerationDetails) 
 		values = append(values, table)
 	}
 	return values
-}
-
-func closedDone() <-chan struct{} {
-	done := make(chan struct{})
-	close(done)
-	return done
 }
 
 func testSandboxUID() int {
