@@ -304,7 +304,7 @@ ORDER BY t.id`, sessionID, generationID)
 }
 
 func (s *Store) BridgeProtocolEvidence(ctx context.Context, sessionID, generationID string) (BridgeProtocolEvidence, error) {
-	record, err := getSandboxContractForGenerationWithMirrors(ctx, s.db, sessionID, generationID)
+	record, err := getSandboxContractForGenerationWithGenerationMirror(ctx, s.db, sessionID, generationID)
 	if err != nil {
 		return BridgeProtocolEvidence{}, err
 	}
@@ -547,7 +547,7 @@ WHERE id = ?
 	if affected != 1 {
 		return TurnGrant{}, false, tx.Commit()
 	}
-	if _, err := getSandboxContractForGenerationWithMirrors(ctx, tx, p.SessionID, p.GenerationID); err != nil {
+	if _, err := getSandboxContractForGenerationWithGenerationMirror(ctx, tx, p.SessionID, p.GenerationID); err != nil {
 		return TurnGrant{}, false, err
 	}
 
@@ -758,7 +758,7 @@ func (s *Store) AckTurnStarted(ctx context.Context, p AckStartedParams) (int64, 
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := getSandboxContractForGenerationWithMirrors(ctx, tx, p.SessionID, p.GenerationID); err != nil {
+	if _, err := getSandboxContractForGenerationWithGenerationMirror(ctx, tx, p.SessionID, p.GenerationID); err != nil {
 		return 0, err
 	}
 	expiresAt := p.Now.Add(p.LeaseTTL)
@@ -1321,7 +1321,7 @@ WHERE session_id = ?
 	if err != nil {
 		return TurnGrant{}, false, err
 	}
-	if _, err := getSandboxContractForGenerationWithMirrors(ctx, tx, p.SessionID, p.GenerationID); err != nil {
+	if _, err := getSandboxContractForGenerationWithGenerationMirror(ctx, tx, p.SessionID, p.GenerationID); err != nil {
 		return TurnGrant{}, false, err
 	}
 	grant, err := turnGrantByID(ctx, tx, p.SessionID, p.GenerationID, turnID, p.Owner, p.Now)

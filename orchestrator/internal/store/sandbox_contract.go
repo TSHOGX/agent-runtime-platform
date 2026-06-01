@@ -218,7 +218,7 @@ ON CONFLICT(generation_id) DO NOTHING`,
 }
 
 func (s *Store) GetSandboxContractForGeneration(ctx context.Context, sessionID, generationID string) (SandboxContractRecord, error) {
-	return getSandboxContractForGenerationWithMirrors(ctx, s.db, sessionID, generationID)
+	return getSandboxContractForGenerationWithGenerationMirror(ctx, s.db, sessionID, generationID)
 }
 
 func recordSandboxContractInputEvidenceTx(ctx context.Context, tx *sql.Tx, p StoreSandboxContractParams, contractID string) error {
@@ -279,7 +279,7 @@ func (s *Store) GetSandboxContractInputEvidence(ctx context.Context, contractID 
 	return getSandboxContractInputEvidenceTx(ctx, s.db, strings.TrimSpace(contractID))
 }
 
-func getSandboxContractForGenerationWithMirrors(ctx context.Context, db dbRunner, sessionID, generationID string) (SandboxContractRecord, error) {
+func getSandboxContractForGenerationWithGenerationMirror(ctx context.Context, db dbRunner, sessionID, generationID string) (SandboxContractRecord, error) {
 	row := db.QueryRowContext(ctx, `
 SELECT
   sc.contract_id,
@@ -292,15 +292,12 @@ SELECT
   sc.sandbox_contract_digest,
   sc.created_at,
   COALESCE(g.sandbox_contract_id, ''),
-  COALESCE(g.sandbox_contract_version, ''),
-  COALESCE(r.contract_id, ''),
-  COALESCE(r.sandbox_contract_version, '')
+  COALESCE(g.sandbox_contract_version, '')
 FROM sandbox_contracts sc
 JOIN runtime_generations g ON g.generation_id = sc.generation_id
-JOIN runtime_generation_resources r ON r.generation_id = sc.generation_id
 WHERE sc.session_id = ?
   AND sc.generation_id = ?`, strings.TrimSpace(sessionID), strings.TrimSpace(generationID))
-	return scanSandboxContractWithMirrors(row)
+	return scanSandboxContractWithGenerationMirror(row)
 }
 
 func (s *Store) RecordSandboxContractArtifacts(ctx context.Context, p RecordSandboxContractArtifactsParams) (SandboxContractArtifacts, error) {
@@ -552,9 +549,9 @@ func scanSandboxContract(row sandboxContractScanner) (SandboxContractRecord, err
 	return record, nil
 }
 
-func scanSandboxContractWithMirrors(row sandboxContractScanner) (SandboxContractRecord, error) {
+func scanSandboxContractWithGenerationMirror(row sandboxContractScanner) (SandboxContractRecord, error) {
 	var record SandboxContractRecord
-	var payload, createdAt, generationContractID, generationContractVersion, resourceContractID, resourceContractVersion string
+	var payload, createdAt, generationContractID, generationContractVersion string
 	if err := row.Scan(
 		&record.ContractID,
 		&record.SessionID,
@@ -567,8 +564,6 @@ func scanSandboxContractWithMirrors(row sandboxContractScanner) (SandboxContract
 		&createdAt,
 		&generationContractID,
 		&generationContractVersion,
-		&resourceContractID,
-		&resourceContractVersion,
 	); err != nil {
 		return SandboxContractRecord{}, err
 	}
@@ -581,10 +576,8 @@ func scanSandboxContractWithMirrors(row sandboxContractScanner) (SandboxContract
 		return SandboxContractRecord{}, err
 	}
 	if generationContractID != record.ContractID ||
-		generationContractVersion != record.SandboxContractVersion ||
-		resourceContractID != record.ContractID ||
-		resourceContractVersion != record.SandboxContractVersion {
-		return SandboxContractRecord{}, fmt.Errorf("sandbox contract mirrors do not match contract row")
+		generationContractVersion != record.SandboxContractVersion {
+		return SandboxContractRecord{}, fmt.Errorf("sandbox contract generation mirror does not match contract row")
 	}
 	return record, nil
 }

@@ -68,7 +68,7 @@ func validatePiDriverStatePayload(object map[string]any) error {
 }
 
 func validatePiDriverStateUpdateAgainstHostTx(ctx context.Context, tx *sql.Tx, p CompleteTurnParams, canonicalPayload []byte) error {
-	record, err := getSandboxContractForGenerationWithMirrors(ctx, tx, p.SessionID, p.GenerationID)
+	record, err := getSandboxContractForGenerationWithGenerationMirror(ctx, tx, p.SessionID, p.GenerationID)
 	if err != nil {
 		return fmt.Errorf("pi driver state contract validation: %w", err)
 	}

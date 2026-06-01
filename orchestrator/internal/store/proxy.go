@@ -141,7 +141,7 @@ WHERE c.sandbox_source_ip = ?
 	snapshot.SessionID = result.SessionID
 	snapshot.GenerationID = result.GenerationID
 	snapshot.SandboxSourceIP = p.SandboxSourceIP
-	contract, err := getSandboxContractForGenerationWithMirrors(ctx, tx, result.SessionID, result.GenerationID)
+	contract, err := getSandboxContractForGenerationWithGenerationMirror(ctx, tx, result.SessionID, result.GenerationID)
 	if err != nil {
 		return StartProxyRequestResult{}, fmt.Errorf("%w: %v", ErrProxyContextUnavailable, err)
 	}

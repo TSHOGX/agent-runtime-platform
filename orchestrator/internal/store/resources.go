@@ -1995,7 +1995,7 @@ func (s *Store) BeginGenerationCheckpoint(ctx context.Context, sessionID, genera
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := getSandboxContractForGenerationWithMirrors(ctx, tx, sessionID, generationID); err != nil {
+	if _, err := getSandboxContractForGenerationWithGenerationMirror(ctx, tx, sessionID, generationID); err != nil {
 		return err
 	}
 	checkpointDriverStatesDigest, err := checkpointDriverStatesDigestTx(ctx, tx, sessionID, generationID)

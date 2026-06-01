@@ -87,6 +87,84 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(
 	}
 }
 
+func TestGetSandboxContractForGenerationIgnoresResourceContractMirror(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	createStoreSession(t, ctx, st, "sess_contract_resource_mirror")
+	now := time.Now().UTC()
+	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_contract_resource_mirror",
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       now,
+		Config:    testAllocatorConfig(t),
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	record, err := st.StoreSandboxContract(ctx, StoreSandboxContractParams{
+		ContractID:   "contract_" + allocation.GenerationID,
+		SessionID:    "sess_contract_resource_mirror",
+		GenerationID: allocation.GenerationID,
+		Payload:      testSandboxContractPayload(t, "sess_contract_resource_mirror", allocation),
+		Now:          now.Add(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("store sandbox contract: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_generation_resources
+SET contract_id = NULL,
+    sandbox_contract_version = NULL
+WHERE generation_id = ?`, allocation.GenerationID); err != nil {
+		t.Fatalf("clear resource contract mirror: %v", err)
+	}
+	got, err := st.GetSandboxContractForGeneration(ctx, "sess_contract_resource_mirror", allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get sandbox contract: %v", err)
+	}
+	if got.ContractID != record.ContractID || got.SandboxContractDigest != record.SandboxContractDigest {
+		t.Fatalf("loaded contract mismatch: got %+v want %+v", got, record)
+	}
+}
+
+func TestGetSandboxContractForGenerationRejectsGenerationContractMirrorMismatch(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	createStoreSession(t, ctx, st, "sess_contract_generation_mirror")
+	now := time.Now().UTC()
+	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_contract_generation_mirror",
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       now,
+		Config:    testAllocatorConfig(t),
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	if _, err := st.StoreSandboxContract(ctx, StoreSandboxContractParams{
+		ContractID:   "contract_" + allocation.GenerationID,
+		SessionID:    "sess_contract_generation_mirror",
+		GenerationID: allocation.GenerationID,
+		Payload:      testSandboxContractPayload(t, "sess_contract_generation_mirror", allocation),
+		Now:          now.Add(time.Second),
+	}); err != nil {
+		t.Fatalf("store sandbox contract: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_generations
+SET sandbox_contract_id = NULL
+WHERE generation_id = ?`, allocation.GenerationID); err != nil {
+		t.Fatalf("clear generation contract mirror: %v", err)
+	}
+
+	_, err = st.GetSandboxContractForGeneration(ctx, "sess_contract_generation_mirror", allocation.GenerationID)
+	if err == nil || !strings.Contains(err.Error(), "generation mirror does not match contract row") {
+		t.Fatalf("expected generation mirror mismatch, got %v", err)
+	}
+}
+
 func TestCredentialPolicyDigestV1StableForModelProviderGrant(t *testing.T) {
 	policy := map[string]any{
 		"provider_credentials": "host-only",
