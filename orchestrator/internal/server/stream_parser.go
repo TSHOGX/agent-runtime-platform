@@ -254,15 +254,22 @@ func (claudeOutputNormalizer) Handle(p *streamParser, output normalizerBridgeOut
 				p.publish("agent.output", runtime.Output{Stream: output.Stream, Line: rawLine})
 				p.complete()
 				return
-			default:
-				// system/init/user/error/etc.
+			case "system", "init", "user":
 				p.publish("agent.output", runtime.Output{Stream: output.Stream, Line: rawLine})
 				return
+			default:
+				p.err = fmt.Errorf("unsupported claude event type %q", event.Type)
+				p.complete()
+				return
 			}
+		} else {
+			p.err = fmt.Errorf("claude event decode failed: %w", err)
+			p.complete()
+			return
 		}
 	}
-	// stdout non-JSON: treat as assistant message for raw-text agents.
-	p.persistAssistant(line)
+	p.err = fmt.Errorf("claude stdout line is not a recognized JSON event")
+	p.complete()
 }
 
 func (shellOutputNormalizer) Handle(p *streamParser, output normalizerBridgeOutput) {
@@ -349,10 +356,8 @@ func (piOutputNormalizer) Handle(p *streamParser, output normalizerBridgeOutput)
 			p.complete()
 			return
 		}
-		// Unknown but well-formed pi event: the producer forwards every pi
-		// stdout line, so a forward-compatible event (future usage/token/etc.)
-		// must not abort an otherwise-successful turn. Ignore it.
-		p.srv.log.Info("ignoring unknown pi event type", "session_id", p.sessionID, "event_type", eventType)
+		p.err = fmt.Errorf("unsupported pi event type %q", eventType)
+		p.complete()
 	}
 }
 
@@ -469,22 +474,28 @@ func (nativeEventsOutputNormalizer) Handle(p *streamParser, output normalizerBri
 		}
 		p.persistAssistant(payload.Content)
 	case "agent.delta", "agent.output", "system.status":
-		p.publish(native.Event.Type, nativeEventPublicPayload(native.Event.Payload))
+		payload, err := nativeEventPublicPayload(native.Event.Payload)
+		if err != nil {
+			p.err = fmt.Errorf("native %s payload decode failed: %w", native.Event.Type, err)
+			p.complete()
+			return
+		}
+		p.publish(native.Event.Type, payload)
 	default:
 		p.err = fmt.Errorf("unsupported native event type %q", native.Event.Type)
 		p.complete()
 	}
 }
 
-func nativeEventPublicPayload(raw json.RawMessage) any {
+func nativeEventPublicPayload(raw json.RawMessage) (any, error) {
 	if len(raw) == 0 {
-		return map[string]any{}
+		return map[string]any{}, nil
 	}
 	var payload any
 	if err := json.Unmarshal(raw, &payload); err != nil {
-		return map[string]string{"raw": string(raw)}
+		return nil, err
 	}
-	return payload
+	return payload, nil
 }
 
 func (p *streamParser) handleStreamEvent(raw json.RawMessage) {

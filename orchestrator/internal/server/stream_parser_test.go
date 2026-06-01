@@ -175,6 +175,30 @@ func TestStreamParserDoesNotFailSessionOnClaudeExecutionError(t *testing.T) {
 	}
 }
 
+func TestStreamParserRejectsClaudeNonJSONStdout(t *testing.T) {
+	srv, st := newParserTestServer(t)
+	parser := newStreamParser(srv, "sess_1", "claude_code")
+
+	parser.handle(runtime.Output{Stream: "stdout", Line: `plain assistant text`})
+
+	select {
+	case <-parser.Done():
+	case <-time.After(time.Second):
+		t.Fatal("parser did not complete after non-JSON claude stdout")
+	}
+	if err := parser.Err(); err == nil || err.Error() != "claude stdout line is not a recognized JSON event" {
+		t.Fatalf("unexpected claude parser error: %v", err)
+	}
+
+	messages, err := st.ListMessages(context.Background(), "sess_1")
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	if len(messages) != 0 {
+		t.Fatalf("expected non-JSON claude stdout not to persist, got %+v", messages)
+	}
+}
+
 func bridgeOutputPayload(t *testing.T, sequence int64, line string) json.RawMessage {
 	t.Helper()
 	payload, err := json.Marshal(map[string]any{
@@ -334,38 +358,27 @@ func TestPiOutputNormalizerAcceptsRetryLifecycleEvents(t *testing.T) {
 	}
 }
 
-func TestPiOutputNormalizerToleratesUnknownType(t *testing.T) {
+func TestPiOutputNormalizerRejectsUnknownType(t *testing.T) {
 	srv, st := newParserTestServer(t)
 	parser := newStreamParser(srv, "sess_1", "pi")
 
-	// The producer forwards every pi stdout line, so an unknown but well-formed
-	// event (e.g. a future usage/token event) must not abort the turn. A real
-	// assistant message before/after it should still be persisted normally.
-	lines := []string{
-		`{"type":"message_update","messageId":"msg_1","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"hello"}}`,
-		`{"type":"future_event","tokens":42}`,
-		`{"type":"message_end","messageId":"msg_1","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}`,
-		`{"type":"turn_end","status":"completed"}`,
-	}
-	for _, line := range lines {
-		parser.handle(runtime.Output{Stream: "stdout", Line: line})
-	}
+	parser.handle(runtime.Output{Stream: "stdout", Line: `{"type":"future_event","tokens":42}`})
 
 	select {
 	case <-parser.Done():
 	case <-time.After(time.Second):
-		t.Fatal("parser did not complete after turn_end")
+		t.Fatal("parser did not complete after unknown pi event")
 	}
-	if err := parser.Err(); err != nil {
-		t.Fatalf("unknown pi event type should be tolerated, got error: %v", err)
+	if err := parser.Err(); err == nil || err.Error() != `unsupported pi event type "future_event"` {
+		t.Fatalf("unexpected pi parser error: %v", err)
 	}
 
 	messages, err := st.ListMessages(context.Background(), "sess_1")
 	if err != nil {
 		t.Fatalf("list messages: %v", err)
 	}
-	if len(messages) != 1 || messages[0].Role != "assistant" || messages[0].Content != "hello" {
-		t.Fatalf("expected the surrounding assistant message to persist, got %+v", messages)
+	if len(messages) != 0 {
+		t.Fatalf("expected unknown pi event not to persist messages, got %+v", messages)
 	}
 }
 
@@ -511,6 +524,17 @@ func TestNativeEventsOutputNormalizerRejectsUnknownType(t *testing.T) {
 	}
 	if err := parser.Err(); err == nil || err.Error() != `unsupported native event type "agent.future"` {
 		t.Fatalf("unexpected native parser error: %v", err)
+	}
+}
+
+func TestNativeEventsPublicPayloadRejectsInvalidJSON(t *testing.T) {
+	for _, eventType := range []string{"agent.delta", "agent.output", "system.status"} {
+		t.Run(eventType, func(t *testing.T) {
+			_, err := nativeEventPublicPayload(json.RawMessage(`{"unterminated"`))
+			if err == nil {
+				t.Fatalf("%s invalid payload should fail", eventType)
+			}
+		})
 	}
 }
 
