@@ -99,6 +99,54 @@ func TestAllocateGenerationRequiresExplicitAllocatorConfigFields(t *testing.T) {
 	}
 }
 
+func TestAllocateGenerationDoesNotReuseLegacyEmptyRuntimeProfileFallback(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	createStoreSessionWithAgent(t, ctx, st, "sess_legacy_empty_profile", "sh")
+	cfg := testAllocatorConfig(t)
+	cfg.DriverID = "sh"
+	cfg.Model = ""
+	cfg.OutputFormat = "shell_pty"
+	modelAccessAllowed := false
+	cfg.ModelAccessAllowed = &modelAccessAllowed
+	cfg.ProviderCredentialsHostOnly = false
+	cfg.SandboxModelProxyBaseURL = ""
+	supplementalGIDsJSON, err := json.Marshal(cfg.sandboxSupplementalGIDs())
+	if err != nil {
+		t.Fatalf("marshal supplemental gids: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+INSERT INTO agent_runtime_profiles (
+  agent_runtime_profile_id, driver_id, model, output_format,
+  disable_nonessential_traffic, sandbox_uid, sandbox_gid, sandbox_supplemental_gids,
+  requires_secret_drop,
+  model_access_allowed, manifest_model_proxy_base_url, model_proxy_api_key_secret_id,
+  model_proxy_auth_token_secret_id, secret_version, created_at
+) VALUES (?, ?, '', ?, ?, ?, ?, ?, 0, 0, '', '', '', '', ?)`,
+		"arp_legacy_empty_profile", cfg.driverID(), cfg.outputFormat(),
+		boolInt(cfg.DisableNonessentialTraffic), cfg.sandboxUID(), cfg.sandboxGID(), string(supplementalGIDsJSON),
+		formatTime(time.Now().UTC())); err != nil {
+		t.Fatalf("insert legacy empty profile: %v", err)
+	}
+
+	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_legacy_empty_profile",
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    cfg,
+	})
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("AllocateGeneration error=%v, want exact-profile miss", err)
+		}
+		return
+	}
+	if allocation.AgentRuntimeProfileID == "arp_legacy_empty_profile" {
+		t.Fatalf("allocation reused legacy empty-string runtime profile")
+	}
+}
+
 func TestAllocateGenerationCreatesRowsAndReservesNonDestroyedSlots(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
@@ -262,6 +310,45 @@ WHERE session_id = ?
 	}
 	if nextNetns == firstNetns {
 		t.Fatalf("expected reclaimable first netns to remain reserved, got %s", nextNetns)
+	}
+}
+
+func TestGetRuntimeGenerationDetailsUsesResourceSandboxContractVersion(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	createStoreSession(t, ctx, st, "sess_resource_contract_version")
+	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_resource_contract_version",
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    testAllocatorConfig(t),
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_generation_resources
+SET sandbox_contract_version = NULL
+WHERE generation_id = ?`, allocation.GenerationID); err != nil {
+		t.Fatalf("clear resource contract version: %v", err)
+	}
+	var generationVersion string
+	if err := st.db.QueryRowContext(ctx, `
+SELECT sandbox_contract_version
+FROM runtime_generations
+WHERE generation_id = ?`, allocation.GenerationID).Scan(&generationVersion); err != nil {
+		t.Fatalf("query generation contract version: %v", err)
+	}
+	if generationVersion != SandboxContractVersion {
+		t.Fatalf("generation mirror version = %q, want %q", generationVersion, SandboxContractVersion)
+	}
+	details, err := st.GetRuntimeGenerationDetails(ctx, "sess_resource_contract_version", allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get runtime generation details: %v", err)
+	}
+	if details.SandboxContractVersion != "" {
+		t.Fatalf("details sandbox contract version = %q, want empty resource value", details.SandboxContractVersion)
 	}
 }
 

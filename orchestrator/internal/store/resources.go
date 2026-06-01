@@ -336,6 +336,17 @@ func (s *Store) AllocateGeneration(ctx context.Context, p AllocateGenerationPara
 	if err != nil {
 		return GenerationAllocation{}, err
 	}
+	var sessionDriverID string
+	var autoCheckpointEnabled int
+	if err := tx.QueryRowContext(ctx, `
+SELECT driver_id, auto_checkpoint_enabled
+FROM sessions
+WHERE id = ?`, p.SessionID).Scan(&sessionDriverID, &autoCheckpointEnabled); err != nil {
+		return GenerationAllocation{}, err
+	}
+	if sessionDriverID != p.Config.driverID() {
+		return GenerationAllocation{}, fmt.Errorf("session driver %q does not match allocation driver %q", sessionDriverID, p.Config.driverID())
+	}
 	now := formatTime(p.Now)
 	leaseExpires := p.Now.Add(p.LeaseTTL)
 
@@ -360,7 +371,7 @@ ON CONFLICT DO NOTHING`,
 SELECT agent_runtime_profile_id
 FROM agent_runtime_profiles
 WHERE driver_id = ?
-  AND COALESCE(model, '') = COALESCE(?, '')
+  AND model IS ?
   AND output_format = ?
   AND disable_nonessential_traffic = ?
   AND sandbox_uid = ?
@@ -368,17 +379,17 @@ WHERE driver_id = ?
   AND sandbox_supplemental_gids = ?
   AND requires_secret_drop = ?
   AND model_access_allowed = ?
-  AND COALESCE(manifest_model_proxy_base_url, '') = COALESCE(?, '')
-  AND COALESCE(model_proxy_api_key_secret_id, '') = COALESCE(?, '')
-  AND COALESCE(model_proxy_auth_token_secret_id, '') = COALESCE(?, '')
-  AND COALESCE(secret_version, '') = COALESCE(?, '')`,
+  AND manifest_model_proxy_base_url IS ?
+  AND model_proxy_api_key_secret_id IS ?
+  AND model_proxy_auth_token_secret_id IS ?
+  AND secret_version IS ?`,
 		p.Config.driverID(), nullableString(p.Config.Model), p.Config.outputFormat(),
 		boolInt(p.Config.DisableNonessentialTraffic), p.Config.sandboxUID(), p.Config.sandboxGID(), string(supplementalGIDsJSON),
 		0,
 		boolInt(p.Config.modelAccessAllowed()),
 		nullableString(p.Config.manifestAnthropicBaseURL(network.SandboxBaseURL)),
 		nil, nil, nil).Scan(&agentRuntimeProfileID); err != nil {
-		return GenerationAllocation{}, err
+		return GenerationAllocation{}, fmt.Errorf("lookup explicit agent runtime profile: %w", err)
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -396,21 +407,10 @@ INSERT INTO runtime_generations (
   generation_id, session_id, status, network_profile_id,
   agent_runtime_profile_id, runsc_platform, sandbox_contract_version, lease_owner,
   lease_expires_at, last_seen_at, auto_checkpoint_enabled
-) VALUES (?, ?, 'allocating', ?, ?, 'systrap', ?, ?, ?, ?, COALESCE((
-  SELECT auto_checkpoint_enabled FROM sessions WHERE id = ?
-), 0))`,
-		generationID, p.SessionID, networkProfileID, agentRuntimeProfileID, SandboxContractVersion, p.Owner, formatTime(leaseExpires), now, p.SessionID); err != nil {
+) VALUES (?, ?, 'allocating', ?, ?, 'systrap', ?, ?, ?, ?, ?)`,
+		generationID, p.SessionID, networkProfileID, agentRuntimeProfileID, SandboxContractVersion,
+		p.Owner, formatTime(leaseExpires), now, autoCheckpointEnabled); err != nil {
 		return GenerationAllocation{}, err
-	}
-	var sessionDriverID string
-	if err := tx.QueryRowContext(ctx, `
-SELECT driver_id
-FROM sessions
-WHERE id = ?`, p.SessionID).Scan(&sessionDriverID); err != nil {
-		return GenerationAllocation{}, err
-	}
-	if sessionDriverID != p.Config.driverID() {
-		return GenerationAllocation{}, fmt.Errorf("session driver %q does not match allocation driver %q", sessionDriverID, p.Config.driverID())
 	}
 	driverState, err := ensureAllocationDriverStateTx(ctx, tx, p.SessionID, generationID, sessionDriverID, p.Now)
 	if err != nil {
@@ -2034,7 +2034,7 @@ SELECT
   g.network_profile_id,
   g.agent_runtime_profile_id,
   COALESCE(g.runsc_platform, ''),
-  COALESCE(g.sandbox_contract_version, ''),
+  COALESCE(r.sandbox_contract_version, ''),
   r.control_dir_path,
   r.control_manifest_path,
   r.bundle_dir_path,
