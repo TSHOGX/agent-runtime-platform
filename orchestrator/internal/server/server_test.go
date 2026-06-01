@@ -5458,25 +5458,25 @@ SET status = 'checkpointed',
     checkpoint_created_at = ?,
     checkpoint_network_profile_id = network_profile_id,
     checkpoint_agent_runtime_profile_id = agent_runtime_profile_id,
-    checkpoint_runsc_version = COALESCE(runsc_version, 'runsc test'),
-    checkpoint_runsc_platform = COALESCE(runsc_platform, 'systrap'),
-    checkpoint_runsc_binary_path = COALESCE((
-      SELECT NULLIF(runsc_binary_path, '')
+    checkpoint_runsc_version = runsc_version,
+    checkpoint_runsc_platform = runsc_platform,
+    checkpoint_runsc_binary_path = (
+      SELECT runsc_binary_path
       FROM runtime_generation_resources
       WHERE runtime_generation_resources.generation_id = runtime_generations.generation_id
-    ), '/usr/local/bin/runsc-test'),
-    checkpoint_runsc_binary_digest = COALESCE((
-      SELECT NULLIF(runsc_binary_digest, '')
+    ),
+    checkpoint_runsc_binary_digest = (
+      SELECT runsc_binary_digest
       FROM runtime_generation_resources
       WHERE runtime_generation_resources.generation_id = runtime_generations.generation_id
-    ), 'sha256:runsc-test'),
+    ),
     checkpoint_bundle_digest = 'bundle_digest',
     checkpoint_runtime_config_digest = 'runtime_config_digest',
-    checkpoint_control_manifest_digest = COALESCE((
+    checkpoint_control_manifest_digest = (
       SELECT control_manifest_digest
       FROM runtime_generation_resources
       WHERE runtime_generation_resources.generation_id = runtime_generations.generation_id
-    ), 'manifest_digest'),
+    ),
     checkpoint_driver_states_digest = ?,
     lease_owner = NULL,
     lease_expires_at = NULL,

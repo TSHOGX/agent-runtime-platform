@@ -1898,6 +1898,12 @@ func (s *Store) CompleteGenerationCheckpoint(ctx context.Context, p CompleteChec
 	if strings.TrimSpace(p.CheckpointControlManifestDigest) == "" {
 		return fmt.Errorf("checkpoint control manifest digest is required")
 	}
+	if strings.TrimSpace(p.RunscVersion) == "" {
+		return fmt.Errorf("checkpoint runsc version is required")
+	}
+	if strings.TrimSpace(p.RunscPlatform) == "" {
+		return fmt.Errorf("checkpoint runsc platform is required")
+	}
 	if strings.TrimSpace(p.RunscBinaryPath) == "" {
 		return fmt.Errorf("checkpoint runsc binary path is required")
 	}
@@ -1933,8 +1939,8 @@ SET status = 'checkpointed',
     checkpoint_created_at = ?,
     checkpoint_network_profile_id = network_profile_id,
     checkpoint_agent_runtime_profile_id = agent_runtime_profile_id,
-    checkpoint_runsc_version = COALESCE(?, runsc_version),
-    checkpoint_runsc_platform = COALESCE(?, runsc_platform),
+    checkpoint_runsc_version = ?,
+    checkpoint_runsc_platform = ?,
     checkpoint_runsc_binary_path = ?,
     checkpoint_runsc_binary_digest = ?,
     checkpoint_bundle_digest = ?,
@@ -1953,7 +1959,7 @@ WHERE generation_id = ?
     WHERE id = ?
       AND active_generation_id = ?
       AND status = 'checkpointing'
-  )`, formatTime(p.Now), nullableString(p.RunscVersion), nullableString(p.RunscPlatform), p.RunscBinaryPath, p.RunscBinaryDigest,
+  )`, formatTime(p.Now), p.RunscVersion, p.RunscPlatform, p.RunscBinaryPath, p.RunscBinaryDigest,
 		p.CheckpointBundleDigest, p.CheckpointRuntimeConfigDigest, p.CheckpointControlManifestDigest,
 		formatTime(p.Now), p.GenerationID, p.SessionID, p.Owner, formatTime(p.Now), p.SessionID, p.GenerationID)
 	if err != nil {
@@ -2192,14 +2198,10 @@ WHERE g.session_id = ?
 	return details, nil
 }
 
-func (s *Store) RecordGenerationRuntimeArtifacts(ctx context.Context, generationID, controlManifestDigest, runscVersion string) error {
-	return s.RecordGenerationRuntimeArtifactDigests(ctx, generationID, GenerationRuntimeArtifactDigests{
-		ControlManifestDigest: controlManifestDigest,
-		RunscVersion:          runscVersion,
-	})
-}
-
 func (s *Store) RecordGenerationRuntimeArtifactDigests(ctx context.Context, generationID string, digests GenerationRuntimeArtifactDigests) error {
+	if err := validateGenerationRuntimeArtifactDigests(digests); err != nil {
+		return err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -2208,32 +2210,54 @@ func (s *Store) RecordGenerationRuntimeArtifactDigests(ctx context.Context, gene
 	if _, err := tx.ExecContext(ctx, `
 UPDATE runtime_generation_resources
 SET control_manifest_digest = ?,
-    projected_control_manifest_digest = COALESCE(?, projected_control_manifest_digest),
-    bundle_digest = COALESCE(?, bundle_digest),
-    runtime_config_digest = COALESCE(?, runtime_config_digest),
-    spec_digest = COALESCE(?, spec_digest),
-    runsc_version = COALESCE(?, runsc_version),
-    runsc_binary_path = COALESCE(?, runsc_binary_path),
-    runsc_binary_digest = COALESCE(?, runsc_binary_digest)
+    projected_control_manifest_digest = ?,
+    bundle_digest = ?,
+    runtime_config_digest = ?,
+    spec_digest = ?,
+    runsc_version = ?,
+    runsc_binary_path = ?,
+    runsc_binary_digest = ?
 WHERE generation_id = ?`,
 		digests.ControlManifestDigest,
-		nullableString(digests.ProjectedControlManifestDigest),
-		nullableString(digests.BundleDigest),
-		nullableString(digests.RuntimeConfigDigest),
-		nullableString(digests.SpecDigest),
-		nullableString(digests.RunscVersion),
-		nullableString(digests.RunscBinaryPath),
-		nullableString(digests.RunscBinaryDigest),
+		digests.ProjectedControlManifestDigest,
+		digests.BundleDigest,
+		digests.RuntimeConfigDigest,
+		digests.SpecDigest,
+		digests.RunscVersion,
+		digests.RunscBinaryPath,
+		digests.RunscBinaryDigest,
 		generationID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE runtime_generations
-SET runsc_version = COALESCE(?, runsc_version)
-WHERE generation_id = ?`, nullableString(digests.RunscVersion), generationID); err != nil {
+SET runsc_version = ?
+WHERE generation_id = ?`, digests.RunscVersion, generationID); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+func validateGenerationRuntimeArtifactDigests(digests GenerationRuntimeArtifactDigests) error {
+	required := []struct {
+		name  string
+		value string
+	}{
+		{"control manifest digest", digests.ControlManifestDigest},
+		{"projected control manifest digest", digests.ProjectedControlManifestDigest},
+		{"bundle digest", digests.BundleDigest},
+		{"runtime config digest", digests.RuntimeConfigDigest},
+		{"spec digest", digests.SpecDigest},
+		{"runsc version", digests.RunscVersion},
+		{"runsc binary path", digests.RunscBinaryPath},
+		{"runsc binary digest", digests.RunscBinaryDigest},
+	}
+	for _, field := range required {
+		if strings.TrimSpace(field.value) == "" {
+			return fmt.Errorf("runtime artifact %s is required", field.name)
+		}
+	}
+	return nil
 }
 
 type networkAllocation struct {

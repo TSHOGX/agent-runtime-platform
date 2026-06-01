@@ -183,14 +183,30 @@ WHERE session_id = ?
 	if err := st.MarkGenerationResourcesLive(ctx, "sess_alloc", allocation.GenerationID, allocation.Owner, now.Add(time.Second)); err != nil {
 		t.Fatalf("mark resources live: %v", err)
 	}
-	if err := st.RecordGenerationRuntimeArtifacts(ctx, allocation.GenerationID, "digest_a", "runsc test"); err != nil {
+	if err := st.RecordGenerationRuntimeArtifactDigests(ctx, allocation.GenerationID, GenerationRuntimeArtifactDigests{
+		ControlManifestDigest:          "digest_a",
+		ProjectedControlManifestDigest: "projected_digest_a",
+		BundleDigest:                   "bundle_digest_a",
+		RuntimeConfigDigest:            "runtime_config_digest_a",
+		SpecDigest:                     "spec_digest_a",
+		RunscVersion:                   "runsc test",
+		RunscBinaryPath:                "/usr/local/bin/runsc-test",
+		RunscBinaryDigest:              "sha256:runsc-test",
+	}); err != nil {
 		t.Fatalf("record runtime artifacts: %v", err)
 	}
 	details, err = st.GetRuntimeGenerationDetails(ctx, "sess_alloc", allocation.GenerationID)
 	if err != nil {
 		t.Fatalf("get runtime generation details after artifact record: %v", err)
 	}
-	if details.ControlManifestDigest != "digest_a" || details.RunscVersion != "runsc test" {
+	if details.ControlManifestDigest != "digest_a" ||
+		details.ProjectedControlManifestDigest != "projected_digest_a" ||
+		details.BundleDigest != "bundle_digest_a" ||
+		details.RuntimeConfigDigest != "runtime_config_digest_a" ||
+		details.SpecDigest != "spec_digest_a" ||
+		details.RunscVersion != "runsc test" ||
+		details.RunscBinaryPath != "/usr/local/bin/runsc-test" ||
+		details.RunscBinaryDigest != "sha256:runsc-test" {
 		t.Fatalf("runtime artifact details not persisted: %+v", details)
 	}
 	if err := st.FailGeneration(ctx, FailGenerationParams{
@@ -227,6 +243,75 @@ WHERE session_id = ?
 	}
 	if nextNetns == firstNetns {
 		t.Fatalf("expected reclaimable first netns to remain reserved, got %s", nextNetns)
+	}
+}
+
+func TestRecordGenerationRuntimeArtifactDigestsRequiresCompleteMetadata(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	createStoreSession(t, ctx, st, "sess_artifact_metadata")
+	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_artifact_metadata",
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    testAllocatorConfig(t),
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	valid := GenerationRuntimeArtifactDigests{
+		ControlManifestDigest:          "manifest_digest",
+		ProjectedControlManifestDigest: "projected_manifest_digest",
+		BundleDigest:                   "bundle_digest",
+		RuntimeConfigDigest:            "runtime_config_digest",
+		SpecDigest:                     "spec_digest",
+		RunscVersion:                   "runsc test",
+		RunscBinaryPath:                "/usr/local/bin/runsc-test",
+		RunscBinaryDigest:              "sha256:runsc-test",
+	}
+	tests := []struct {
+		name string
+		want string
+		edit func(*GenerationRuntimeArtifactDigests)
+	}{
+		{name: "control manifest", want: "control manifest digest", edit: func(d *GenerationRuntimeArtifactDigests) { d.ControlManifestDigest = "" }},
+		{name: "projected manifest", want: "projected control manifest digest", edit: func(d *GenerationRuntimeArtifactDigests) { d.ProjectedControlManifestDigest = "" }},
+		{name: "bundle", want: "bundle digest", edit: func(d *GenerationRuntimeArtifactDigests) { d.BundleDigest = "" }},
+		{name: "runtime config", want: "runtime config digest", edit: func(d *GenerationRuntimeArtifactDigests) { d.RuntimeConfigDigest = "" }},
+		{name: "spec", want: "spec digest", edit: func(d *GenerationRuntimeArtifactDigests) { d.SpecDigest = "" }},
+		{name: "runsc version", want: "runsc version", edit: func(d *GenerationRuntimeArtifactDigests) { d.RunscVersion = "" }},
+		{name: "runsc binary path", want: "runsc binary path", edit: func(d *GenerationRuntimeArtifactDigests) { d.RunscBinaryPath = "" }},
+		{name: "runsc binary digest", want: "runsc binary digest", edit: func(d *GenerationRuntimeArtifactDigests) { d.RunscBinaryDigest = "" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			digests := valid
+			tt.edit(&digests)
+			err := st.RecordGenerationRuntimeArtifactDigests(ctx, allocation.GenerationID, digests)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("RecordGenerationRuntimeArtifactDigests error=%v want field %q", err, tt.want)
+			}
+		})
+	}
+
+	if err := st.RecordGenerationRuntimeArtifactDigests(ctx, allocation.GenerationID, valid); err != nil {
+		t.Fatalf("record complete artifacts: %v", err)
+	}
+	partial := valid
+	partial.ControlManifestDigest = "new_manifest_digest"
+	partial.BundleDigest = ""
+	if err := st.RecordGenerationRuntimeArtifactDigests(ctx, allocation.GenerationID, partial); err == nil {
+		t.Fatalf("partial artifact update succeeded")
+	}
+	details, err := st.GetRuntimeGenerationDetails(ctx, "sess_artifact_metadata", allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get runtime generation details: %v", err)
+	}
+	if details.ControlManifestDigest != valid.ControlManifestDigest ||
+		details.BundleDigest != valid.BundleDigest ||
+		details.RunscVersion != valid.RunscVersion {
+		t.Fatalf("partial artifact update changed stored metadata: %+v", details)
 	}
 }
 
@@ -1935,6 +2020,43 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(
 	}
 }
 
+func TestCompleteGenerationCheckpointRequiresRunscMetadata(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openOwnedStore(t, ctx)
+	params := CompleteCheckpointParams{
+		SessionID:                       "sess_checkpoint_metadata",
+		GenerationID:                    "gen_checkpoint_metadata",
+		Owner:                           "owner",
+		CheckpointPath:                  "/tmp/checkpoint",
+		RunscPlatform:                   "systrap",
+		RunscVersion:                    "runsc test",
+		RunscBinaryPath:                 "/usr/local/bin/runsc-test",
+		RunscBinaryDigest:               "sha256:runsc-test",
+		CheckpointBundleDigest:          "bundle_digest",
+		CheckpointRuntimeConfigDigest:   "runtime_config_digest",
+		CheckpointControlManifestDigest: "manifest_digest",
+		Now:                             time.Now().UTC(),
+	}
+	tests := []struct {
+		name string
+		want string
+		edit func(*CompleteCheckpointParams)
+	}{
+		{name: "runsc version", want: "checkpoint runsc version is required", edit: func(p *CompleteCheckpointParams) { p.RunscVersion = "" }},
+		{name: "runsc platform", want: "checkpoint runsc platform is required", edit: func(p *CompleteCheckpointParams) { p.RunscPlatform = "" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := params
+			tt.edit(&p)
+			err := st.CompleteGenerationCheckpoint(ctx, p)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("CompleteGenerationCheckpoint error=%v want %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestGenerationCheckpointAbortRestoresIdleState(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
@@ -2583,25 +2705,25 @@ SET status = 'checkpointed',
     checkpoint_created_at = ?,
     checkpoint_network_profile_id = network_profile_id,
     checkpoint_agent_runtime_profile_id = agent_runtime_profile_id,
-    checkpoint_runsc_version = COALESCE(runsc_version, 'runsc test'),
-    checkpoint_runsc_platform = COALESCE(runsc_platform, 'systrap'),
-    checkpoint_runsc_binary_path = COALESCE((
-      SELECT NULLIF(runsc_binary_path, '')
+    checkpoint_runsc_version = runsc_version,
+    checkpoint_runsc_platform = runsc_platform,
+    checkpoint_runsc_binary_path = (
+      SELECT runsc_binary_path
       FROM runtime_generation_resources
       WHERE runtime_generation_resources.generation_id = runtime_generations.generation_id
-    ), '/usr/local/bin/runsc-test'),
-    checkpoint_runsc_binary_digest = COALESCE((
-      SELECT NULLIF(runsc_binary_digest, '')
+    ),
+    checkpoint_runsc_binary_digest = (
+      SELECT runsc_binary_digest
       FROM runtime_generation_resources
       WHERE runtime_generation_resources.generation_id = runtime_generations.generation_id
-    ), 'sha256:runsc-test'),
+    ),
     checkpoint_bundle_digest = 'bundle_digest',
     checkpoint_runtime_config_digest = 'runtime_config_digest',
-    checkpoint_control_manifest_digest = COALESCE((
+    checkpoint_control_manifest_digest = (
       SELECT control_manifest_digest
       FROM runtime_generation_resources
       WHERE runtime_generation_resources.generation_id = runtime_generations.generation_id
-    ), 'manifest_digest'),
+    ),
     checkpoint_driver_states_digest = ?,
     lease_owner = NULL,
     lease_expires_at = NULL,
