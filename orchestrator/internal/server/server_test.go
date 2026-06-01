@@ -2226,23 +2226,29 @@ func TestGetQuotaReportsSessionAndPoolCeilings(t *testing.T) {
 	cfg.MaxSessions = 3
 	cfg.Harness.MaxSessions = 3
 	cfg.Harness.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.242.0.0/29")}
+	modelAccessAllowed := true
 	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
 		SessionID: "sess_quota",
 		Owner:     store.GenerationLeaseOwner(owner.UUID),
 		LeaseTTL:  time.Minute,
 		Now:       time.Now().UTC(),
 		Config: store.ResourceAllocatorConfig{
-			RunDir:             cfg.Harness.RunDir,
-			CIDRPool:           cfg.Harness.Network.CIDRPool.Prefix,
-			EgressDorisFEHosts: cfg.Harness.Network.Egress.DorisFEHosts,
-			EgressDorisBEHosts: cfg.Harness.Network.Egress.DorisBEHosts,
-			EgressDorisPorts:   cfg.Harness.Network.Egress.DorisPorts,
-			EgressDNSPolicy:    string(cfg.Harness.Network.Egress.DNSPolicy),
-			HostProxyBindURL:   cfg.ModelProxy.BindURL,
-			ProxyPort:          cfg.ModelProxy.BindPort,
-			DriverID:           "claude_code",
-			Model:              "sonnet",
-			OutputFormat:       "stream-json",
+			RunDir:                      cfg.Harness.RunDir,
+			CIDRPool:                    cfg.Harness.Network.CIDRPool.Prefix,
+			EgressDorisFEHosts:          cfg.Harness.Network.Egress.DorisFEHosts,
+			EgressDorisBEHosts:          cfg.Harness.Network.Egress.DorisBEHosts,
+			EgressDorisPorts:            cfg.Harness.Network.Egress.DorisPorts,
+			EgressDNSPolicy:             string(cfg.Harness.Network.Egress.DNSPolicy),
+			HostProxyBindURL:            cfg.ModelProxy.BindURL,
+			ProxyPort:                   cfg.ModelProxy.BindPort,
+			DriverID:                    "claude_code",
+			Model:                       "sonnet",
+			OutputFormat:                "stream-json",
+			SandboxUID:                  cfg.Harness.SandboxIdentity.UID,
+			SandboxGID:                  cfg.Harness.SandboxIdentity.GID,
+			ModelAccessAllowed:          &modelAccessAllowed,
+			ProviderCredentialsHostOnly: true,
+			SandboxModelProxyBaseURL:    cfg.ModelProxy.SandboxBaseURL,
 		},
 	})
 	if err != nil {
@@ -2695,19 +2701,22 @@ func TestSandboxContractPayloadRecordsPiMaterializedConfig(t *testing.T) {
 	if err := st.CreateSession(ctx, session); err != nil {
 		t.Fatalf("create pi session: %v", err)
 	}
+	modelAccessAllowed := true
 	allocatorConfig := store.ResourceAllocatorConfig{
-		RunDir:                     filepath.Join(dir, "run"),
-		CIDRPool:                   netip.MustParsePrefix("10.240.0.0/28"),
-		EgressDNSPolicy:            "hostnames_only",
-		HostProxyBindURL:           "http://0.0.0.0:8082",
-		ProxyPort:                  8082,
-		DriverID:                   "pi",
-		Model:                      "sonnet",
-		OutputFormat:               "pi_rpc_events_v1.0",
-		DisableNonessentialTraffic: true,
-		SandboxUID:                 65534,
-		SandboxGID:                 65534,
-		SandboxModelProxyBaseURL:   "http://harness-model-proxy.internal:8082",
+		RunDir:                      filepath.Join(dir, "run"),
+		CIDRPool:                    netip.MustParsePrefix("10.240.0.0/28"),
+		EgressDNSPolicy:             "hostnames_only",
+		HostProxyBindURL:            "http://0.0.0.0:8082",
+		ProxyPort:                   8082,
+		DriverID:                    "pi",
+		Model:                       "sonnet",
+		OutputFormat:                "pi_rpc_events_v1.0",
+		DisableNonessentialTraffic:  true,
+		SandboxUID:                  65534,
+		SandboxGID:                  65534,
+		ModelAccessAllowed:          &modelAccessAllowed,
+		ProviderCredentialsHostOnly: true,
+		SandboxModelProxyBaseURL:    "http://harness-model-proxy.internal:8082",
 	}
 	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
 		SessionID: session.ID,
@@ -3297,23 +3306,29 @@ func TestRunMaintenancePollsBridgeOutbox(t *testing.T) {
 	session := createServerTestSession(t, ctx, st, dir, "sess_bridge_poll", string(sessionstate.Created), time.Now().UTC(), nil)
 	cfg := testServerConfig(dir)
 	cfg.Harness.Bridge.PollInterval = config.Duration{Duration: 10 * time.Millisecond}
+	modelAccessAllowed := true
 	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
 		SessionID: session.ID,
 		Owner:     store.GenerationLeaseOwner(owner.UUID),
 		LeaseTTL:  time.Minute,
 		Now:       time.Now().UTC(),
 		Config: store.ResourceAllocatorConfig{
-			RunDir:             cfg.Harness.RunDir,
-			CIDRPool:           cfg.Harness.Network.CIDRPool.Prefix,
-			EgressDorisFEHosts: cfg.Harness.Network.Egress.DorisFEHosts,
-			EgressDorisBEHosts: cfg.Harness.Network.Egress.DorisBEHosts,
-			EgressDorisPorts:   cfg.Harness.Network.Egress.DorisPorts,
-			EgressDNSPolicy:    string(cfg.Harness.Network.Egress.DNSPolicy),
-			HostProxyBindURL:   cfg.ModelProxy.BindURL,
-			ProxyPort:          cfg.ModelProxy.BindPort,
-			DriverID:           "claude_code",
-			Model:              "sonnet",
-			OutputFormat:       "stream-json",
+			RunDir:                      cfg.Harness.RunDir,
+			CIDRPool:                    cfg.Harness.Network.CIDRPool.Prefix,
+			EgressDorisFEHosts:          cfg.Harness.Network.Egress.DorisFEHosts,
+			EgressDorisBEHosts:          cfg.Harness.Network.Egress.DorisBEHosts,
+			EgressDorisPorts:            cfg.Harness.Network.Egress.DorisPorts,
+			EgressDNSPolicy:             string(cfg.Harness.Network.Egress.DNSPolicy),
+			HostProxyBindURL:            cfg.ModelProxy.BindURL,
+			ProxyPort:                   cfg.ModelProxy.BindPort,
+			DriverID:                    "claude_code",
+			Model:                       "sonnet",
+			OutputFormat:                "stream-json",
+			SandboxUID:                  cfg.Harness.SandboxIdentity.UID,
+			SandboxGID:                  cfg.Harness.SandboxIdentity.GID,
+			ModelAccessAllowed:          &modelAccessAllowed,
+			ProviderCredentialsHostOnly: true,
+			SandboxModelProxyBaseURL:    cfg.ModelProxy.SandboxBaseURL,
 		},
 	})
 	if err != nil {
@@ -5794,6 +5809,7 @@ func serverTestAllocatorConfig(cfg config.Config, driverID string) store.Resourc
 		SandboxUID:                  cfg.Harness.SandboxIdentity.UID,
 		SandboxGID:                  cfg.Harness.SandboxIdentity.GID,
 		SandboxSupplementalGIDs:     cfg.Harness.SandboxIdentity.SupplementalGIDs,
+		ModelAccessAllowed:          &modelAccess,
 		ProviderCredentialsHostOnly: modelAccess,
 		SandboxModelProxyBaseURL:    cfg.ModelProxy.SandboxBaseURL,
 	}

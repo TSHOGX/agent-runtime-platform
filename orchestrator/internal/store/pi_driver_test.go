@@ -263,8 +263,15 @@ func createAllocatedDriverSession(t *testing.T, ctx context.Context, st *Store, 
 	createStoreSessionWithAgent(t, ctx, st, sessionID, driverID)
 	cfg.DriverID = driverID
 	cfg.OutputFormat = outputFormat
+	modelAccessAllowed := false
+	if spec, ok := agents.DriverSpecFor(driverID); ok {
+		modelAccessAllowed = spec.ModelAccess
+	}
+	cfg.ModelAccessAllowed = &modelAccessAllowed
+	cfg.ProviderCredentialsHostOnly = modelAccessAllowed
 	if driverID == "sh" {
 		cfg.Model = ""
+		cfg.SandboxModelProxyBaseURL = ""
 	}
 	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
 		SessionID: sessionID,

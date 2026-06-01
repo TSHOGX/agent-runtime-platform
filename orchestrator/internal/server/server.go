@@ -1225,9 +1225,11 @@ func (s *Server) resourceAllocatorConfig(driverID string) store.ResourceAllocato
 		driverID = string(canonical)
 	}
 	outputFormat := ""
+	modelAccessAllowed := false
 	providerCredentialsHostOnly := false
 	if driverSpec, ok := agents.DriverSpecFor(driverID); ok {
 		outputFormat = driverSpec.OutputFormat
+		modelAccessAllowed = driverSpec.ModelAccess
 		providerCredentialsHostOnly = driverSpec.ModelAccess
 	}
 	var model string
@@ -1258,6 +1260,7 @@ func (s *Server) resourceAllocatorConfig(driverID string) store.ResourceAllocato
 		SandboxUID:                  s.cfg.Harness.SandboxIdentity.UID,
 		SandboxGID:                  s.cfg.Harness.SandboxIdentity.GID,
 		SandboxSupplementalGIDs:     s.cfg.Harness.SandboxIdentity.SupplementalGIDs,
+		ModelAccessAllowed:          &modelAccessAllowed,
 		ProviderCredentialsHostOnly: providerCredentialsHostOnly,
 		SandboxModelProxyBaseURL:    s.cfg.ModelProxy.SandboxBaseURL,
 	}

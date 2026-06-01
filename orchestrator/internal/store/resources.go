@@ -21,9 +21,6 @@ import (
 )
 
 const RuntimeManagerRoleTag = "runtime_manager"
-const defaultSandboxModelProxyAliasHost = "harness-model-proxy.internal"
-const defaultSandboxModelProxyAliasPort = 8082
-const defaultSandboxModelProxyAliasURL = "http://harness-model-proxy.internal:8082"
 
 var ErrPoolExhausted = errors.New("pool exhausted")
 var ErrStaleCheckpointRestore = errors.New("stale checkpoint restore")
@@ -281,7 +278,7 @@ func (s *Store) AllocateGeneration(ctx context.Context, p AllocateGenerationPara
 	if strings.TrimSpace(p.Config.RunDir) == "" {
 		return GenerationAllocation{}, fmt.Errorf("run dir is required")
 	}
-	if err := p.Config.validateSandboxModelProxyBaseURL(); err != nil {
+	if err := p.Config.validateAllocationBoundary(); err != nil {
 		return GenerationAllocation{}, err
 	}
 	if _, ok := agents.Lookup(p.Config.driverID()); !ok {
@@ -2573,33 +2570,18 @@ func agentRuntimeProfileID(generationID string) string {
 }
 
 func (c ResourceAllocatorConfig) driverID() string {
-	if strings.TrimSpace(c.DriverID) != "" {
-		return strings.TrimSpace(c.DriverID)
-	}
-	if strings.TrimSpace(c.OutputFormat) == "shell_pty" {
-		return string(agents.Shell)
-	}
-	return string(agents.ClaudeCode)
+	return strings.TrimSpace(c.DriverID)
 }
 
 func (c ResourceAllocatorConfig) outputFormat() string {
-	if strings.TrimSpace(c.OutputFormat) == "" {
-		return "stream-json"
-	}
 	return strings.TrimSpace(c.OutputFormat)
 }
 
 func (c ResourceAllocatorConfig) sandboxUID() int {
-	if c.SandboxUID <= 0 {
-		return 65534
-	}
 	return c.SandboxUID
 }
 
 func (c ResourceAllocatorConfig) sandboxGID() int {
-	if c.SandboxGID <= 0 {
-		return 65534
-	}
 	return c.SandboxGID
 }
 
@@ -2609,32 +2591,15 @@ func (c ResourceAllocatorConfig) sandboxSupplementalGIDs() []int {
 	}
 	out := append([]int(nil), c.SandboxSupplementalGIDs...)
 	sort.Ints(out)
-	deduped := out[:0]
-	for _, gid := range out {
-		if gid <= 0 {
-			continue
-		}
-		if len(deduped) == 0 || deduped[len(deduped)-1] != gid {
-			deduped = append(deduped, gid)
-		}
-	}
-	return deduped
+	return out
 }
 
 func (c ResourceAllocatorConfig) modelAccessAllowed() bool {
-	if c.ModelAccessAllowed != nil {
-		return *c.ModelAccessAllowed
-	}
-	return c.driverSupportsModelAccess()
+	return c.ModelAccessAllowed != nil && *c.ModelAccessAllowed
 }
 
 func (c ResourceAllocatorConfig) providerCredentialsHostOnly() bool {
-	return c.driverSupportsModelAccess()
-}
-
-func (c ResourceAllocatorConfig) driverSupportsModelAccess() bool {
-	spec, ok := agents.DriverSpecFor(c.driverID())
-	return ok && spec.ModelAccess
+	return c.ProviderCredentialsHostOnly
 }
 
 func (c ResourceAllocatorConfig) requiresNetworkHostsProjection() bool {
@@ -2662,20 +2627,55 @@ func (c ResourceAllocatorConfig) manifestAnthropicBaseURL(baseURL string) string
 }
 
 func (c ResourceAllocatorConfig) sandboxModelProxyBaseURL() string {
-	if value := strings.TrimSpace(c.SandboxModelProxyBaseURL); value != "" {
-		return value
-	}
-	if c.providerCredentialsHostOnly() && c.modelAccessAllowed() {
-		return defaultSandboxModelProxyAliasURLForPort(c.proxyPort())
-	}
-	return ""
+	return strings.TrimSpace(c.SandboxModelProxyBaseURL)
 }
 
-func defaultSandboxModelProxyAliasURLForPort(port int) string {
-	if port <= 0 {
-		port = defaultSandboxModelProxyAliasPort
+func (c ResourceAllocatorConfig) validateAllocationBoundary() error {
+	if c.driverID() == "" {
+		return fmt.Errorf("driver id is required")
 	}
-	return fmt.Sprintf("http://%s:%d", defaultSandboxModelProxyAliasHost, port)
+	if c.outputFormat() == "" {
+		return fmt.Errorf("output format is required")
+	}
+	if c.sandboxUID() <= 0 {
+		return fmt.Errorf("sandbox uid must be > 0")
+	}
+	if c.sandboxGID() <= 0 {
+		return fmt.Errorf("sandbox gid must be > 0")
+	}
+	if err := c.validateSandboxSupplementalGIDs(); err != nil {
+		return err
+	}
+	if c.hostProxyBindURL() == "" {
+		return fmt.Errorf("host proxy bind url is required")
+	}
+	if c.proxyPort() <= 0 {
+		return fmt.Errorf("proxy port must be > 0")
+	}
+	if c.ModelAccessAllowed == nil {
+		return fmt.Errorf("model access allowed must be explicitly set")
+	}
+	if c.modelAccessAllowed() && strings.TrimSpace(c.Model) == "" {
+		return fmt.Errorf("model is required when model access is enabled")
+	}
+	if err := c.validateSandboxModelProxyBaseURL(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c ResourceAllocatorConfig) validateSandboxSupplementalGIDs() error {
+	seen := map[int]struct{}{}
+	for _, gid := range c.SandboxSupplementalGIDs {
+		if gid <= 0 {
+			return fmt.Errorf("sandbox supplemental gids must contain only positive gids")
+		}
+		if _, ok := seen[gid]; ok {
+			return fmt.Errorf("sandbox supplemental gids contains duplicate gid %d", gid)
+		}
+		seen[gid] = struct{}{}
+	}
+	return nil
 }
 
 func (c ResourceAllocatorConfig) validateSandboxModelProxyBaseURL() error {
@@ -2683,6 +2683,9 @@ func (c ResourceAllocatorConfig) validateSandboxModelProxyBaseURL() error {
 		return nil
 	}
 	raw := c.sandboxModelProxyBaseURL()
+	if raw == "" {
+		return fmt.Errorf("sandbox model proxy base url is required when host-only model access is enabled")
+	}
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		return fmt.Errorf("sandbox model proxy base url %q is invalid: %w", raw, err)
@@ -2748,16 +2751,10 @@ func modelProxyHostIsProviderUpstream(host string) bool {
 }
 
 func (c ResourceAllocatorConfig) hostProxyBindURL() string {
-	if strings.TrimSpace(c.HostProxyBindURL) == "" {
-		return "http://0.0.0.0:8082"
-	}
 	return strings.TrimSpace(c.HostProxyBindURL)
 }
 
 func (c ResourceAllocatorConfig) proxyPort() int {
-	if c.ProxyPort <= 0 {
-		return 8082
-	}
 	return c.ProxyPort
 }
 

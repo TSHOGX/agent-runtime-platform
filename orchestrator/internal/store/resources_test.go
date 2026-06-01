@@ -15,66 +15,85 @@ import (
 	"harness-platform/orchestrator/internal/sessionstate"
 )
 
-func TestResourceAllocatorConfigModelCredentialDefaultsUseDriverSpec(t *testing.T) {
-	boolPtr := func(value bool) *bool {
-		return &value
-	}
+func TestAllocateGenerationRequiresExplicitAllocatorConfigFields(t *testing.T) {
 	tests := []struct {
-		name         string
-		cfg          ResourceAllocatorConfig
-		wantAccess   bool
-		wantHostOnly bool
+		name string
+		edit func(*ResourceAllocatorConfig)
+		want string
 	}{
 		{
-			name:         "claude default",
-			cfg:          ResourceAllocatorConfig{DriverID: "claude_code"},
-			wantAccess:   true,
-			wantHostOnly: true,
+			name: "missing driver",
+			edit: func(cfg *ResourceAllocatorConfig) { cfg.DriverID = "" },
+			want: "driver id is required",
 		},
 		{
-			name:         "pi default",
-			cfg:          ResourceAllocatorConfig{DriverID: "pi"},
-			wantAccess:   true,
-			wantHostOnly: true,
+			name: "missing output format",
+			edit: func(cfg *ResourceAllocatorConfig) { cfg.OutputFormat = "" },
+			want: "output format is required",
 		},
 		{
-			name:         "shell default",
-			cfg:          ResourceAllocatorConfig{DriverID: "sh"},
-			wantAccess:   false,
-			wantHostOnly: false,
+			name: "missing sandbox uid",
+			edit: func(cfg *ResourceAllocatorConfig) { cfg.SandboxUID = 0 },
+			want: "sandbox uid must be > 0",
 		},
 		{
-			name:         "unknown default",
-			cfg:          ResourceAllocatorConfig{DriverID: "unknown"},
-			wantAccess:   false,
-			wantHostOnly: false,
+			name: "missing sandbox gid",
+			edit: func(cfg *ResourceAllocatorConfig) { cfg.SandboxGID = 0 },
+			want: "sandbox gid must be > 0",
 		},
 		{
-			name:         "explicit claude deny",
-			cfg:          ResourceAllocatorConfig{DriverID: "claude_code", ModelAccessAllowed: boolPtr(false)},
-			wantAccess:   false,
-			wantHostOnly: true,
+			name: "invalid supplemental gid",
+			edit: func(cfg *ResourceAllocatorConfig) { cfg.SandboxSupplementalGIDs = []int{44, 0} },
+			want: "sandbox supplemental gids must contain only positive gids",
 		},
 		{
-			name:         "explicit shell allow",
-			cfg:          ResourceAllocatorConfig{DriverID: "sh", ModelAccessAllowed: boolPtr(true)},
-			wantAccess:   true,
-			wantHostOnly: false,
+			name: "duplicate supplemental gid",
+			edit: func(cfg *ResourceAllocatorConfig) { cfg.SandboxSupplementalGIDs = []int{44, 44} },
+			want: "sandbox supplemental gids contains duplicate gid 44",
 		},
 		{
-			name:         "explicit unknown allow",
-			cfg:          ResourceAllocatorConfig{DriverID: "unknown", ModelAccessAllowed: boolPtr(true)},
-			wantAccess:   true,
-			wantHostOnly: false,
+			name: "missing host proxy bind url",
+			edit: func(cfg *ResourceAllocatorConfig) { cfg.HostProxyBindURL = "" },
+			want: "host proxy bind url is required",
+		},
+		{
+			name: "missing proxy port",
+			edit: func(cfg *ResourceAllocatorConfig) { cfg.ProxyPort = 0 },
+			want: "proxy port must be > 0",
+		},
+		{
+			name: "missing model access allowed",
+			edit: func(cfg *ResourceAllocatorConfig) { cfg.ModelAccessAllowed = nil },
+			want: "model access allowed must be explicitly set",
+		},
+		{
+			name: "missing model for model access",
+			edit: func(cfg *ResourceAllocatorConfig) { cfg.Model = "" },
+			want: "model is required when model access is enabled",
+		},
+		{
+			name: "missing sandbox model proxy url for host-only model access",
+			edit: func(cfg *ResourceAllocatorConfig) { cfg.SandboxModelProxyBaseURL = "" },
+			want: "sandbox model proxy base url is required when host-only model access is enabled",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.cfg.modelAccessAllowed(); got != tt.wantAccess {
-				t.Fatalf("modelAccessAllowed()=%v want %v", got, tt.wantAccess)
-			}
-			if got := tt.cfg.providerCredentialsHostOnly(); got != tt.wantHostOnly {
-				t.Fatalf("providerCredentialsHostOnly()=%v want %v", got, tt.wantHostOnly)
+			ctx := context.Background()
+			st, owner := openOwnedStore(t, ctx)
+			createStoreSession(t, ctx, st, "sess_required_"+strings.ReplaceAll(tt.name, " ", "_"))
+			cfg := testAllocatorConfig(t)
+			tt.edit(&cfg)
+
+			_, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+				SessionID: "sess_required_" + strings.ReplaceAll(tt.name, " ", "_"),
+				Owner:     GenerationLeaseOwner(owner.UUID),
+				LeaseTTL:  time.Minute,
+				Now:       time.Now().UTC(),
+				Config:    cfg,
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("AllocateGeneration error=%v want %q", err, tt.want)
 			}
 		})
 	}
@@ -162,7 +181,7 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ne
 		details.NetworkAllocationState != "allocating" {
 		t.Fatalf("generation details missing network allocation fields: %+v", details)
 	}
-	if details.ManifestAnthropicBaseURL != defaultSandboxModelProxyAliasURL {
+	if details.ManifestAnthropicBaseURL != "http://harness-model-proxy.internal:8082" {
 		t.Fatalf("manifest model proxy base URL = %q, want default alias", details.ManifestAnthropicBaseURL)
 	}
 	if details.NetworkHostsPath == "" {
@@ -462,7 +481,7 @@ func TestAllocateGenerationEgressPolicyIdentityIncludesProxyPort(t *testing.T) {
 
 	cfg.HostProxyBindURL = "http://0.0.0.0:8083"
 	cfg.ProxyPort = 8083
-	cfg.SandboxModelProxyBaseURL = ""
+	cfg.SandboxModelProxyBaseURL = "http://harness-model-proxy.internal:8083"
 	second, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
 		SessionID: "sess_proxy_policy_8083",
 		Owner:     GenerationLeaseOwner(owner.UUID),
@@ -481,7 +500,7 @@ func TestAllocateGenerationEgressPolicyIdentityIncludesProxyPort(t *testing.T) {
 		t.Fatalf("proxy port change reused egress policy id %q", secondDetails.EgressPolicyID)
 	}
 	if secondDetails.ManifestAnthropicBaseURL != "http://harness-model-proxy.internal:8083" {
-		t.Fatalf("default manifest proxy alias was not derived from proxy port: %+v", secondDetails)
+		t.Fatalf("manifest proxy alias was not persisted from explicit config: %+v", secondDetails)
 	}
 	wantSecondRules := []string{
 		"tcp:10.240.0.5:8083",
@@ -978,6 +997,10 @@ func TestAllocateShellGenerationHasNoSecretReferences(t *testing.T) {
 	cfg.DriverID = "sh"
 	cfg.Model = ""
 	cfg.OutputFormat = "shell_pty"
+	modelAccessAllowed := false
+	cfg.ModelAccessAllowed = &modelAccessAllowed
+	cfg.ProviderCredentialsHostOnly = false
+	cfg.SandboxModelProxyBaseURL = ""
 
 	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
 		SessionID: "sess_shell",
@@ -3088,22 +3111,26 @@ func createLiveRuntimeResourceInstanceForAllocation(t *testing.T, ctx context.Co
 
 func testAllocatorConfig(t *testing.T) ResourceAllocatorConfig {
 	t.Helper()
+	modelAccessAllowed := true
 	return ResourceAllocatorConfig{
-		RunDir:                     filepath.Join(t.TempDir(), "run"),
-		CIDRPool:                   netip.MustParsePrefix("10.240.0.0/29"),
-		EgressDorisFEHosts:         []string{"172.16.0.138"},
-		EgressDorisBEHosts:         []string{"172.16.0.139"},
-		EgressDorisPorts:           []int{9030, 8040},
-		EgressDNSPolicy:            "hostnames_only",
-		HostProxyBindURL:           "http://0.0.0.0:8082",
-		ProxyPort:                  8082,
-		DriverID:                   "claude_code",
-		Model:                      "sonnet",
-		OutputFormat:               "stream-json",
-		DisableNonessentialTraffic: true,
-		SandboxUID:                 7000,
-		SandboxGID:                 7001,
-		SandboxSupplementalGIDs:    []int{44, 43},
+		RunDir:                      filepath.Join(t.TempDir(), "run"),
+		CIDRPool:                    netip.MustParsePrefix("10.240.0.0/29"),
+		EgressDorisFEHosts:          []string{"172.16.0.138"},
+		EgressDorisBEHosts:          []string{"172.16.0.139"},
+		EgressDorisPorts:            []int{9030, 8040},
+		EgressDNSPolicy:             "hostnames_only",
+		HostProxyBindURL:            "http://0.0.0.0:8082",
+		ProxyPort:                   8082,
+		DriverID:                    "claude_code",
+		Model:                       "sonnet",
+		OutputFormat:                "stream-json",
+		DisableNonessentialTraffic:  true,
+		SandboxUID:                  7000,
+		SandboxGID:                  7001,
+		SandboxSupplementalGIDs:     []int{44, 43},
+		ModelAccessAllowed:          &modelAccessAllowed,
+		ProviderCredentialsHostOnly: true,
+		SandboxModelProxyBaseURL:    "http://harness-model-proxy.internal:8082",
 	}
 }
 

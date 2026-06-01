@@ -1250,24 +1250,30 @@ func createBridgeSession(t *testing.T, ctx context.Context, st *store.Store, id 
 
 func allocateBridgeGeneration(t *testing.T, ctx context.Context, st *store.Store, owner *store.OwnerLock, sessionID string) (store.GenerationAllocation, store.RuntimeGenerationDetails) {
 	t.Helper()
+	modelAccessAllowed := true
 	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
 		SessionID: sessionID,
 		Owner:     store.GenerationLeaseOwner(owner.UUID),
 		LeaseTTL:  time.Minute,
 		Now:       time.Now().UTC(),
 		Config: store.ResourceAllocatorConfig{
-			RunDir:                     filepath.Join(t.TempDir(), "run"),
-			CIDRPool:                   netip.MustParsePrefix("10.240.0.0/29"),
-			EgressDorisFEHosts:         []string{"172.16.0.138"},
-			EgressDorisBEHosts:         []string{"172.16.0.139"},
-			EgressDorisPorts:           []int{9030},
-			EgressDNSPolicy:            "hostnames_only",
-			HostProxyBindURL:           "http://0.0.0.0:8082",
-			ProxyPort:                  8082,
-			DriverID:                   "claude_code",
-			Model:                      "sonnet",
-			OutputFormat:               "stream-json",
-			DisableNonessentialTraffic: true,
+			RunDir:                      filepath.Join(t.TempDir(), "run"),
+			CIDRPool:                    netip.MustParsePrefix("10.240.0.0/29"),
+			EgressDorisFEHosts:          []string{"172.16.0.138"},
+			EgressDorisBEHosts:          []string{"172.16.0.139"},
+			EgressDorisPorts:            []int{9030},
+			EgressDNSPolicy:             "hostnames_only",
+			HostProxyBindURL:            "http://0.0.0.0:8082",
+			ProxyPort:                   8082,
+			DriverID:                    "claude_code",
+			Model:                       "sonnet",
+			OutputFormat:                "stream-json",
+			DisableNonessentialTraffic:  true,
+			SandboxUID:                  7000,
+			SandboxGID:                  7001,
+			ModelAccessAllowed:          &modelAccessAllowed,
+			ProviderCredentialsHostOnly: true,
+			SandboxModelProxyBaseURL:    "http://harness-model-proxy.internal:8082",
 		},
 	})
 	if err != nil {
