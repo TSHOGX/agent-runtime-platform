@@ -241,6 +241,19 @@ func TestResolveAgentModeRequiresExplicitDefaultAgent(t *testing.T) {
 	}
 }
 
+func TestResolveDeploymentRequiresExplicitRuntimeProviderID(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testServerConfig(dir)
+	runtimeProvider := cfg.Harness.RuntimeProviders["local_runsc"]
+	runtimeProvider.ProviderID = ""
+	cfg.Harness.RuntimeProviders["local_runsc"] = runtimeProvider
+	srv := &Server{cfg: cfg}
+
+	if _, err := srv.resolveModeDeployment("agent"); err == nil || err.code != "provider_unsupported" {
+		t.Fatalf("expected missing provider_id to make deployment unavailable, got %v", err)
+	}
+}
+
 func TestDeploymentCapabilitiesAreProductSafe(t *testing.T) {
 	dir := t.TempDir()
 	srv := &Server{

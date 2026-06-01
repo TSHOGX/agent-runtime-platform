@@ -91,7 +91,7 @@ func (s *Server) resolveDriverDeployment(mode string, driverID agents.ID) (deplo
 	}
 	providerID := strings.TrimSpace(runtimeCfg.ProviderID)
 	if providerID == "" {
-		providerID = runtimeProviderID
+		return deploymentResolution{}, capabilityError("provider_unsupported", modeUnavailableMessage(mode))
 	}
 	providerSpec, ok := agents.RuntimeProviderSpecFor(providerID)
 	if !ok {
