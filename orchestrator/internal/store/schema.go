@@ -3,11 +3,19 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 
 	"harness-platform/orchestrator/internal/agents"
 	"harness-platform/orchestrator/internal/sessionstate"
 )
+
+var legacySessionColumns = []string{
+	"workspace",
+	"restore_id",
+	"claude_session_uuid",
+	"agent_home_path",
+}
 
 type dbRunner interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
@@ -625,26 +633,28 @@ CREATE UNIQUE INDEX IF NOT EXISTS runtime_resource_instances_log_dir_path_active
 	if err != nil {
 		return err
 	}
-	if err := s.dropLegacySessionColumn(ctx, "workspace"); err != nil {
-		return err
-	}
-	return s.dropLegacySessionColumn(ctx, "restore_id")
+	return s.dropLegacySessionColumns(ctx)
 }
 
-func (s *Store) dropLegacySessionColumn(ctx context.Context, column string) error {
-	exists, err := tableColumnExists(ctx, s.db, "sessions", column)
-	if err != nil {
-		return err
+func (s *Store) dropLegacySessionColumns(ctx context.Context) error {
+	for _, column := range legacySessionColumns {
+		exists, err := tableColumnExists(ctx, s.db, "sessions", column)
+		if err != nil {
+			return fmt.Errorf("check legacy sessions.%s: %w", column, err)
+		}
+		if !exists {
+			continue
+		}
+		_, err = s.db.ExecContext(ctx, `ALTER TABLE `+quoteSQLiteIdent("sessions")+` DROP COLUMN `+quoteSQLiteIdent(column))
+		if err != nil {
+			return fmt.Errorf("drop legacy sessions.%s: %w", column, err)
+		}
 	}
-	if !exists {
-		return nil
-	}
-	_, err = s.db.ExecContext(ctx, `ALTER TABLE sessions DROP COLUMN `+quoteSQLiteIdent(column))
-	return err
+	return nil
 }
 
 func tableColumnExists(ctx context.Context, db *sql.DB, table, column string) (bool, error) {
-	rows, err := db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(`+quoteSQLiteIdent(table)+`)`)
 	if err != nil {
 		return false, err
 	}

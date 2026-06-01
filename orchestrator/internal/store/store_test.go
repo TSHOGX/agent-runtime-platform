@@ -136,7 +136,7 @@ func TestFreshSchemaDoesNotCreateLegacySessionColumns(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	for _, column := range []string{"workspace", "restore_id"} {
+	for _, column := range removedLegacySessionColumnsForTest() {
 		exists, err := tableColumnExists(ctx, st.db, "sessions", column)
 		if err != nil {
 			t.Fatalf("check sessions.%s: %v", column, err)
@@ -174,7 +174,13 @@ func TestMigrateDropsLegacySessionColumns(t *testing.T) {
 	if _, err := st.db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN restore_id TEXT NOT NULL DEFAULT 'legacy'`); err != nil {
 		t.Fatalf("add legacy restore_id column: %v", err)
 	}
-	for _, column := range []string{"workspace", "restore_id"} {
+	if _, err := st.db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN claude_session_uuid TEXT`); err != nil {
+		t.Fatalf("add legacy claude_session_uuid column: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN agent_home_path TEXT`); err != nil {
+		t.Fatalf("add legacy agent_home_path column: %v", err)
+	}
+	for _, column := range removedLegacySessionColumnsForTest() {
 		if exists, err := tableColumnExists(ctx, st.db, "sessions", column); err != nil {
 			t.Fatalf("check added %s column: %v", column, err)
 		} else if !exists {
@@ -190,7 +196,7 @@ func TestMigrateDropsLegacySessionColumns(t *testing.T) {
 		t.Fatalf("reopen store: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	for _, column := range []string{"workspace", "restore_id"} {
+	for _, column := range removedLegacySessionColumnsForTest() {
 		exists, err := tableColumnExists(ctx, st.db, "sessions", column)
 		if err != nil {
 			t.Fatalf("check migrated %s column: %v", column, err)
@@ -199,6 +205,13 @@ func TestMigrateDropsLegacySessionColumns(t *testing.T) {
 			t.Fatalf("migration should drop legacy sessions.%s", column)
 		}
 	}
+	if err := st.migrate(ctx); err != nil {
+		t.Fatalf("rerun migrate after dropping legacy columns: %v", err)
+	}
+}
+
+func removedLegacySessionColumnsForTest() []string {
+	return []string{"workspace", "restore_id", "claude_session_uuid", "agent_home_path"}
 }
 
 func TestUpdateSessionStatusAndActivity(t *testing.T) {
