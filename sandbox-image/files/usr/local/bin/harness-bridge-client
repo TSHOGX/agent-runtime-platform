@@ -2,6 +2,7 @@
 import argparse
 import collections
 import json
+import math
 import os
 import subprocess
 import sys
@@ -45,6 +46,16 @@ def required_int_env(name):
         return int(value)
     except ValueError as err:
         raise RuntimeError(f"{name} must be an integer") from err
+
+
+def validate_positive_float(name, value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as err:
+        raise RuntimeError(f"{name} must be a number") from err
+    if not math.isfinite(number) or number <= 0:
+        raise RuntimeError(f"{name} must be > 0")
+    return number
 
 
 def seq_name(seq):
@@ -250,7 +261,7 @@ class BridgeClient:
         self.driver_id = (driver_id or "").strip()
         if not self.driver_id:
             raise RuntimeError("driver_id is required")
-        self.poll_interval = poll_interval
+        self.poll_interval = validate_positive_float("poll_interval", poll_interval)
         self.inbox = Queue(root, INBOX)
         self.outbox = Queue(root, OUTBOX)
         self.last_output_sequence_by_turn = {}
@@ -898,6 +909,7 @@ def http_status(url, method="GET", headers=None, body=None, timeout=3.0):
 
 
 def run_network_probe(base_url, healthz_statuses, timeout):
+    timeout = validate_positive_float("HTTP timeout", timeout)
     if not base_url:
         raise RuntimeError("ANTHROPIC_BASE_URL is required for probe")
     base_url = base_url.rstrip("/")
@@ -906,8 +918,26 @@ def run_network_probe(base_url, healthz_statuses, timeout):
         raise RuntimeError(f"probe GET /healthz returned {healthz_status}, want one of {sorted(healthz_statuses)}")
 
 
+def validate_probe_timing_args(args):
+    args.poll_interval = validate_positive_float("poll_interval", args.poll_interval)
+    args.http_timeout = validate_positive_float("HTTP timeout", args.http_timeout)
+
+
+def validate_heartbeat_timing_args(args):
+    args.poll_interval = validate_positive_float("poll_interval", args.poll_interval)
+    args.interval = validate_positive_float("heartbeat interval", args.interval)
+
+
+def validate_claim_timing_args(args):
+    args.poll_interval = validate_positive_float("poll_interval", args.poll_interval)
+    args.http_timeout = validate_positive_float("HTTP timeout", args.http_timeout)
+    args.heartbeat_interval = validate_positive_float("heartbeat interval", args.heartbeat_interval)
+    args.idle_interval = validate_positive_float("idle interval", args.idle_interval)
+
+
 def run_probe(args):
     driver_id = args_driver_id(args)
+    validate_probe_timing_args(args)
     client = BridgeClient(args.bridge_dir, args.session_id, args.generation_id, driver_id, args.poll_interval)
     client.heartbeat()
     client.hello(timeout=args.timeout)
@@ -923,18 +953,19 @@ def run_probe(args):
 
 
 def run_heartbeat_loop(args):
+    validate_heartbeat_timing_args(args)
     client = BridgeClient(args.bridge_dir, args.session_id, args.generation_id, args_driver_id(args), args.poll_interval)
-    interval = max(args.interval, 0.001)
     while True:
         client.heartbeat()
-        time.sleep(interval)
+        time.sleep(args.interval)
 
 
 def start_background_heartbeat(client, interval):
+    interval = validate_positive_float("heartbeat interval", interval)
     stop = threading.Event()
 
     def loop():
-        while not stop.wait(max(interval, 0.001)):
+        while not stop.wait(interval):
             try:
                 client.heartbeat()
             except Exception as err:
@@ -999,6 +1030,7 @@ def execute_grant(client, runner, grant):
 
 def run_claim_loop(args, runner=None):
     driver_id = args_driver_id(args)
+    validate_claim_timing_args(args)
     client = BridgeClient(args.bridge_dir, args.session_id, args.generation_id, driver_id, args.poll_interval)
     client.heartbeat()
     client.hello(timeout=args.timeout)
@@ -1026,7 +1058,7 @@ def run_claim_loop(args, runner=None):
                 empty_polls += 1
                 if args.max_empty_polls > 0 and empty_polls >= args.max_empty_polls:
                     return
-                time.sleep(max(args.idle_interval, 0.001))
+                time.sleep(args.idle_interval)
                 continue
             empty_polls = 0
             execute_grant(client, runner, grant)
@@ -1067,16 +1099,28 @@ def main(argv=None):
     if args.poll_interval is None:
         parser.error("--poll-interval or HARNESS_BRIDGE_POLL_INTERVAL is required")
     if args.command == "probe":
+        try:
+            validate_probe_timing_args(args)
+        except RuntimeError as err:
+            parser.error(str(err))
         run_probe(args)
     elif args.command == "heartbeat-loop":
         if args.interval is None:
             parser.error("--interval or HARNESS_BRIDGE_HEARTBEAT_INTERVAL is required")
+        try:
+            validate_heartbeat_timing_args(args)
+        except RuntimeError as err:
+            parser.error(str(err))
         run_heartbeat_loop(args)
     elif args.command == "claim-loop":
         if args.idle_interval is None:
             parser.error("--idle-interval or HARNESS_BRIDGE_IDLE_INTERVAL is required")
         if args.heartbeat_interval is None:
             parser.error("--heartbeat-interval or HARNESS_BRIDGE_HEARTBEAT_INTERVAL is required")
+        try:
+            validate_claim_timing_args(args)
+        except RuntimeError as err:
+            parser.error(str(err))
         run_claim_loop(args)
     return 0
 

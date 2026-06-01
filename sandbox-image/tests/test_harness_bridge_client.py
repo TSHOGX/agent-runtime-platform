@@ -97,6 +97,14 @@ class BridgeClientTest(unittest.TestCase):
             self.assertEqual(client.last_output_sequence_by_turn, {42: 7})
             self.assertEqual(client.leased_turn_id, 42)
 
+    def test_bridge_client_rejects_nonpositive_poll_interval(self):
+        for poll_interval in (0, -0.001):
+            with self.subTest(poll_interval=poll_interval):
+                with tempfile.TemporaryDirectory() as root:
+                    with self.assertRaisesRegex(RuntimeError, "poll_interval must be > 0"):
+                        bridge.BridgeClient(root, "sess", "gen", "claude_code", poll_interval=poll_interval)
+                    self.assertFalse((Path(root) / bridge.INBOX).exists())
+
     def test_hello_sends_bridge_protocol_v2_identity(self):
         with tempfile.TemporaryDirectory() as root:
             client = bridge.BridgeClient(root, "sess", "gen", "claude_code", poll_interval=0.001)
@@ -264,6 +272,24 @@ class BridgeClientTest(unittest.TestCase):
 
             self.assertEqual(calls, [("sess", "gen")])
 
+    def test_heartbeat_loop_rejects_nonpositive_interval(self):
+        for interval in (0, -0.25):
+            with self.subTest(interval=interval):
+                with tempfile.TemporaryDirectory() as root:
+                    args = argparse_namespace(
+                        bridge_dir=root,
+                        session_id="sess",
+                        generation_id="gen",
+                        driver_id="claude_code",
+                        poll_interval=0.001,
+                        interval=interval,
+                    )
+
+                    with self.assertRaisesRegex(RuntimeError, "heartbeat interval must be > 0"):
+                        bridge.run_heartbeat_loop(args)
+
+                    self.assertFalse((Path(root) / bridge.OUTBOX).exists())
+
     def test_claim_loop_claims_and_records_lifecycle(self):
         with tempfile.TemporaryDirectory() as root:
             args = argparse_namespace(
@@ -335,6 +361,43 @@ class BridgeClientTest(unittest.TestCase):
             self.assertEqual(output["payload"]["payload"]["line"], '{"type":"harness.shell_output","text":"ok"}')
             ready = Path(root) / bridge.HEARTBEAT / bridge.CHECKPOINT_READY
             self.assertTrue(ready.exists())
+
+    def test_claim_loop_rejects_nonpositive_timing_values(self):
+        cases = [
+            ("poll_interval", 0, "poll_interval must be > 0"),
+            ("poll_interval", -0.001, "poll_interval must be > 0"),
+            ("http_timeout", 0, "HTTP timeout must be > 0"),
+            ("http_timeout", -0.1, "HTTP timeout must be > 0"),
+            ("heartbeat_interval", 0, "heartbeat interval must be > 0"),
+            ("heartbeat_interval", -1, "heartbeat interval must be > 0"),
+            ("idle_interval", 0, "idle interval must be > 0"),
+            ("idle_interval", -0.001, "idle interval must be > 0"),
+        ]
+        for field, value, message in cases:
+            with self.subTest(field=field, value=value):
+                with tempfile.TemporaryDirectory() as root:
+                    kwargs = {
+                        "bridge_dir": root,
+                        "session_id": "sess",
+                        "generation_id": "gen",
+                        "driver_id": "sh",
+                        "poll_interval": 0.001,
+                        "timeout": 0.1,
+                        "base_url": "",
+                        "healthz_statuses": "200",
+                        "http_timeout": 0.1,
+                        "heartbeat_interval": 60,
+                        "idle_interval": 0.001,
+                        "max_turns": 1,
+                        "max_empty_polls": 0,
+                    }
+                    kwargs[field] = value
+                    args = argparse_namespace(**kwargs)
+
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        bridge.run_claim_loop(args, runner=object())
+
+                    self.assertFalse((Path(root) / bridge.OUTBOX).exists())
 
     def test_execute_grant_rejects_non_run_turn_schema(self):
         with tempfile.TemporaryDirectory() as root:
