@@ -922,7 +922,7 @@ func TestDestroyGenerationResourcesDeletesPerGenerationNetwork(t *testing.T) {
 	}
 }
 
-func TestDestroyGenerationResourcesFallsBackToRecordedRunscOnPinMismatch(t *testing.T) {
+func TestDestroyGenerationResourcesReturnsCurrentPinMismatchWhenCurrentDeleteFails(t *testing.T) {
 	dir := t.TempDir()
 	oldRunscPath, oldRunscDigest := installFakeRunsc(t, filepath.Join(dir, "old-runsc"), "old")
 	currentRunscPath, _ := installFakeRunsc(t, filepath.Join(dir, "current-runsc"), "current")
@@ -933,7 +933,6 @@ func TestDestroyGenerationResourcesFallsBackToRecordedRunscOnPinMismatch(t *test
 		},
 		fail: map[string]error{
 			currentRunscPath + " -root " + runscRoot + " delete -force harness-gen-gen_pin": errors.New("incompatible runsc root"),
-			oldRunscPath + " -root " + runscRoot + " state harness-gen-gen_pin":             errors.New("not found"),
 		},
 	}
 	rt := New(Config{
@@ -949,15 +948,18 @@ func TestDestroyGenerationResourcesFallsBackToRecordedRunscOnPinMismatch(t *test
 	details.RunscBinaryDigest = oldRunscDigest
 
 	cleanup, err := rt.DestroyGenerationResources(context.Background(), details)
-	if err != nil {
-		t.Fatalf("destroy generation resources: %v", err)
+	if err == nil {
+		t.Fatal("expected current runsc pin mismatch")
 	}
-	if !cleanup.RunscDeleted {
-		t.Fatalf("expected runsc deletion through recorded binary: %+v", cleanup)
+	if !strings.Contains(err.Error(), "current runsc pin mismatch") ||
+		!strings.Contains(err.Error(), "incompatible runsc root") {
+		t.Fatalf("expected current runsc mismatch delete error, got %v", err)
+	}
+	if cleanup.RunscDeleted {
+		t.Fatalf("runsc deletion should fail on current pin mismatch: %+v", cleanup)
 	}
 	if !strings.Contains(cleanup.RunscPinEvidence, "runsc_pin:mismatch") ||
-		!strings.Contains(cleanup.RunscPinEvidence, "cleanup_binary=recorded") ||
-		!strings.Contains(cleanup.RunscState, "cleanup_binary=recorded") {
+		!strings.Contains(cleanup.RunscPinEvidence, "cleanup_binary=current") {
 		t.Fatalf("cleanup did not record runsc mismatch evidence: %+v", cleanup)
 	}
 
@@ -965,53 +967,13 @@ func TestDestroyGenerationResourcesFallsBackToRecordedRunscOnPinMismatch(t *test
 		"runsc --version",
 		currentRunscPath + " -root " + runscRoot + " kill harness-gen-gen_pin KILL",
 		currentRunscPath + " -root " + runscRoot + " delete -force harness-gen-gen_pin",
-		oldRunscPath + " -root " + runscRoot + " kill harness-gen-gen_pin KILL",
-		oldRunscPath + " -root " + runscRoot + " delete -force harness-gen-gen_pin",
-		oldRunscPath + " -root " + runscRoot + " state harness-gen-gen_pin",
 	}
 	if got := runner.Commands(); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("unexpected commands:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
-}
-
-func TestDestroyGenerationResourcesRejectsRecordedRunscDigestMismatch(t *testing.T) {
-	dir := t.TempDir()
-	oldRunscPath, _ := installFakeRunsc(t, filepath.Join(dir, "old-runsc"), "old")
-	currentRunscPath, _ := installFakeRunsc(t, filepath.Join(dir, "current-runsc"), "current")
-	runscRoot := filepath.Join(dir, "runsc-root")
-	runner := &recordingCommandRunner{
-		outputs: map[string][]byte{
-			"runsc --version": []byte("runsc current"),
-		},
-		fail: map[string]error{
-			currentRunscPath + " -root " + runscRoot + " delete -force harness-gen-gen_pin_bad": errors.New("incompatible runsc root"),
-		},
-	}
-	rt := New(Config{
-		RunscNetwork:  "host",
-		RunscRoot:     runscRoot,
-		RunDir:        filepath.Join(dir, "run"),
-		CommandRunner: runner,
-	})
-	details := testGenerationDetails(dir, "gen_pin_bad")
-	details.RunscNetwork = "host"
-	details.RunscVersion = "runsc old"
-	details.RunscBinaryPath = oldRunscPath
-	details.RunscBinaryDigest = "sha256:stale"
-
-	cleanup, err := rt.DestroyGenerationResources(context.Background(), details)
-	if err == nil {
-		t.Fatal("expected recorded runsc digest mismatch")
-	}
-	if !strings.Contains(err.Error(), "recorded runsc binary digest") {
-		t.Fatalf("expected recorded runsc digest mismatch, got %v", err)
-	}
-	if !strings.Contains(cleanup.RunscPinEvidence, "runsc_pin:mismatch") {
-		t.Fatalf("cleanup did not retain mismatch evidence: %+v", cleanup)
-	}
 	for _, command := range runner.Commands() {
 		if strings.HasPrefix(command, oldRunscPath+" -root ") {
-			t.Fatalf("recorded runsc with bad digest must not execute, commands: %v", runner.Commands())
+			t.Fatalf("recorded runsc must not execute, commands: %v", runner.Commands())
 		}
 	}
 }

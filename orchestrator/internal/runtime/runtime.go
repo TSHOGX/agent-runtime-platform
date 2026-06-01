@@ -957,15 +957,7 @@ func (r *Runtime) deleteGenerationRunscContainer(ctx context.Context, details st
 	if currentErr == nil && currentResult.Missing {
 		currentErr = fmt.Errorf("current runsc reported container missing under mismatched pin")
 	}
-	compatibleBinary, err := verifiedRecordedRunscBinary(pinned)
-	if err != nil {
-		return currentBinary, evidence, fmt.Errorf("current runsc pin mismatch; current delete failed: %w; recorded runsc unavailable: %v", currentErr, err)
-	}
-	recordedErr := r.deleteRunscContainer(ctx, compatibleBinary, containerID)
-	if recordedErr != nil {
-		return compatibleBinary, cleanupRunscPinMismatchEvidence(current, pinned, "recorded"), fmt.Errorf("current runsc pin mismatch; current delete failed: %w; recorded delete failed: %v", currentErr, recordedErr)
-	}
-	return compatibleBinary, cleanupRunscPinMismatchEvidence(current, pinned, "recorded"), nil
+	return currentBinary, evidence, fmt.Errorf("current runsc pin mismatch; current delete failed: %w", currentErr)
 }
 
 func hasRecordedRunscBinaryPin(details store.RuntimeGenerationDetails) bool {
@@ -1002,43 +994,6 @@ func cleanupRunscPinMismatchEvidence(current, pinned runscPin, cleanupBinary str
 		pinned.BinaryDigest,
 		cleanupBinary,
 	)
-}
-
-func verifiedRecordedRunscBinary(pinned runscPin) (string, error) {
-	path := strings.TrimSpace(pinned.BinaryPath)
-	if path == "" {
-		return "", fmt.Errorf("recorded runsc binary path is required")
-	}
-	if !filepath.IsAbs(path) {
-		return "", fmt.Errorf("recorded runsc binary path %q must be absolute", path)
-	}
-	cleaned := filepath.Clean(path)
-	canonical, err := filepath.EvalSymlinks(cleaned)
-	if err != nil {
-		return "", fmt.Errorf("resolve recorded runsc binary path %q: %w", path, err)
-	}
-	canonical = filepath.Clean(canonical)
-	if canonical != cleaned {
-		return "", fmt.Errorf("recorded runsc binary path %q is not canonical, resolves to %q", cleaned, canonical)
-	}
-	info, err := os.Stat(canonical)
-	if err != nil {
-		return "", fmt.Errorf("stat recorded runsc binary %q: %w", canonical, err)
-	}
-	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("recorded runsc binary %q is not a regular file", canonical)
-	}
-	if info.Mode()&0o111 == 0 {
-		return "", fmt.Errorf("recorded runsc binary %q is not executable", canonical)
-	}
-	digest, err := fileSHA256(canonical)
-	if err != nil {
-		return "", fmt.Errorf("digest recorded runsc binary %q: %w", canonical, err)
-	}
-	if got, want := "sha256:"+digest, strings.TrimSpace(pinned.BinaryDigest); got != want {
-		return "", fmt.Errorf("recorded runsc binary digest %s, want %s", got, want)
-	}
-	return canonical, nil
 }
 
 type runscContainerDeleteResult struct {
