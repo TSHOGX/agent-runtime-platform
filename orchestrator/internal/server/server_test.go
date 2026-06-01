@@ -295,14 +295,16 @@ func TestDeploymentCapabilitiesUseImageManifestGate(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
+	cfg := config.Config{
+		SessionsRoot:     dir,
+		SessionRetention: time.Hour,
+		MaxSessions:      10,
+		DefaultAgent:     "claude_code",
+		RootFSPath:       rootfs,
+	}
+	applyServerTestDeploymentConfig(&cfg)
 	srv := &Server{
-		cfg: config.Config{
-			SessionsRoot:     dir,
-			SessionRetention: time.Hour,
-			MaxSessions:      10,
-			DefaultAgent:     "claude_code",
-			RootFSPath:       rootfs,
-		},
+		cfg:     cfg,
 		store:   st,
 		runtime: runtime.New(runtime.Config{}),
 		watcher: newServerTestWatcher(t, dir, st, events.NewHub()),
@@ -414,6 +416,7 @@ func TestDriverManifestInputDigestsUseSourceConfigAndImageManifest(t *testing.T)
 		DefaultAgent: "claude_code",
 		RootFSPath:   rootfs,
 	}
+	applyServerTestDeploymentConfig(&cfg)
 	srv := &Server{cfg: cfg}
 	deployment, capabilityErr := srv.resolveModeDeployment("shell")
 	if capabilityErr != nil {
@@ -5826,10 +5829,52 @@ func serverDataVolumeConfigForTest(cfg config.Config) (store.DataVolumeProvision
 	}, nil
 }
 
+func applyServerTestDeploymentConfig(cfg *config.Config) {
+	enabled := true
+	disableNonessentialTraffic := true
+	cfg.Harness.DefaultAgent = cfg.DefaultAgent
+	cfg.Harness.Agents = map[string]config.AgentConfig{
+		"claude_code": {
+			Enabled:                    &enabled,
+			DriverID:                   "claude_code",
+			ModelProfile:               "anthropic_default",
+			RuntimeProvider:            "local_runsc",
+			DisableNonessentialTraffic: &disableNonessentialTraffic,
+		},
+		"pi": {
+			Enabled:                    &enabled,
+			DriverID:                   "pi",
+			ModelProfile:               "anthropic_default",
+			RuntimeProvider:            "local_runsc",
+			DisableNonessentialTraffic: &disableNonessentialTraffic,
+		},
+		"sh": {
+			Enabled:         &enabled,
+			DriverID:        "sh",
+			RuntimeProvider: "local_runsc",
+		},
+	}
+	cfg.Harness.ModelProfiles = map[string]config.ModelProfileConfig{
+		"anthropic_default": {
+			Enabled:  &enabled,
+			Provider: "anthropic_messages",
+			Model:    "sonnet",
+			ProxyRef: config.DefaultModelProxyRef,
+		},
+	}
+	cfg.Harness.RuntimeProviders = map[string]config.RuntimeProviderConfig{
+		"local_runsc": {
+			Enabled:    &enabled,
+			ProviderID: "local_runsc",
+			ProfileID:  "local_runsc_default",
+		},
+	}
+}
+
 func testServerConfig(dir string) config.Config {
 	rootfs := filepath.Join(dir, "rootfs")
 	mustWriteServerTestAgentImageManifest(rootfs, agents.ClaudeCode, agents.Pi, agents.Shell)
-	return config.Config{
+	cfg := config.Config{
 		SessionsRoot:     filepath.Join(dir, "sessions"),
 		AgentHomesRoot:   filepath.Join(dir, "agent-homes"),
 		BundleRoot:       filepath.Join(dir, "bundle"),
@@ -5846,6 +5891,11 @@ func testServerConfig(dir string) config.Config {
 		},
 		Harness: config.HarnessConfig{
 			RunDir: filepath.Join(dir, "run"),
+			ModelProxy: config.ModelProxyConfig{
+				BindURL:        "http://0.0.0.0:8082",
+				SandboxBaseURL: "http://harness-model-proxy.internal:8082",
+				BindPort:       8082,
+			},
 			Network: config.NetworkConfig{
 				CIDRPool: config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/29")},
 				Egress: config.EgressConfig{
@@ -5881,6 +5931,8 @@ func testServerConfig(dir string) config.Config {
 			},
 		},
 	}
+	applyServerTestDeploymentConfig(&cfg)
+	return cfg
 }
 
 func serverTestSandboxUID() int {

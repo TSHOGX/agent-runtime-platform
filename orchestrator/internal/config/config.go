@@ -349,9 +349,7 @@ type projectConfig struct {
 }
 
 func loadProjectConfig(path string) (projectConfig, error) {
-	cfg := projectConfig{
-		Harness: defaultHarnessConfig(),
-	}
+	cfg := projectConfig{}
 
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -367,8 +365,6 @@ func loadProjectConfig(path string) (projectConfig, error) {
 	var target struct {
 		Harness HarnessConfig `yaml:"harness"`
 	}
-	target.Harness = cfg.Harness
-	target.Harness.ModelProxy.SandboxBaseURL = ""
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&target); err != nil {
@@ -389,77 +385,8 @@ func finalizeProjectConfig(path string, cfg projectConfig) (projectConfig, error
 	return cfg, nil
 }
 
-func defaultHarnessConfig() HarnessConfig {
-	return HarnessConfig{
-		DefaultAgent:     string(agents.ClaudeCode),
-		Agents:           defaultAgentConfigs(),
-		ModelProfiles:    defaultModelProfileConfigs(),
-		RuntimeProviders: defaultRuntimeProviderConfigs(),
-		RunDir:           "/var/lib/harness/run",
-		SessionRetention: Duration{Duration: 0},
-		MaxSessions:      30,
-		Network: NetworkConfig{
-			CIDRPool: CIDRPrefix{Prefix: netip.MustParsePrefix("10.200.0.0/16")},
-			Egress: EgressConfig{
-				DorisFEHosts: []string{"172.16.0.138"},
-				DorisBEHosts: []string{"172.16.0.138"},
-				DorisPorts:   []int{9030},
-				DNSPolicy:    DNSPolicyHostnamesOnly,
-			},
-		},
-		Events: EventsConfig{
-			RetentionWindow:        Duration{Duration: 24 * time.Hour},
-			RetentionRows:          1_000_000,
-			EmitOutputBatchMaxRows: 64,
-			EmitOutputBatchMaxAge:  Duration{Duration: 100 * time.Millisecond},
-		},
-		Probe: ProbeConfig{
-			AcceptStatus: ProbeAcceptStatusConfig{
-				GetHealthz: []int{200},
-				PostV1Messages: PostV1MessagesStatuses{
-					Unauthorized:           []int{401},
-					MalformedAuthenticated: []int{400},
-				},
-			},
-			PreStartAttempts:  3,
-			PreStartInterval:  Duration{Duration: 500 * time.Millisecond},
-			PostStartAttempts: 5,
-			PostStartInterval: Duration{Duration: time.Second},
-		},
-		Bridge: BridgeConfig{
-			LeaseTTL:          Duration{Duration: time.Minute},
-			HeartbeatInterval: Duration{Duration: 30 * time.Second},
-			PollInterval:      Duration{Duration: 5 * time.Millisecond},
-			AckStartedGrace:   Duration{Duration: 90 * time.Second},
-			ReconnectGrace:    Duration{Duration: 30 * time.Second},
-		},
-		Checkpoint: CheckpointConfig{
-			AutoEnabled:     false,
-			IdleThreshold:   Duration{Duration: 30 * time.Minute},
-			MonitorInterval: Duration{Duration: 5 * time.Minute},
-		},
-		Reaper: ReaperConfig{
-			FailedRetention:          Duration{Duration: 10 * time.Minute},
-			CheckpointImageRetention: Duration{Duration: 720 * time.Hour},
-		},
-		SandboxIdentity: SandboxIdentity{
-			UID: 65534,
-			GID: 65534,
-		},
-		ProxyServiceIdentity: ProxyServiceIdentity{
-			UID: os.Geteuid(),
-			GID: os.Getegid(),
-		},
-		ModelProxy: ModelProxyConfig{
-			BindURL:        defaultModelProxyBindURL,
-			SandboxBaseURL: defaultSandboxModelProxyBaseURL,
-			BindPort:       8082,
-		},
-	}
-}
-
 func normalizeHarnessConfig(cfg HarnessConfig) HarnessConfig {
-	cfg.DefaultAgent = defaultString(cfg.DefaultAgent, string(agents.ClaudeCode))
+	cfg.DefaultAgent = strings.TrimSpace(cfg.DefaultAgent)
 	if canonical, err := agents.CanonicalDriverID(cfg.DefaultAgent); err == nil {
 		cfg.DefaultAgent = string(canonical)
 	}
@@ -875,103 +802,30 @@ func validateHosts(field string, values []string) error {
 	return nil
 }
 
-const defaultModelProfileModel = "sonnet"
-const defaultModelAccessDisableNonessentialTraffic = true
-
-func defaultAgentConfigs() map[string]AgentConfig {
-	return map[string]AgentConfig{
-		string(agents.ClaudeCode): {
-			Enabled:                    boolPtr(true),
-			DriverID:                   string(agents.ClaudeCode),
-			ModelProfile:               defaultModelProfileID,
-			RuntimeProvider:            "local_runsc",
-			DisableNonessentialTraffic: boolPtr(defaultModelAccessDisableNonessentialTraffic),
-		},
-		string(agents.Shell): {
-			Enabled:         boolPtr(true),
-			DriverID:        string(agents.Shell),
-			RuntimeProvider: "local_runsc",
-		},
-		string(agents.Pi): {
-			Enabled:                    boolPtr(true),
-			DriverID:                   string(agents.Pi),
-			ModelProfile:               defaultModelProfileID,
-			RuntimeProvider:            "local_runsc",
-			DisableNonessentialTraffic: boolPtr(defaultModelAccessDisableNonessentialTraffic),
-		},
-	}
-}
-
-// Default model-access identifiers. The model-profile validator and
-// server-side deployment resolver both reference these, so they must stay in
-// sync.
-const (
-	defaultModelProfileID = "anthropic_default"
-	defaultModelProvider  = "anthropic_messages"
-	// DefaultModelProxyRef is the only proxy reference accepted on model
-	// profiles; it is exported because the server re-validates the same
-	// invariant when resolving a deployment.
-	DefaultModelProxyRef = "model_proxy"
-)
-
-func defaultModelProfileConfigs() map[string]ModelProfileConfig {
-	return map[string]ModelProfileConfig{
-		defaultModelProfileID: {
-			Enabled:  boolPtr(true),
-			Provider: defaultModelProvider,
-			Model:    defaultModelProfileModel,
-			ProxyRef: DefaultModelProxyRef,
-		},
-	}
-}
-
-func defaultRuntimeProviderConfigs() map[string]RuntimeProviderConfig {
-	return map[string]RuntimeProviderConfig{
-		"local_runsc": {
-			Enabled:    boolPtr(true),
-			ProviderID: "local_runsc",
-			ProfileID:  "local_runsc_default",
-		},
-	}
-}
+// DefaultModelProxyRef is the only proxy reference accepted on model profiles;
+// it is exported because the server re-validates the same invariant when
+// resolving a deployment.
+const DefaultModelProxyRef = "model_proxy"
 
 func normalizeAgentConfigs(raw map[string]AgentConfig) map[string]AgentConfig {
-	defaults := defaultAgentConfigs()
-	if len(raw) == 0 {
-		return cloneAgentConfigs(defaults)
-	}
-	normalized := cloneAgentConfigs(defaults)
+	normalized := make(map[string]AgentConfig, len(raw))
 	for id, cfg := range raw {
 		key := strings.TrimSpace(id)
 		if key == "" {
 			continue
 		}
-		base, ok := normalized[key]
-		if !ok {
-			base = AgentConfig{}
-		}
+		base := AgentConfig{}
 		if cfg.Enabled != nil {
 			base.Enabled = boolPtr(*cfg.Enabled)
 		}
-		if strings.TrimSpace(cfg.DriverID) != "" {
-			base.DriverID = strings.TrimSpace(cfg.DriverID)
-		} else if strings.TrimSpace(base.DriverID) == "" {
-			base.DriverID = key
-		}
+		base.DriverID = strings.TrimSpace(cfg.DriverID)
 		if canonical, err := agents.CanonicalDriverID(base.DriverID); err == nil {
 			base.DriverID = string(canonical)
 		}
-		if strings.TrimSpace(cfg.ModelProfile) != "" {
-			base.ModelProfile = strings.TrimSpace(cfg.ModelProfile)
-		}
-		if strings.TrimSpace(cfg.RuntimeProvider) != "" {
-			base.RuntimeProvider = strings.TrimSpace(cfg.RuntimeProvider)
-		}
+		base.ModelProfile = strings.TrimSpace(cfg.ModelProfile)
+		base.RuntimeProvider = strings.TrimSpace(cfg.RuntimeProvider)
 		if cfg.DisableNonessentialTraffic != nil {
 			base.DisableNonessentialTraffic = boolPtr(*cfg.DisableNonessentialTraffic)
-		}
-		if base.Enabled == nil {
-			base.Enabled = boolPtr(false)
 		}
 		normalized[key] = base
 	}
@@ -979,87 +833,95 @@ func normalizeAgentConfigs(raw map[string]AgentConfig) map[string]AgentConfig {
 }
 
 func normalizeModelProfileConfigs(raw map[string]ModelProfileConfig) map[string]ModelProfileConfig {
-	defaults := defaultModelProfileConfigs()
-	if len(raw) == 0 {
-		return cloneModelProfileConfigs(defaults)
-	}
-	normalized := cloneModelProfileConfigs(defaults)
+	normalized := make(map[string]ModelProfileConfig, len(raw))
 	for id, cfg := range raw {
 		key := strings.TrimSpace(id)
 		if key == "" {
 			continue
 		}
-		base, ok := normalized[key]
-		if !ok {
-			base = ModelProfileConfig{}
-		}
+		base := ModelProfileConfig{}
 		if cfg.Enabled != nil {
 			base.Enabled = boolPtr(*cfg.Enabled)
 		}
-		if strings.TrimSpace(cfg.Provider) != "" {
-			base.Provider = strings.TrimSpace(cfg.Provider)
-		}
-		if strings.TrimSpace(cfg.Model) != "" {
-			base.Model = strings.TrimSpace(cfg.Model)
-		}
-		if strings.TrimSpace(cfg.ProxyRef) != "" {
-			base.ProxyRef = strings.TrimSpace(cfg.ProxyRef)
-		}
-		if base.Enabled == nil {
-			base.Enabled = boolPtr(false)
-		}
+		base.Provider = strings.TrimSpace(cfg.Provider)
+		base.Model = strings.TrimSpace(cfg.Model)
+		base.ProxyRef = strings.TrimSpace(cfg.ProxyRef)
 		normalized[key] = base
 	}
 	return normalized
 }
 
 func normalizeRuntimeProviderConfigs(raw map[string]RuntimeProviderConfig) map[string]RuntimeProviderConfig {
-	defaults := defaultRuntimeProviderConfigs()
-	if len(raw) == 0 {
-		return cloneRuntimeProviderConfigs(defaults)
-	}
-	normalized := cloneRuntimeProviderConfigs(defaults)
+	normalized := make(map[string]RuntimeProviderConfig, len(raw))
 	for id, cfg := range raw {
 		key := strings.TrimSpace(id)
 		if key == "" {
 			continue
 		}
-		base, ok := normalized[key]
-		if !ok {
-			base = RuntimeProviderConfig{}
-		}
+		base := RuntimeProviderConfig{}
 		if cfg.Enabled != nil {
 			base.Enabled = boolPtr(*cfg.Enabled)
 		}
-		if strings.TrimSpace(cfg.ProviderID) != "" {
-			base.ProviderID = strings.TrimSpace(cfg.ProviderID)
-		} else if strings.TrimSpace(base.ProviderID) == "" {
-			base.ProviderID = key
-		}
-		if strings.TrimSpace(cfg.ProfileID) != "" {
-			base.ProfileID = strings.TrimSpace(cfg.ProfileID)
-		}
-		if base.Enabled == nil {
-			base.Enabled = boolPtr(false)
-		}
+		base.ProviderID = strings.TrimSpace(cfg.ProviderID)
+		base.ProfileID = strings.TrimSpace(cfg.ProfileID)
 		normalized[key] = base
 	}
 	return normalized
 }
 
 func validateDeploymentConfig(cfg HarnessConfig) error {
+	if strings.TrimSpace(cfg.DefaultAgent) == "" {
+		return fmt.Errorf("harness.default_agent is required")
+	}
 	defaultDriver, err := agents.CanonicalDriverID(cfg.DefaultAgent)
 	if err != nil {
-		return fmt.Errorf("harness.default_agent: %w", err)
-	}
-	if err := validateDefaultAgentDriver(defaultDriver, cfg.Agents); err != nil {
 		return fmt.Errorf("harness.default_agent: %w", err)
 	}
 	if len(cfg.Agents) == 0 {
 		return fmt.Errorf("harness.agents must be non-empty")
 	}
+	if len(cfg.ModelProfiles) == 0 {
+		return fmt.Errorf("harness.model_profiles must be non-empty")
+	}
+	if len(cfg.RuntimeProviders) == 0 {
+		return fmt.Errorf("harness.runtime_providers must be non-empty")
+	}
+	for id, profile := range cfg.ModelProfiles {
+		if profile.Enabled == nil {
+			return fmt.Errorf("harness.model_profiles.%s.enabled is required", id)
+		}
+		if strings.TrimSpace(profile.Provider) == "" {
+			return fmt.Errorf("harness.model_profiles.%s.provider is required", id)
+		}
+		if strings.TrimSpace(profile.Model) == "" {
+			return fmt.Errorf("harness.model_profiles.%s.model is required", id)
+		}
+		if strings.TrimSpace(profile.ProxyRef) == "" {
+			return fmt.Errorf("harness.model_profiles.%s.proxy_ref is required", id)
+		}
+		if strings.TrimSpace(profile.ProxyRef) != DefaultModelProxyRef {
+			return fmt.Errorf("harness.model_profiles.%s.proxy_ref must be %s", id, DefaultModelProxyRef)
+		}
+	}
+	for id, runtimeCfg := range cfg.RuntimeProviders {
+		if runtimeCfg.Enabled == nil {
+			return fmt.Errorf("harness.runtime_providers.%s.enabled is required", id)
+		}
+		if strings.TrimSpace(runtimeCfg.ProviderID) == "" {
+			return fmt.Errorf("harness.runtime_providers.%s.provider_id is required", id)
+		}
+		if strings.TrimSpace(runtimeCfg.ProfileID) == "" {
+			return fmt.Errorf("harness.runtime_providers.%s.profile_id is required", id)
+		}
+	}
 	for id, agentCfg := range cfg.Agents {
-		driverID, err := agents.CanonicalDriverID(defaultString(agentCfg.DriverID, id))
+		if agentCfg.Enabled == nil {
+			return fmt.Errorf("harness.agents.%s.enabled is required", id)
+		}
+		if strings.TrimSpace(agentCfg.DriverID) == "" {
+			return fmt.Errorf("harness.agents.%s.driver_id is required", id)
+		}
+		driverID, err := agents.CanonicalDriverID(agentCfg.DriverID)
 		if err != nil {
 			return fmt.Errorf("harness.agents.%s.driver_id: %w", id, err)
 		}
@@ -1077,11 +939,14 @@ func validateDeploymentConfig(cfg HarnessConfig) error {
 		if enabled(agentCfg.Enabled) && !enabled(runtimeCfg.Enabled) {
 			return fmt.Errorf("harness.agents.%s.runtime_provider %q is disabled", id, agentCfg.RuntimeProvider)
 		}
-		providerID := defaultString(runtimeCfg.ProviderID, agentCfg.RuntimeProvider)
+		providerID := strings.TrimSpace(runtimeCfg.ProviderID)
 		if err := agents.EnsureDriverSupportedByProvider(string(driverID), providerID); err != nil {
 			return fmt.Errorf("harness.agents.%s.runtime_provider: %w", id, err)
 		}
 		if spec.ModelAccess {
+			if enabled(agentCfg.Enabled) && agentCfg.DisableNonessentialTraffic == nil {
+				return fmt.Errorf("harness.agents.%s.disable_nonessential_traffic is required for enabled model-access drivers", id)
+			}
 			if strings.TrimSpace(agentCfg.ModelProfile) == "" {
 				return fmt.Errorf("harness.agents.%s.model_profile is required for model-access drivers", id)
 			}
@@ -1092,13 +957,10 @@ func validateDeploymentConfig(cfg HarnessConfig) error {
 			if enabled(agentCfg.Enabled) && !enabled(profile.Enabled) {
 				return fmt.Errorf("harness.agents.%s.model_profile %q is disabled", id, agentCfg.ModelProfile)
 			}
-			if strings.TrimSpace(profile.Model) == "" {
-				return fmt.Errorf("harness.model_profiles.%s.model is required", agentCfg.ModelProfile)
-			}
-			if strings.TrimSpace(profile.ProxyRef) != DefaultModelProxyRef {
-				return fmt.Errorf("harness.model_profiles.%s.proxy_ref must be %s", agentCfg.ModelProfile, DefaultModelProxyRef)
-			}
 		}
+	}
+	if err := validateDefaultAgentDriver(defaultDriver, cfg.Agents); err != nil {
+		return fmt.Errorf("harness.default_agent: %w", err)
 	}
 	return nil
 }
@@ -1121,7 +983,10 @@ func EnabledAgentConfigForDriver(agentConfigs map[string]AgentConfig, driverID s
 		if !enabled(cfg.Enabled) {
 			continue
 		}
-		candidate, err := agents.CanonicalDriverID(defaultString(cfg.DriverID, key))
+		if strings.TrimSpace(cfg.DriverID) == "" {
+			continue
+		}
+		candidate, err := agents.CanonicalDriverID(cfg.DriverID)
 		if err == nil && candidate == canonical {
 			return key, cfg, true
 		}
@@ -1211,13 +1076,13 @@ func boolPtr(value bool) *bool {
 }
 
 func normalizeModelProxyConfig(cfg ModelProxyConfig) ModelProxyConfig {
-	cfg.BindURL = defaultString(cfg.BindURL, defaultModelProxyBindURL)
+	cfg.BindURL = strings.TrimSpace(cfg.BindURL)
 	if port, err := parseModelProxyBindPort(cfg.BindURL); err == nil {
 		cfg.BindPort = port
 	} else {
 		cfg.BindPort = 0
 	}
-	cfg.SandboxBaseURL = defaultString(cfg.SandboxBaseURL, defaultSandboxModelProxyBaseURLForPort(cfg.BindPort))
+	cfg.SandboxBaseURL = strings.TrimSpace(cfg.SandboxBaseURL)
 	return cfg
 }
 
@@ -1239,7 +1104,7 @@ func defaultSandboxModelProxyBaseURLForPort(port int) string {
 func validateModelProxySandboxBaseURL(raw string, bindPort int) error {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return nil
+		return fmt.Errorf("harness.model_proxy.sandbox_base_url is required")
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil {
@@ -1313,13 +1178,6 @@ func isUnspecifiedModelProxyBindHost(host string) bool {
 		return false
 	}
 	return addr.IsUnspecified()
-}
-
-func defaultString(value, defaultValue string) string {
-	if strings.TrimSpace(value) == "" {
-		return defaultValue
-	}
-	return strings.TrimSpace(value)
 }
 
 func getenv(key, defaultValue string) string {

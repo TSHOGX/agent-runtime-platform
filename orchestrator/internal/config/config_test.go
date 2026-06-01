@@ -13,6 +13,35 @@ func TestLoadProjectConfigUsesHarnessSchema(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "harness.yaml")
 	if err := os.WriteFile(path, []byte(`harness:
+  default_agent: pi
+  agents:
+    claude_code:
+      enabled: true
+      driver_id: claude_code
+      model_profile: anthropic_default
+      runtime_provider: local_runsc
+      disable_nonessential_traffic: true
+    pi:
+      enabled: true
+      driver_id: pi
+      model_profile: anthropic_default
+      runtime_provider: local_runsc
+      disable_nonessential_traffic: true
+    sh:
+      enabled: true
+      driver_id: sh
+      runtime_provider: local_runsc
+  model_profiles:
+    anthropic_default:
+      enabled: true
+      provider: anthropic_messages
+      model: sonnet
+      proxy_ref: model_proxy
+  runtime_providers:
+    local_runsc:
+      enabled: true
+      provider_id: local_runsc
+      profile_id: local_runsc_default
   run_dir: /tmp/harness-run
   session_retention: 3h
   max_sessions: 10
@@ -121,27 +150,245 @@ func TestLoadProjectConfigUsesHarnessSchema(t *testing.T) {
 		t.Fatalf("unexpected checkpoint config: %+v", harness.Checkpoint)
 	}
 	if agent := harness.Agents["claude_code"]; agent.DisableNonessentialTraffic == nil || !*agent.DisableNonessentialTraffic {
-		t.Fatalf("expected default nonessential traffic setting to be true")
+		t.Fatalf("expected explicit nonessential traffic setting to be true")
 	}
 }
 
-func TestLoadProjectConfigDerivesModelProxySandboxBaseURLPort(t *testing.T) {
+func TestLoadProjectConfigRejectsMissingModelProxySandboxBaseURL(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "harness.yaml")
-	if err := os.WriteFile(path, []byte(`harness:
-  model_proxy:
+	if err := os.WriteFile(path, []byte(minimalHarnessYAMLWithModelProxy(`  model_proxy:
     bind_url: http://0.0.0.0:8083
-`), 0o644); err != nil {
+`)), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
-	cfg, err := loadProjectConfig(path)
-	if err != nil {
-		t.Fatalf("load project config: %v", err)
+	_, err := loadProjectConfig(path)
+	if err == nil || !strings.Contains(err.Error(), "harness.model_proxy.sandbox_base_url is required") {
+		t.Fatalf("expected missing sandbox_base_url rejection, got %v", err)
 	}
-	if cfg.Harness.ModelProxy.BindPort != 8083 ||
-		cfg.Harness.ModelProxy.SandboxBaseURL != "http://harness-model-proxy.internal:8083" {
-		t.Fatalf("model proxy sandbox base URL was not derived from bind port: %+v", cfg.Harness.ModelProxy)
+}
+
+func TestLoadProjectConfigRejectsImplicitDeploymentDefaults(t *testing.T) {
+	base := minimalHarnessYAMLWithModelProxy(`  model_proxy:
+    bind_url: http://0.0.0.0:8082
+    sandbox_base_url: http://harness-model-proxy.internal:8082
+`)
+	tests := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{
+			name: "agent enabled",
+			yaml: strings.Replace(base, "      enabled: true\n      driver_id: pi\n", "      driver_id: pi\n", 1),
+			want: "harness.agents.pi.enabled is required",
+		},
+		{
+			name: "agent driver",
+			yaml: strings.Replace(base, "      driver_id: pi\n", "", 1),
+			want: "harness.agents.pi.driver_id is required",
+		},
+		{
+			name: "agent runtime provider",
+			yaml: strings.Replace(base, "      runtime_provider: local_runsc\n", "", 1),
+			want: "harness.agents.pi.runtime_provider is required",
+		},
+		{
+			name: "model profile provider",
+			yaml: strings.Replace(base, "      provider: anthropic_messages\n", "", 1),
+			want: "harness.model_profiles.anthropic_default.provider is required",
+		},
+		{
+			name: "runtime provider id",
+			yaml: strings.Replace(base, "      provider_id: local_runsc\n", "", 1),
+			want: "harness.runtime_providers.local_runsc.provider_id is required",
+		},
+		{
+			name: "model access traffic policy",
+			yaml: strings.Replace(base, "      disable_nonessential_traffic: true\n", "", 1),
+			want: "harness.agents.pi.disable_nonessential_traffic is required",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "harness.yaml")
+			if err := os.WriteFile(path, []byte(tt.yaml), 0o644); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			_, err := loadProjectConfig(path)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %q rejection, got %v", tt.want, err)
+			}
+		})
+	}
+}
+
+func minimalHarnessYAMLWithModelProxy(modelProxyYAML string) string {
+	return `harness:
+  default_agent: pi
+  agents:
+    pi:
+      enabled: true
+      driver_id: pi
+      model_profile: anthropic_default
+      runtime_provider: local_runsc
+      disable_nonessential_traffic: true
+    sh:
+      enabled: true
+      driver_id: sh
+      runtime_provider: local_runsc
+  model_profiles:
+    anthropic_default:
+      enabled: true
+      provider: anthropic_messages
+      model: sonnet
+      proxy_ref: model_proxy
+  runtime_providers:
+    local_runsc:
+      enabled: true
+      provider_id: local_runsc
+      profile_id: local_runsc_default
+  run_dir: /tmp/harness-run
+  session_retention: 0s
+  max_sessions: 10
+  sandbox_identity:
+    uid: 65534
+    gid: 65534
+    supplemental_gids: []
+  proxy_service_identity:
+    uid: 0
+    gid: 0
+  network:
+    cidr_pool: 10.210.0.0/24
+    egress:
+      doris_fe_hosts: [172.16.0.138]
+      doris_be_hosts: [172.16.0.138]
+      doris_ports: [9030]
+      dns_policy: hostnames_only
+  events:
+    retention_window: 24h
+    retention_rows: 1000000
+    emit_output_batch_max_rows: 64
+    emit_output_batch_max_age: 100ms
+  probe:
+    accept_status:
+      get_healthz: [200]
+      post_v1_messages:
+        unauthorized: [401]
+        malformed_authenticated: [400]
+    pre_start_attempts: 3
+    pre_start_interval: 500ms
+    post_start_attempts: 5
+    post_start_interval: 1s
+  bridge:
+    lease_ttl: 60s
+    heartbeat_interval: 30s
+    poll_interval: 5ms
+    ack_started_grace: 90s
+    reconnect_grace: 30s
+  checkpoint:
+    auto_enabled: false
+    idle_threshold: 30m
+    monitor_interval: 5m
+  reaper:
+    failed_retention: 10m
+    checkpoint_image_retention: 720h
+` + modelProxyYAML
+}
+
+func testHarnessConfig() HarnessConfig {
+	return HarnessConfig{
+		DefaultAgent: "pi",
+		Agents: map[string]AgentConfig{
+			"pi": {
+				Enabled:                    boolPtr(true),
+				DriverID:                   "pi",
+				ModelProfile:               "anthropic_default",
+				RuntimeProvider:            "local_runsc",
+				DisableNonessentialTraffic: boolPtr(true),
+			},
+			"sh": {
+				Enabled:         boolPtr(true),
+				DriverID:        "sh",
+				RuntimeProvider: "local_runsc",
+			},
+		},
+		ModelProfiles: map[string]ModelProfileConfig{
+			"anthropic_default": {
+				Enabled:  boolPtr(true),
+				Provider: "anthropic_messages",
+				Model:    "sonnet",
+				ProxyRef: DefaultModelProxyRef,
+			},
+		},
+		RuntimeProviders: map[string]RuntimeProviderConfig{
+			"local_runsc": {
+				Enabled:    boolPtr(true),
+				ProviderID: "local_runsc",
+				ProfileID:  "local_runsc_default",
+			},
+		},
+		RunDir:           "/var/lib/harness/run",
+		SessionRetention: Duration{Duration: 0},
+		MaxSessions:      30,
+		Network: NetworkConfig{
+			CIDRPool: CIDRPrefix{Prefix: netip.MustParsePrefix("10.200.0.0/16")},
+			Egress: EgressConfig{
+				DorisFEHosts: []string{"172.16.0.138"},
+				DorisBEHosts: []string{"172.16.0.138"},
+				DorisPorts:   []int{9030},
+				DNSPolicy:    DNSPolicyHostnamesOnly,
+			},
+		},
+		Events: EventsConfig{
+			RetentionWindow:        Duration{Duration: 24 * time.Hour},
+			RetentionRows:          1_000_000,
+			EmitOutputBatchMaxRows: 64,
+			EmitOutputBatchMaxAge:  Duration{Duration: 100 * time.Millisecond},
+		},
+		Probe: ProbeConfig{
+			AcceptStatus: ProbeAcceptStatusConfig{
+				GetHealthz: []int{200},
+				PostV1Messages: PostV1MessagesStatuses{
+					Unauthorized:           []int{401},
+					MalformedAuthenticated: []int{400},
+				},
+			},
+			PreStartAttempts:  3,
+			PreStartInterval:  Duration{Duration: 500 * time.Millisecond},
+			PostStartAttempts: 5,
+			PostStartInterval: Duration{Duration: time.Second},
+		},
+		Bridge: BridgeConfig{
+			LeaseTTL:          Duration{Duration: time.Minute},
+			HeartbeatInterval: Duration{Duration: 30 * time.Second},
+			PollInterval:      Duration{Duration: 5 * time.Millisecond},
+			AckStartedGrace:   Duration{Duration: 90 * time.Second},
+			ReconnectGrace:    Duration{Duration: 30 * time.Second},
+		},
+		Checkpoint: CheckpointConfig{
+			AutoEnabled:     false,
+			IdleThreshold:   Duration{Duration: 30 * time.Minute},
+			MonitorInterval: Duration{Duration: 5 * time.Minute},
+		},
+		Reaper: ReaperConfig{
+			FailedRetention:          Duration{Duration: 10 * time.Minute},
+			CheckpointImageRetention: Duration{Duration: 720 * time.Hour},
+		},
+		SandboxIdentity: SandboxIdentity{
+			UID: 65534,
+			GID: 65534,
+		},
+		ProxyServiceIdentity: ProxyServiceIdentity{
+			UID: 0,
+			GID: 0,
+		},
+		ModelProxy: ModelProxyConfig{
+			BindURL:        defaultModelProxyBindURL,
+			SandboxBaseURL: defaultSandboxModelProxyBaseURL,
+			BindPort:       8082,
+		},
 	}
 }
 
@@ -178,6 +425,9 @@ func TestLoadProjectConfigUsesGenericDeploymentConfig(t *testing.T) {
       enabled: true
       provider_id: local_runsc
       profile_id: local_runsc_default
+  model_proxy:
+    bind_url: http://0.0.0.0:8082
+    sandbox_base_url: http://harness-model-proxy.internal:8082
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -216,6 +466,20 @@ func TestLoadProjectConfigRejectsDisabledDefaultAgent(t *testing.T) {
       driver_id: pi
       model_profile: anthropic_default
       runtime_provider: local_runsc
+  model_profiles:
+    anthropic_default:
+      enabled: true
+      provider: anthropic_messages
+      model: sonnet
+      proxy_ref: model_proxy
+  runtime_providers:
+    local_runsc:
+      enabled: true
+      provider_id: local_runsc
+      profile_id: local_runsc_default
+  model_proxy:
+    bind_url: http://0.0.0.0:8082
+    sandbox_base_url: http://harness-model-proxy.internal:8082
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -272,10 +536,10 @@ func TestLoadProjectConfigRejectsInvalidModelProxyBindURL(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "harness.yaml")
-			if err := os.WriteFile(path, []byte(`harness:
-  model_proxy:
+			if err := os.WriteFile(path, []byte(minimalHarnessYAMLWithModelProxy(`  model_proxy:
     bind_url: `+tt.bindURL+`
-`), 0o644); err != nil {
+    sandbox_base_url: http://harness-model-proxy.internal:8082
+`)), 0o644); err != nil {
 				t.Fatalf("write config: %v", err)
 			}
 
@@ -290,11 +554,10 @@ func TestLoadProjectConfigRejectsInvalidModelProxyBindURL(t *testing.T) {
 func TestLoadProjectConfigRejectsMismatchedModelProxySandboxPort(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "harness.yaml")
-	if err := os.WriteFile(path, []byte(`harness:
-  model_proxy:
+	if err := os.WriteFile(path, []byte(minimalHarnessYAMLWithModelProxy(`  model_proxy:
     bind_url: http://0.0.0.0:8083
     sandbox_base_url: http://harness-model-proxy.internal:8082
-`), 0o644); err != nil {
+`)), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
@@ -355,11 +618,10 @@ func TestLoadProjectConfigRejectsMalformedModelProxySandboxBaseURL(t *testing.T)
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "harness.yaml")
-			if err := os.WriteFile(path, []byte(`harness:
-  model_proxy:
+			if err := os.WriteFile(path, []byte(minimalHarnessYAMLWithModelProxy(`  model_proxy:
     bind_url: http://0.0.0.0:8082
     sandbox_base_url: `+tt.sandboxBaseURL+`
-`), 0o644); err != nil {
+`)), 0o644); err != nil {
 				t.Fatalf("write config: %v", err)
 			}
 
@@ -751,7 +1013,7 @@ func TestValidateHarnessConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := defaultHarnessConfig()
+			cfg := testHarnessConfig()
 			tt.mutate(&cfg)
 
 			err := validateHarnessConfig(cfg)
@@ -780,7 +1042,7 @@ func TestNormalizeSandboxIdentitySortsSupplementalGIDs(t *testing.T) {
 }
 
 func TestValidateHarnessConfigAllowsZeroSessionRetention(t *testing.T) {
-	cfg := defaultHarnessConfig()
+	cfg := testHarnessConfig()
 	cfg.SessionRetention.Duration = 0
 
 	if err := validateHarnessConfig(cfg); err != nil {
@@ -853,7 +1115,7 @@ func TestValidateIsolationRootsRejectsRelativeRoot(t *testing.T) {
 }
 
 func TestValidateHarnessConfigAllowsMaxSessionsAboveCIDRCapacity(t *testing.T) {
-	cfg := defaultHarnessConfig()
+	cfg := testHarnessConfig()
 	cfg.MaxSessions = 10
 	cfg.Network.CIDRPool.Prefix = netip.MustParsePrefix("10.0.0.0/30")
 
@@ -945,11 +1207,10 @@ func TestLoadExposesModelProxyConfig(t *testing.T) {
 	if err := os.Mkdir(configDir, 0o755); err != nil {
 		t.Fatalf("mkdir config dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(configDir, "harness.yaml"), []byte(`harness:
-  model_proxy:
+	if err := os.WriteFile(filepath.Join(configDir, "harness.yaml"), []byte(minimalHarnessYAMLWithModelProxy(`  model_proxy:
     bind_url: http://0.0.0.0:8083
     sandbox_base_url: http://harness-model-proxy.internal:8083
-`), 0o644); err != nil {
+`)), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 	chdirForLoadTest(t, repo)
@@ -1023,9 +1284,10 @@ func writeMinimalLoadConfig(t *testing.T) string {
 	if err := os.Mkdir(configDir, 0o755); err != nil {
 		t.Fatalf("mkdir config dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(configDir, "harness.yaml"), []byte(`harness:
-  max_sessions: 30
-`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(configDir, "harness.yaml"), []byte(minimalHarnessYAMLWithModelProxy(`  model_proxy:
+    bind_url: http://0.0.0.0:8082
+    sandbox_base_url: http://harness-model-proxy.internal:8082
+`)), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 	return repo
@@ -1103,33 +1365,12 @@ func TestCheckedInHarnessConfigLoads(t *testing.T) {
 }
 
 func TestLoadValidatesMergedHarnessConfig(t *testing.T) {
-	repo := t.TempDir()
-	configDir := filepath.Join(repo, "config")
-	if err := os.Mkdir(configDir, 0o755); err != nil {
-		t.Fatalf("mkdir config dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(configDir, "harness.yaml"), []byte(`harness:
-  network:
-    cidr_pool: 10.0.0.0/30
-`), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	oldWD, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	if err := os.Chdir(repo); err != nil {
-		t.Fatalf("chdir repo: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chdir(oldWD); err != nil {
-			t.Fatalf("restore wd: %v", err)
-		}
-	})
+	repo := writeMinimalLoadConfig(t)
+	chdirForLoadTest(t, repo)
 	unsetEnvForTest(t, "HARNESS_SESSION_TTL")
 	t.Setenv("HARNESS_SESSION_RETENTION", "-1s")
 
-	_, err = Load()
+	_, err := Load()
 	if err == nil || !strings.Contains(err.Error(), "harness.session_retention must be >= 0") {
 		t.Fatalf("expected merged validation error, got %v", err)
 	}
