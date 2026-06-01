@@ -621,11 +621,13 @@ func scanSession(row scanner) (Session, error) {
 }
 
 func ModeForDriver(driverID string) string {
-	switch strings.TrimSpace(driverID) {
-	case string(agents.Shell):
-		return "shell"
-	case string(agents.ClaudeCode), string(agents.Pi):
-		return "agent"
+	spec, ok := agents.DriverSpecFor(driverID)
+	if !ok {
+		return ""
+	}
+	switch spec.Kind {
+	case agents.DriverKindAgent, agents.DriverKindShell:
+		return string(spec.Kind)
 	default:
 		return ""
 	}

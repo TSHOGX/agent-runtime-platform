@@ -15,6 +15,71 @@ import (
 	"harness-platform/orchestrator/internal/sessionstate"
 )
 
+func TestResourceAllocatorConfigModelCredentialDefaultsUseDriverSpec(t *testing.T) {
+	boolPtr := func(value bool) *bool {
+		return &value
+	}
+	tests := []struct {
+		name         string
+		cfg          ResourceAllocatorConfig
+		wantAccess   bool
+		wantHostOnly bool
+	}{
+		{
+			name:         "claude default",
+			cfg:          ResourceAllocatorConfig{Agent: "claude_code"},
+			wantAccess:   true,
+			wantHostOnly: true,
+		},
+		{
+			name:         "pi default",
+			cfg:          ResourceAllocatorConfig{Agent: "pi"},
+			wantAccess:   true,
+			wantHostOnly: true,
+		},
+		{
+			name:         "shell default",
+			cfg:          ResourceAllocatorConfig{Agent: "sh"},
+			wantAccess:   false,
+			wantHostOnly: false,
+		},
+		{
+			name:         "unknown default",
+			cfg:          ResourceAllocatorConfig{Agent: "unknown"},
+			wantAccess:   false,
+			wantHostOnly: false,
+		},
+		{
+			name:         "explicit claude deny",
+			cfg:          ResourceAllocatorConfig{Agent: "claude_code", ModelAccessAllowed: boolPtr(false)},
+			wantAccess:   false,
+			wantHostOnly: true,
+		},
+		{
+			name:         "explicit shell allow",
+			cfg:          ResourceAllocatorConfig{Agent: "sh", ModelAccessAllowed: boolPtr(true)},
+			wantAccess:   true,
+			wantHostOnly: false,
+		},
+		{
+			name:         "explicit unknown allow",
+			cfg:          ResourceAllocatorConfig{Agent: "unknown", ModelAccessAllowed: boolPtr(true)},
+			wantAccess:   true,
+			wantHostOnly: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.modelAccessAllowed(); got != tt.wantAccess {
+				t.Fatalf("modelAccessAllowed()=%v want %v", got, tt.wantAccess)
+			}
+			if got := tt.cfg.providerCredentialsHostOnly(); got != tt.wantHostOnly {
+				t.Fatalf("providerCredentialsHostOnly()=%v want %v", got, tt.wantHostOnly)
+			}
+		})
+	}
+}
+
 func TestAllocateGenerationCreatesRowsAndReservesNonDestroyedSlots(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)

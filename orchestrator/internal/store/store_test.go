@@ -10,6 +10,25 @@ import (
 	"harness-platform/orchestrator/internal/sessionstate"
 )
 
+func TestModeForDriverUsesDriverRegistryKind(t *testing.T) {
+	tests := []struct {
+		driverID string
+		want     string
+	}{
+		{driverID: "claude_code", want: "agent"},
+		{driverID: "pi", want: "agent"},
+		{driverID: "sh", want: "shell"},
+		{driverID: "unknown", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.driverID, func(t *testing.T) {
+			if got := ModeForDriver(tt.driverID); got != tt.want {
+				t.Fatalf("ModeForDriver(%q)=%q want %q", tt.driverID, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestListMessagesAndUUID(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")

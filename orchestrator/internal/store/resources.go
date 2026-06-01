@@ -2823,21 +2823,16 @@ func (c ResourceAllocatorConfig) modelAccessAllowed() bool {
 	if c.ModelAccessAllowed != nil {
 		return *c.ModelAccessAllowed
 	}
-	switch c.agent() {
-	case string(agents.ClaudeCode), string(agents.Pi):
-		return true
-	default:
-		return false
-	}
+	return c.driverSupportsModelAccess()
 }
 
 func (c ResourceAllocatorConfig) providerCredentialsHostOnly() bool {
-	switch c.agent() {
-	case string(agents.ClaudeCode), string(agents.Pi):
-		return true
-	default:
-		return false
-	}
+	return c.driverSupportsModelAccess()
+}
+
+func (c ResourceAllocatorConfig) driverSupportsModelAccess() bool {
+	spec, ok := agents.DriverSpecFor(c.agent())
+	return ok && spec.ModelAccess
 }
 
 func (c ResourceAllocatorConfig) requiresNetworkHostsProjection() bool {
