@@ -35,7 +35,6 @@ type Config struct {
 	AgentHomesRoot          string
 	BundleRoot              string
 	RootFSPath              string
-	DefaultAgent            string
 	SandboxUID              int
 	SandboxGID              int
 	SandboxSupplementalGIDs []int
@@ -263,7 +262,7 @@ func New(cfg Config) *Runtime {
 }
 
 func (r *Runtime) Start(ctx context.Context, req StartRequest, output func(Output)) Result {
-	driverID, err := resolveDriverID(req.DriverID, r.cfg.DefaultAgent)
+	driverID, err := resolveDriverID(req.DriverID)
 	if err != nil {
 		return Result{Err: err}
 	}
@@ -357,11 +356,8 @@ func restoreGenerationArtifacts(req StartRequest) (GenerationArtifacts, error) {
 	return artifacts, nil
 }
 
-func resolveDriverID(driverID, defaultValue string) (string, error) {
+func resolveDriverID(driverID string) (string, error) {
 	driverID = strings.TrimSpace(driverID)
-	if driverID == "" {
-		driverID = strings.TrimSpace(defaultValue)
-	}
 	if driverID == "" {
 		return "", errors.New("driver id is required")
 	}

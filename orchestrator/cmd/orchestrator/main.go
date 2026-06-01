@@ -73,7 +73,6 @@ func main() {
 				AgentHomesRoot:          cfg.AgentHomesRoot,
 				BundleRoot:              cfg.BundleRoot,
 				RootFSPath:              cfg.RootFSPath,
-				DefaultAgent:            cfg.DefaultAgent,
 				SandboxUID:              cfg.Harness.SandboxIdentity.UID,
 				SandboxGID:              cfg.Harness.SandboxIdentity.GID,
 				SandboxSupplementalGIDs: append([]int(nil), cfg.Harness.SandboxIdentity.SupplementalGIDs...),

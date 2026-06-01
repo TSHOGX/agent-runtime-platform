@@ -22,7 +22,7 @@ import (
 )
 
 func TestRuntimeStartRejectsUnsupportedDriver(t *testing.T) {
-	rt := New(Config{DefaultAgent: "claude_code"})
+	rt := New(Config{})
 	res := rt.Start(context.Background(), StartRequest{
 		SessionID: "sess_1",
 		DriverID:  "opencode",
@@ -32,6 +32,25 @@ func TestRuntimeStartRejectsUnsupportedDriver(t *testing.T) {
 	}
 	if !strings.Contains(res.Err.Error(), "unsupported driver") {
 		t.Fatalf("expected unsupported driver error, got %v", res.Err)
+	}
+}
+
+func TestRuntimeStartRequiresExplicitDriverID(t *testing.T) {
+	rt := New(Config{})
+	res := rt.Start(context.Background(), StartRequest{
+		SessionID:    "sess_1",
+		GenerationID: "gen_1",
+		Generation: store.RuntimeGenerationDetails{
+			SessionID:    "sess_1",
+			GenerationID: "gen_1",
+			DriverID:     "claude_code",
+		},
+	}, nil)
+	if res.Err == nil {
+		t.Fatal("expected missing driver id error")
+	}
+	if !strings.Contains(res.Err.Error(), "driver id is required") {
+		t.Fatalf("expected driver id required error, got %v", res.Err)
 	}
 }
 
@@ -54,7 +73,6 @@ func TestPathIsMountPointDetectsRootAndTempDir(t *testing.T) {
 
 func TestRuntimeStartRequiresGenerationDetailsForColdPath(t *testing.T) {
 	rt := New(Config{
-		DefaultAgent:   "claude_code",
 		SessionsRoot:   filepath.Join(t.TempDir(), "sessions"),
 		AgentHomesRoot: filepath.Join(t.TempDir(), "agent-homes"),
 		BundleRoot:     filepath.Join(t.TempDir(), "bundle", "out"),
@@ -171,7 +189,7 @@ func TestResolveCheckpointPathRequiresGenerationPath(t *testing.T) {
 }
 
 func TestRuntimeStartRestoreRequiresCheckpointPath(t *testing.T) {
-	rt := New(Config{DefaultAgent: "claude_code"})
+	rt := New(Config{})
 	res := rt.Start(context.Background(), StartRequest{
 		SessionID:             "sess_missing_checkpoint",
 		DriverID:              "claude_code",
@@ -200,7 +218,7 @@ func TestRuntimeStartRequiresExplicitRestoreEvenWhenCheckpointExists(t *testing.
 	details := testGenerationDetails(dir, "gen_no_implicit_restore")
 	writeCheckpointFiles(t, details.CheckpointPath)
 	details.RunscPlatform = "ptrace"
-	rt := New(Config{DefaultAgent: "claude_code"})
+	rt := New(Config{})
 
 	res := rt.Start(context.Background(), StartRequest{
 		SessionID:    details.SessionID,
@@ -221,7 +239,7 @@ func TestRuntimeStartRestoreRequiresStoredArtifacts(t *testing.T) {
 	checkpointPath := filepath.Join(dir, "checkpoint")
 	writeCheckpointFiles(t, checkpointPath)
 	runner := &recordingCommandRunner{}
-	rt := New(Config{DefaultAgent: "claude_code", CommandRunner: runner})
+	rt := New(Config{CommandRunner: runner})
 	details := testGenerationDetails(dir, "gen_restore_missing_artifacts")
 	details.CheckpointPath = checkpointPath
 
@@ -435,7 +453,6 @@ func TestRuntimeStartRestoreRejectsMetadataBeforeRunscRestore(t *testing.T) {
 		},
 	}
 	rt := New(Config{
-		DefaultAgent:   "claude_code",
 		SessionsRoot:   filepath.Join(dir, "sessions"),
 		AgentHomesRoot: filepath.Join(dir, "agent-homes"),
 		RootFSPath:     filepath.Join(dir, "rootfs"),
@@ -498,7 +515,6 @@ func TestRuntimeStartRejectsRunscPinMismatchBeforeRunscRun(t *testing.T) {
 		},
 	}
 	rt := New(Config{
-		DefaultAgent:  "claude_code",
 		CommandRunner: runner,
 	})
 	details := testGenerationDetails(dir, "gen_start_pin_mismatch")
@@ -550,7 +566,6 @@ func TestRuntimeStartRestoreRejectsRunscBinaryMismatchBeforeRunscRestore(t *test
 		},
 	}
 	rt := New(Config{
-		DefaultAgent:   "claude_code",
 		SessionsRoot:   filepath.Join(dir, "sessions"),
 		AgentHomesRoot: filepath.Join(dir, "agent-homes"),
 		RootFSPath:     filepath.Join(dir, "rootfs"),
@@ -658,7 +673,7 @@ func TestCleanupExitedContainerDoesNotRemoveReplacement(t *testing.T) {
 }
 
 func TestRuntimeStartDoesNotReuseContainerForDifferentGeneration(t *testing.T) {
-	rt := New(Config{DefaultAgent: "claude_code"})
+	rt := New(Config{})
 	stdin := &recordingWriteCloser{}
 	canceled := make(chan struct{})
 	rt.containers["sess_1"] = &Container{
@@ -802,7 +817,6 @@ func TestCheckpointRequiresGenerationScopedPath(t *testing.T) {
 
 func TestRuntimeStartReusesExistingGenerationWithoutStdinTurn(t *testing.T) {
 	rt := New(Config{
-		DefaultAgent: "claude_code",
 		RunscNetwork: "sandbox",
 	})
 	hub := NewOutputHub()

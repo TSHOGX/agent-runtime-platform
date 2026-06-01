@@ -2126,7 +2126,6 @@ WHERE generation_id = ?`, checkpointPath, old.GenerationID); err != nil {
 	markServerGenerationCheckpointed(t, ctx, st, session.ID, old.GenerationID, time.Now().UTC())
 
 	realRuntime := runtime.New(runtime.Config{
-		DefaultAgent:    "sh",
 		SessionsRoot:    cfg.SessionsRoot,
 		AgentHomesRoot:  filepath.Join(dir, "agent-homes"),
 		RootFSPath:      filepath.Join(dir, "rootfs"),
