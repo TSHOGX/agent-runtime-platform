@@ -1250,12 +1250,13 @@ WHERE session_id = ?
 		return 0, err
 	}
 	res, err = tx.ExecContext(ctx, `
-UPDATE sessions
-SET status = ?,
-    updated_at = ?,
-    restore_ms = NULL,
-    error_class = NULL,
-    failure_reason = NULL
+	UPDATE sessions
+	SET status = ?,
+	    updated_at = ?,
+	    checkpoint_path = NULL,
+	    restore_ms = NULL,
+	    error_class = NULL,
+	    failure_reason = NULL
 WHERE id = ?
   AND active_generation_id = ?
   AND status NOT IN ('failed', 'destroyed')`,

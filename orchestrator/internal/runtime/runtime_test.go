@@ -247,7 +247,7 @@ func TestProjectedControlManifestDigestRejectsHostOnlyFields(t *testing.T) {
 }
 
 func TestCanonicalManifestDigestMatchesSandboxProjectionFixture(t *testing.T) {
-	data := mustReadFile(t, filepath.Join("testdata", "control-manifest-payload.phase8.json"))
+	data := mustReadFile(t, filepath.Join("testdata", "control-manifest-payload.sandbox-isolation-v1.json"))
 	var payload any
 	if err := json.Unmarshal(data, &payload); err != nil {
 		t.Fatalf("read canonical manifest fixture: %v", err)
@@ -1221,19 +1221,19 @@ func TestRunscRunningEvidenceRetriesTransientStateMiss(t *testing.T) {
 func TestDestroyTreatsMissingRunscContainerAsAbsent(t *testing.T) {
 	runner := &recordingCommandRunner{
 		sequence: map[string][]commandResult{
-			"runsc -root /runsc delete -force phase3-missing": {
-				{out: []byte("container phase3-missing not found"), err: errors.New("exit status 1")},
+			"runsc -root /runsc delete -force harness-gen-missing": {
+				{out: []byte("container harness-gen-missing not found"), err: errors.New("exit status 1")},
 			},
 		},
 	}
 	rt := New(Config{RunscRoot: "/runsc", CommandRunner: runner})
 
-	if err := rt.Destroy(context.Background(), "phase3-missing"); err != nil {
+	if err := rt.Destroy(context.Background(), "harness-gen-missing"); err != nil {
 		t.Fatalf("destroy missing runsc container: %v", err)
 	}
 	want := []string{
-		"runsc -root /runsc kill phase3-missing KILL",
-		"runsc -root /runsc delete -force phase3-missing",
+		"runsc -root /runsc kill harness-gen-missing KILL",
+		"runsc -root /runsc delete -force harness-gen-missing",
 	}
 	if got := runner.Commands(); !slices.Equal(got, want) {
 		t.Fatalf("commands=%v want %v", got, want)
@@ -1263,7 +1263,7 @@ func TestRenderRuntimeSpecUsesGenerationNetnsPath(t *testing.T) {
 	if !strings.Contains(string(spec.Linux), details.NetnsPath) {
 		t.Fatalf("spec linux must contain generation netns path %q: %s", details.NetnsPath, spec.Linux)
 	}
-	if strings.Contains(string(spec.Linux), "phase1-demo") {
+	if strings.Contains(string(spec.Linux), "shared-demo-netns") {
 		t.Fatalf("spec linux must not contain shared netns path: %s", spec.Linux)
 	}
 }
@@ -1444,8 +1444,8 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndIsolatedRuntime(t *t
 	if err := json.Unmarshal(specData, &spec); err != nil {
 		t.Fatalf("runtime spec is not valid JSON: %v\n%s", err, specData)
 	}
-	if strings.Contains(string(specData), "phase2-template") {
-		t.Fatalf("runtime spec hot path must not reference phase2-template: %s", specData)
+	if strings.Contains(string(specData), "legacy-template") {
+		t.Fatalf("runtime spec hot path must not reference legacy-template: %s", specData)
 	}
 	if strings.Contains(string(specData), "/harness-secrets") ||
 		strings.Contains(string(specData), "anthropic_api_key") ||

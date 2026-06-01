@@ -518,27 +518,8 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, sessionID s
 		return
 	}
 	if err := s.startEnsuredGeneration(r.Context(), session, ensured, startFailureInputAcceptable); err != nil {
-		if !ensured.RestoreFromCheckpoint {
-			writeRuntimeStartError(w, err)
-			return
-		}
-		ensured, err = s.ensureActiveGeneration(r.Context(), session, leaseOwner)
-		if errors.Is(err, store.ErrPoolExhausted) {
-			writeErrorClass(w, http.StatusServiceUnavailable, "pool_exhausted", "resource pool exhausted")
-			return
-		}
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if !ensured.IsNew {
-			writeError(w, http.StatusInternalServerError, "restore fallback did not allocate a replacement generation")
-			return
-		}
-		if err := s.startEnsuredGeneration(r.Context(), session, ensured, startFailureInputAcceptable); err != nil {
-			writeRuntimeStartError(w, err)
-			return
-		}
+		writeRuntimeStartError(w, err)
+		return
 	}
 	runningStatus := string(sessionstate.RunningActive)
 	enqueue, err := s.store.EnqueueTurnMessage(r.Context(), store.EnqueueTurnMessageParams{
@@ -582,9 +563,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			return leaseErr
 		}
 		if ensured.RestoreFromCheckpoint {
-			if retireErr := s.retireGenerationForRestoreFallback(session.ID, allocation.GenerationID, allocation.Owner, err); retireErr != nil {
-				return retireErr
-			}
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 			return err
 		}
 		if ensured.IsNew {
@@ -772,9 +751,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 	if ensured.RestoreFromCheckpoint {
 		instance, resourceTracked, err := s.prepareRuntimeResourceRestore(ctx, allocation.GenerationID, resourceWorkerID, resourceHostID, s.cfg.Harness.Bridge.LeaseTTL.Duration)
 		if err != nil {
-			if retireErr := s.retireGenerationForRestoreFallback(session.ID, allocation.GenerationID, allocation.Owner, err); retireErr != nil {
-				return retireErr
-			}
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 			return err
 		}
 		runtimeResourceCreated = resourceTracked
@@ -786,9 +763,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 	if err := validateDriverStateForRuntimeLaunch(generationDetails, dataVolumes); err != nil {
 		if ensured.RestoreFromCheckpoint {
 			retireRuntimeResource()
-			if retireErr := s.retireGenerationForRestoreFallback(session.ID, allocation.GenerationID, allocation.Owner, err); retireErr != nil {
-				return retireErr
-			}
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 			return err
 		}
 		retireRuntimeResource()
@@ -807,9 +782,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		}
 		if ensured.RestoreFromCheckpoint {
 			retireRuntimeResource()
-			if err := s.retireGenerationForRestoreFallback(session.ID, allocation.GenerationID, allocation.Owner, result.Err); err != nil {
-				return err
-			}
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, result.Err, failureMode)
 			return result.Err
 		}
 		retireRuntimeResource()
@@ -846,9 +819,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			}
 			retireRuntimeResource()
 			if ensured.RestoreFromCheckpoint {
-				if retireErr := s.retireGenerationForRestoreFallback(session.ID, allocation.GenerationID, allocation.Owner, err); retireErr != nil {
-					return retireErr
-				}
+				s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 			} else {
 				s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 			}
@@ -878,9 +849,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			}
 			retireRuntimeResource()
 			if ensured.RestoreFromCheckpoint {
-				if retireErr := s.retireGenerationForRestoreFallback(session.ID, allocation.GenerationID, allocation.Owner, err); retireErr != nil {
-					return retireErr
-				}
+				s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 			} else {
 				s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 			}
@@ -896,9 +865,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			}
 			retireRuntimeResource()
 			if ensured.RestoreFromCheckpoint {
-				if retireErr := s.retireGenerationForRestoreFallback(session.ID, allocation.GenerationID, allocation.Owner, err); retireErr != nil {
-					return retireErr
-				}
+				s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 			} else {
 				s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 			}
@@ -977,9 +944,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 				if leaseErr := leaseKeeper.ensureOwned(); leaseErr != nil {
 					return leaseErr
 				}
-				if retireErr := s.retireGenerationForRestoreFallback(session.ID, allocation.GenerationID, allocation.Owner, err); retireErr != nil {
-					return retireErr
-				}
+				s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 				return err
 			}
 			if err := s.store.MarkRuntimeResourceLive(ctx, store.RuntimeResourceWorkerTransitionParams{
@@ -997,9 +962,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 				if leaseErr := leaseKeeper.ensureOwned(); leaseErr != nil {
 					return leaseErr
 				}
-				if retireErr := s.retireGenerationForRestoreFallback(session.ID, allocation.GenerationID, allocation.Owner, err); retireErr != nil {
-					return retireErr
-				}
+				s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 				return err
 			}
 		}
@@ -1012,9 +975,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			if leaseErr := leaseKeeper.ensureOwned(); leaseErr != nil {
 				return leaseErr
 			}
-			if retireErr := s.retireGenerationForRestoreFallback(session.ID, allocation.GenerationID, allocation.Owner, err); retireErr != nil {
-				return retireErr
-			}
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 			return err
 		}
 		if err := leaseKeeper.ensureOwned(); err != nil {
@@ -1170,32 +1131,6 @@ func (s *Server) failGenerationBeforeTurn(session store.Session, generationID, o
 		return
 	}
 	s.publishDurableEvent(ctx, eventID)
-}
-
-func (s *Server) retireGenerationForRestoreFallback(sessionID, generationID, owner string, failure error) error {
-	reason := ""
-	if failure != nil {
-		reason = failure.Error()
-	}
-	errorClass := runtimeFailureClass(reason)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	retired, err := s.store.RetireRestoreFallback(ctx, store.RetireRestoreFallbackParams{
-		SessionID:    sessionID,
-		GenerationID: generationID,
-		Owner:        owner,
-		ErrorClass:   errorClass,
-		Reason:       reason,
-		Now:          time.Now().UTC(),
-	})
-	if err != nil {
-		s.log.Warn("failed to retire generation before restore fallback", "session_id", sessionID, "generation_id", generationID, "error", err)
-		return err
-	}
-	for _, eventID := range retired.EventIDs {
-		s.publishDurableEvent(ctx, eventID)
-	}
-	return nil
 }
 
 func (s *Server) ensureActiveGeneration(ctx context.Context, session store.Session, owner string) (ensuredGeneration, error) {
@@ -2393,45 +2328,6 @@ func (s *Server) runtimeGenerationDetails(ctx context.Context, sessionID, genera
 	return details, nil
 }
 
-func (s *Server) startColdFallbackSessions(ctx context.Context, owner string) {
-	fallbacks, err := s.store.ListColdFallbackSessions(ctx)
-	if err != nil {
-		if !errors.Is(err, context.Canceled) {
-			s.log.Warn("cold fallback session list failed", "error", err)
-		}
-		return
-	}
-	for _, fallback := range fallbacks {
-		ensured, err := s.ensureActiveGeneration(ctx, fallback.Session, owner)
-		if err != nil {
-			if errors.Is(err, store.ErrPoolExhausted) {
-				s.log.Warn("cold fallback pool exhausted", "session_id", fallback.Session.ID, "old_generation_id", fallback.OldGeneration, "queued_turns", fallback.QueuedTurns)
-				return
-			}
-			if !errors.Is(err, context.Canceled) {
-				s.log.Warn("cold fallback allocation failed", "session_id", fallback.Session.ID, "old_generation_id", fallback.OldGeneration, "error", err)
-			}
-			continue
-		}
-		if !ensured.IsNew {
-			continue
-		}
-		if err := s.startEnsuredGeneration(ctx, fallback.Session, ensured, startFailureInputBlocking); err != nil {
-			if !errors.Is(err, context.Canceled) {
-				s.log.Warn("cold fallback start failed", "session_id", fallback.Session.ID, "old_generation_id", fallback.OldGeneration, "new_generation_id", ensured.Allocation.GenerationID, "error", err)
-			}
-			continue
-		}
-		if err := s.store.UpdateSessionStatusAndActivity(ctx, fallback.Session.ID, string(sessionstate.RunningActive), nil, time.Now().UTC()); err != nil {
-			if !errors.Is(err, context.Canceled) {
-				s.log.Warn("cold fallback status update failed", "session_id", fallback.Session.ID, "new_generation_id", ensured.Allocation.GenerationID, "error", err)
-			}
-			continue
-		}
-		s.hub.Publish(events.Event{Type: "session." + string(sessionstate.RunningActive), SessionID: fallback.Session.ID})
-	}
-}
-
 func (s *Server) RunMaintenance(ctx context.Context) error {
 	if strings.TrimSpace(s.ownerUUID) == "" {
 		return fmt.Errorf("maintenance requires owner uuid")
@@ -2480,7 +2376,6 @@ func (s *Server) RunMaintenance(ctx context.Context) error {
 		}); err != nil && !errors.Is(err, context.Canceled) {
 			s.log.Warn("generation lease renewal failed", "error", err)
 		}
-		s.startColdFallbackSessions(ctx, owner)
 		generations, err := s.store.ListBridgePollGenerations(ctx, owner, now, s.cfg.Harness.Bridge.AckStartedGrace.Duration)
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
