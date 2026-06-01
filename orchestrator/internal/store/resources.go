@@ -2428,8 +2428,11 @@ WHERE allocation_state != 'destroyed'`)
 			return 0, err
 		}
 		prefix, err := netip.ParsePrefix(cidr)
-		if err != nil || prefix.Bits() != 30 {
-			continue
+		if err != nil {
+			return 0, fmt.Errorf("invalid occupied network CIDR %q: %w", cidr, err)
+		}
+		if prefix.Bits() != 30 {
+			return 0, fmt.Errorf("invalid occupied network CIDR %q: expected /30, got /%d", cidr, prefix.Bits())
 		}
 		if slot, ok := slotForPrefix(pool, prefix); ok {
 			used[slot] = struct{}{}

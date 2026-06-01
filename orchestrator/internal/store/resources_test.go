@@ -246,6 +246,86 @@ WHERE session_id = ?
 	}
 }
 
+func TestAllocateGenerationFailsOnMalformedOccupiedNetworkCIDR(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	createStoreSession(t, ctx, st, "sess_bad_cidr")
+	cfg := testAllocatorConfig(t)
+	now := time.Now().UTC()
+
+	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_bad_cidr",
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       now,
+		Config:    cfg,
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE network_profiles
+SET host_side_cidr = 'not-a-cidr',
+    allocation_state = 'live'
+WHERE generation_id = ?`, allocation.GenerationID); err != nil {
+		t.Fatalf("corrupt occupied network CIDR: %v", err)
+	}
+
+	createStoreSession(t, ctx, st, "sess_bad_cidr_next")
+	_, err = st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_bad_cidr_next",
+		Owner:     GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       now.Add(time.Second),
+		Config:    cfg,
+	})
+	if err == nil || !strings.Contains(err.Error(), `invalid occupied network CIDR "not-a-cidr"`) {
+		t.Fatalf("AllocateGeneration error=%v want malformed occupied CIDR failure", err)
+	}
+}
+
+func TestAllocateGenerationFailsOnNonThirtyOccupiedCheckpointNetworkCIDR(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	createStoreSession(t, ctx, st, "sess_bad_checkpoint_cidr")
+	cfg := testAllocatorConfig(t)
+	now := time.Now().UTC()
+	leaseOwner := GenerationLeaseOwner(owner.UUID)
+
+	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_bad_checkpoint_cidr",
+		Owner:     leaseOwner,
+		LeaseTTL:  time.Minute,
+		Now:       now,
+		Config:    cfg,
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, "sess_bad_checkpoint_cidr", allocation.GenerationID, allocation.Owner, now.Add(time.Second)); err != nil {
+		t.Fatalf("mark generation live: %v", err)
+	}
+	checkpointedGeneration(t, ctx, st, "sess_bad_checkpoint_cidr", allocation.GenerationID, now.Add(2*time.Second))
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE network_profiles
+SET host_side_cidr = '10.240.0.0/29'
+WHERE generation_id = ?`, allocation.GenerationID); err != nil {
+		t.Fatalf("corrupt checkpoint network CIDR prefix length: %v", err)
+	}
+
+	createStoreSession(t, ctx, st, "sess_bad_checkpoint_cidr_next")
+	_, err = st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_bad_checkpoint_cidr_next",
+		Owner:     leaseOwner,
+		LeaseTTL:  time.Minute,
+		Now:       now.Add(3 * time.Second),
+		Config:    cfg,
+	})
+	if err == nil || !strings.Contains(err.Error(), `invalid occupied network CIDR "10.240.0.0/29": expected /30, got /29`) {
+		t.Fatalf("AllocateGeneration error=%v want non-/30 checkpoint CIDR failure", err)
+	}
+}
+
 func TestRecordGenerationRuntimeArtifactDigestsRequiresCompleteMetadata(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
