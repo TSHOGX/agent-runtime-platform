@@ -1301,12 +1301,14 @@ func (s *Server) resourceAllocatorConfig(agent string) store.ResourceAllocatorCo
 	if driverID, err := agents.CanonicalDriverID(agent); err == nil {
 		agent = string(driverID)
 	}
-	driverSpec, ok := agents.DriverSpecFor(agent)
-	if !ok {
-		driverSpec = agents.DriverSpec{ID: agents.ID(agent), OutputFormat: s.cfg.Claude.OutputFormat}
+	outputFormat := ""
+	providerCredentialsHostOnly := false
+	if driverSpec, ok := agents.DriverSpecFor(agent); ok {
+		outputFormat = driverSpec.OutputFormat
+		providerCredentialsHostOnly = driverSpec.ModelAccess
 	}
-	model := s.cfg.Claude.Model
-	disableNonessentialTraffic := s.cfg.Claude.DisableNonessentialTraffic
+	var model string
+	var disableNonessentialTraffic bool
 	if _, agentCfg, ok := s.enabledAgentConfigForDriver(agents.ID(agent)); ok {
 		if agentCfg.DisableNonessentialTraffic != nil {
 			disableNonessentialTraffic = *agentCfg.DisableNonessentialTraffic
@@ -1328,12 +1330,12 @@ func (s *Server) resourceAllocatorConfig(agent string) store.ResourceAllocatorCo
 		ProxyPort:                   s.cfg.ModelProxy.BindPort,
 		Agent:                       agent,
 		AgentModel:                  model,
-		AgentOutputFormat:           driverSpec.OutputFormat,
+		AgentOutputFormat:           outputFormat,
 		DisableNonessentialTraffic:  disableNonessentialTraffic,
 		SandboxUID:                  s.cfg.Harness.SandboxIdentity.UID,
 		SandboxGID:                  s.cfg.Harness.SandboxIdentity.GID,
 		SandboxSupplementalGIDs:     s.cfg.Harness.SandboxIdentity.SupplementalGIDs,
-		ProviderCredentialsHostOnly: driverSpec.ModelAccess,
+		ProviderCredentialsHostOnly: providerCredentialsHostOnly,
 		SandboxModelProxyBaseURL:    s.cfg.ModelProxy.SandboxBaseURL,
 	}
 }

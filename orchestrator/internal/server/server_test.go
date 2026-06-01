@@ -2296,8 +2296,8 @@ func TestGetQuotaReportsSessionAndPoolCeilings(t *testing.T) {
 			HostProxyBindURL:   cfg.ModelProxy.BindURL,
 			ProxyPort:          cfg.ModelProxy.BindPort,
 			Agent:              "claude_code",
-			AgentModel:         cfg.Claude.Model,
-			AgentOutputFormat:  cfg.Claude.OutputFormat,
+			AgentModel:         "sonnet",
+			AgentOutputFormat:  "stream-json",
 		},
 	})
 	if err != nil {
@@ -3337,8 +3337,8 @@ func TestRunMaintenancePollsBridgeOutbox(t *testing.T) {
 			HostProxyBindURL:   cfg.ModelProxy.BindURL,
 			ProxyPort:          cfg.ModelProxy.BindPort,
 			Agent:              "claude_code",
-			AgentModel:         cfg.Claude.Model,
-			AgentOutputFormat:  cfg.Claude.OutputFormat,
+			AgentModel:         "sonnet",
+			AgentOutputFormat:  "stream-json",
 		},
 	})
 	if err != nil {
@@ -5495,13 +5495,6 @@ func testServerConfig(dir string) config.Config {
 		SessionRetention: time.Hour,
 		MaxSessions:      10,
 		DefaultAgent:     "claude_code",
-		Claude: config.ClaudeConfig{
-			ProxyBindURL:               "http://0.0.0.0:8082",
-			SandboxBaseURL:             "http://harness-model-proxy.internal:8082",
-			Model:                      "sonnet",
-			OutputFormat:               "stream-json",
-			DisableNonessentialTraffic: true,
-		},
 		ModelProxy: config.ModelProxyConfig{
 			BindURL:        "http://0.0.0.0:8082",
 			SandboxBaseURL: "http://harness-model-proxy.internal:8082",
@@ -5602,12 +5595,59 @@ func TestResourceAllocatorConfigUsesModelProxyPort(t *testing.T) {
 	}
 }
 
+func TestResourceAllocatorConfigUsesHarnessDeploymentConfig(t *testing.T) {
+	cfg := testServerConfig(t.TempDir())
+	enabled := true
+	disableNonessentialTraffic := false
+	cfg.Harness.Agents = map[string]config.AgentConfig{
+		"claude_code": {
+			Enabled:                    &enabled,
+			DriverID:                   "claude_code",
+			ModelProfile:               "custom_anthropic",
+			RuntimeProvider:            "local_runsc",
+			DisableNonessentialTraffic: &disableNonessentialTraffic,
+		},
+	}
+	cfg.Harness.ModelProfiles = map[string]config.ModelProfileConfig{
+		"custom_anthropic": {
+			Enabled:  &enabled,
+			Provider: "anthropic_messages",
+			Model:    "opus",
+			ProxyRef: config.DefaultModelProxyRef,
+		},
+	}
+	srv := &Server{cfg: cfg}
+
+	allocatorConfig := srv.resourceAllocatorConfig("claude_code")
+	if allocatorConfig.AgentModel != "opus" ||
+		allocatorConfig.AgentOutputFormat != "stream-json" ||
+		allocatorConfig.DisableNonessentialTraffic ||
+		!allocatorConfig.ProviderCredentialsHostOnly {
+		t.Fatalf("allocator deployment config = %+v", allocatorConfig)
+	}
+}
+
 func serverTestAllocatorConfig(cfg config.Config, agent string) store.ResourceAllocatorConfig {
-	outputFormat := cfg.Claude.OutputFormat
-	modelAccess := agent == "claude_code"
+	if driverID, err := agents.CanonicalDriverID(agent); err == nil {
+		agent = string(driverID)
+	}
+	outputFormat := ""
+	modelAccess := false
 	if spec, ok := agents.DriverSpecFor(agent); ok {
 		outputFormat = spec.OutputFormat
 		modelAccess = spec.ModelAccess
+	}
+	model := ""
+	disableNonessentialTraffic := false
+	if _, agentCfg, ok := config.EnabledAgentConfigForDriver(cfg.DeploymentAgents(), agent); ok {
+		if agentCfg.DisableNonessentialTraffic != nil {
+			disableNonessentialTraffic = *agentCfg.DisableNonessentialTraffic
+		}
+		if strings.TrimSpace(agentCfg.ModelProfile) != "" {
+			if profile, ok := cfg.DeploymentModelProfiles()[agentCfg.ModelProfile]; ok && strings.TrimSpace(profile.Model) != "" {
+				model = strings.TrimSpace(profile.Model)
+			}
+		}
 	}
 	return store.ResourceAllocatorConfig{
 		RunDir:                      cfg.Harness.RunDir,
@@ -5619,9 +5659,9 @@ func serverTestAllocatorConfig(cfg config.Config, agent string) store.ResourceAl
 		HostProxyBindURL:            cfg.ModelProxy.BindURL,
 		ProxyPort:                   cfg.ModelProxy.BindPort,
 		Agent:                       agent,
-		AgentModel:                  cfg.Claude.Model,
+		AgentModel:                  model,
 		AgentOutputFormat:           outputFormat,
-		DisableNonessentialTraffic:  cfg.Claude.DisableNonessentialTraffic,
+		DisableNonessentialTraffic:  disableNonessentialTraffic,
 		SandboxUID:                  cfg.Harness.SandboxIdentity.UID,
 		SandboxGID:                  cfg.Harness.SandboxIdentity.GID,
 		SandboxSupplementalGIDs:     cfg.Harness.SandboxIdentity.SupplementalGIDs,

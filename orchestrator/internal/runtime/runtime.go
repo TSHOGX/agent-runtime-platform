@@ -40,7 +40,6 @@ type Config struct {
 	SandboxUID              int
 	SandboxGID              int
 	SandboxSupplementalGIDs []int
-	Claude                  ClaudeConfig
 	RunDir                  string
 	PreStartProbeAttempts   int
 	PreStartProbeInterval   time.Duration
@@ -87,15 +86,6 @@ type execCommandRunner struct{}
 
 func (execCommandRunner) CombinedOutput(ctx context.Context, name string, args ...string) ([]byte, error) {
 	return exec.CommandContext(ctx, name, args...).CombinedOutput()
-}
-
-type ClaudeConfig struct {
-	ProxyBindURL               string
-	APIKey                     string
-	AuthToken                  string
-	Model                      string
-	OutputFormat               string
-	DisableNonessentialTraffic bool
 }
 
 type StartRequest struct {
@@ -262,7 +252,6 @@ type Container struct {
 }
 
 func New(cfg Config) *Runtime {
-	cfg.Claude = normalizeClaudeConfig(cfg.Claude)
 	runner := cfg.CommandRunner
 	if runner == nil {
 		runner = execCommandRunner{}
@@ -1981,19 +1970,6 @@ func runscBinaryMetadata() (string, string) {
 		return canonical, "unavailable:" + err.Error()
 	}
 	return canonical, "sha256:" + digest
-}
-
-func normalizeClaudeConfig(cfg ClaudeConfig) ClaudeConfig {
-	empty := cfg == ClaudeConfig{}
-	cfg.ProxyBindURL = defaultString(cfg.ProxyBindURL, "http://0.0.0.0:8082")
-	cfg.APIKey = defaultString(cfg.APIKey, "123")
-	cfg.AuthToken = defaultString(cfg.AuthToken, cfg.APIKey)
-	cfg.Model = defaultString(cfg.Model, "sonnet")
-	cfg.OutputFormat = defaultString(cfg.OutputFormat, "stream-json")
-	if empty {
-		cfg.DisableNonessentialTraffic = true
-	}
-	return cfg
 }
 
 func defaultString(value, fallback string) string {

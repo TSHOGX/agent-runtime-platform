@@ -1545,12 +1545,6 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndIsolatedRuntime(t *t
 		RootFSPath:         filepath.Join(dir, "rootfs"),
 		BridgeHeartbeat:    20 * time.Second,
 		BridgePollInterval: 5 * time.Millisecond,
-		Claude: ClaudeConfig{
-			ProxyBindURL:               "http://0.0.0.0:8082",
-			Model:                      "sonnet",
-			OutputFormat:               "stream-json",
-			DisableNonessentialTraffic: true,
-		},
 	})
 	details := testGenerationDetails(dir, "gen_a")
 
@@ -1793,12 +1787,6 @@ func TestPrepareClaudeHostOnlyGenerationHasNoSecretMount(t *testing.T) {
 		RootFSPath:         filepath.Join(dir, "rootfs"),
 		BridgeHeartbeat:    20 * time.Second,
 		BridgePollInterval: 5 * time.Millisecond,
-		Claude: ClaudeConfig{
-			ProxyBindURL:               "http://0.0.0.0:8082",
-			Model:                      "sonnet",
-			OutputFormat:               "stream-json",
-			DisableNonessentialTraffic: true,
-		},
 	})
 	details := testGenerationDetails(dir, "gen_host_only")
 	details.RequiresSecretDrop = false
@@ -1865,12 +1853,6 @@ func TestPreparePiGenerationMaterializesReadOnlyConfig(t *testing.T) {
 		RootFSPath:         filepath.Join(dir, "rootfs"),
 		BridgeHeartbeat:    20 * time.Second,
 		BridgePollInterval: 5 * time.Millisecond,
-		Claude: ClaudeConfig{
-			ProxyBindURL:               "http://0.0.0.0:8082",
-			Model:                      "sonnet",
-			OutputFormat:               "stream-json",
-			DisableNonessentialTraffic: true,
-		},
 	})
 	details := testGenerationDetails(dir, "gen_pi_config")
 	details.SessionID = "sess_pi"
@@ -2158,10 +2140,6 @@ func TestPrepareGenerationConcurrentSessionsUseDistinctControlManifests(t *testi
 		AgentHomesRoot: filepath.Join(dir, "agent-homes"),
 		BundleRoot:     filepath.Join(dir, "bundle", "out"),
 		RootFSPath:     filepath.Join(dir, "rootfs"),
-		Claude: ClaudeConfig{
-			APIKey:    "123",
-			AuthToken: "123",
-		},
 	})
 	type prepareCase struct {
 		sessionID string
@@ -2446,10 +2424,6 @@ func TestPrepareGenerationRejectsMismatchedIdentity(t *testing.T) {
 		AgentHomesRoot: filepath.Join(dir, "agent-homes"),
 		BundleRoot:     filepath.Join(dir, "bundle", "out"),
 		RootFSPath:     filepath.Join(dir, "rootfs"),
-		Claude: ClaudeConfig{
-			APIKey:    "123",
-			AuthToken: "123",
-		},
 	})
 
 	_, err := rt.PrepareGeneration(context.Background(), StartRequest{

@@ -84,14 +84,6 @@ func main() {
 				ProbeHealthzStatuses:    cfg.Harness.Probe.AcceptStatus.GetHealthz,
 				BridgeHeartbeat:         cfg.Harness.Bridge.HeartbeatInterval.Duration,
 				BridgePollInterval:      cfg.Harness.Bridge.PollInterval.Duration,
-				Claude: runtime.ClaudeConfig{
-					ProxyBindURL:               cfg.ModelProxy.BindURL,
-					APIKey:                     cfg.Claude.APIKey,
-					AuthToken:                  cfg.Claude.AuthToken,
-					Model:                      cfg.Claude.Model,
-					OutputFormat:               cfg.Claude.OutputFormat,
-					DisableNonessentialTraffic: cfg.Claude.DisableNonessentialTraffic,
-				},
 			})
 			hub := events.NewHub()
 			volumeConfig, err := dataVolumeProvisionerConfig(cfg)
