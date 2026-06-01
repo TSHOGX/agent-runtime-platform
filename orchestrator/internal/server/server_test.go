@@ -230,6 +230,17 @@ func TestCreateSessionAgentModeRejectsShellDefault(t *testing.T) {
 	}
 }
 
+func TestResolveAgentModeRequiresExplicitDefaultAgent(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testServerConfig(dir)
+	cfg.DefaultAgent = ""
+	srv := &Server{cfg: cfg}
+
+	if _, err := srv.resolveModeDeployment("agent"); err == nil || err.code != "default_unavailable" {
+		t.Fatalf("expected missing default agent to make agent mode unavailable, got %v", err)
+	}
+}
+
 func TestDeploymentCapabilitiesAreProductSafe(t *testing.T) {
 	dir := t.TempDir()
 	srv := &Server{
@@ -445,9 +456,92 @@ func TestDriverManifestInputDigestsUseSourceConfigAndImageManifest(t *testing.T)
 	}
 }
 
+func TestDriverManifestInputDigestsRequireExplicitDefaultAgent(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testServerConfig(dir)
+	srv := &Server{cfg: cfg}
+	deployment, capabilityErr := srv.resolveModeDeployment("shell")
+	if capabilityErr != nil {
+		t.Fatalf("resolve shell deployment: %v", capabilityErr)
+	}
+
+	cfg.DefaultAgent = ""
+	srv = &Server{cfg: cfg}
+	if _, err := srv.driverManifestInputDigests(deployment); err == nil || !strings.Contains(err.Error(), "default agent is required") {
+		t.Fatalf("expected missing default agent error, got %v", err)
+	}
+
+	cfg.DefaultAgent = "not-a-driver"
+	srv = &Server{cfg: cfg}
+	if _, err := srv.driverManifestInputDigests(deployment); err == nil || !strings.Contains(err.Error(), "default agent") {
+		t.Fatalf("expected invalid default agent error, got %v", err)
+	}
+}
+
 func TestSandboxContractDigestForPayloadFailsClosedOnCanonicalizationError(t *testing.T) {
 	if got, err := sandboxContractDigestForPayload(map[string]any{"invalid": func() {}}); err == nil {
 		t.Fatalf("expected canonicalization error, got digest %q", got)
+	}
+}
+
+func TestSandboxContractInputEvidenceRequiresExplicitDefaultAgentAndSessionMode(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testServerConfig(dir)
+	srv := &Server{cfg: cfg}
+	session := store.Session{
+		ID:       "sess_contract_evidence",
+		DriverID: "claude_code",
+		Mode:     "agent",
+	}
+
+	cfg.DefaultAgent = ""
+	srv = &Server{cfg: cfg}
+	if _, err := srv.sandboxContractInputEvidenceFor(session, "claude_code"); err == nil || !strings.Contains(err.Error(), "default agent is required") {
+		t.Fatalf("expected missing default agent error, got %v", err)
+	}
+
+	cfg.DefaultAgent = "claude_code"
+	srv = &Server{cfg: cfg}
+	session.Mode = ""
+	if _, err := srv.sandboxContractInputEvidenceFor(session, "claude_code"); err == nil || !strings.Contains(err.Error(), "session mode is required") {
+		t.Fatalf("expected missing session mode error, got %v", err)
+	}
+}
+
+func TestSandboxContractPayloadRequiresRunscPlatformAndSessionMode(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testServerConfig(dir)
+	srv := &Server{cfg: cfg}
+	session := store.Session{
+		ID:       "sess_contract_payload",
+		DriverID: "claude_code",
+		Mode:     "agent",
+	}
+	details := store.RuntimeGenerationDetails{
+		SessionID:      session.ID,
+		GenerationID:   "gen_contract_payload",
+		DriverID:       "claude_code",
+		RunscPlatform:  "systrap",
+		SandboxIPCIDR:  "10.241.0.2/29",
+		RunscOverlay2:  "true",
+		SandboxUID:     serverTestSandboxUID(),
+		SandboxGID:     serverTestSandboxGID(),
+		ControlDirPath: filepath.Join(dir, "control"),
+		BridgeDirPath:  filepath.Join(dir, "bridge"),
+	}
+
+	missingPlatform := details
+	missingPlatform.RunscPlatform = ""
+	if _, err := srv.sandboxContractPayload(session, missingPlatform, runtime.GenerationArtifacts{}, "sha256:resource-identity", sessionRuntimeDataVolumes{}); err == nil || !strings.Contains(err.Error(), "runsc platform is required") {
+		t.Fatalf("expected missing runsc platform error, got %v", err)
+	}
+	if _, err := srv.runtimeResourceInstanceParams(missingPlatform, runtime.GenerationArtifacts{}, "host-a"); err == nil || !strings.Contains(err.Error(), "runsc platform is required") {
+		t.Fatalf("expected missing runtime resource runsc platform error, got %v", err)
+	}
+
+	session.Mode = ""
+	if _, err := srv.sandboxContractPayload(session, details, runtime.GenerationArtifacts{}, "sha256:resource-identity", sessionRuntimeDataVolumes{}); err == nil || !strings.Contains(err.Error(), "session mode is required") {
+		t.Fatalf("expected missing session mode error, got %v", err)
 	}
 }
 

@@ -54,7 +54,7 @@ func (s *Server) resolveModeDeployment(mode string) (deploymentResolution, *depl
 	case "agent":
 		defaultAgent := strings.TrimSpace(s.cfg.DefaultAgent)
 		if defaultAgent == "" {
-			defaultAgent = string(agents.ClaudeCode)
+			return deploymentResolution{}, capabilityError("default_unavailable", "agent mode unavailable")
 		}
 		driverID, err := agents.CanonicalDriverID(defaultAgent)
 		if err != nil {
@@ -494,21 +494,30 @@ func (r deploymentResolution) runtimeConfigPreimage(defaultAgent string) map[str
 	}
 }
 
+func (s *Server) explicitDefaultAgent() (string, error) {
+	defaultAgent := strings.TrimSpace(s.cfg.DefaultAgent)
+	if defaultAgent == "" {
+		return "", fmt.Errorf("default agent is required")
+	}
+	canonical, err := agents.CanonicalDriverID(defaultAgent)
+	if err != nil {
+		return "", fmt.Errorf("default agent: %w", err)
+	}
+	return string(canonical), nil
+}
+
 func (s *Server) sandboxContractInputEvidenceFor(session store.Session, driverID string) (sandboxContractInputEvidence, error) {
 	mode := strings.TrimSpace(session.Mode)
 	if mode == "" {
-		mode = store.ModeForDriver(driverID)
+		return sandboxContractInputEvidence{}, fmt.Errorf("session mode is required")
 	}
 	deployment, capabilityErr := s.resolveDriverDeployment(mode, agents.ID(driverID))
 	if capabilityErr != nil {
 		return sandboxContractInputEvidence{}, capabilityErr
 	}
-	defaultAgent := strings.TrimSpace(s.cfg.DefaultAgent)
-	if defaultAgent == "" {
-		defaultAgent = string(agents.ClaudeCode)
-	}
-	if canonical, err := agents.CanonicalDriverID(defaultAgent); err == nil {
-		defaultAgent = string(canonical)
+	defaultAgent, err := s.explicitDefaultAgent()
+	if err != nil {
+		return sandboxContractInputEvidence{}, err
 	}
 	preimage := deployment.runtimeConfigPreimage(defaultAgent)
 	digest, err := runtimeConfigDigest(preimage)

@@ -1408,7 +1408,7 @@ func driverConfigMaterializationPayload(driverID string, entries []runtime.Drive
 func (s *Server) sandboxContractPayload(session store.Session, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, resourceIdentityDigest string, volumes sessionRuntimeDataVolumes) (map[string]any, error) {
 	runscPlatform := strings.TrimSpace(details.RunscPlatform)
 	if runscPlatform == "" {
-		runscPlatform = "systrap"
+		return nil, fmt.Errorf("runsc platform is required")
 	}
 	driverID := strings.TrimSpace(details.DriverID)
 	driverSpec, ok := agents.DriverSpecFor(driverID)
@@ -1417,7 +1417,7 @@ func (s *Server) sandboxContractPayload(session store.Session, details store.Run
 	}
 	mode := strings.TrimSpace(session.Mode)
 	if mode == "" {
-		mode = store.ModeForDriver(driverID)
+		return nil, fmt.Errorf("session mode is required")
 	}
 	deployment, capabilityErr := s.resolveDriverDeployment(mode, agents.ID(driverID))
 	if capabilityErr != nil {
@@ -1688,12 +1688,9 @@ type driverManifestInputDigests struct {
 }
 
 func (s *Server) driverManifestInputDigests(deployment deploymentResolution) (driverManifestInputDigests, error) {
-	defaultAgent := strings.TrimSpace(s.cfg.DefaultAgent)
-	if defaultAgent == "" {
-		defaultAgent = string(agents.ClaudeCode)
-	}
-	if canonical, err := agents.CanonicalDriverID(defaultAgent); err == nil {
-		defaultAgent = string(canonical)
+	defaultAgent, err := s.explicitDefaultAgent()
+	if err != nil {
+		return driverManifestInputDigests{}, err
 	}
 	runtimeConfigDigest, err := runtimeConfigDigest(deployment.runtimeConfigPreimage(defaultAgent))
 	if err != nil {
@@ -1703,14 +1700,6 @@ func (s *Server) driverManifestInputDigests(deployment deploymentResolution) (dr
 		RuntimeConfigDigest: runtimeConfigDigest,
 		AgentManifestDigest: deployment.AgentManifest.Digest,
 	}, nil
-}
-
-func effectiveString(value, defaultValue string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return defaultValue
-	}
-	return value
 }
 
 func sandboxContractDigestForPayload(value any) (string, error) {
@@ -1753,7 +1742,7 @@ func runtimeArtifactDigests(artifacts runtime.GenerationArtifacts) store.Generat
 func (s *Server) runtimeResourceInstanceParams(details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, hostID string) (store.RuntimeResourceInstanceParams, error) {
 	runscPlatform := strings.TrimSpace(details.RunscPlatform)
 	if runscPlatform == "" {
-		runscPlatform = "systrap"
+		return store.RuntimeResourceInstanceParams{}, fmt.Errorf("runsc platform is required")
 	}
 	sandboxIP, err := runtimeResourceSandboxIP(details.SandboxIPCIDR)
 	if err != nil {
