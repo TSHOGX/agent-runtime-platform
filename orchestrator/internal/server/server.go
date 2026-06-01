@@ -1776,8 +1776,11 @@ func (s *Server) createRuntimeResourceInstance(ctx context.Context, params store
 
 func (s *Server) prepareRuntimeResourceRestore(ctx context.Context, generationID, workerID, hostID string, leaseTTL time.Duration) (store.RuntimeResourceInstance, bool, error) {
 	_, ok, err := s.runtimeResourceInstanceIfExists(ctx, generationID)
-	if err != nil || !ok {
+	if err != nil {
 		return store.RuntimeResourceInstance{}, false, err
+	}
+	if !ok {
+		return store.RuntimeResourceInstance{}, false, fmt.Errorf("runtime resource instance is required for checkpoint restore")
 	}
 	now := time.Now().UTC()
 	if err := s.store.ClaimRuntimeResourceCheckpointRestore(ctx, store.RuntimeResourceMaterializationClaimParams{

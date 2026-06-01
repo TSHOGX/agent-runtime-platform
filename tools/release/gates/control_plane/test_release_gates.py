@@ -14,7 +14,6 @@ class ReleaseGatesTest(unittest.TestCase):
             {
                 "include_proxy": False,
                 "include_bridge_lab": False,
-                "include_secret_lab": False,
                 "include_live_latency": False,
             },
         )()
@@ -36,20 +35,18 @@ class ReleaseGatesTest(unittest.TestCase):
             {
                 "include_proxy": True,
                 "include_bridge_lab": True,
-                "include_secret_lab": True,
                 "include_live_latency": True,
             },
         )()
 
         gates = MODULE.selected_gates(args)
 
-        self.assertEqual([gate.name for gate in gates[-4:]], [
+        self.assertEqual([gate.name for gate in gates[-3:]], [
             "pinned_proxy_contract",
             "gvisor_bridge_durability_lab",
-            "secret_permission_lab",
             "live_turn_start_latency",
         ])
-        self.assertEqual({gate.category for gate in gates[-4:]}, {"external"})
+        self.assertEqual({gate.category for gate in gates[-3:]}, {"external"})
 
     def test_run_gate_captures_success_and_failure(self):
         ok = MODULE.Gate(
@@ -112,9 +109,6 @@ harness:
     poll_interval: 5ms
     lease_ttl: 60s
     ack_started_grace: 90s
-  secrets:
-    root: /var/lib/harness/secrets
-    readers_gid: 65501
 """,
                 encoding="utf-8",
             )
@@ -123,7 +117,7 @@ harness:
 
             self.assertEqual(values["harness.bridge.poll_interval"], "5ms")
             self.assertEqual(values["harness.events.emit_output_batch_max_rows"], "64")
-            self.assertEqual(values["harness.secrets.readers_gid"], "65501")
+            self.assertNotIn("harness.secrets.readers_gid", values)
 
     def test_attach_structured_output_reads_bridge_lab_evidence(self):
         with tempfile.TemporaryDirectory(prefix="harness-bridge-durability-lab.") as tmp:

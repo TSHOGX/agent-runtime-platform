@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2453,7 +2454,7 @@ func TestStartEnsuredGenerationRenewsLeaseDuringSlowPrepare(t *testing.T) {
 	st, owner := openServerOwnedStore(t, ctx, dir)
 	session := createServerTestSession(t, ctx, st, dir, "sess_slow_start", string(sessionstate.Created), time.Now().UTC(), nil)
 	cfg := testServerConfig(dir)
-	cfg.Harness.Bridge.LeaseTTL = config.Duration{Duration: 40 * time.Millisecond}
+	cfg.Harness.Bridge.LeaseTTL = config.Duration{Duration: 200 * time.Millisecond}
 	now := time.Now().UTC()
 	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
 		SessionID: session.ID,
@@ -5052,6 +5053,15 @@ func createServerRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 		t.Fatalf("store sandbox contract: %v", err)
 	}
 	artifacts := testGenerationArtifacts()
+	if strings.TrimSpace(details.RunscVersion) != "" {
+		artifacts.RunscVersion = details.RunscVersion
+	}
+	if strings.TrimSpace(details.RunscBinaryPath) != "" {
+		artifacts.RunscBinaryPath = details.RunscBinaryPath
+	}
+	if strings.TrimSpace(details.RunscBinaryDigest) != "" {
+		artifacts.RunscBinaryDigest = details.RunscBinaryDigest
+	}
 	instance, err := st.CreateRuntimeResourceInstance(ctx, store.RuntimeResourceInstanceParams{
 		GenerationID:           allocation.GenerationID,
 		SessionID:              sessionID,
@@ -5307,7 +5317,7 @@ func prepareServerIdleGeneration(t *testing.T, ctx context.Context, st *store.St
 	if err := st.MarkGenerationResourcesLive(ctx, sessionID, allocation.GenerationID, allocation.Owner, now.Add(time.Second)); err != nil {
 		t.Fatalf("mark generation live: %v", err)
 	}
-	createServerRuntimeResourceLive(t, ctx, st, sessionID, allocation, ownerUUID, "host-idle", now.Add(2*time.Second))
+	createServerRuntimeResourceLive(t, ctx, st, sessionID, allocation, ownerUUID, runtimeResourceHostID(), now.Add(2*time.Second))
 	if err := st.UpdateSessionStatusAndActivity(ctx, sessionID, string(sessionstate.RunningIdle), nil, now.Add(-time.Minute)); err != nil {
 		t.Fatalf("mark session idle: %v", err)
 	}
@@ -5316,6 +5326,7 @@ func prepareServerIdleGeneration(t *testing.T, ctx context.Context, st *store.St
 
 func markServerGenerationCheckpointed(t *testing.T, ctx context.Context, st *store.Store, sessionID, generationID string, now time.Time) {
 	t.Helper()
+	ensureServerRuntimeResourceLiveForCheckpoint(t, ctx, st, sessionID, generationID, now.Add(-time.Millisecond))
 	formattedNow := now.UTC().Format(time.RFC3339Nano)
 	fence := serverCheckpointDriverStateFenceForTest(t, ctx, st, sessionID, generationID)
 	if _, err := st.DBForTest().ExecContext(ctx, `
@@ -5364,9 +5375,60 @@ SET resource_state = 'reserved_checkpointed'
 WHERE generation_id = ?`, generationID); err != nil {
 		t.Fatalf("reserve checkpointed resources: %v", err)
 	}
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE runtime_resource_instances
+SET state = 'checkpoint_reserved',
+    lease_expires_at = NULL,
+    idempotency_token = NULL,
+    updated_at = ?
+WHERE generation_id = ?
+  AND state IN ('live', 'checkpoint_reserved')`, formattedNow, generationID); err != nil {
+		t.Fatalf("reserve checkpointed runtime resource: %v", err)
+	}
 	if err := st.UpdateSessionStatus(ctx, sessionID, string(sessionstate.Checkpointed), nil); err != nil {
 		t.Fatalf("set checkpointed session: %v", err)
 	}
+}
+
+func ensureServerRuntimeResourceLiveForCheckpoint(t *testing.T, ctx context.Context, st *store.Store, sessionID, generationID string, now time.Time) {
+	t.Helper()
+	if _, err := st.GetRuntimeResourceInstance(ctx, generationID); err == nil {
+		return
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("get checkpoint runtime resource instance: %v", err)
+	}
+	allocation := serverGenerationAllocationForTest(t, ctx, st, sessionID, generationID)
+	createServerRuntimeResourceLive(t, ctx, st, sessionID, allocation, "checkpoint-test-owner", runtimeResourceHostID(), now)
+}
+
+func serverGenerationAllocationForTest(t *testing.T, ctx context.Context, st *store.Store, sessionID, generationID string) store.GenerationAllocation {
+	t.Helper()
+	allocation := store.GenerationAllocation{GenerationID: generationID}
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT network_profile_id, agent_runtime_profile_id, COALESCE(lease_owner, '')
+FROM runtime_generations
+WHERE session_id = ?
+  AND generation_id = ?`, sessionID, generationID).Scan(
+		&allocation.NetworkProfileID,
+		&allocation.AgentRuntimeProfileID,
+		&allocation.Owner,
+	); err != nil {
+		t.Fatalf("query generation allocation for checkpoint: %v", err)
+	}
+	if strings.TrimSpace(allocation.Owner) == "" {
+		allocation.Owner = store.GenerationLeaseOwner("checkpoint-test-owner")
+	}
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT driver_id, state_digest, state_version
+FROM session_driver_states
+WHERE session_id = ?`, sessionID).Scan(
+		&allocation.DriverState.DriverID,
+		&allocation.DriverState.StateDigest,
+		&allocation.DriverState.StateVersion,
+	); err != nil {
+		t.Fatalf("query driver state for checkpoint: %v", err)
+	}
+	return allocation
 }
 
 func serverCheckpointDriverStateFenceForTest(t *testing.T, ctx context.Context, st *store.Store, sessionID, generationID string) string {

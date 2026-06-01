@@ -3,8 +3,7 @@
 
 Owns the durable control-plane qualification gates: orchestrator package
 tests, the turn-start latency bench, the pinned proxy contract, the gVisor
-bridge durability lab, the secret-permission lab, and live latency. Per
-PLAN.md guardrail #2 these gates remain blocking until explicitly retired.
+bridge durability lab, and live latency.
 """
 import argparse
 import json
@@ -21,7 +20,7 @@ PROXY_ROOT = Path("/root/claude-code-proxy")
 SUITE = "control_plane"
 FAILURE_BANNER = "control-plane release gates failed"
 
-JSON_OUTPUT_GATES = {"secret_permission_lab", "live_turn_start_latency"}
+JSON_OUTPUT_GATES = {"live_turn_start_latency"}
 EVIDENCE_FILE_GATES = {"gvisor_bridge_durability_lab"}
 
 
@@ -29,7 +28,6 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Run control-plane release qualification gates and emit JSON evidence.")
     parser.add_argument("--include-proxy", action="store_true", help="Run the pinned claude-code-proxy contract gate.")
     parser.add_argument("--include-bridge-lab", action="store_true", help="Run the gVisor bridge durability lab.")
-    parser.add_argument("--include-secret-lab", action="store_true", help="Run the rootful secret permission lab.")
     parser.add_argument("--include-live-latency", action="store_true", help="Run the live turn-start latency gate.")
     parser.add_argument("--output", default="", help="Optional path for the JSON evidence file.")
     parser.add_argument("--list", action="store_true", help="List selected gates without running them.")
@@ -80,8 +78,6 @@ def deterministic_gates():
                 "sandbox-image/tests/test_harness_bridge_client.py",
                 "tools/release/gates/control_plane/test_live_turn_start_latency.py",
                 "tools/release/gates/control_plane/test_release_gates.py",
-                "tools/release/gates/control_plane/test_secret_permission_bootstrap.py",
-                "tools/release/gates/control_plane/test_secret_permission_lab.py",
             ),
             cwd=REPO_ROOT,
             category="deterministic",
@@ -105,15 +101,6 @@ def optional_gates(args):
             Gate(
                 name="gvisor_bridge_durability_lab",
                 command=("tools/release/gates/control_plane/bridge-durability-lab.sh",),
-                cwd=REPO_ROOT,
-                category="external",
-            )
-        )
-    if args.include_secret_lab:
-        gates.append(
-            Gate(
-                name="secret_permission_lab",
-                command=("tools/release/gates/control_plane/secret-permission-lab.py",),
                 cwd=REPO_ROOT,
                 category="external",
             )
@@ -144,8 +131,6 @@ def load_release_config(config_path=REPO_ROOT / "config" / "harness.yaml"):
         "harness.bridge.poll_interval",
         "harness.bridge.lease_ttl",
         "harness.bridge.ack_started_grace",
-        "harness.secrets.root",
-        "harness.secrets.readers_gid",
     }
     values = {}
     stack = []

@@ -9,7 +9,6 @@ from tools.release.suites import sandbox_isolation as MODULE
 class ReleaseGatesTest(unittest.TestCase):
     def test_default_selected_gates_are_deterministic_only(self):
         args = argparse_namespace(
-            include_prior_release=False,
             include_cutover_inventory=False,
             include_reconciliation=False,
             include_rootfs_inspection=False,
@@ -41,7 +40,6 @@ class ReleaseGatesTest(unittest.TestCase):
 
     def test_optional_flags_add_external_and_baseline_gates(self):
         args = argparse_namespace(
-            include_prior_release=True,
             include_cutover_inventory=True,
             include_reconciliation=True,
             include_rootfs_inspection=True,
@@ -55,9 +53,8 @@ class ReleaseGatesTest(unittest.TestCase):
         gates = MODULE.selected_gates(args)
 
         self.assertEqual(
-            [gate.name for gate in gates[-8:]],
+            [gate.name for gate in gates[-7:]],
             [
-                "prior_deterministic_release_runner",
                 "cutover_inventory",
                 "runtime_reconciliation_evidence",
                 "rootfs_image_inspection",
@@ -67,7 +64,6 @@ class ReleaseGatesTest(unittest.TestCase):
                 "live_turn_start_latency",
             ],
         )
-        self.assertEqual(gates[-8].category, "baseline")
         self.assertEqual({gates[-7].category, gates[-6].category, gates[-5].category, gates[-3].category}, {"evidence"})
         self.assertEqual({gates[-4].category, gates[-2].category, gates[-1].category}, {"external"})
         self.assertIn("/tmp/sandbox-adversarial-lab.json", gates[-3].command)

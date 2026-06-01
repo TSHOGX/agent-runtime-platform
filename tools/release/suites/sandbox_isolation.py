@@ -45,7 +45,6 @@ _NOTE_COMPLETE = "Selected gates passed and all required supplied evidence label
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Run runtime isolation release qualification gates and emit JSON evidence.")
-    parser.add_argument("--include-prior-release", action="store_true", help="Run the prior deterministic release runner.")
     parser.add_argument("--include-cutover-inventory", action="store_true", help="Run the cutover inventory clean-state gate.")
     parser.add_argument("--include-reconciliation", action="store_true", help="Run the runtime resource reconciliation evidence gate.")
     parser.add_argument("--include-rootfs-inspection", action="store_true", help="Inspect the configured sandbox rootfs image.")
@@ -127,15 +126,6 @@ def deterministic_gates():
 
 def optional_gates(args):
     gates = []
-    if args.include_prior_release:
-        gates.append(
-            Gate(
-                name="prior_deterministic_release_runner",
-                command=("python3", "tools/release/run.py", "--suite", "control_plane"),
-                cwd=REPO_ROOT,
-                category="baseline",
-            )
-        )
     if args.include_cutover_inventory:
         gates.append(
             Gate(

@@ -16,7 +16,7 @@ def _args(**kwargs):
 
 class ControlPlaneSuiteTest(unittest.TestCase):
     def test_default_gates(self):
-        args = _args(include_proxy=False, include_bridge_lab=False, include_secret_lab=False, include_live_latency=False)
+        args = _args(include_proxy=False, include_bridge_lab=False, include_live_latency=False)
         gates = control_plane.selected_gates(args)
         self.assertEqual(
             [g.name for g in gates],
@@ -36,7 +36,6 @@ class ControlPlaneSuiteTest(unittest.TestCase):
 class SandboxIsolationSuiteTest(unittest.TestCase):
     def test_default_gates(self):
         args = _args(
-            include_prior_release=False,
             include_cutover_inventory=False,
             include_reconciliation=False,
             include_rootfs_inspection=False,

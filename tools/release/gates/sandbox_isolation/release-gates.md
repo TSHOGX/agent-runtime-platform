@@ -271,7 +271,7 @@ crash recovery.
   the first `sandbox-isolation-v1` allocation.
 - Removed `harness.secrets.root` data is deleted or quarantined outside all
   `sandbox-isolation-v1` roots and cannot be mounted as `/harness-secrets`.
-- The removed secret permission lab is retired only after `sandbox-isolation-v1` gates prove
+- The old secret permission lab is retired. `sandbox-isolation-v1` gates prove
   `harness.secrets.*` config is rejected, `/harness-secrets` is absent, provider
   credentials are host/proxy-only, and no credential material appears in
   sandbox-visible files, env, `/proc`, logs, DB rows, checkpoints, or release
