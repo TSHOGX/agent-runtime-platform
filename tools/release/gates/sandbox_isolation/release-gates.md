@@ -57,20 +57,20 @@ crash recovery.
   cleanliness evidence.
 - Runtime profile identity includes UID, GID, supplemental groups, and
   `model_access_allowed`.
-- Public API responses and session event payloads are rendered through Phase 8
-  DTOs and do not expose `workspace`, `agent_home_path`, `restore_id`,
+- Public API responses and session event payloads are rendered through
+  `sandbox-isolation-v1` DTOs and do not expose `workspace`, `agent_home_path`, `restore_id`,
   checkpoint paths, bridge/control paths, credential paths, or proxy-internal
   paths.
 - Frontend `ApiSession` types, fixtures, and reducers do not require
   `workspace`, `agent_home_path`, or `restore_id`.
-- No release gate or runtime helper uses a roadmap phase name as a code-level
+- No release gate or runtime helper uses a historical stage name as a code-level
   runtime contract.
 
 ## Root and Mount Gates
 
 - Configured top-level roots are canonical, symlink-safe, and mutually disjoint:
   sessions, agent homes, run, checkpoint, prepared bundle, rootfs/content,
-  schema pack, Phase 10 content, DB/control-plane, and any file-backed provider
+  schema pack, agent capability content, DB/control-plane, and any file-backed provider
   credential roots.
 - The proxy-internal socket root is canonical, symlink-safe, host-only, and not
   equal to, contained by, or containing any sandbox content bind source.
@@ -80,8 +80,8 @@ crash recovery.
   contained by, or containing any sandbox content bind source, provider
   credential root, or proxy-internal root.
 - Legacy `harness.secrets.root` and `harness.secrets.readers_gid` are removed
-  from Phase 8 config; old secret roots are absent from active roots or
-  quarantined outside all Phase 8 roots before enablement.
+  from `sandbox-isolation-v1` config; old secret roots are absent from active roots or
+  quarantined outside all `sandbox-isolation-v1` roots before enablement.
 - The DB lives outside every sandbox-bindable root.
 - Provider credential roots and proxy-internal roots live outside every
   sandbox-bindable root.
@@ -127,7 +127,7 @@ crash recovery.
 
 ## Runtime and Resource Gates
 
-- Phase 7 session, generation, turn, bridge, and event semantics remain intact.
+- `bridge-protocol-v2` session, generation, turn, bridge, and event semantics remain intact.
 - `runtime_resource_instances.state` is never used as a substitute for session
   state, turn state, generation execution status, or bridge claim ownership.
 - Resource state follows only the allowed graph in
@@ -153,7 +153,7 @@ crash recovery.
 - Evidence includes `host_id` and is rejected from the wrong worker/host.
 - Runtime start, restore, cleanup, fallback destruction, and release evidence use
   `runtime_resource_instances.runsc_container_id`, not `sessions.restore_id`,
-  session ID, or `phase3-<session_id>`.
+  session ID, or historical stage-prefixed session IDs.
 - `ready -> live` occurs only after the worker records post-start proof for the
   same generation and contract: `runsc state` confirms the expected
   `runsc_container_id`, network namespace/veth/nft evidence exists, the
@@ -238,7 +238,7 @@ crash recovery.
 - Injected multiple in-flight turns for one generation/source IP deny.
 - Proxy correlation APIs are reachable only over the authenticated UDS and reject
   sandbox or unauthenticated host-local callers.
-- The re-pinned `claude-code-proxy` contract tests replace the Phase 7
+- The re-pinned `claude-code-proxy` contract tests replace the legacy
   authenticated malformed `/v1/messages` pre-turn probe: `/healthz` passes
   through the stable alias; pre-turn model endpoints reject without active
   context; malformed `/v1/messages` is tested only after a running turn has a
@@ -265,13 +265,13 @@ crash recovery.
   active proxy contexts, checkpoints, prepared bundles, netns/veth/nft, runsc
   containers, generation directories, legacy secret roots, provider credential
   roots, and proxy-internal sockets before enablement.
-- Old host runtime resources block Phase 8 enablement until reconciled and
+- Old host runtime resources block `sandbox-isolation-v1` enablement until reconciled and
   absence evidence is recorded.
 - Existing session/workspace/agent-home data is wiped from active roots before
-  the first Phase 8 allocation.
+  the first `sandbox-isolation-v1` allocation.
 - Legacy `harness.secrets.root` data is deleted or quarantined outside all
-  Phase 8 roots and cannot be mounted as `/harness-secrets`.
-- The Phase 7 secret permission lab is retired only after Phase 8 gates prove
+  `sandbox-isolation-v1` roots and cannot be mounted as `/harness-secrets`.
+- The legacy secret permission lab is retired only after `sandbox-isolation-v1` gates prove
   `harness.secrets.*` config is rejected, `/harness-secrets` is absent, provider
   credentials are host/proxy-only, and no credential material appears in
   sandbox-visible files, env, `/proc`, logs, DB rows, checkpoints, or release
@@ -296,9 +296,9 @@ crash recovery.
 - `session_driver_homes` is unique by `(session_id, driver)` and `host_path`.
 - Sandbox identity changes are gated as drain/wipe/reprovision or a separately
   designed trusted host-side reprovision flow.
-- Optional backup evidence is outside active roots and is not treated as Phase 8
+- Optional backup evidence is outside active roots and is not treated as `sandbox-isolation-v1`
   runtime data.
-- Phase 2 bake/restore smoke tooling is migrated to `sandbox-isolation-v1` or
+- Legacy bake/restore smoke tooling is migrated to `sandbox-isolation-v1` or
   quarantined from release evidence.
 
 ## Documentation Gates

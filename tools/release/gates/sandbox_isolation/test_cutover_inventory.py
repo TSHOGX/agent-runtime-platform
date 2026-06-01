@@ -108,7 +108,7 @@ class CutoverInventoryTest(unittest.TestCase):
                     {
                         "name": "runsc_containers",
                         "status": "passed",
-                        "output_tail": "ID PID STATUS\nphase3-sess_old -1 stopped",
+                        "output_tail": "ID PID STATUS\nharness-gen-old -1 stopped",
                     },
                     {
                         "name": "ip_netns",

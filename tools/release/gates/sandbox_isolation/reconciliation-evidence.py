@@ -195,7 +195,7 @@ def db_inventory(db_path):
                 issue(
                     "runtime_resource_instances",
                     "missing_columns",
-                    message="runtime_resource_instances cannot be audited without all Phase 8 columns",
+                    message="runtime_resource_instances cannot be audited without all sandbox-isolation-v1 columns",
                     columns=result["missing_columns"],
                 )
             )

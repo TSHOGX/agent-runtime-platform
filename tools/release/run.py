@@ -13,8 +13,7 @@ strips ``--suite NAME`` and forwards the remaining arguments to that suite's
 Suites:
     control_plane     - durable control-plane gates.
     sandbox_isolation - runtime-isolation contract; the live harness.
-    driver_contract   - driver/provider contract (reserved placeholder).
-    agent_capability  - capability/UX (reserved; static-check view).
+    agent_capability  - capability/UX static-check view.
 """
 import json
 import sys
@@ -25,17 +24,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from tools.release.suites import (  # noqa: E402
     agent_capability,
     control_plane,
-    driver_contract,
     sandbox_isolation,
 )
 
 SUITES = {
     "control_plane": control_plane,
     "sandbox_isolation": sandbox_isolation,
-    "driver_contract": driver_contract,
     "agent_capability": agent_capability,
 }
-SUITE_ORDER = ["control_plane", "sandbox_isolation", "driver_contract", "agent_capability"]
+SUITE_ORDER = ["control_plane", "sandbox_isolation", "agent_capability"]
 
 
 def extract_suite(argv):

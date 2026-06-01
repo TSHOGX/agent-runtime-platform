@@ -32,7 +32,7 @@ class CutoverCleanupTest(unittest.TestCase):
             self.assertIn(str(base / "run" / "network" / "gen-old"), delete_sources)
             self.assertIn(str(base / "run" / "logs" / "gen-old"), delete_sources)
             self.assertIn(str(base / "secrets"), delete_sources)
-            self.assertIn(("runsc", "-root", "/tmp/runsc-root", "delete", "-force", "phase3-sess_old"), commands)
+            self.assertIn(("runsc", "-root", "/tmp/runsc-root", "delete", "-force", "harness-gen-old"), commands)
             self.assertIn(("ip", "netns", "delete", "harness-gen-old"), commands)
             self.assertIn(("ip", "link", "delete", "hgenold"), commands)
             self.assertIn(("nft", "delete", "table", "inet", "harness_gen_old"), commands)
@@ -199,7 +199,7 @@ def inventory_for(base):
                     "name": "runsc_containers",
                     "command": ["runsc", "-root", "/tmp/runsc-root", "list"],
                     "status": "passed",
-                    "output_tail": "ID PID STATUS\nphase3-sess_old -1 stopped",
+                    "output_tail": "ID PID STATUS\nharness-gen-old -1 stopped",
                 },
                 {
                     "name": "ip_netns",

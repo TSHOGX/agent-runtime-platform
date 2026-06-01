@@ -16,7 +16,7 @@ plane` is the durable state, scheduling, policy, and observability layer.
 
 Active planning docs:
 
-- [PLAN.md](./PLAN.md) for the current roadmap.
+- [PLAN.md](./PLAN.md) for the current operating plan.
 - [next-stage.md](./next-stage.md) for the next capability target.
 
 ## Component Model

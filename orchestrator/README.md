@@ -166,8 +166,8 @@ across turns. Each generation gets its own network profile, netns/veth pair,
 Automatic idle checkpointing is a per-session policy. The checked-in default is
 off; `HARNESS_AUTO_CHECKPOINT_ENABLED=true` enables it for newly created
 sessions. Only the next idle generation with an empty turn queue plus fresh
-bridge heartbeat/checkpoint-ready markers can checkpoint. Legacy Phase 2
-bundle/restore smoke tooling has been removed from the runtime surface.
+bridge heartbeat/checkpoint-ready markers can checkpoint. Legacy bundle/restore
+smoke tooling has been removed from the runtime surface.
 
 ## Event Streams
 
@@ -200,7 +200,7 @@ curl -b /tmp/harness.cookies \
 ```
 
 Use `{"mode":"shell"}` for the PTY shell path when Shell is enabled. Raw
-`agent` input is rejected after the Phase 9 product-mode cutover.
+`agent` input is rejected after the `driver-contract-v1` product-mode cutover.
 
 Send the first message:
 

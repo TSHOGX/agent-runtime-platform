@@ -47,7 +47,7 @@ PROTECTED_DELETE_PATHS = {
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Plan or apply direct destructive Phase 8 cutover cleanup from cutover inventory JSON.")
+    parser = argparse.ArgumentParser(description="Plan or apply direct destructive sandbox-isolation-v1 cutover cleanup from cutover inventory JSON.")
     parser.add_argument("--inventory", required=True, help="Path to cutover-inventory.py JSON output.")
     parser.add_argument("--apply", action="store_true", help="Apply the destructive cleanup plan.")
     parser.add_argument("--confirm-destructive-cutover", default="", help="Must equal sandbox-isolation-v1 when --apply is used.")

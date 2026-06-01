@@ -62,7 +62,7 @@ def sandbox_isolation_checks():
             "kind": "lacks",
             "path": REPO_ROOT / "docs" / "PLAN.md",
             "patterns": (
-                ("obsolete_parent_mount_boundary", "Until Phase 8 lands, the sandbox reaches"),
+                ("obsolete_parent_mount_boundary", "the sandbox reaches"),
                 ("obsolete_parent_mount_target", "parent `/sessions` and `/agent-homes` mounts"),
             ),
         },

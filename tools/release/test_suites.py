@@ -5,7 +5,6 @@ from tools.release import run as dispatcher
 from tools.release.suites import (
     agent_capability,
     control_plane,
-    driver_contract,
     sandbox_isolation,
     static_manifests,
 )
@@ -83,10 +82,6 @@ class SandboxIsolationSuiteTest(unittest.TestCase):
 
 
 class ReservedSuiteTest(unittest.TestCase):
-    def test_driver_contract_is_skipped(self):
-        self.assertEqual(driver_contract.selected_gates(), [])
-        self.assertEqual(driver_contract.evidence()["result"], "skipped")
-
     def test_agent_capability_is_next_stage_subset(self):
         names = [c["name"] for c in static_manifests.agent_capability_checks()]
         full = [c["name"] for c in static_manifests.sandbox_isolation_checks()]
@@ -104,7 +99,7 @@ class DispatcherTest(unittest.TestCase):
         self.assertEqual(dispatcher.extract_suite(["--list"]), (None, ["--list"]))
 
     def test_registered_suites(self):
-        self.assertEqual(set(dispatcher.SUITES), {"control_plane", "sandbox_isolation", "driver_contract", "agent_capability"})
+        self.assertEqual(set(dispatcher.SUITES), {"control_plane", "sandbox_isolation", "agent_capability"})
 
 
 if __name__ == "__main__":
