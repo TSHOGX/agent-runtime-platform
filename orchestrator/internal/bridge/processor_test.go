@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1228,17 +1227,11 @@ func openBridgeStore(t *testing.T, ctx context.Context) (*store.Store, *store.Ow
 func createBridgeSession(t *testing.T, ctx context.Context, st *store.Store, id string) {
 	t.Helper()
 	now := time.Now().UTC()
-	workspace := filepath.Join(t.TempDir(), "sessions", id)
-	if err := os.MkdirAll(workspace, 0o755); err != nil {
-		t.Fatalf("create workspace: %v", err)
-	}
 	if err := st.CreateSession(ctx, store.Session{
 		ID:        id,
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
 		Agent:     "claude_code",
-		Workspace: workspace,
-		RestoreID: "phase3-" + id,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}); err != nil {
