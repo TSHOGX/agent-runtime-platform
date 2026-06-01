@@ -38,6 +38,11 @@ type Processor struct {
 
 var errProtocol = errors.New("bridge protocol error")
 
+const (
+	RequiredProtocolVersionV2 = 2
+	RequiredTurnInputRunTurn  = "RunTurn"
+)
+
 type bridgeState struct {
 	helloSeen bool
 	probed    bool
@@ -74,11 +79,11 @@ type runTurnInput struct {
 	Content string `json:"content"`
 }
 
-func (p *Processor) buildGrantPayload(grant store.TurnGrant) grantPayload {
+func buildGrantPayload(grant store.TurnGrant, turnInputSchema string) grantPayload {
 	return grantPayload{
 		TurnID:          grant.TurnID,
 		Sequence:        grant.Sequence,
-		TurnInputSchema: p.turnInputSchema(),
+		TurnInputSchema: turnInputSchema,
 		Input:           runTurnInput{Content: grant.Content},
 		Attempt:         grant.Attempt,
 		Replayed:        grant.Replayed,
@@ -201,11 +206,15 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 			ServerTime:               ack.ServerTime,
 		})
 	case TypeHeartbeat:
+		leaseTTL, err := p.requiredLeaseTTL()
+		if err != nil {
+			return err
+		}
 		return p.Store.RenewGenerationHeartbeat(ctx, store.RenewHeartbeatParams{
 			SessionID:    envelope.SessionID,
 			GenerationID: envelope.GenerationID,
 			Owner:        p.Owner,
-			LeaseTTL:     p.leaseTTL(),
+			LeaseTTL:     leaseTTL,
 			Now:          now,
 		})
 	case TypeProbeNetwork:
@@ -227,12 +236,20 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 		if !state.helloSeen || !state.probed {
 			return p.writeResponse(ctx, inbox, envelope, TypeNoWork, map[string]string{"reason": "bridge_not_ready"})
 		}
+		leaseTTL, err := p.requiredLeaseTTL()
+		if err != nil {
+			return err
+		}
+		turnInputSchema, err := p.requiredTurnInputSchema()
+		if err != nil {
+			return err
+		}
 		grant, ok, err := p.Store.ClaimNextTurn(ctx, store.ClaimNextTurnParams{
 			SessionID:    envelope.SessionID,
 			GenerationID: envelope.GenerationID,
 			Owner:        p.Owner,
 			RequestID:    requestID(envelope),
-			LeaseTTL:     p.leaseTTL(),
+			LeaseTTL:     leaseTTL,
 			Now:          now,
 		})
 		if err != nil {
@@ -241,7 +258,7 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 		if !ok {
 			return p.writeResponse(ctx, inbox, envelope, TypeNoWork, map[string]string{"reason": "no_eligible_turn"})
 		}
-		return p.writeResponse(ctx, inbox, envelope, TypeGrant, p.buildGrantPayload(grant))
+		return p.writeResponse(ctx, inbox, envelope, TypeGrant, buildGrantPayload(grant, turnInputSchema))
 	case TypeResumeTurn:
 		state := p.state(key)
 		if !state.helloSeen || !state.probed {
@@ -250,12 +267,20 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 		if envelope.TurnID == nil {
 			return protocolErrorf("resume_turn requires turn_id")
 		}
+		leaseTTL, err := p.requiredLeaseTTL()
+		if err != nil {
+			return err
+		}
+		turnInputSchema, err := p.requiredTurnInputSchema()
+		if err != nil {
+			return err
+		}
 		grant, ok, err := p.Store.ResumeTurn(ctx, store.ResumeTurnParams{
 			SessionID:       envelope.SessionID,
 			GenerationID:    envelope.GenerationID,
 			TurnID:          *envelope.TurnID,
 			Owner:           p.Owner,
-			LeaseTTL:        p.leaseTTL(),
+			LeaseTTL:        leaseTTL,
 			AckStartedGrace: p.AckStartedGrace,
 			Now:             now,
 		})
@@ -266,10 +291,14 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 			return p.writeResponse(ctx, inbox, envelope, TypeNoWork, map[string]string{"reason": "no_resumable_turn"})
 		}
 		grant.Replayed = true
-		return p.writeResponse(ctx, inbox, envelope, TypeGrant, p.buildGrantPayload(grant))
+		return p.writeResponse(ctx, inbox, envelope, TypeGrant, buildGrantPayload(grant, turnInputSchema))
 	case TypeAckTurnStarted:
 		if envelope.TurnID == nil {
 			return protocolErrorf("ack_turn_started requires turn_id")
+		}
+		leaseTTL, err := p.requiredLeaseTTL()
+		if err != nil {
+			return err
 		}
 		sandboxSourceIP := ""
 		if len(envelope.Payload) > 0 {
@@ -287,7 +316,7 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 			TurnID:          *envelope.TurnID,
 			Owner:           p.Owner,
 			SandboxSourceIP: sandboxSourceIP,
-			LeaseTTL:        p.leaseTTL(),
+			LeaseTTL:        leaseTTL,
 			EventType:       TypeAckTurnStarted,
 			EventDedupeKey:  fmt.Sprintf("ack_started:%s:%d", envelope.GenerationID, *envelope.TurnID),
 			EventPayload:    jsonPayload(envelope.Payload),
@@ -340,8 +369,9 @@ func (p *Processor) handle(ctx context.Context, inbox Queue, envelope Envelope) 
 		if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
 			return protocolError(err)
 		}
+		payload.Status = strings.TrimSpace(payload.Status)
 		if payload.Status == "" {
-			payload.Status = "completed"
+			return protocolErrorf("ack_turn_completed requires status")
 		}
 		eventID, err := p.Store.CompleteTurn(ctx, store.CompleteTurnParams{
 			SessionID:         envelope.SessionID,
@@ -396,7 +426,11 @@ func (p *Processor) writeResponse(ctx context.Context, inbox Queue, request Enve
 }
 
 func (p *Processor) validateHello(ctx context.Context, envelope Envelope) (helloPayload, store.BridgeProtocolEvidence, error) {
-	return ValidateHelloPayload(ctx, p.Store, envelope, p.protocolVersion(), p.turnInputSchema())
+	requiredProtocolVersion, requiredTurnInputSchema, err := p.requiredProtocolConfig()
+	if err != nil {
+		return helloPayload{}, store.BridgeProtocolEvidence{}, err
+	}
+	return ValidateHelloPayload(ctx, p.Store, envelope, requiredProtocolVersion, requiredTurnInputSchema)
 }
 
 type ProtocolEvidenceStore interface {
@@ -405,11 +439,11 @@ type ProtocolEvidenceStore interface {
 
 func ValidateHelloPayload(ctx context.Context, st ProtocolEvidenceStore, envelope Envelope, requiredProtocolVersion int, requiredTurnInputSchema string) (helloPayload, store.BridgeProtocolEvidence, error) {
 	if requiredProtocolVersion <= 0 {
-		requiredProtocolVersion = 2
+		return helloPayload{}, store.BridgeProtocolEvidence{}, protocolErrorf("required bridge protocol_version must be positive")
 	}
 	requiredTurnInputSchema = strings.TrimSpace(requiredTurnInputSchema)
 	if requiredTurnInputSchema == "" {
-		requiredTurnInputSchema = "RunTurn"
+		return helloPayload{}, store.BridgeProtocolEvidence{}, protocolErrorf("required turn_input_schema is required")
 	}
 	var payload helloPayload
 	if len(envelope.Payload) == 0 {
@@ -545,25 +579,27 @@ func (p *Processor) now() time.Time {
 	return time.Now().UTC()
 }
 
-func (p *Processor) leaseTTL() time.Duration {
-	if p.LeaseTTL > 0 {
-		return p.LeaseTTL
+func (p *Processor) requiredLeaseTTL() (time.Duration, error) {
+	if p.LeaseTTL <= 0 {
+		return 0, protocolErrorf("bridge processor lease_ttl must be positive")
 	}
-	return time.Minute
+	return p.LeaseTTL, nil
 }
 
-func (p *Processor) protocolVersion() int {
-	if p.RequiredProtocolVersion > 0 {
-		return p.RequiredProtocolVersion
+func (p *Processor) requiredProtocolConfig() (int, string, error) {
+	if p.RequiredProtocolVersion <= 0 {
+		return 0, "", protocolErrorf("required bridge protocol_version must be positive")
 	}
-	return 2
+	requiredTurnInputSchema := strings.TrimSpace(p.RequiredTurnInputSchema)
+	if requiredTurnInputSchema == "" {
+		return 0, "", protocolErrorf("required turn_input_schema is required")
+	}
+	return p.RequiredProtocolVersion, requiredTurnInputSchema, nil
 }
 
-func (p *Processor) turnInputSchema() string {
-	if strings.TrimSpace(p.RequiredTurnInputSchema) != "" {
-		return strings.TrimSpace(p.RequiredTurnInputSchema)
-	}
-	return "RunTurn"
+func (p *Processor) requiredTurnInputSchema() (string, error) {
+	_, requiredTurnInputSchema, err := p.requiredProtocolConfig()
+	return requiredTurnInputSchema, err
 }
 
 func (p *Processor) state(key string) bridgeState {

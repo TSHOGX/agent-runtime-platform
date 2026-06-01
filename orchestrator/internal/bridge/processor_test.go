@@ -27,9 +27,11 @@ func TestProcessorRequiresHelloAndProbeBeforeClaimGrant(t *testing.T) {
 
 	now := time.Now().UTC()
 	processor := &Processor{
-		Store:    st,
-		Owner:    allocation.Owner,
-		LeaseTTL: time.Minute,
+		Store:                   st,
+		Owner:                   allocation.Owner,
+		LeaseTTL:                time.Minute,
+		RequiredProtocolVersion: RequiredProtocolVersionV2,
+		RequiredTurnInputSchema: RequiredTurnInputRunTurn,
 		Now: func() time.Time {
 			return now
 		},
@@ -117,9 +119,11 @@ func TestProcessorRejectsInvalidV2Hello(t *testing.T) {
 				t.Fatalf("enqueue turn: %v", err)
 			}
 			processor := &Processor{
-				Store:    st,
-				Owner:    allocation.Owner,
-				LeaseTTL: time.Minute,
+				Store:                   st,
+				Owner:                   allocation.Owner,
+				LeaseTTL:                time.Minute,
+				RequiredProtocolVersion: RequiredProtocolVersionV2,
+				RequiredTurnInputSchema: RequiredTurnInputRunTurn,
 			}
 			writeOutbox(t, ctx, details.BridgeDirPath, Envelope{
 				MessageID:    "msg_bad_hello",
@@ -151,6 +155,135 @@ func TestProcessorRejectsInvalidV2Hello(t *testing.T) {
 	}
 }
 
+func TestValidateHelloPayloadRequiresRequiredContract(t *testing.T) {
+	ctx := context.Background()
+	envelope := Envelope{
+		MessageID:    "msg_hello",
+		Type:         TypeHello,
+		SessionID:    "sess_hello_config",
+		GenerationID: "gen_hello_config",
+		Payload:      bridgeHelloPayloadForTest("claude_code"),
+	}
+	tests := []struct {
+		name                    string
+		requiredProtocolVersion int
+		requiredTurnInputSchema string
+		want                    string
+	}{
+		{name: "missing protocol version", requiredTurnInputSchema: RequiredTurnInputRunTurn, want: "required bridge protocol_version must be positive"},
+		{name: "missing turn input schema", requiredProtocolVersion: RequiredProtocolVersionV2, want: "required turn_input_schema is required"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := ValidateHelloPayload(ctx, storeFailure{}, envelope, tc.requiredProtocolVersion, tc.requiredTurnInputSchema)
+			if err == nil || !errors.Is(err, errProtocol) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("ValidateHelloPayload err=%v, want protocol error containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestProcessorRejectsMissingRequiredProtocolConfig(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := EnsureLayout(root); err != nil {
+		t.Fatalf("ensure layout: %v", err)
+	}
+	processor := &Processor{
+		Store:    storeFailure{},
+		Owner:    "owner",
+		LeaseTTL: time.Minute,
+	}
+	writeOutbox(t, ctx, root, Envelope{
+		MessageID:    "msg_hello",
+		RequestID:    "req_hello",
+		Type:         TypeHello,
+		SessionID:    "sess_missing_config",
+		GenerationID: "gen_missing_config",
+		Payload:      bridgeHelloPayloadForTest("claude_code"),
+	})
+	if err := processor.ProcessOnce(ctx, root); err != nil {
+		t.Fatalf("process missing config hello: %v", err)
+	}
+	response := assertSingleInboxResponse(t, root, TypeError, "req_hello")
+	var payload errorPayload
+	if err := json.Unmarshal(response.Payload, &payload); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if payload.ErrorClass != "bridge_protocol_error" || !strings.Contains(payload.Error, "required bridge protocol_version must be positive") {
+		t.Fatalf("unexpected missing config error: %+v", payload)
+	}
+}
+
+func TestProcessorRejectsMissingLeaseTTLBeforeClaim(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := EnsureLayout(root); err != nil {
+		t.Fatalf("ensure layout: %v", err)
+	}
+	processor := &Processor{
+		Store:                   storeFailure{},
+		Owner:                   "owner",
+		RequiredProtocolVersion: RequiredProtocolVersionV2,
+		RequiredTurnInputSchema: RequiredTurnInputRunTurn,
+	}
+	processor.MarkReady("sess_missing_ttl", "gen_missing_ttl")
+	writeOutbox(t, ctx, root, Envelope{
+		MessageID:    "msg_claim",
+		RequestID:    "req_claim",
+		Type:         TypeClaimNextTurn,
+		SessionID:    "sess_missing_ttl",
+		GenerationID: "gen_missing_ttl",
+	})
+	if err := processor.ProcessOnce(ctx, root); err != nil {
+		t.Fatalf("process missing ttl claim: %v", err)
+	}
+	response := assertSingleInboxResponse(t, root, TypeError, "req_claim")
+	var payload errorPayload
+	if err := json.Unmarshal(response.Payload, &payload); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if payload.ErrorClass != "bridge_protocol_error" || !strings.Contains(payload.Error, "bridge processor lease_ttl must be positive") {
+		t.Fatalf("unexpected missing ttl error: %+v", payload)
+	}
+}
+
+func TestProcessorRejectsAckCompletedMissingStatus(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := EnsureLayout(root); err != nil {
+		t.Fatalf("ensure layout: %v", err)
+	}
+	processor := &Processor{
+		Store:                   storeFailure{},
+		Owner:                   "owner",
+		LeaseTTL:                time.Minute,
+		RequiredProtocolVersion: RequiredProtocolVersionV2,
+		RequiredTurnInputSchema: RequiredTurnInputRunTurn,
+	}
+	turnID := int64(1)
+	writeOutbox(t, ctx, root, Envelope{
+		MessageID:    "msg_done",
+		RequestID:    "req_done",
+		Type:         TypeAckTurnCompleted,
+		SessionID:    "sess_done",
+		GenerationID: "gen_done",
+		TurnID:       &turnID,
+		Payload:      json.RawMessage(`{}`),
+	})
+	if err := processor.ProcessOnce(ctx, root); err != nil {
+		t.Fatalf("process missing status completion: %v", err)
+	}
+	response := assertSingleInboxResponse(t, root, TypeError, "req_done")
+	var payload errorPayload
+	if err := json.Unmarshal(response.Payload, &payload); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if payload.ErrorClass != "bridge_protocol_error" || !strings.Contains(payload.Error, "ack_turn_completed requires status") {
+		t.Fatalf("unexpected missing completion status error: %+v", payload)
+	}
+}
+
 func TestProcessorMarkReadyAllowsClaimAfterExternalStartupProbe(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openBridgeStore(t, ctx)
@@ -163,9 +296,11 @@ func TestProcessorMarkReadyAllowsClaimAfterExternalStartupProbe(t *testing.T) {
 
 	now := time.Now().UTC()
 	processor := &Processor{
-		Store:    st,
-		Owner:    allocation.Owner,
-		LeaseTTL: time.Minute,
+		Store:                   st,
+		Owner:                   allocation.Owner,
+		LeaseTTL:                time.Minute,
+		RequiredProtocolVersion: RequiredProtocolVersionV2,
+		RequiredTurnInputSchema: RequiredTurnInputRunTurn,
 		Now: func() time.Time {
 			return now
 		},
@@ -229,9 +364,11 @@ func TestProcessorRequiresProbeBeforeRestoredGenerationClaimsTurn(t *testing.T) 
 
 	processorNow := now.Add(3 * time.Second)
 	processor := &Processor{
-		Store:    st,
-		Owner:    allocation.Owner,
-		LeaseTTL: time.Minute,
+		Store:                   st,
+		Owner:                   allocation.Owner,
+		LeaseTTL:                time.Minute,
+		RequiredProtocolVersion: RequiredProtocolVersionV2,
+		RequiredTurnInputSchema: RequiredTurnInputRunTurn,
 		Now: func() time.Time {
 			return processorNow
 		},
@@ -336,9 +473,11 @@ func TestProcessorLifecycleMessagesUpdateTurnAndEvents(t *testing.T) {
 	}
 
 	processor := &Processor{
-		Store:    st,
-		Owner:    allocation.Owner,
-		LeaseTTL: time.Minute,
+		Store:                   st,
+		Owner:                   allocation.Owner,
+		LeaseTTL:                time.Minute,
+		RequiredProtocolVersion: RequiredProtocolVersionV2,
+		RequiredTurnInputSchema: RequiredTurnInputRunTurn,
 	}
 	started := Envelope{
 		MessageID:    "msg_started",
@@ -468,9 +607,11 @@ func TestProcessorResumeTurnRequiresReadyBridgeAndExistingLease(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	processor := &Processor{
-		Store:    st,
-		Owner:    allocation.Owner,
-		LeaseTTL: time.Minute,
+		Store:                   st,
+		Owner:                   allocation.Owner,
+		LeaseTTL:                time.Minute,
+		RequiredProtocolVersion: RequiredProtocolVersionV2,
+		RequiredTurnInputSchema: RequiredTurnInputRunTurn,
 		Now: func() time.Time {
 			return now
 		},
@@ -567,10 +708,12 @@ WHERE id = ?`, store.GenerationLeaseOwner("previous-owner"), formatStoreTimeForB
 	}
 
 	processor := &Processor{
-		Store:           st,
-		Owner:           allocation.Owner,
-		LeaseTTL:        time.Minute,
-		AckStartedGrace: 90 * time.Second,
+		Store:                   st,
+		Owner:                   allocation.Owner,
+		LeaseTTL:                time.Minute,
+		AckStartedGrace:         90 * time.Second,
+		RequiredProtocolVersion: RequiredProtocolVersionV2,
+		RequiredTurnInputSchema: RequiredTurnInputRunTurn,
 		Now: func() time.Time {
 			return now
 		},
@@ -660,9 +803,11 @@ func TestProcessorReplayAfterCommitBeforeUnlinkIsIdempotent(t *testing.T) {
 		t.Fatalf("claim setup: ok=%v err=%v", ok, err)
 	}
 	processor := &Processor{
-		Store:    st,
-		Owner:    allocation.Owner,
-		LeaseTTL: time.Minute,
+		Store:                   st,
+		Owner:                   allocation.Owner,
+		LeaseTTL:                time.Minute,
+		RequiredProtocolVersion: RequiredProtocolVersionV2,
+		RequiredTurnInputSchema: RequiredTurnInputRunTurn,
 	}
 	started := Envelope{
 		MessageID:    "msg_started",
@@ -739,9 +884,11 @@ func TestProcessorDedupesMidStreamOutputReplayUnderLoad(t *testing.T) {
 		t.Fatalf("claim setup: ok=%v err=%v", ok, err)
 	}
 	processor := &Processor{
-		Store:    st,
-		Owner:    allocation.Owner,
-		LeaseTTL: time.Minute,
+		Store:                   st,
+		Owner:                   allocation.Owner,
+		LeaseTTL:                time.Minute,
+		RequiredProtocolVersion: RequiredProtocolVersionV2,
+		RequiredTurnInputSchema: RequiredTurnInputRunTurn,
 	}
 	writeOutbox(t, ctx, details.BridgeDirPath, Envelope{
 		MessageID:    "msg_started",
@@ -817,9 +964,11 @@ func TestProcessorRejectsUnknownNativeEventPayload(t *testing.T) {
 	}
 	turnID := int64(9)
 	processor := &Processor{
-		Store:    storeFailure{},
-		Owner:    "owner",
-		LeaseTTL: time.Minute,
+		Store:                   storeFailure{},
+		Owner:                   "owner",
+		LeaseTTL:                time.Minute,
+		RequiredProtocolVersion: RequiredProtocolVersionV2,
+		RequiredTurnInputSchema: RequiredTurnInputRunTurn,
 	}
 	writeOutbox(t, ctx, root, Envelope{
 		MessageID:    "msg_native_unknown",
@@ -867,7 +1016,13 @@ func TestProcessorFailsGenerationOnOutputSequenceMismatch(t *testing.T) {
 	}); err != nil || !ok {
 		t.Fatalf("claim setup: ok=%v err=%v", ok, err)
 	}
-	processor := &Processor{Store: st, Owner: allocation.Owner, LeaseTTL: time.Minute}
+	processor := &Processor{
+		Store:                   st,
+		Owner:                   allocation.Owner,
+		LeaseTTL:                time.Minute,
+		RequiredProtocolVersion: RequiredProtocolVersionV2,
+		RequiredTurnInputSchema: RequiredTurnInputRunTurn,
+	}
 	writeOutbox(t, ctx, details.BridgeDirPath, Envelope{
 		MessageID:    "msg_started",
 		RequestID:    "req_started",
@@ -941,7 +1096,13 @@ func TestProcessorFailsGenerationWhenCompletionCommitFailsAfterOutput(t *testing
 	}); err != nil || !ok {
 		t.Fatalf("claim setup: ok=%v err=%v", ok, err)
 	}
-	processor := &Processor{Store: st, Owner: allocation.Owner, LeaseTTL: time.Minute}
+	processor := &Processor{
+		Store:                   st,
+		Owner:                   allocation.Owner,
+		LeaseTTL:                time.Minute,
+		RequiredProtocolVersion: RequiredProtocolVersionV2,
+		RequiredTurnInputSchema: RequiredTurnInputRunTurn,
+	}
 	writeOutbox(t, ctx, details.BridgeDirPath, Envelope{
 		MessageID:    "msg_started",
 		RequestID:    "req_started",
@@ -1028,8 +1189,10 @@ func TestProcessorRetainsOutboxMessageWhenCompletionIsTransient(t *testing.T) {
 			completeErr:   errors.New("database is locked"),
 			failGenCalled: &failGenCalled,
 		},
-		Owner:    "owner",
-		LeaseTTL: time.Minute,
+		Owner:                   "owner",
+		LeaseTTL:                time.Minute,
+		RequiredProtocolVersion: RequiredProtocolVersionV2,
+		RequiredTurnInputSchema: RequiredTurnInputRunTurn,
 	}
 	turnID := int64(1)
 	writeOutbox(t, ctx, root, Envelope{
@@ -1071,8 +1234,10 @@ func TestProcessorRetainsOutboxMessageWhenStoreApplyFails(t *testing.T) {
 		Store: storeFailure{
 			claimErr: errors.New("database is locked"),
 		},
-		Owner:    "owner",
-		LeaseTTL: time.Minute,
+		Owner:                   "owner",
+		LeaseTTL:                time.Minute,
+		RequiredProtocolVersion: RequiredProtocolVersionV2,
+		RequiredTurnInputSchema: RequiredTurnInputRunTurn,
 	}
 	processor.setState(stateKey("sess_retry", "gen_retry"), func(state bridgeState) bridgeState {
 		state.helloSeen = true
@@ -1110,9 +1275,11 @@ func TestProcessorProtocolErrorWritesErrorAndUnlinks(t *testing.T) {
 		t.Fatalf("ensure layout: %v", err)
 	}
 	processor := &Processor{
-		Store:    storeFailure{},
-		Owner:    "owner",
-		LeaseTTL: time.Minute,
+		Store:                   storeFailure{},
+		Owner:                   "owner",
+		LeaseTTL:                time.Minute,
+		RequiredProtocolVersion: RequiredProtocolVersionV2,
+		RequiredTurnInputSchema: RequiredTurnInputRunTurn,
 	}
 	writeOutbox(t, ctx, root, Envelope{
 		MessageID:    "msg_bad",

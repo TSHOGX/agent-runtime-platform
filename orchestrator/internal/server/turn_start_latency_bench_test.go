@@ -46,11 +46,13 @@ func TestTurnStartLatencyGate(t *testing.T) {
 		ownerUUID: owner.UUID,
 	}
 	processor := &bridge.Processor{
-		Store:           st,
-		Owner:           allocation.Owner,
-		LeaseTTL:        cfg.Harness.Bridge.LeaseTTL.Duration,
-		AckStartedGrace: cfg.Harness.Bridge.AckStartedGrace.Duration,
-		AfterCommit:     srv.handleBridgeCommittedEnvelope,
+		Store:                   st,
+		Owner:                   allocation.Owner,
+		LeaseTTL:                cfg.Harness.Bridge.LeaseTTL.Duration,
+		AckStartedGrace:         cfg.Harness.Bridge.AckStartedGrace.Duration,
+		RequiredProtocolVersion: bridge.RequiredProtocolVersionV2,
+		RequiredTurnInputSchema: bridge.RequiredTurnInputRunTurn,
+		AfterCommit:             srv.handleBridgeCommittedEnvelope,
 	}
 	outbox, err := bridge.OpenQueue(details.BridgeDirPath, bridge.OutboxDir)
 	if err != nil {
@@ -72,6 +74,7 @@ func TestTurnStartLatencyGate(t *testing.T) {
 		Type:         bridge.TypeHello,
 		SessionID:    session.ID,
 		GenerationID: allocation.GenerationID,
+		Payload:      json.RawMessage(`{"protocol_version":2,"driver_id":"claude_code","turn_input_schema":"RunTurn"}`),
 	})
 	process(bridge.Envelope{
 		MessageID:    "msg_latency_probe",

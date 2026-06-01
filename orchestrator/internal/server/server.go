@@ -2020,7 +2020,7 @@ func (s *Server) processBridgeStartupBatch(ctx context.Context, inbox, outbox br
 				state.heartbeatSeq = file.Seq
 			}
 		case bridge.TypeHello:
-			if _, _, err := bridge.ValidateHelloPayload(ctx, bridgeStore(s.store), envelope, 2, "RunTurn"); err != nil {
+			if _, _, err := bridge.ValidateHelloPayload(ctx, bridgeStore(s.store), envelope, bridge.RequiredProtocolVersionV2, bridge.RequiredTurnInputRunTurn); err != nil {
 				return false, fmt.Errorf("bridge startup probe hello validation failed: %w", err)
 			}
 			ack, err := s.store.BridgeHelloAck(ctx, envelope.SessionID, envelope.GenerationID, owner, time.Now().UTC(), 0)
@@ -2349,11 +2349,13 @@ func (s *Server) RunMaintenance(ctx context.Context) error {
 	}
 	owner := store.GenerationLeaseOwner(s.ownerUUID)
 	processor := &bridge.Processor{
-		Store:           bridgeStore(s.store),
-		Owner:           owner,
-		LeaseTTL:        s.cfg.Harness.Bridge.LeaseTTL.Duration,
-		AckStartedGrace: s.cfg.Harness.Bridge.AckStartedGrace.Duration,
-		AfterCommit:     s.handleBridgeCommittedEnvelope,
+		Store:                   bridgeStore(s.store),
+		Owner:                   owner,
+		LeaseTTL:                s.cfg.Harness.Bridge.LeaseTTL.Duration,
+		AckStartedGrace:         s.cfg.Harness.Bridge.AckStartedGrace.Duration,
+		RequiredProtocolVersion: bridge.RequiredProtocolVersionV2,
+		RequiredTurnInputSchema: bridge.RequiredTurnInputRunTurn,
+		AfterCommit:             s.handleBridgeCommittedEnvelope,
 	}
 	touchHostHeartbeat := func(generation store.BridgePollGeneration, now time.Time) {
 		if err := bridge.TouchHeartbeat(generation.BridgeDirPath, bridge.HostHeartbeatFile, now); err != nil && !errors.Is(err, context.Canceled) {
