@@ -1,5 +1,6 @@
 import importlib.util
 from importlib.machinery import SourceFileLoader
+import io
 import json
 import os
 import subprocess
@@ -398,6 +399,83 @@ class BridgeClientTest(unittest.TestCase):
                         bridge.run_claim_loop(args, runner=object())
 
                     self.assertFalse((Path(root) / bridge.OUTBOX).exists())
+
+    def test_main_parser_rejects_invalid_probe_timing_args(self):
+        cases = [
+            ("--poll-interval", "0", "poll_interval must be > 0"),
+            ("--poll-interval", "-0.001", "poll_interval must be > 0"),
+            ("--http-timeout", "0", "HTTP timeout must be > 0"),
+            ("--http-timeout", "-0.1", "HTTP timeout must be > 0"),
+        ]
+        for option, value, message in cases:
+            with self.subTest(option=option, value=value):
+                with tempfile.TemporaryDirectory() as root:
+                    argv = bridge_main_argv(root, "probe")
+                    set_argv_option(argv, option, value)
+
+                    self.assert_main_parser_error(argv, message)
+
+    def test_main_parser_rejects_invalid_heartbeat_loop_timing_args(self):
+        cases = [
+            ("--poll-interval", "0", "poll_interval must be > 0"),
+            ("--poll-interval", "-0.001", "poll_interval must be > 0"),
+            ("--interval", "0", "heartbeat interval must be > 0"),
+            ("--interval", "-0.25", "heartbeat interval must be > 0"),
+        ]
+        for option, value, message in cases:
+            with self.subTest(option=option, value=value):
+                with tempfile.TemporaryDirectory() as root:
+                    argv = bridge_main_argv(root, "heartbeat-loop", subcommand_options={"--interval": "0.25"})
+                    set_argv_option(argv, option, value)
+
+                    self.assert_main_parser_error(argv, message)
+
+    def test_main_parser_rejects_invalid_claim_loop_timing_args(self):
+        cases = [
+            ("--poll-interval", "0", "poll_interval must be > 0"),
+            ("--poll-interval", "-0.001", "poll_interval must be > 0"),
+            ("--http-timeout", "0", "HTTP timeout must be > 0"),
+            ("--http-timeout", "-0.1", "HTTP timeout must be > 0"),
+            ("--heartbeat-interval", "0", "heartbeat interval must be > 0"),
+            ("--heartbeat-interval", "-1", "heartbeat interval must be > 0"),
+            ("--idle-interval", "0", "idle interval must be > 0"),
+            ("--idle-interval", "-0.001", "idle interval must be > 0"),
+        ]
+        for option, value, message in cases:
+            with self.subTest(option=option, value=value):
+                with tempfile.TemporaryDirectory() as root:
+                    argv = bridge_main_argv(
+                        root,
+                        "claim-loop",
+                        subcommand_options={
+                            "--heartbeat-interval": "60",
+                            "--idle-interval": "0.001",
+                            "--max-turns": "1",
+                            "--max-empty-polls": "1",
+                        },
+                    )
+                    set_argv_option(argv, option, value)
+
+                    self.assert_main_parser_error(argv, message)
+
+    def assert_main_parser_error(self, argv, message):
+        stderr = io.StringIO()
+        patches = [
+            mock.patch.object(bridge, "run_probe", side_effect=AssertionError("run_probe should not be called")),
+            mock.patch.object(
+                bridge,
+                "run_heartbeat_loop",
+                side_effect=AssertionError("run_heartbeat_loop should not be called"),
+            ),
+            mock.patch.object(bridge, "run_claim_loop", side_effect=AssertionError("run_claim_loop should not be called")),
+            mock.patch("sys.stderr", stderr),
+        ]
+        with patches[0], patches[1], patches[2], patches[3]:
+            with self.assertRaises(SystemExit) as raised:
+                bridge.main(argv)
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn(f"error: {message}", stderr.getvalue())
 
     def test_execute_grant_rejects_non_run_turn_schema(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1931,6 +2009,33 @@ class EntrypointStaticTest(unittest.TestCase):
 
 def argparse_namespace(**kwargs):
     return type("Args", (), kwargs)()
+
+
+def bridge_main_argv(root, command, subcommand_options=None):
+    argv = [
+        "--bridge-dir",
+        root,
+        "--session-id",
+        "sess",
+        "--generation-id",
+        "gen",
+        "--driver-id",
+        "sh",
+        "--poll-interval",
+        "0.001",
+        "--timeout",
+        "0.1",
+        "--http-timeout",
+        "0.1",
+        command,
+    ]
+    for option, value in (subcommand_options or {}).items():
+        argv.extend([option, value])
+    return argv
+
+
+def set_argv_option(argv, option, value):
+    argv[argv.index(option) + 1] = value
 
 
 def claude_runner_env():
