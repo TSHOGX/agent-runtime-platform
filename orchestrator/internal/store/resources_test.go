@@ -1707,7 +1707,14 @@ func TestListBridgePollGenerationsFiltersCurrentOwnerLiveResources(t *testing.T)
 	if err := st.MarkGenerationResourcesLive(ctx, "sess_poll", pollAllocation.GenerationID, pollAllocation.Owner, now.Add(time.Second)); err != nil {
 		t.Fatalf("mark poll generation live: %v", err)
 	}
-	createLiveRuntimeResourceInstanceForAllocation(t, ctx, st, "sess_poll", pollAllocation, owner.UUID, "host-1", now.Add(2*time.Second))
+	pollResource := createLiveRuntimeResourceInstanceForAllocation(t, ctx, st, "sess_poll", pollAllocation, owner.UUID, "host-1", now.Add(2*time.Second))
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE runtime_generation_resources
+SET resource_state = 'ready',
+    bridge_dir_path = ?
+WHERE generation_id = ?`, filepath.Join(t.TempDir(), "legacy-bridge"), pollAllocation.GenerationID); err != nil {
+		t.Fatalf("make legacy poll resource state stale: %v", err)
+	}
 
 	createStoreSession(t, ctx, st, "sess_other")
 	otherAllocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
@@ -1762,7 +1769,7 @@ WHERE generation_id = ?`, readyOnly.GenerationID); err != nil {
 	}
 	if generations[0].SessionID != "sess_poll" ||
 		generations[0].GenerationID != pollAllocation.GenerationID ||
-		generations[0].BridgeDirPath == "" {
+		generations[0].BridgeDirPath != pollResource.BridgeDirPath {
 		t.Fatalf("unexpected poll generation: %+v", generations[0])
 	}
 }
@@ -1825,6 +1832,17 @@ func TestAutoCheckpointCandidatesRequirePolicyArtifactsAndNoActiveTurns(t *testi
 	ownerLease := GenerationLeaseOwner(owner.UUID)
 
 	eligible := createAutoCheckpointGeneration(t, ctx, st, cfg, "sess_auto_eligible", ownerLease, now)
+	eligibleResource, err := st.GetRuntimeResourceInstance(ctx, eligible.GenerationID)
+	if err != nil {
+		t.Fatalf("get eligible runtime resource: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_generation_resources
+SET resource_state = 'ready',
+    bridge_dir_path = ?
+WHERE generation_id = ?`, filepath.Join(t.TempDir(), "legacy-auto-bridge"), eligible.GenerationID); err != nil {
+		t.Fatalf("make legacy auto checkpoint resource state stale: %v", err)
+	}
 	disabled := createAutoCheckpointGeneration(t, ctx, st, cfg, "sess_auto_disabled", ownerLease, now)
 	if _, err := st.db.ExecContext(ctx, `UPDATE sessions SET auto_checkpoint_enabled = 0 WHERE id = ?`, "sess_auto_disabled"); err != nil {
 		t.Fatalf("disable session policy: %v", err)
@@ -1861,7 +1879,7 @@ WHERE generation_id = ?`, readyOnly.GenerationID); err != nil {
 	}
 	if candidates[0].SessionID != "sess_auto_eligible" ||
 		candidates[0].GenerationID != eligible.GenerationID ||
-		candidates[0].BridgeDirPath == "" {
+		candidates[0].BridgeDirPath != eligibleResource.BridgeDirPath {
 		t.Fatalf("unexpected candidate: %+v eligible=%+v disabled=%s busy=%s",
 			candidates[0], eligible, disabled.GenerationID, busy.GenerationID)
 	}
@@ -1873,6 +1891,12 @@ func TestGenerationCheckpointTransitionsAndMetadata(t *testing.T) {
 	cfg := testAllocatorConfig(t)
 	now := time.Now().UTC()
 	allocation := createAutoCheckpointGeneration(t, ctx, st, cfg, "sess_auto_complete", GenerationLeaseOwner(owner.UUID), now)
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_generation_resources
+SET resource_state = 'ready'
+WHERE generation_id = ?`, allocation.GenerationID); err != nil {
+		t.Fatalf("make legacy checkpoint resource state stale: %v", err)
+	}
 
 	if err := st.BeginGenerationCheckpoint(ctx, "sess_auto_complete", allocation.GenerationID, allocation.Owner, now.Add(2*time.Minute)); err != nil {
 		t.Fatalf("begin checkpoint: %v", err)

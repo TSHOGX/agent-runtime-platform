@@ -1815,9 +1815,8 @@ func (s *Store) ListBridgePollGenerations(ctx context.Context, owner string, now
 		args = append(args, formatTime(now), formatTime(cutoff), formatTime(now), formatTime(cutoff))
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT g.session_id, g.generation_id, r.bridge_dir_path
+SELECT g.session_id, g.generation_id, ri.bridge_dir_path
 FROM runtime_generations g
-JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
 JOIN runtime_resource_instances ri ON ri.generation_id = g.generation_id
   AND ri.session_id = g.session_id
 JOIN sessions s ON s.id = g.session_id
@@ -1828,7 +1827,6 @@ WHERE g.status IN ('active','idle','probing','restoring','starting')
   )
   AND s.active_generation_id = g.generation_id
   AND s.status NOT IN ('failed', 'destroyed')
-  AND r.resource_state = 'live'
   AND ri.state = 'live'
 ORDER BY g.session_id, g.generation_id`, args...)
 	if err != nil {
@@ -1935,7 +1933,7 @@ func (s *Store) ListAutoCheckpointCandidates(ctx context.Context, owner string, 
 	}
 	cutoff := now.Add(-idleThreshold)
 	rows, err := s.db.QueryContext(ctx, `
-SELECT s.id, g.generation_id, r.bridge_dir_path
+SELECT s.id, g.generation_id, ri.bridge_dir_path
 FROM sessions s
 JOIN runtime_generations g ON g.generation_id = s.active_generation_id
   AND g.session_id = s.id
@@ -1952,7 +1950,6 @@ WHERE s.status = 'running_idle'
   AND g.lease_expires_at > ?
   AND g.runsc_version IS NOT NULL
   AND g.runsc_platform IS NOT NULL
-  AND r.resource_state = 'live'
   AND ri.state = 'live'
   AND r.checkpoint_path IS NOT NULL
   AND r.control_manifest_digest IS NOT NULL
@@ -2027,8 +2024,10 @@ WHERE generation_id = ?
   )
   AND EXISTS (
     SELECT 1 FROM runtime_generation_resources r
+    JOIN runtime_resource_instances ri ON ri.generation_id = r.generation_id
     WHERE r.generation_id = runtime_generations.generation_id
-      AND r.resource_state = 'live'
+      AND ri.session_id = runtime_generations.session_id
+      AND ri.state = 'live'
       AND r.checkpoint_path IS NOT NULL
       AND r.control_manifest_digest IS NOT NULL
       AND r.projected_control_manifest_digest IS NOT NULL
@@ -2214,7 +2213,13 @@ UPDATE runtime_generation_resources
 SET resource_state = 'reserved_checkpointed',
     checkpoint_path = ?
 WHERE generation_id = ?
-  AND resource_state = 'live'`, p.CheckpointPath, p.GenerationID)
+  AND resource_state IN ('allocating','ready','live','recreating')
+  AND EXISTS (
+    SELECT 1 FROM runtime_resource_instances ri
+    WHERE ri.generation_id = runtime_generation_resources.generation_id
+      AND ri.session_id = ?
+      AND ri.state = 'live'
+  )`, p.CheckpointPath, p.GenerationID, p.SessionID)
 	if err != nil {
 		return err
 	}
