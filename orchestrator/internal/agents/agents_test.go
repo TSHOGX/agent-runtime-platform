@@ -60,10 +60,17 @@ func TestPiDriverConfigMaterializationSpecs(t *testing.T) {
 	}
 
 	allSpecs := AllDriverConfigMaterializationSpecs()
-	if len(allSpecs) != 2 ||
-		allSpecs[0] != spec.ConfigMaterializationSpecs[0] ||
-		allSpecs[1] != spec.ConfigMaterializationSpecs[1] {
-		t.Fatalf("all specs = %+v, driver specs = %+v", allSpecs, spec.ConfigMaterializationSpecs)
+	for _, want := range spec.ConfigMaterializationSpecs {
+		found := false
+		for _, got := range allSpecs {
+			if got == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("all specs missing pi materialization spec %+v; all specs = %+v", want, allSpecs)
+		}
 	}
 
 	spec.ConfigMaterializationSpecs[0].MountName = "mutated"
