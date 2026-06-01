@@ -18,8 +18,6 @@ const (
 	Shell      ID = "sh"
 )
 
-const LegacyClaudeToken = "claude"
-
 const (
 	PiCodingAgentDir       = "/agent-home/.pi/agent"
 	PiSessionDir           = PiCodingAgentDir + "/sessions"
@@ -460,8 +458,6 @@ func CanonicalDriverID(value string) (ID, error) {
 	switch ID(trimmed) {
 	case ClaudeCode, Pi, Shell:
 		return ID(trimmed), nil
-	case ID(LegacyClaudeToken):
-		return ClaudeCode, nil
 	default:
 		return "", fmt.Errorf("unsupported driver %q", value)
 	}
@@ -469,12 +465,8 @@ func CanonicalDriverID(value string) (ID, error) {
 
 func PublicAgentForDriver(value string) (string, bool) {
 	switch ID(strings.TrimSpace(value)) {
-	case ClaudeCode:
-		return LegacyClaudeToken, true
-	case Pi:
-		return string(Pi), true
-	case Shell:
-		return string(Shell), true
+	case ClaudeCode, Pi, Shell:
+		return strings.TrimSpace(value), true
 	default:
 		return "", false
 	}

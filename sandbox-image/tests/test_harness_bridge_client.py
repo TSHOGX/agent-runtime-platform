@@ -68,7 +68,7 @@ class BridgeClientTest(unittest.TestCase):
 
     def test_hello_records_resume_boundary(self):
         with tempfile.TemporaryDirectory() as root:
-            client = bridge.BridgeClient(root, "sess", "gen", "claude", poll_interval=0.001)
+            client = bridge.BridgeClient(root, "sess", "gen", "claude_code", poll_interval=0.001)
             response = bridge.Queue(root, bridge.INBOX)
 
             sent = client.send("hello", request_id="req_hello")
@@ -99,7 +99,7 @@ class BridgeClientTest(unittest.TestCase):
 
     def test_hello_sends_bridge_protocol_v2_identity(self):
         with tempfile.TemporaryDirectory() as root:
-            client = bridge.BridgeClient(root, "sess", "gen", "claude", poll_interval=0.001)
+            client = bridge.BridgeClient(root, "sess", "gen", "claude_code", poll_interval=0.001)
             inbox = bridge.Queue(root, bridge.INBOX)
             original_write = bridge.Queue.write
             sent = {}
@@ -129,7 +129,7 @@ class BridgeClientTest(unittest.TestCase):
 
     def test_claim_and_lifecycle_messages(self):
         with tempfile.TemporaryDirectory() as root:
-            client = bridge.BridgeClient(root, "sess", "gen", "claude", poll_interval=0.001)
+            client = bridge.BridgeClient(root, "sess", "gen", "claude_code", poll_interval=0.001)
             inbox = bridge.Queue(root, bridge.INBOX)
 
             sent = client.send("claim_next_turn", request_id="req_claim")
@@ -160,7 +160,7 @@ class BridgeClientTest(unittest.TestCase):
 
     def test_resume_turn_returns_grant_payload(self):
         with tempfile.TemporaryDirectory() as root:
-            client = bridge.BridgeClient(root, "sess", "gen", "claude", poll_interval=0.001)
+            client = bridge.BridgeClient(root, "sess", "gen", "claude_code", poll_interval=0.001)
 
             sent_request_id = None
             original_send = client.send
@@ -190,7 +190,7 @@ class BridgeClientTest(unittest.TestCase):
 
     def test_heartbeat_writes_bridge_mtime_file_and_message(self):
         with tempfile.TemporaryDirectory() as root:
-            client = bridge.BridgeClient(root, "sess", "gen", "claude", poll_interval=0.001)
+            client = bridge.BridgeClient(root, "sess", "gen", "claude_code", poll_interval=0.001)
             client.heartbeat()
 
             heartbeat = Path(root) / bridge.HEARTBEAT / bridge.BRIDGE_HEARTBEAT
@@ -202,7 +202,7 @@ class BridgeClientTest(unittest.TestCase):
 
     def test_checkpoint_ready_marker_is_written_and_cleared(self):
         with tempfile.TemporaryDirectory() as root:
-            client = bridge.BridgeClient(root, "sess", "gen", "claude", poll_interval=0.001)
+            client = bridge.BridgeClient(root, "sess", "gen", "claude_code", poll_interval=0.001)
             client.mark_checkpoint_ready()
             ready = Path(root) / bridge.HEARTBEAT / bridge.CHECKPOINT_READY
             self.assertTrue(ready.exists())
@@ -228,7 +228,7 @@ class BridgeClientTest(unittest.TestCase):
                 bridge_dir=root,
                 session_id="sess",
                 generation_id="gen",
-                agent="claude",
+                driver_id="claude_code",
                 poll_interval=0.001,
                 interval=0.25,
             )
@@ -250,7 +250,7 @@ class BridgeClientTest(unittest.TestCase):
                 bridge_dir=root,
                 session_id="sess",
                 generation_id="gen",
-                agent="sh",
+                driver_id="sh",
                 poll_interval=0.001,
                 timeout=0.1,
                 base_url="",
@@ -1011,7 +1011,7 @@ class BridgeClientTest(unittest.TestCase):
                 bridge_dir=root,
                 session_id="sess",
                 generation_id="gen",
-                agent="sh",
+                driver_id="sh",
                 poll_interval=0.001,
                 timeout=0.1,
                 base_url="",
@@ -1085,7 +1085,7 @@ class BridgeClientTest(unittest.TestCase):
                 bridge_dir=root,
                 session_id="sess",
                 generation_id="gen",
-                agent="sh",
+                driver_id="sh",
                 poll_interval=0.001,
                 timeout=0.1,
                 base_url="",
@@ -1158,7 +1158,7 @@ class BridgeClientTest(unittest.TestCase):
                 bridge_dir=root,
                 session_id="sess",
                 generation_id="gen",
-                agent="sh",
+                driver_id="sh",
                 poll_interval=0.001,
                 timeout=0.1,
                 base_url="",
@@ -1227,7 +1227,6 @@ class BridgeClientTest(unittest.TestCase):
         with mock.patch.dict(
             os.environ,
             {
-                "CLAUDE_SESSION_UUID": "11111111-2222-3333-4444-555555555555",
                 "SESSION_ID": "sess",
                 "HARNESS_AGENT_HOME": "/agent-home",
                 "HARNESS_AGENT_UID": "65534",
@@ -1243,7 +1242,7 @@ class BridgeClientTest(unittest.TestCase):
             clear=True,
         ):
             with mock.patch.object(bridge.subprocess, "Popen", side_effect=popen):
-                runner = bridge.ClaudeTurnRunner()
+                runner = claude_runner()
                 status, error_class, error = runner.run_turn("hello", lambda stream, line: None)
 
         self.assertEqual((status, error_class, error), ("completed", "", ""))
@@ -1296,7 +1295,6 @@ class BridgeClientTest(unittest.TestCase):
         with mock.patch.dict(
             os.environ,
             {
-                "CLAUDE_SESSION_UUID": "11111111-2222-3333-4444-555555555555",
                 "SESSION_ID": "sess",
                 "HARNESS_AGENT_HOME": "/agent-home",
                 "HARNESS_AGENT_UID": "65534",
@@ -1306,7 +1304,7 @@ class BridgeClientTest(unittest.TestCase):
             clear=True,
         ):
             with mock.patch.object(bridge.subprocess, "Popen", side_effect=popen):
-                status, error_class, error = bridge.ClaudeTurnRunner().run_turn(
+                status, error_class, error = claude_runner().run_turn(
                     "hello",
                     lambda stream, line: None,
                 )
@@ -1352,7 +1350,6 @@ class BridgeClientTest(unittest.TestCase):
         with mock.patch.dict(
             os.environ,
             {
-                "CLAUDE_SESSION_UUID": "11111111-2222-3333-4444-555555555555",
                 "SESSION_ID": "sess",
                 "HARNESS_AGENT_HOME": "/agent-home",
                 "HARNESS_AGENT_UID": "65534",
@@ -1364,7 +1361,7 @@ class BridgeClientTest(unittest.TestCase):
             with mock.patch.object(bridge.os, "geteuid", return_value=65534):
                 with mock.patch.object(bridge.os, "getegid", return_value=65534):
                     with mock.patch.object(bridge.subprocess, "Popen", side_effect=popen):
-                        status, error_class, error = bridge.ClaudeTurnRunner().run_turn(
+                        status, error_class, error = claude_runner().run_turn(
                             "hello",
                             lambda stream, line: None,
                         )
@@ -1374,7 +1371,7 @@ class BridgeClientTest(unittest.TestCase):
         self.assertNotIn("setpriv", captured["command"])
         self.assertEqual(captured["env"]["ANTHROPIC_API_KEY"], bridge.HOST_ONLY_DUMMY_API_KEY)
 
-    def test_claude_runner_resumes_after_first_turn(self):
+    def test_claude_runner_resume_selector_uses_driver_state(self):
         class FakeStdin:
             def write(self, value):
                 pass
@@ -1399,7 +1396,33 @@ class BridgeClientTest(unittest.TestCase):
         with mock.patch.dict(os.environ, claude_runner_env(), clear=True):
             with mock.patch.object(bridge.subprocess, "Popen", side_effect=popen):
                 runner = bridge.ClaudeTurnRunner()
+                runner.set_turn_context(
+                    {
+                        "driver_state": {
+                            "driver_id": "claude_code",
+                            "state_payload": {
+                                "driver_id": "claude_code",
+                                "state_kind": "claude_session",
+                                "claude_session_uuid": "11111111-2222-3333-4444-555555555555",
+                                "initialized": False,
+                            },
+                        }
+                    }
+                )
                 runner.run_turn("first", lambda stream, line: None)
+                runner.set_turn_context(
+                    {
+                        "driver_state": {
+                            "driver_id": "claude_code",
+                            "state_payload": {
+                                "driver_id": "claude_code",
+                                "state_kind": "claude_session",
+                                "claude_session_uuid": "11111111-2222-3333-4444-555555555555",
+                                "initialized": True,
+                            },
+                        }
+                    }
+                )
                 runner.run_turn("second", lambda stream, line: None)
 
         self.assertIn("--session-id", commands[0])
@@ -1407,7 +1430,7 @@ class BridgeClientTest(unittest.TestCase):
         self.assertIn("--resume", commands[1])
         self.assertNotIn("--session-id", commands[1])
 
-    def test_claude_runner_resumes_after_recreated_runner_when_marker_written(self):
+    def test_claude_runner_marker_does_not_override_driver_state(self):
         class FakeStdin:
             def write(self, value):
                 pass
@@ -1444,18 +1467,24 @@ class BridgeClientTest(unittest.TestCase):
             env["HARNESS_AGENT_HOME"] = agent_home
             with mock.patch.dict(os.environ, env, clear=True):
                 with mock.patch.object(bridge.subprocess, "Popen", side_effect=popen):
-                    bridge.ClaudeTurnRunner().run_turn("first", lambda stream, line: None)
-                    bridge.ClaudeTurnRunner().run_turn("second", lambda stream, line: None)
+                    claude_runner(initialized=False, session_uuid=session_uuid).run_turn(
+                        "first",
+                        lambda stream, line: None,
+                    )
+                    claude_runner(initialized=False, session_uuid=session_uuid).run_turn(
+                        "second",
+                        lambda stream, line: None,
+                    )
 
             marker = Path(agent_home) / bridge.CLAUDE_MARKER_DIR / bridge.CLAUDE_SESSION_MARKER
             self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))["claude_session_uuid"], session_uuid)
 
         self.assertIn("--session-id", commands[0])
         self.assertNotIn("--resume", commands[0])
-        self.assertIn("--resume", commands[1])
-        self.assertNotIn("--session-id", commands[1])
+        self.assertIn("--session-id", commands[1])
+        self.assertNotIn("--resume", commands[1])
 
-    def test_claude_runner_resumes_after_recreated_runner_when_claude_state_exists(self):
+    def test_claude_runner_filesystem_state_does_not_override_driver_state(self):
         class FakeStdin:
             def write(self, value):
                 pass
@@ -1489,10 +1518,13 @@ class BridgeClientTest(unittest.TestCase):
             env["HARNESS_AGENT_HOME"] = agent_home
             with mock.patch.dict(os.environ, env, clear=True):
                 with mock.patch.object(bridge.subprocess, "Popen", side_effect=popen):
-                    bridge.ClaudeTurnRunner().run_turn("second", lambda stream, line: None)
+                    claude_runner(initialized=False, session_uuid=session_uuid).run_turn(
+                        "second",
+                        lambda stream, line: None,
+                    )
 
-        self.assertIn("--resume", commands[0])
-        self.assertNotIn("--session-id", commands[0])
+        self.assertIn("--session-id", commands[0])
+        self.assertNotIn("--resume", commands[0])
 
     def test_claude_runner_maps_stream_error_to_failed_turn(self):
         class FakeStdin:
@@ -1514,7 +1546,7 @@ class BridgeClientTest(unittest.TestCase):
 
         with mock.patch.dict(os.environ, claude_runner_env(), clear=True):
             with mock.patch.object(bridge.subprocess, "Popen", return_value=FakeProcess()):
-                status, error_class, error = bridge.ClaudeTurnRunner().run_turn(
+                status, error_class, error = claude_runner().run_turn(
                     "hello",
                     lambda stream, line: emitted.append((stream, line)),
                 )
@@ -1542,7 +1574,7 @@ class BridgeClientTest(unittest.TestCase):
 
         with mock.patch.dict(os.environ, claude_runner_env(), clear=True):
             with mock.patch.object(bridge.subprocess, "Popen", return_value=FakeProcess()):
-                status, error_class, error = bridge.ClaudeTurnRunner().run_turn(
+                status, error_class, error = claude_runner().run_turn(
                     "hello",
                     lambda stream, line: emitted.append((stream, line)),
                 )
@@ -1577,9 +1609,10 @@ class EntrypointStaticTest(unittest.TestCase):
         self.assertIn("exec /usr/local/bin/harness-bridge-client probe", text)
         self.assertIn('HARNESS_BRIDGE_MODE:-}" = "claim-loop"', text)
         self.assertIn("exec_bridge_client claim-loop", text)
-        self.assertIn('HARNESS_BRIDGE_MODE:-auto}" = "auto"', text)
-        self.assertIn("/usr/local/bin/harness-bridge-client probe", text)
-        self.assertIn("/usr/local/bin/harness-bridge-client heartbeat-loop &", text)
+        self.assertIn('HARNESS_BRIDGE_MODE:-}" = "heartbeat-loop"', text)
+        self.assertIn("exec_bridge_client heartbeat-loop", text)
+        self.assertNotIn('HARNESS_BRIDGE_MODE:-auto}" = "auto"', text)
+        self.assertNotIn("heartbeat-loop &", text)
 
     def test_entrypoint_expected_mismatch_message_matches_host_classifier(self):
         entrypoint = SCRIPT.with_name("harness-agent-entrypoint")
@@ -1602,7 +1635,6 @@ class EntrypointStaticTest(unittest.TestCase):
         self.assertIn("--clear-groups", text)
         self.assertIn('[ "$(id -u)" = "$AGENT_UID" ]', text)
         self.assertIn('[ "$(id -g)" = "$AGENT_GID" ]', text)
-        self.assertIn("HARNESS_PROXY_DUMMY_API_KEY:-harness-model-proxy-dummy-key", text)
         self.assertIn("exec_bridge_client()", text)
         self.assertIn('/usr/local/bin/harness-bridge-client "$@"', text)
         self.assertIn("sandbox secret mounts are not supported", text)
@@ -1615,7 +1647,11 @@ class EntrypointStaticTest(unittest.TestCase):
         text = entrypoint.read_text(encoding="utf-8")
         self.assertIn('driver_runtime = data.get("driver_runtime")', text)
         self.assertIn("if not isinstance(driver_runtime, dict):", text)
-        self.assertIn("return driver_runtime.get(key, data.get(key))", text)
+        self.assertIn("return driver_runtime.get(key)", text)
+        self.assertNotIn("return driver_runtime.get(key, data.get(key))", text)
+        self.assertIn('emit("HARNESS_DRIVER_ID", data.get("driver_id"))', text)
+        self.assertNotIn('emit("CLAUDE_SESSION_UUID"', text)
+        self.assertNotIn('emit("CLAUDE_RESUME"', text)
         self.assertIn('emit("PI_CODING_AGENT_DIR", driver_runtime_value("pi_coding_agent_dir"))', text)
         self.assertIn('emit("PI_CODING_AGENT_SESSION_DIR", driver_runtime_value("pi_coding_agent_session_dir"))', text)
         self.assertIn('emit("PI_OFFLINE", driver_runtime_value("pi_offline"))', text)
@@ -1646,13 +1682,30 @@ def argparse_namespace(**kwargs):
 
 def claude_runner_env():
     return {
-        "CLAUDE_SESSION_UUID": "11111111-2222-3333-4444-555555555555",
         "SESSION_ID": "sess",
         "HARNESS_AGENT_HOME": "/agent-home",
         "HARNESS_AGENT_UID": "65534",
         "HARNESS_AGENT_GID": "65534",
         "ANTHROPIC_BASE_URL": "http://harness-model-proxy.internal:8082",
     }
+
+
+def claude_runner(initialized=False, session_uuid="11111111-2222-3333-4444-555555555555"):
+    runner = bridge.ClaudeTurnRunner()
+    runner.set_turn_context(
+        {
+            "driver_state": {
+                "driver_id": "claude_code",
+                "state_payload": {
+                    "driver_id": "claude_code",
+                    "state_kind": "claude_session",
+                    "claude_session_uuid": session_uuid,
+                    "initialized": initialized,
+                },
+            }
+        }
+    )
+    return runner
 
 
 if __name__ == "__main__":

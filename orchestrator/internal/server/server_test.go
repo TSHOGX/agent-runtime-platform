@@ -1350,8 +1350,6 @@ WHERE session_id = ?
 		t.Fatalf("runtime calls prepare=%d start=%d", len(prepareRequests), len(startRequests))
 	}
 	if startRequests[0].GenerationID != gotSession.ActiveGenerationID ||
-		startRequests[0].ClaudeSessionUUID != session.ClaudeSessionUUID ||
-		startRequests[0].ResumeClaude ||
 		startRequests[0].WaitForTurn {
 		t.Fatalf("unexpected replacement start request: %+v", startRequests[0])
 	}
@@ -1437,7 +1435,6 @@ WHERE session_id = ?
 	start := startRequests[0]
 	if start.GenerationID != allocation.GenerationID ||
 		!start.RestoreFromCheckpoint ||
-		start.ResumeClaude ||
 		start.WaitForTurn ||
 		start.PreparedArtifacts.ManifestDigest != "restore_manifest_digest" ||
 		start.PreparedArtifacts.RunscVersion != "runsc restore-test" ||
@@ -2021,9 +2018,7 @@ func TestColdFallbackMaintenanceStartsReplacementForQueuedTurn(t *testing.T) {
 	}
 	_, startRequests := rt.requests()
 	if len(startRequests) != 1 ||
-		startRequests[0].GenerationID != gotSession.ActiveGenerationID ||
-		startRequests[0].ClaudeSessionUUID != session.ClaudeSessionUUID ||
-		startRequests[0].ResumeClaude {
+		startRequests[0].GenerationID != gotSession.ActiveGenerationID {
 		t.Fatalf("unexpected maintenance start requests: %+v", startRequests)
 	}
 	grant, ok, err := st.ClaimNextTurn(ctx, store.ClaimNextTurnParams{

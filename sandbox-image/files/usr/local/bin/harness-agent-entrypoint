@@ -4,7 +4,6 @@ set -eu
 echo "[entrypoint] starting" >&2
 
 CONTROL_JSON_FILE="/harness-control/session.json"
-CONTROL_ENV_FILE="/harness-control/session.env"
 POLL_INTERVAL="0.05"
 AGENT_USER="harness"
 AGENT_UID="${HARNESS_AGENT_UID:-}"
@@ -14,23 +13,17 @@ AGENT_GID="${HARNESS_AGENT_GID:-}"
 export HARNESS_AGENT_UID="$AGENT_UID"
 export HARNESS_AGENT_GID="$AGENT_GID"
 
-echo "[entrypoint] waiting for control file: $CONTROL_JSON_FILE or $CONTROL_ENV_FILE" >&2
-while [ ! -f "$CONTROL_JSON_FILE" ] && [ ! -f "$CONTROL_ENV_FILE" ]; do
+echo "[entrypoint] waiting for control file: $CONTROL_JSON_FILE" >&2
+while [ ! -f "$CONTROL_JSON_FILE" ]; do
   sleep "$POLL_INTERVAL"
 done
 
-CONTROL_FILE="$CONTROL_ENV_FILE"
-CONTROL_FORMAT="env"
-if [ -f "$CONTROL_JSON_FILE" ]; then
-  CONTROL_FILE="$CONTROL_JSON_FILE"
-  CONTROL_FORMAT="json"
-fi
+CONTROL_FILE="$CONTROL_JSON_FILE"
 
 echo "[entrypoint] loading control file: $CONTROL_FILE" >&2
-if [ "$CONTROL_FORMAT" = "json" ]; then
-  # shellcheck disable=SC2016
-  CONTROL_EXPORTS="$(
-    python3 - "$CONTROL_FILE" <<'PY'
+# shellcheck disable=SC2016
+CONTROL_EXPORTS="$(
+  python3 - "$CONTROL_FILE" <<'PY'
 import shlex
 import sys
 
@@ -43,7 +36,7 @@ if not isinstance(driver_runtime, dict):
     driver_runtime = {}
 
 def driver_runtime_value(key):
-    return driver_runtime.get(key, data.get(key))
+    return driver_runtime.get(key)
 
 def emit(key, value):
     if value is None or value == "":
@@ -59,15 +52,12 @@ emit("AGENT_RUNTIME_PROFILE_ID", data.get("agent_runtime_profile_id"))
 emit("MANIFEST_VERSION", data.get("manifest_version"))
 emit("SESSION_WORKSPACE", data.get("workspace_path"))
 emit("HARNESS_AGENT_HOME", data.get("agent_home_path"))
-emit("HARNESS_AGENT", data.get("agent"))
 emit("HARNESS_DRIVER_ID", data.get("driver_id"))
 emit("HARNESS_BRIDGE_PROTOCOL_VERSION", data.get("bridge_protocol_version"))
 emit("HARNESS_TURN_INPUT_SCHEMA", data.get("turn_input_schema"))
-emit("CLAUDE_SESSION_UUID", data.get("claude_session_uuid"))
-emit("CLAUDE_RESUME", data.get("resume_claude", False))
 emit("CLAUDE_MODEL", data.get("model", "sonnet"))
 emit("CLAUDE_OUTPUT_FORMAT", data.get("output_format", "stream-json"))
-emit("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", data.get("claude_code_disable_nonessential_traffic", True))
+emit("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", driver_runtime_value("claude_code_disable_nonessential_traffic"))
 emit("ANTHROPIC_BASE_URL", data.get("sandbox_model_proxy_base_url"))
 emit("PI_CODING_AGENT_DIR", driver_runtime_value("pi_coding_agent_dir"))
 emit("PI_CODING_AGENT_SESSION_DIR", driver_runtime_value("pi_coding_agent_session_dir"))
@@ -77,12 +67,8 @@ pi_telemetry_disabled = driver_runtime_value("pi_telemetry_disabled")
 if pi_telemetry_disabled is not None:
     emit("PI_TELEMETRY", "0" if pi_telemetry_disabled else "1")
 PY
-  )" || exit 65
-  eval "$CONTROL_EXPORTS"
-else
-  # shellcheck disable=SC1090
-  . "$CONTROL_FILE"
-fi
+)" || exit 65
+eval "$CONTROL_EXPORTS"
 
 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export PATH
@@ -90,6 +76,7 @@ export PATH
 [ -n "${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-}" ] && export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
 
 : "${SESSION_ID:?SESSION_ID is required in control file}"
+: "${HARNESS_DRIVER_ID:?HARNESS_DRIVER_ID is required in control file}"
 
 check_expected() {
   actual="$1"
@@ -113,8 +100,8 @@ if [ -n "${SECRET_MOUNT_PATH:-}" ] || [ -n "${ANTHROPIC_API_KEY_SECRET_ID:-}" ] 
 fi
 unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
 
-if [ "${HARNESS_AGENT:-claude}" = "claude" ]; then
-  : "${ANTHROPIC_BASE_URL:?ANTHROPIC_BASE_URL is required for claude agent}"
+if [ "$HARNESS_DRIVER_ID" = "claude_code" ]; then
+  : "${ANTHROPIC_BASE_URL:?ANTHROPIC_BASE_URL is required for claude_code driver}"
   export ANTHROPIC_BASE_URL
 fi
 
@@ -147,22 +134,23 @@ fi
 
 cd /workspace
 
-if [ "${HARNESS_AGENT:-claude}" = "claude" ]; then
-  : "${CLAUDE_SESSION_UUID:?CLAUDE_SESSION_UUID is required for claude agent}"
+if [ "$HARNESS_DRIVER_ID" = "claude_code" ]; then
   ensure_agent_user
 fi
 
 exec_bridge_client() {
-  if [ "${HARNESS_AGENT:-claude}" = "claude" ]; then
+  if [ "$HARNESS_DRIVER_ID" = "claude_code" ]; then
     if [ "$(id -u)" = "$AGENT_UID" ] && [ "$(id -g)" = "$AGENT_GID" ]; then
       exec env HOME="$AGENT_HOME" USER="$AGENT_USER" LOGNAME="$AGENT_USER" \
         HARNESS_AGENT_HOME="$AGENT_HOME" \
+        HARNESS_DRIVER_ID="$HARNESS_DRIVER_ID" \
         ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-}" \
         /usr/local/bin/harness-bridge-client "$@"
     fi
     exec setpriv --reuid "$AGENT_UID" --regid "$AGENT_GID" --clear-groups \
       env HOME="$AGENT_HOME" USER="$AGENT_USER" LOGNAME="$AGENT_USER" \
       HARNESS_AGENT_HOME="$AGENT_HOME" \
+      HARNESS_DRIVER_ID="$HARNESS_DRIVER_ID" \
       ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-}" \
       /usr/local/bin/harness-bridge-client "$@"
   fi
@@ -173,63 +161,10 @@ if [ "${HARNESS_BRIDGE_MODE:-}" = "claim-loop" ]; then
   echo "[entrypoint] bridge claim loop starting" >&2
   exec_bridge_client claim-loop
 fi
-if [ "${HARNESS_BRIDGE_MODE:-auto}" = "auto" ]; then
-  echo "[entrypoint] bridge probe starting" >&2
-  /usr/local/bin/harness-bridge-client probe
-  /usr/local/bin/harness-bridge-client heartbeat-loop &
+if [ "${HARNESS_BRIDGE_MODE:-}" = "heartbeat-loop" ]; then
+  echo "[entrypoint] bridge heartbeat loop starting" >&2
+  exec_bridge_client heartbeat-loop
 fi
 
-echo "[entrypoint] agent: ${HARNESS_AGENT:-claude}" >&2
-case "${HARNESS_AGENT:-claude}" in
-  claude)
-    echo "[entrypoint] claude turn loop starting" >&2
-
-    first_turn=1
-    while IFS= read -r turn; do
-      [ -n "$turn" ] || continue
-      echo "[entrypoint] claude turn starting" >&2
-      set -- /usr/local/bin/claude \
-        --bare \
-        --permission-mode bypassPermissions \
-        -p \
-        --model "${CLAUDE_MODEL:-sonnet}" \
-        --input-format stream-json \
-        --output-format "${CLAUDE_OUTPUT_FORMAT:-stream-json}" \
-        --include-partial-messages \
-        --replay-user-messages \
-        --verbose
-      if [ "$first_turn" = "1" ] && [ "${CLAUDE_RESUME:-0}" != "1" ]; then
-        set -- "$@" --session-id "$CLAUDE_SESSION_UUID"
-      else
-        set -- "$@" --resume "$CLAUDE_SESSION_UUID"
-      fi
-      set +e
-      ANTHROPIC_API_KEY="${HARNESS_PROXY_DUMMY_API_KEY:-harness-model-proxy-dummy-key}"
-      export ANTHROPIC_API_KEY
-      printf '%s\n' "$turn" | setpriv --reuid "$AGENT_UID" --regid "$AGENT_GID" --clear-groups \
-        env HOME="$AGENT_HOME" USER="$AGENT_USER" LOGNAME="$AGENT_USER" \
-        ANTHROPIC_BASE_URL="$ANTHROPIC_BASE_URL" \
-        sh -c '
-          export ANTHROPIC_BASE_URL ANTHROPIC_API_KEY
-          unset ANTHROPIC_AUTH_TOKEN
-          exec "$@"
-        ' sh "$@"
-      status=$?
-      unset ANTHROPIC_API_KEY
-      set -e
-      if [ "$status" -ne 0 ]; then
-        echo "[entrypoint] claude turn exited with status $status" >&2
-      fi
-      first_turn=0
-    done
-    echo "[entrypoint] stdin closed; exiting" >&2
-    ;;
-  sh)
-    echo "[entrypoint] sh agent starting" >&2
-    exec /usr/local/bin/harness-shell-agent
-    ;;
-  *)
-    echo "unknown HARNESS_AGENT: ${HARNESS_AGENT}" >&2
-    exit 64
-    ;;
-esac
+echo "[entrypoint] unsupported HARNESS_BRIDGE_MODE: ${HARNESS_BRIDGE_MODE:-}" >&2
+exit 64

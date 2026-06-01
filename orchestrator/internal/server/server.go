@@ -1372,8 +1372,6 @@ func (s *Server) runtimeStartRequest(session store.Session, generationID string,
 		GenerationID:      generationID,
 		Agent:             session.Agent,
 		WaitForTurn:       false,
-		ClaudeSessionUUID: session.ClaudeSessionUUID,
-		ResumeClaude:      driverStateInitialized(details),
 		Generation:        details,
 		PreparedArtifacts: artifacts,
 		WorkspaceHostPath: volumes.Workspace.HostPath,
@@ -1383,19 +1381,6 @@ func (s *Server) runtimeStartRequest(session store.Session, generationID string,
 
 func validateDriverStateForRuntimeLaunch(details store.RuntimeGenerationDetails, volumes sessionRuntimeDataVolumes) error {
 	return store.ValidateDriverStatePayloadForRuntimeLaunch(details.Agent, details.DriverStatePayload, volumes.DriverHome.HostPath)
-}
-
-func driverStateInitialized(details store.RuntimeGenerationDetails) bool {
-	if strings.TrimSpace(details.Agent) != string(agents.ClaudeCode) || len(details.DriverStatePayload) == 0 {
-		return false
-	}
-	var payload struct {
-		Initialized bool `json:"initialized"`
-	}
-	if err := json.Unmarshal(details.DriverStatePayload, &payload); err != nil {
-		return false
-	}
-	return payload.Initialized
 }
 
 func (s *Server) ensureSessionRuntimeDataVolumes(ctx context.Context, session store.Session) (sessionRuntimeDataVolumes, error) {

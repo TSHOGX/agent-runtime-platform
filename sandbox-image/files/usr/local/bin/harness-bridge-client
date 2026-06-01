@@ -101,21 +101,6 @@ def claude_session_marker_path(agent_home):
     return Path(agent_home) / CLAUDE_MARKER_DIR / CLAUDE_SESSION_MARKER
 
 
-def claude_session_marker_matches(agent_home, session_uuid):
-    marker = claude_session_marker_path(agent_home)
-    try:
-        raw = marker.read_text(encoding="utf-8").strip()
-    except OSError:
-        return False
-    if raw == session_uuid:
-        return True
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        return False
-    return payload.get("claude_session_uuid") == session_uuid
-
-
 def claude_session_state_exists(agent_home, session_uuid):
     projects = Path(agent_home) / ".claude" / "projects"
     if not projects.is_dir():
@@ -127,13 +112,6 @@ def claude_session_state_exists(agent_home, session_uuid):
     except OSError:
         return False
     return False
-
-
-def claude_session_initialized(agent_home, session_uuid):
-    return claude_session_marker_matches(agent_home, session_uuid) or claude_session_state_exists(
-        agent_home,
-        session_uuid,
-    )
 
 
 def mark_claude_session_initialized(agent_home, session_uuid):
@@ -240,15 +218,11 @@ class Queue:
             pass
 
 
-def canonical_driver_id(value):
-    value = (value or "").strip()
-    if value == "claude":
-        return "claude_code"
-    return value or "claude_code"
-
-
 def args_driver_id(args):
-    return canonical_driver_id(getattr(args, "driver_id", getattr(args, "agent", "claude_code")))
+    driver_id = (getattr(args, "driver_id", "") or "").strip()
+    if not driver_id:
+        raise RuntimeError("--driver-id is required")
+    return driver_id
 
 
 class BridgeClient:
@@ -256,7 +230,9 @@ class BridgeClient:
         self.root = Path(root)
         self.session_id = session_id
         self.generation_id = generation_id
-        self.driver_id = canonical_driver_id(driver_id)
+        self.driver_id = (driver_id or "").strip()
+        if not self.driver_id:
+            raise RuntimeError("driver_id is required")
         self.poll_interval = poll_interval
         self.inbox = Queue(root, INBOX)
         self.outbox = Queue(root, OUTBOX)
@@ -414,12 +390,25 @@ class ShellTurnRunner:
 
 class ClaudeTurnRunner:
     def __init__(self):
-        self.first_turn = True
+        self.current_grant = {}
+
+    def set_turn_context(self, grant):
+        self.current_grant = dict(grant or {})
+
+    def _grant_driver_state_payload(self):
+        token = self.current_grant.get("driver_state") or {}
+        if token.get("driver_id") != "claude_code":
+            return {}
+        payload = token.get("state_payload") or {}
+        if isinstance(payload, dict):
+            return payload
+        return {}
 
     def run_turn(self, content, emit):
-        session_uuid = os.environ.get("CLAUDE_SESSION_UUID", "")
+        state_payload = self._grant_driver_state_payload()
+        session_uuid = str(state_payload.get("claude_session_uuid") or "").strip()
         if not session_uuid:
-            raise RuntimeError("CLAUDE_SESSION_UUID is required for claude agent")
+            raise RuntimeError("claude driver_state claude_session_uuid is required")
         agent_home = os.environ.get("HARNESS_AGENT_HOME", "")
         if not agent_home:
             raise RuntimeError("HARNESS_AGENT_HOME is required for claude agent")
@@ -439,16 +428,11 @@ class ClaudeTurnRunner:
             "--replay-user-messages",
             "--verbose",
         ]
-        resume_claude = (
-            os.environ.get("CLAUDE_RESUME", "0") == "1"
-            or not self.first_turn
-            or claude_session_initialized(agent_home, session_uuid)
-        )
-        if resume_claude:
+        state_initialized = bool(state_payload.get("initialized"))
+        if state_initialized:
             claude_command.extend(["--resume", session_uuid])
         else:
             claude_command.extend(["--session-id", session_uuid])
-        self.first_turn = False
 
         env = {
             "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
@@ -872,7 +856,7 @@ RUNNER_FACTORIES = {
 
 
 def make_turn_runner(driver_id):
-    driver_id = canonical_driver_id(driver_id)
+    driver_id = (driver_id or "").strip()
     factory = RUNNER_FACTORIES.get(driver_id)
     if factory is not None:
         return factory()
@@ -1053,7 +1037,7 @@ def main(argv=None):
     parser.add_argument("--bridge-dir", default=os.environ.get("HARNESS_BRIDGE_DIR", "/harness-control/bridge"))
     parser.add_argument("--session-id", default=os.environ.get("SESSION_ID"))
     parser.add_argument("--generation-id", default=os.environ.get("GENERATION_ID"))
-    parser.add_argument("--driver-id", default=os.environ.get("HARNESS_DRIVER_ID", os.environ.get("HARNESS_AGENT", "claude_code")))
+    parser.add_argument("--driver-id", default=os.environ.get("HARNESS_DRIVER_ID", ""))
     parser.add_argument("--poll-interval", type=float, default=float(os.environ.get("HARNESS_BRIDGE_POLL_INTERVAL", "0.05")))
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--base-url", default=os.environ.get("ANTHROPIC_BASE_URL", ""))
@@ -1071,6 +1055,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if not args.session_id or not args.generation_id:
         parser.error("--session-id and --generation-id are required")
+    if not args.driver_id:
+        parser.error("--driver-id is required")
     if args.command == "probe":
         run_probe(args)
     elif args.command == "heartbeat-loop":

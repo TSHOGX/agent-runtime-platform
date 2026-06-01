@@ -105,8 +105,6 @@ type StartRequest struct {
 	Agent                 string
 	FirstMessage          string
 	WaitForTurn           bool
-	ClaudeSessionUUID     string
-	ResumeClaude          bool
 	RestoreFromCheckpoint bool
 	Done                  <-chan struct{}
 	Generation            store.RuntimeGenerationDetails
@@ -147,33 +145,29 @@ type checkpointImageManifestFile struct {
 }
 
 type controlManifest struct {
-	SessionID                            string         `json:"session_id"`
-	GenerationID                         string         `json:"generation_id"`
-	SandboxContractVersion               string         `json:"sandbox_contract_version"`
-	CreatedAt                            string         `json:"created_at"`
-	AttemptID                            string         `json:"attempt_id"`
-	NetworkProfileID                     string         `json:"network_profile_id"`
-	AgentRuntimeProfileID                string         `json:"agent_runtime_profile_id"`
-	Agent                                string         `json:"agent"`
-	DriverID                             string         `json:"driver_id"`
-	BridgeProtocolVersion                int            `json:"bridge_protocol_version"`
-	TurnInputSchema                      string         `json:"turn_input_schema"`
-	ClaudeSessionUUID                    string         `json:"claude_session_uuid,omitempty"`
-	ResumeClaude                         bool           `json:"resume_claude"`
-	RunscPlatform                        string         `json:"runsc_platform"`
-	RunscVersion                         string         `json:"runsc_version"`
-	SandboxModelProxyBaseURL             string         `json:"sandbox_model_proxy_base_url,omitempty"`
-	Model                                string         `json:"model,omitempty"`
-	OutputFormat                         string         `json:"output_format"`
-	WorkspacePath                        string         `json:"workspace_path"`
-	AgentHomePath                        string         `json:"agent_home_path"`
-	BundleDigest                         string         `json:"bundle_digest"`
-	RuntimeConfigDigest                  string         `json:"runtime_config_digest"`
-	SpecDigest                           string         `json:"spec_digest"`
-	EgressPolicyDigest                   string         `json:"egress_policy_digest"`
-	ManifestVersion                      int            `json:"manifest_version"`
-	ClaudeCodeDisableNonessentialTraffic bool           `json:"claude_code_disable_nonessential_traffic"`
-	DriverRuntime                        map[string]any `json:"driver_runtime,omitempty"`
+	SessionID                string         `json:"session_id"`
+	GenerationID             string         `json:"generation_id"`
+	SandboxContractVersion   string         `json:"sandbox_contract_version"`
+	CreatedAt                string         `json:"created_at"`
+	AttemptID                string         `json:"attempt_id"`
+	NetworkProfileID         string         `json:"network_profile_id"`
+	AgentRuntimeProfileID    string         `json:"agent_runtime_profile_id"`
+	DriverID                 string         `json:"driver_id"`
+	BridgeProtocolVersion    int            `json:"bridge_protocol_version"`
+	TurnInputSchema          string         `json:"turn_input_schema"`
+	RunscPlatform            string         `json:"runsc_platform"`
+	RunscVersion             string         `json:"runsc_version"`
+	SandboxModelProxyBaseURL string         `json:"sandbox_model_proxy_base_url,omitempty"`
+	Model                    string         `json:"model,omitempty"`
+	OutputFormat             string         `json:"output_format"`
+	WorkspacePath            string         `json:"workspace_path"`
+	AgentHomePath            string         `json:"agent_home_path"`
+	BundleDigest             string         `json:"bundle_digest"`
+	RuntimeConfigDigest      string         `json:"runtime_config_digest"`
+	SpecDigest               string         `json:"spec_digest"`
+	EgressPolicyDigest       string         `json:"egress_policy_digest"`
+	ManifestVersion          int            `json:"manifest_version"`
+	DriverRuntime            map[string]any `json:"driver_runtime,omitempty"`
 }
 
 type controlManifestFile struct {
@@ -1098,7 +1092,7 @@ func (r *Runtime) deleteRunscContainer(ctx context.Context, runscBinary, contain
 func (r *Runtime) deleteRunscContainerDetailed(ctx context.Context, runscBinary, containerID string) (runscContainerDeleteResult, error) {
 	runscBinary = defaultString(runscBinary, "runsc")
 	_, _ = r.runner.CombinedOutput(ctx, runscBinary, "-root", r.cfg.RunscRoot, "kill", containerID, "KILL")
-	output, err := r.runner.CombinedOutput(ctx, runscBinary, "-root", r.cfg.RunscRoot, "delete", containerID)
+	output, err := r.runner.CombinedOutput(ctx, runscBinary, "-root", r.cfg.RunscRoot, "delete", "-force", containerID)
 	if err != nil {
 		if commandFailureContains(output, err, "does not exist", "not found", "no such container", "no such file") {
 			return runscContainerDeleteResult{Missing: true}, nil
@@ -1447,48 +1441,58 @@ func (r *Runtime) buildGenerationManifest(req StartRequest, runscVersion, bundle
 		return controlManifest{}, fmt.Errorf("unsupported agent %q", selectedDriver)
 	}
 	selectedDriver := driverID(req)
-	agent, _ := agents.SandboxAgentForDriver(selectedDriver)
 	manifest := controlManifest{
-		SessionID:                            req.SessionID,
-		GenerationID:                         details.GenerationID,
-		SandboxContractVersion:               defaultString(details.SandboxContractVersion, store.SandboxContractVersion),
-		CreatedAt:                            time.Now().UTC().Format(time.RFC3339Nano),
-		AttemptID:                            "attempt-0",
-		NetworkProfileID:                     details.NetworkProfileID,
-		AgentRuntimeProfileID:                details.AgentRuntimeProfileID,
-		Agent:                                agent,
-		DriverID:                             selectedDriver,
-		BridgeProtocolVersion:                2,
-		TurnInputSchema:                      "RunTurn",
-		ClaudeSessionUUID:                    req.ClaudeSessionUUID,
-		ResumeClaude:                         req.ResumeClaude,
-		RunscPlatform:                        effectiveRunscPlatform(details),
-		RunscVersion:                         runscVersion,
-		SandboxModelProxyBaseURL:             details.ManifestAnthropicBaseURL,
-		Model:                                details.Model,
-		OutputFormat:                         details.OutputFormat,
-		WorkspacePath:                        "/workspace",
-		AgentHomePath:                        "/agent-home",
-		BundleDigest:                         bundleDigest,
-		RuntimeConfigDigest:                  runtimeConfigDigest,
-		SpecDigest:                           specDigest,
-		EgressPolicyDigest:                   details.EgressPolicyDigest,
-		ManifestVersion:                      1,
-		ClaudeCodeDisableNonessentialTraffic: details.DisableNonessentialTraffic,
+		SessionID:                req.SessionID,
+		GenerationID:             details.GenerationID,
+		SandboxContractVersion:   defaultString(details.SandboxContractVersion, store.SandboxContractVersion),
+		CreatedAt:                time.Now().UTC().Format(time.RFC3339Nano),
+		AttemptID:                "attempt-0",
+		NetworkProfileID:         details.NetworkProfileID,
+		AgentRuntimeProfileID:    details.AgentRuntimeProfileID,
+		DriverID:                 selectedDriver,
+		BridgeProtocolVersion:    2,
+		TurnInputSchema:          "RunTurn",
+		RunscPlatform:            effectiveRunscPlatform(details),
+		RunscVersion:             runscVersion,
+		SandboxModelProxyBaseURL: details.ManifestAnthropicBaseURL,
+		Model:                    details.Model,
+		OutputFormat:             details.OutputFormat,
+		WorkspacePath:            "/workspace",
+		AgentHomePath:            "/agent-home",
+		BundleDigest:             bundleDigest,
+		RuntimeConfigDigest:      runtimeConfigDigest,
+		SpecDigest:               specDigest,
+		EgressPolicyDigest:       details.EgressPolicyDigest,
+		ManifestVersion:          1,
 	}
+	applyDriverRuntimeManifestFields(&manifest, details)
 	if layout, ok := agents.DriverRuntimeLayoutSpecFor(agents.ID(selectedDriver)); ok {
 		applyDriverControlManifestSpec(&manifest, layout.ControlManifest)
 	}
 	return manifest, nil
 }
 
+func applyDriverRuntimeManifestFields(manifest *controlManifest, details store.RuntimeGenerationDetails) {
+	switch agents.ID(strings.TrimSpace(manifest.DriverID)) {
+	case agents.ClaudeCode:
+		ensureDriverRuntimeManifest(manifest)
+		manifest.DriverRuntime["claude_code_disable_nonessential_traffic"] = details.DisableNonessentialTraffic
+	}
+}
+
 func applyDriverControlManifestSpec(manifest *controlManifest, spec agents.DriverRuntimeControlManifestSpec) {
 	if len(spec.Fields) == 0 {
 		return
 	}
-	manifest.DriverRuntime = make(map[string]any, len(spec.Fields))
+	ensureDriverRuntimeManifest(manifest)
 	for key, value := range spec.Fields {
 		manifest.DriverRuntime[key] = value
+	}
+}
+
+func ensureDriverRuntimeManifest(manifest *controlManifest) {
+	if manifest.DriverRuntime == nil {
+		manifest.DriverRuntime = make(map[string]any)
 	}
 }
 
@@ -1573,12 +1577,9 @@ func controlManifestProjectionFields() (map[string]struct{}, map[string]struct{}
 		"sandbox_contract_version":     {},
 		"network_profile_id":           {},
 		"agent_runtime_profile_id":     {},
-		"agent":                        {},
 		"driver_id":                    {},
 		"bridge_protocol_version":      {},
 		"turn_input_schema":            {},
-		"claude_session_uuid":          {},
-		"resume_claude":                {},
 		"runsc_platform":               {},
 		"runsc_version":                {},
 		"sandbox_model_proxy_base_url": {},
@@ -1591,8 +1592,7 @@ func controlManifestProjectionFields() (map[string]struct{}, map[string]struct{}
 		"spec_digest":                  {},
 		"egress_policy_digest":         {},
 		"manifest_version":             {},
-		"claude_code_disable_nonessential_traffic": {},
-		"driver_runtime": {},
+		"driver_runtime":               {},
 	}
 	regenerableFields := map[string]struct{}{
 		"created_at": {},
@@ -1617,8 +1617,7 @@ func (r *Runtime) renderSandboxIsolatedRuntimeSpec(req StartRequest) (runtimeSpe
 	var spec runtimeSpec
 	details := req.Generation
 	selectedDriver := driverID(req)
-	agent, ok := agents.SandboxAgentForDriver(selectedDriver)
-	if !ok {
+	if _, ok := agents.DriverSpecFor(selectedDriver); !ok {
 		return runtimeSpec{}, "", fmt.Errorf("unsupported agent %q", selectedDriver)
 	}
 	identity, err := r.requiredSandboxIdentity(details)
@@ -1652,7 +1651,6 @@ func (r *Runtime) renderSandboxIsolatedRuntimeSpec(req StartRequest) (runtimeSpe
 		"LOGNAME=harness",
 		"SESSION_WORKSPACE=/workspace",
 		"HARNESS_AGENT_HOME=/agent-home",
-		"HARNESS_AGENT=" + agent,
 		"HARNESS_DRIVER_ID=" + driverID(req),
 		"HARNESS_TURN_INPUT_SCHEMA=RunTurn",
 		"HARNESS_BRIDGE_PROTOCOL_VERSION=2",

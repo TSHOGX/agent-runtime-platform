@@ -28,9 +28,9 @@ type streamParser struct {
 	pending      map[string]*strings.Builder
 	pendingOrder []string
 	done         chan struct{}
-	once    sync.Once
-	err     error
-	last    string
+	once         sync.Once
+	err          error
+	last         string
 }
 
 type outputNormalizer interface {
@@ -60,6 +60,9 @@ type claudeOutputNormalizer struct{}
 type piOutputNormalizer struct{}
 type shellOutputNormalizer struct{}
 type nativeEventsOutputNormalizer struct{}
+type unsupportedOutputNormalizer struct {
+	driverID string
+}
 
 type claudeStreamDelta struct {
 	Type        string `json:"type"`
@@ -77,12 +80,12 @@ type claudeStreamEvent struct {
 	} `json:"message"`
 }
 
-func newStreamParser(srv *Server, sessionID, agent string) *streamParser {
+func newStreamParser(srv *Server, sessionID, driverID string) *streamParser {
 	return &streamParser{
 		srv:        srv,
 		sessionID:  sessionID,
-		driverID:   strings.TrimSpace(agent),
-		normalizer: outputNormalizerForDriver(agent),
+		driverID:   strings.TrimSpace(driverID),
+		normalizer: outputNormalizerForDriver(driverID),
 		pending:    map[string]*strings.Builder{},
 		done:       make(chan struct{}),
 	}
@@ -194,12 +197,9 @@ func (output normalizerBridgeOutput) line() (string, bool) {
 
 func outputNormalizerForDriver(driverID string) outputNormalizer {
 	driverID = strings.TrimSpace(driverID)
-	if driverID == agents.LegacyClaudeToken {
-		driverID = string(agents.ClaudeCode)
-	}
 	factory := outputNormalizers[driverID]
 	if factory == nil {
-		factory = outputNormalizers[string(agents.ClaudeCode)]
+		return unsupportedOutputNormalizer{driverID: driverID}
 	}
 	return factory()
 }
@@ -209,6 +209,15 @@ var outputNormalizers = map[string]outputNormalizerFactory{
 	string(agents.Pi):         func() outputNormalizer { return piOutputNormalizer{} },
 	string(agents.Shell):      func() outputNormalizer { return shellOutputNormalizer{} },
 	"native_events_probe":     func() outputNormalizer { return nativeEventsOutputNormalizer{} },
+}
+
+func (n unsupportedOutputNormalizer) Handle(p *streamParser, output normalizerBridgeOutput) {
+	if n.driverID == "" {
+		p.err = fmt.Errorf("driver id is required")
+	} else {
+		p.err = fmt.Errorf("unsupported driver %q", n.driverID)
+	}
+	p.complete()
 }
 
 func (claudeOutputNormalizer) Handle(p *streamParser, output normalizerBridgeOutput) {

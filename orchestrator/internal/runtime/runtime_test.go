@@ -227,8 +227,8 @@ func TestCanonicalManifestDigestMatchesSandboxProjectionFixture(t *testing.T) {
 	if err != nil {
 		t.Fatalf("canonicalize manifest fixture: %v", err)
 	}
-	const wantCanonical = `{"agent":"sh","agent_home_path":"/agent-home","agent_runtime_profile_id":"arp_fixture","attempt_id":"attempt_fixture","bundle_digest":"bundle_digest_fixture","claude_code_disable_nonessential_traffic":true,"created_at":"2026-05-25T00:00:00Z","egress_policy_digest":"egress_digest_fixture","generation_id":"gen_fixture","manifest_version":1,"network_profile_id":"net_fixture","output_format":"stream-json","resume_claude":false,"runsc_platform":"systrap","runsc_version":"runsc release-20260511.0","runtime_config_digest":"runtime_config_digest_fixture","sandbox_contract_version":"sandbox-isolation-v1","session_id":"sess_fixture","spec_digest":"spec_digest_fixture","workspace_path":"/workspace"}`
-	const wantDigest = "2b25f059344966e1dfb6f714a3e075d20d2053652dd41776339f2ab39d6d59a0"
+	const wantCanonical = `{"agent_home_path":"/agent-home","agent_runtime_profile_id":"arp_fixture","attempt_id":"attempt_fixture","bridge_protocol_version":2,"bundle_digest":"bundle_digest_fixture","created_at":"2026-05-25T00:00:00Z","driver_id":"sh","egress_policy_digest":"egress_digest_fixture","generation_id":"gen_fixture","manifest_version":1,"network_profile_id":"net_fixture","output_format":"stream-json","runsc_platform":"systrap","runsc_version":"runsc release-20260511.0","runtime_config_digest":"runtime_config_digest_fixture","sandbox_contract_version":"sandbox-isolation-v1","session_id":"sess_fixture","spec_digest":"spec_digest_fixture","turn_input_schema":"RunTurn","workspace_path":"/workspace"}`
+	const wantDigest = "a027f6f46bfb30bd0f4a400a6d90def318ac881e383ec59693aee4c57d47d68c"
 	if string(canonical) != wantCanonical {
 		t.Fatalf("canonical fixture mismatch:\ngot  %s\nwant %s", canonical, wantCanonical)
 	}
@@ -884,7 +884,7 @@ func TestDestroyGenerationResourcesDeletesPerGenerationNetwork(t *testing.T) {
 
 	want := []string{
 		"runsc -root " + filepath.Join(dir, "runsc-root") + " kill harness-gen-gen_a KILL",
-		"runsc -root " + filepath.Join(dir, "runsc-root") + " delete harness-gen-gen_a",
+		"runsc -root " + filepath.Join(dir, "runsc-root") + " delete -force harness-gen-gen_a",
 		"nft delete table inet harness_gen_gen_a",
 		"ip link delete hgenah",
 		"ip netns delete harness-gen-a",
@@ -908,7 +908,7 @@ func TestDestroyGenerationResourcesFallsBackToRecordedRunscOnPinMismatch(t *test
 			"runsc --version": []byte("runsc current"),
 		},
 		fail: map[string]error{
-			currentRunscPath + " -root " + runscRoot + " delete harness-gen-gen_pin": errors.New("incompatible runsc root"),
+			currentRunscPath + " -root " + runscRoot + " delete -force harness-gen-gen_pin": errors.New("incompatible runsc root"),
 			oldRunscPath + " -root " + runscRoot + " state harness-gen-gen_pin":      errors.New("not found"),
 		},
 	}
@@ -941,9 +941,9 @@ func TestDestroyGenerationResourcesFallsBackToRecordedRunscOnPinMismatch(t *test
 	want := []string{
 		"runsc --version",
 		currentRunscPath + " -root " + runscRoot + " kill harness-gen-gen_pin KILL",
-		currentRunscPath + " -root " + runscRoot + " delete harness-gen-gen_pin",
+		currentRunscPath + " -root " + runscRoot + " delete -force harness-gen-gen_pin",
 		oldRunscPath + " -root " + runscRoot + " kill harness-gen-gen_pin KILL",
-		oldRunscPath + " -root " + runscRoot + " delete harness-gen-gen_pin",
+		oldRunscPath + " -root " + runscRoot + " delete -force harness-gen-gen_pin",
 		oldRunscPath + " -root " + runscRoot + " state harness-gen-gen_pin",
 	}
 	if got := runner.Commands(); strings.Join(got, "\n") != strings.Join(want, "\n") {
@@ -961,7 +961,7 @@ func TestDestroyGenerationResourcesRejectsRecordedRunscDigestMismatch(t *testing
 			"runsc --version": []byte("runsc current"),
 		},
 		fail: map[string]error{
-			currentRunscPath + " -root " + runscRoot + " delete harness-gen-gen_pin_bad": errors.New("incompatible runsc root"),
+			currentRunscPath + " -root " + runscRoot + " delete -force harness-gen-gen_pin_bad": errors.New("incompatible runsc root"),
 		},
 	}
 	rt := New(Config{
@@ -1253,7 +1253,7 @@ func TestDestroyGenerationResourcesCleansFilesystemWithIncompleteSandboxMetadata
 
 	want := []string{
 		"runsc -root " + filepath.Join(dir, "runsc-root") + " kill harness-gen-gen_missing_net KILL",
-		"runsc -root " + filepath.Join(dir, "runsc-root") + " delete harness-gen-gen_missing_net",
+		"runsc -root " + filepath.Join(dir, "runsc-root") + " delete -force harness-gen-gen_missing_net",
 		"nft delete table inet harness_gen_gen_missing_net",
 		"runsc -root " + filepath.Join(dir, "runsc-root") + " state harness-gen-gen_missing_net",
 		"nft list table inet harness_gen_gen_missing_net",
@@ -1352,7 +1352,7 @@ func TestRunscRunningEvidenceRetriesTransientStateMiss(t *testing.T) {
 func TestDestroyTreatsMissingRunscContainerAsAbsent(t *testing.T) {
 	runner := &recordingCommandRunner{
 		sequence: map[string][]commandResult{
-			"runsc -root /runsc delete phase3-missing": {
+			"runsc -root /runsc delete -force phase3-missing": {
 				{out: []byte("container phase3-missing not found"), err: errors.New("exit status 1")},
 			},
 		},
@@ -1364,7 +1364,7 @@ func TestDestroyTreatsMissingRunscContainerAsAbsent(t *testing.T) {
 	}
 	want := []string{
 		"runsc -root /runsc kill phase3-missing KILL",
-		"runsc -root /runsc delete phase3-missing",
+		"runsc -root /runsc delete -force phase3-missing",
 	}
 	if got := runner.Commands(); !slices.Equal(got, want) {
 		t.Fatalf("commands=%v want %v", got, want)
@@ -1610,12 +1610,10 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndIsolatedRuntime(t *t
 
 	workspacePath, agentHomePath := dataVolumePathsForTest(dir, "sess_1", "claude_code")
 	artifacts, err := rt.PrepareGeneration(context.Background(), withDataVolumePathsForTest(dir, StartRequest{
-		SessionID:         "sess_1",
-		GenerationID:      details.GenerationID,
-		Agent:             "claude_code",
-		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
-		ResumeClaude:      true,
-		Generation:        details,
+		SessionID:    "sess_1",
+		GenerationID: details.GenerationID,
+		Agent:        "claude_code",
+		Generation:   details,
 	}))
 	if err != nil {
 		t.Fatalf("prepare generation: %v", err)
@@ -1655,17 +1653,14 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndIsolatedRuntime(t *t
 	if manifest.WorkspacePath != "/workspace" || manifest.AgentHomePath != "/agent-home" {
 		t.Fatalf("unexpected workspace/home paths: %+v", manifest)
 	}
-	if !manifest.ResumeClaude {
-		t.Fatalf("expected resume flag to be set: %+v", manifest)
-	}
 	if manifest.SandboxModelProxyBaseURL != "http://harness-model-proxy.internal:8082" {
 		t.Fatalf("unexpected sandbox base URL: %+v", manifest)
 	}
 	if strings.Contains(string(data), `"anthropic_api_key":`) || strings.Contains(string(data), `"anthropic_auth_token":`) {
 		t.Fatalf("manifest must not contain plaintext credential fields: %s", data)
 	}
-	if !manifest.ClaudeCodeDisableNonessentialTraffic {
-		t.Fatalf("expected nonessential traffic to be disabled: %+v", manifest)
+	if manifest.DriverRuntime["claude_code_disable_nonessential_traffic"] != true {
+		t.Fatalf("expected nonessential traffic to be disabled: %+v", manifest.DriverRuntime)
 	}
 	if manifest.Model != "sonnet" || manifest.OutputFormat != "stream-json" {
 		t.Fatalf("unexpected Claude defaults: %+v", manifest)
@@ -1747,7 +1742,7 @@ func TestPrepareGenerationWritesPerGenerationSpecManifestAndIsolatedRuntime(t *t
 	if _, ok := env["HARNESS_PROBE_MESSAGE_STATUSES"]; ok {
 		t.Fatalf("runtime spec must not configure pre-turn model endpoint probes: %+v", env)
 	}
-	if env["HARNESS_AGENT"] != "claude" ||
+	if env["HARNESS_DRIVER_ID"] != "claude_code" ||
 		env["HARNESS_AGENT_UID"] != fmt.Sprint(testSandboxUID()) ||
 		env["HARNESS_AGENT_GID"] != fmt.Sprint(testSandboxGID()) ||
 		env["SESSION_WORKSPACE"] != "/workspace" ||
@@ -1825,11 +1820,10 @@ func TestPrepareClaudeHostOnlyGenerationHasNoSecretMount(t *testing.T) {
 	details.NetworkHostsPath = filepath.Join(dir, "run", "network", "gen-"+details.GenerationID, "hosts")
 
 	if _, err := rt.PrepareGeneration(context.Background(), withDataVolumePathsForTest(dir, StartRequest{
-		SessionID:         "sess_1",
-		GenerationID:      details.GenerationID,
-		Agent:             "claude_code",
-		ClaudeSessionUUID: "11111111-2222-3333-4444-555555555555",
-		Generation:        details,
+		SessionID:    "sess_1",
+		GenerationID: details.GenerationID,
+		Agent:        "claude_code",
+		Generation:   details,
 	})); err != nil {
 		t.Fatalf("prepare host-only claude generation: %v", err)
 	}
@@ -2640,29 +2634,31 @@ func assertGenerationFilesystemPresent(t *testing.T, paths []string) {
 
 func testControlManifest() controlManifest {
 	return controlManifest{
-		SessionID:                            "sess_1",
-		GenerationID:                         "gen_a",
-		SandboxContractVersion:               store.SandboxContractVersion,
-		CreatedAt:                            "2026-01-01T00:00:00Z",
-		AttemptID:                            "attempt-1",
-		NetworkProfileID:                     "net_a",
-		AgentRuntimeProfileID:                "arp_a",
-		Agent:                                "claude_code",
-		ClaudeSessionUUID:                    "11111111-2222-3333-4444-555555555555",
-		ResumeClaude:                         true,
-		RunscPlatform:                        "systrap",
-		RunscVersion:                         "runsc test",
-		SandboxModelProxyBaseURL:             "http://harness-model-proxy.internal:8082",
-		Model:                                "sonnet",
-		OutputFormat:                         "stream-json",
-		WorkspacePath:                        "/workspace",
-		AgentHomePath:                        "/agent-home",
-		BundleDigest:                         "bundle_digest",
-		RuntimeConfigDigest:                  "runtime_config_digest",
-		SpecDigest:                           "spec_digest",
-		EgressPolicyDigest:                   "egress_digest",
-		ManifestVersion:                      1,
-		ClaudeCodeDisableNonessentialTraffic: true,
+		SessionID:                "sess_1",
+		GenerationID:             "gen_a",
+		SandboxContractVersion:   store.SandboxContractVersion,
+		CreatedAt:                "2026-01-01T00:00:00Z",
+		AttemptID:                "attempt-1",
+		NetworkProfileID:         "net_a",
+		AgentRuntimeProfileID:    "arp_a",
+		DriverID:                 "claude_code",
+		BridgeProtocolVersion:    2,
+		TurnInputSchema:          "RunTurn",
+		RunscPlatform:            "systrap",
+		RunscVersion:             "runsc test",
+		SandboxModelProxyBaseURL: "http://harness-model-proxy.internal:8082",
+		Model:                    "sonnet",
+		OutputFormat:             "stream-json",
+		WorkspacePath:            "/workspace",
+		AgentHomePath:            "/agent-home",
+		BundleDigest:             "bundle_digest",
+		RuntimeConfigDigest:      "runtime_config_digest",
+		SpecDigest:               "spec_digest",
+		EgressPolicyDigest:       "egress_digest",
+		ManifestVersion:          1,
+		DriverRuntime: map[string]any{
+			"claude_code_disable_nonessential_traffic": true,
+		},
 	}
 }
 
