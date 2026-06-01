@@ -1166,10 +1166,14 @@ func (s *Store) ListExpiredRuntimeRecoveryCandidates(ctx context.Context, p Star
 
 	var candidates []ExpiredRuntimeRecoveryCandidate
 	rows, err := tx.QueryContext(ctx, `
-SELECT s.id, g.generation_id, COALESCE(r.runsc_container_id, ''), g.status
+SELECT s.id, g.generation_id, ri.runsc_container_id, g.status
 FROM runtime_generations g
 JOIN sessions s ON s.id = g.session_id
-JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+JOIN runtime_resource_instances ri ON ri.generation_id = g.generation_id
+  AND ri.session_id = s.id
+  AND ri.contract_id = g.sandbox_contract_id
+  AND ri.sandbox_contract_version = g.sandbox_contract_version
+  AND ri.sandbox_contract_version = 'sandbox-isolation-v1'
 WHERE g.status IN ('allocating','starting','probing','restoring','checkpointing')
   AND g.lease_expires_at IS NOT NULL
   AND g.lease_expires_at <= ?
@@ -1194,10 +1198,14 @@ ORDER BY s.id, g.generation_id`, formatTime(p.Now))
 
 	ackStartedCutoff := p.Now.Add(-p.AckStartedGrace)
 	rows, err = tx.QueryContext(ctx, `
-SELECT s.id, g.generation_id, COALESCE(r.runsc_container_id, ''), g.status
+SELECT s.id, g.generation_id, ri.runsc_container_id, g.status
 FROM runtime_generations g
 JOIN sessions s ON s.id = g.session_id
-JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+JOIN runtime_resource_instances ri ON ri.generation_id = g.generation_id
+  AND ri.session_id = s.id
+  AND ri.contract_id = g.sandbox_contract_id
+  AND ri.sandbox_contract_version = g.sandbox_contract_version
+  AND ri.sandbox_contract_version = 'sandbox-isolation-v1'
 WHERE g.status IN ('active','idle')
   AND g.lease_expires_at IS NOT NULL
   AND g.lease_expires_at <= ?
@@ -1230,10 +1238,14 @@ ORDER BY s.id, g.generation_id`, formatTime(ackStartedCutoff), formatTime(ackSta
 
 	cutoff := p.Now.Add(-p.ReconnectGrace)
 	rows, err = tx.QueryContext(ctx, `
-SELECT s.id, g.generation_id, COALESCE(r.runsc_container_id, ''), g.status
+SELECT s.id, g.generation_id, ri.runsc_container_id, g.status
 FROM runtime_generations g
 JOIN sessions s ON s.id = g.session_id
-JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+JOIN runtime_resource_instances ri ON ri.generation_id = g.generation_id
+  AND ri.session_id = s.id
+  AND ri.contract_id = g.sandbox_contract_id
+  AND ri.sandbox_contract_version = g.sandbox_contract_version
+  AND ri.sandbox_contract_version = 'sandbox-isolation-v1'
 WHERE g.status IN ('active','idle')
   AND g.lease_expires_at IS NOT NULL
   AND g.lease_expires_at <= ?

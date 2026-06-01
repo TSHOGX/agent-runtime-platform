@@ -1797,12 +1797,10 @@ func (s *Server) createRuntimeResourceInstance(ctx context.Context, params store
 }
 
 func (s *Server) prepareRuntimeResourceRestore(ctx context.Context, generationID, workerID, hostID string, leaseTTL time.Duration) (store.RuntimeResourceInstance, bool, error) {
-	_, ok, err := s.runtimeResourceInstanceIfExists(ctx, generationID)
-	if err != nil {
-		return store.RuntimeResourceInstance{}, false, err
-	}
-	if !ok {
+	if _, err := s.store.GetRuntimeResourceInstance(ctx, generationID); errors.Is(err, sql.ErrNoRows) {
 		return store.RuntimeResourceInstance{}, false, fmt.Errorf("runtime resource instance is required for checkpoint restore")
+	} else if err != nil {
+		return store.RuntimeResourceInstance{}, false, err
 	}
 	now := time.Now().UTC()
 	if err := s.store.ClaimRuntimeResourceCheckpointRestore(ctx, store.RuntimeResourceMaterializationClaimParams{
@@ -1839,8 +1837,11 @@ func (s *Server) prepareRuntimeResourceRestore(ctx context.Context, generationID
 }
 
 func (s *Server) reserveRuntimeResourceCheckpoint(ctx context.Context, generationID string) error {
-	instance, ok, err := s.runtimeResourceInstanceIfExists(ctx, generationID)
-	if err != nil || !ok {
+	instance, err := s.store.GetRuntimeResourceInstance(ctx, generationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("runtime resource instance is required for checkpoint reserve")
+	}
+	if err != nil {
 		return err
 	}
 	return s.store.ReserveRuntimeResourceCheckpoint(ctx, store.RuntimeResourceWorkerTransitionParams{
@@ -1849,28 +1850,6 @@ func (s *Server) reserveRuntimeResourceCheckpoint(ctx context.Context, generatio
 		HostID:       instance.HostID,
 		Now:          time.Now().UTC(),
 	})
-}
-
-func (s *Server) runtimeResourceInstanceIfExists(ctx context.Context, generationID string) (store.RuntimeResourceInstance, bool, error) {
-	instance, err := s.store.GetRuntimeResourceInstance(ctx, generationID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return store.RuntimeResourceInstance{}, false, nil
-	}
-	if err != nil {
-		return store.RuntimeResourceInstance{}, false, err
-	}
-	return instance, true, nil
-}
-
-func (s *Server) runtimeResourceCleanupIdentityIfExists(ctx context.Context, generationID string) (store.RuntimeResourceInstance, bool, error) {
-	instance, err := s.store.GetRuntimeResourceCleanupIdentity(ctx, generationID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return store.RuntimeResourceInstance{}, false, nil
-	}
-	if err != nil {
-		return store.RuntimeResourceInstance{}, false, err
-	}
-	return instance, true, nil
 }
 
 func (s *Server) claimRuntimeResourceCleanup(ctx context.Context, instance store.RuntimeResourceInstance, now time.Time) error {
@@ -2547,16 +2526,17 @@ func (s *Server) cleanupGenerationResources(ctx context.Context, sessionID, gene
 	if err != nil {
 		return fmt.Errorf("lookup generation resources: %w", err)
 	}
-	resourceInstance, resourceTracked, err := s.runtimeResourceCleanupIdentityIfExists(ctx, generationID)
+	resourceInstance, err := s.store.GetRuntimeResourceCleanupIdentity(ctx, generationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("runtime resource instance is required for generation cleanup")
+	}
 	if err != nil {
 		return fmt.Errorf("lookup runtime resource instance: %w", err)
 	}
-	if resourceTracked {
-		if err := s.claimRuntimeResourceCleanup(ctx, resourceInstance, now); err != nil {
-			return err
-		}
-		details = runtimeDetailsWithResourceInstance(details, resourceInstance)
+	if err := s.claimRuntimeResourceCleanup(ctx, resourceInstance, now); err != nil {
+		return err
 	}
+	details = runtimeDetailsWithResourceInstance(details, resourceInstance)
 	cleanup, err := s.runtime.DestroyGenerationResources(ctx, details)
 	if err != nil {
 		return fmt.Errorf("destroy generation resources: %w", err)
@@ -2568,10 +2548,8 @@ func (s *Server) cleanupGenerationResources(ctx context.Context, sessionID, gene
 	}); err != nil {
 		return fmt.Errorf("mark generation resources destroyed: %w", err)
 	}
-	if resourceTracked {
-		if err := s.completeRuntimeResourceCleanup(ctx, resourceInstance, cleanup, now); err != nil {
-			return fmt.Errorf("mark runtime resource destroyed: %w", err)
-		}
+	if err := s.completeRuntimeResourceCleanup(ctx, resourceInstance, cleanup, now); err != nil {
+		return fmt.Errorf("mark runtime resource destroyed: %w", err)
 	}
 	return nil
 }

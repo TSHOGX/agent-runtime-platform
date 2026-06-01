@@ -1087,6 +1087,7 @@ UPDATE network_profiles SET allocation_state = 'recreating' WHERE generation_id 
 UPDATE runtime_generation_resources SET resource_state = 'recreating' WHERE generation_id = ?`, allocation.GenerationID); err != nil {
 		t.Fatalf("set recreating resource: %v", err)
 	}
+	createLiveRuntimeResourceInstanceForAllocation(t, ctx, st, "sess_recover", allocation, owner.UUID, "host-recover", now.Add(-30*time.Second))
 
 	recovered, err := recoverCleanedAllocations(t, ctx, st, StartupRecoveryParams{
 		OwnerUUID:      owner.UUID,
@@ -1169,6 +1170,7 @@ func TestExpiredRuntimeRecoveryDoesNotReclaimUnrelatedFailedGeneration(t *testin
 UPDATE runtime_generations SET status = 'starting', lease_expires_at = ? WHERE generation_id = ?`, formatTime(now.Add(-time.Second)), crashed.GenerationID); err != nil {
 		t.Fatalf("set crashed generation starting: %v", err)
 	}
+	createLiveRuntimeResourceInstanceForAllocation(t, ctx, st, "sess_crashed", crashed, owner.UUID, "host-crashed", now.Add(-30*time.Second))
 
 	createStoreSession(t, ctx, st, "sess_recent_failed")
 	recentFailed, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
@@ -1212,6 +1214,76 @@ WHERE generation_id = ?`, formatTime(now.Add(-5*time.Second)), recentFailed.Gene
 	}
 	if crashedState != "reclaimable" || recentState != "live" {
 		t.Fatalf("unexpected allocation states: crashed=%s recent_failed=%s", crashedState, recentState)
+	}
+}
+
+func TestListExpiredRuntimeRecoveryCandidatesRequiresMatchingRuntimeResourceInstance(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	cfg := testAllocatorConfig(t)
+	cfg.CIDRPool = netip.MustParsePrefix("10.240.0.0/27")
+	now := time.Now().UTC()
+
+	createExpiredIdle := func(sessionID string) GenerationAllocation {
+		t.Helper()
+		createStoreSession(t, ctx, st, sessionID)
+		allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+			SessionID: sessionID,
+			Owner:     GenerationLeaseOwner(owner.UUID),
+			LeaseTTL:  time.Minute,
+			Now:       now.Add(-3 * time.Minute),
+			Config:    cfg,
+		})
+		if err != nil {
+			t.Fatalf("allocate %s: %v", sessionID, err)
+		}
+		if err := st.MarkGenerationResourcesLive(ctx, sessionID, allocation.GenerationID, allocation.Owner, now.Add(-3*time.Minute+time.Second)); err != nil {
+			t.Fatalf("mark %s live: %v", sessionID, err)
+		}
+		if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_generations
+SET lease_expires_at = ?
+WHERE generation_id = ?`, formatTime(now.Add(-2*time.Minute)), allocation.GenerationID); err != nil {
+			t.Fatalf("expire %s lease: %v", sessionID, err)
+		}
+		return allocation
+	}
+
+	valid := createExpiredIdle("sess_recovery_instance_valid")
+	validInstance := createLiveRuntimeResourceInstanceForAllocation(t, ctx, st, "sess_recovery_instance_valid", valid, owner.UUID, "host-valid", now.Add(-2*time.Minute+time.Second))
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_generation_resources
+SET runsc_container_id = ?
+WHERE generation_id = ?`, "legacy-"+valid.GenerationID, valid.GenerationID); err != nil {
+		t.Fatalf("set stale legacy runtime id: %v", err)
+	}
+
+	createExpiredIdle("sess_recovery_instance_missing")
+
+	mismatch := createExpiredIdle("sess_recovery_instance_mismatch")
+	createLiveRuntimeResourceInstanceForAllocation(t, ctx, st, "sess_recovery_instance_mismatch", mismatch, owner.UUID, "host-mismatch", now.Add(-2*time.Minute+time.Second))
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_generations
+SET sandbox_contract_id = NULL
+WHERE generation_id = ?`, mismatch.GenerationID); err != nil {
+		t.Fatalf("break generation contract mirror: %v", err)
+	}
+
+	candidates, err := st.ListExpiredRuntimeRecoveryCandidates(ctx, StartupRecoveryParams{
+		OwnerUUID:      owner.UUID,
+		Now:            now,
+		ReconnectGrace: time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("list recovery candidates: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("candidates=%+v, want only generation with matching runtime resource instance", candidates)
+	}
+	if candidates[0].GenerationID != valid.GenerationID ||
+		candidates[0].RuntimeID != validInstance.RunscContainerID ||
+		candidates[0].RuntimeID == "legacy-"+valid.GenerationID {
+		t.Fatalf("unexpected recovery candidate: %+v want runtime id %q", candidates[0], validInstance.RunscContainerID)
 	}
 }
 
