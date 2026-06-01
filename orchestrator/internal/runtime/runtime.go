@@ -1462,14 +1462,18 @@ func (r *Runtime) buildGenerationManifest(req StartRequest, runscVersion, bundle
 		ManifestVersion:                      1,
 		ClaudeCodeDisableNonessentialTraffic: details.DisableNonessentialTraffic,
 	}
-	if selectedDriver == string(agents.Pi) {
-		manifest.PiCodingAgentDir = agents.PiCodingAgentDir
-		manifest.PiCodingAgentSessionDir = agents.PiSessionDir
-		manifest.PiOffline = true
-		manifest.PiSkipVersionCheck = true
-		manifest.PiTelemetryDisabled = true
+	if layout, ok := agents.DriverRuntimeLayoutSpecFor(agents.ID(selectedDriver)); ok {
+		applyDriverControlManifestSpec(&manifest, layout.ControlManifest)
 	}
 	return manifest, nil
+}
+
+func applyDriverControlManifestSpec(manifest *controlManifest, spec agents.DriverRuntimeControlManifestSpec) {
+	manifest.PiCodingAgentDir = spec.PiCodingAgentDir
+	manifest.PiCodingAgentSessionDir = spec.PiCodingAgentSessionDir
+	manifest.PiOffline = spec.PiOffline
+	manifest.PiSkipVersionCheck = spec.PiSkipVersionCheck
+	manifest.PiTelemetryDisabled = spec.PiTelemetryDisabled
 }
 
 func validateGenerationDetails(req StartRequest) error {
@@ -1654,14 +1658,8 @@ func (r *Runtime) renderSandboxIsolatedRuntimeSpec(req StartRequest) (runtimeSpe
 		"HARNESS_BRIDGE_IDLE_INTERVAL=" + formatSeconds(defaultDuration(r.cfg.BridgePollInterval, 5*time.Millisecond)),
 		"HARNESS_PROBE_HEALTHZ_STATUSES=" + joinInts(defaultIntSlice(r.cfg.ProbeHealthzStatuses, []int{200})),
 	}
-	if selectedDriver == string(agents.Pi) {
-		spec.Process.Env = append(spec.Process.Env,
-			"PI_CODING_AGENT_DIR="+agents.PiCodingAgentDir,
-			"PI_CODING_AGENT_SESSION_DIR="+agents.PiSessionDir,
-			"PI_OFFLINE=1",
-			"PI_SKIP_VERSION_CHECK=1",
-			"PI_TELEMETRY=0",
-		)
+	if layout, ok := agents.DriverRuntimeLayoutSpecFor(agents.ID(selectedDriver)); ok {
+		spec.Process.Env = append(spec.Process.Env, driverRuntimeEnv(layout.Env)...)
 	}
 	spec.Process.Cwd = "/"
 	spec.Process.Capabilities = emptyCapabilities()
@@ -2040,6 +2038,26 @@ func emptyCapabilities() map[string]any {
 	}
 }
 
+func driverRuntimeEnv(vars []agents.DriverRuntimeEnvVarSpec) []string {
+	env := make([]string, 0, len(vars))
+	for _, item := range vars {
+		env = append(env, strings.TrimSpace(item.Name)+"="+item.Value)
+	}
+	return env
+}
+
+func driverAgentHomeDirHostPath(agentHomeHostPath, relativePath string) (string, error) {
+	relativePath = strings.TrimSpace(relativePath)
+	if relativePath == "" {
+		return "", fmt.Errorf("agent home relative path is required")
+	}
+	cleaned := filepath.Clean(filepath.FromSlash(relativePath))
+	if cleaned == "." || cleaned == ".." || filepath.IsAbs(cleaned) || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("agent home relative path %q escapes /agent-home", relativePath)
+	}
+	return filepath.Join(agentHomeHostPath, cleaned), nil
+}
+
 func (r *Runtime) prepareRuntimeDataDirs(req StartRequest) error {
 	if isSandboxIsolatedRequest(req) {
 		return r.prepareSandboxIsolationDataDirs(req)
@@ -2072,19 +2090,14 @@ func (r *Runtime) prepareSandboxIsolationDataDirs(req StartRequest) error {
 			return fmt.Errorf("%s: %w", item.label, err)
 		}
 	}
-	if driverID(req) == string(agents.Pi) {
-		piRootDir := filepath.Join(agentHomeHostPath, ".pi")
-		piAgentDir := filepath.Join(agentHomeHostPath, ".pi", "agent")
-		for _, item := range []struct {
-			label string
-			path  string
-		}{
-			{label: "pi root dir", path: piRootDir},
-			{label: "pi agent dir", path: piAgentDir},
-			{label: "pi session dir", path: filepath.Join(piAgentDir, "sessions")},
-		} {
-			if err := ensureSandboxOwnedDir(item.path, identity.UID, identity.GID, 0o750); err != nil {
-				return fmt.Errorf("%s: %w", item.label, err)
+	if layout, ok := agents.DriverRuntimeLayoutSpecFor(agents.ID(driverID(req))); ok {
+		for _, item := range layout.HomeDirs {
+			hostPath, err := driverAgentHomeDirHostPath(agentHomeHostPath, item.AgentHomeRelativePath)
+			if err != nil {
+				return fmt.Errorf("%s: %w", item.Label, err)
+			}
+			if err := ensureSandboxOwnedDir(hostPath, identity.UID, identity.GID, item.Mode); err != nil {
+				return fmt.Errorf("%s: %w", item.Label, err)
 			}
 		}
 	}

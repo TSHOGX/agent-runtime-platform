@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -86,6 +87,31 @@ type DriverConfigMaterializationSpec struct {
 	MountExact                  bool
 }
 
+type DriverRuntimeEnvVarSpec struct {
+	Name  string
+	Value string
+}
+
+type DriverRuntimeHomeDirSpec struct {
+	Label                 string
+	AgentHomeRelativePath string
+	Mode                  fs.FileMode
+}
+
+type DriverRuntimeControlManifestSpec struct {
+	PiCodingAgentDir        string
+	PiCodingAgentSessionDir string
+	PiOffline               bool
+	PiSkipVersionCheck      bool
+	PiTelemetryDisabled     bool
+}
+
+type DriverRuntimeLayoutSpec struct {
+	Env             []DriverRuntimeEnvVarSpec
+	HomeDirs        []DriverRuntimeHomeDirSpec
+	ControlManifest DriverRuntimeControlManifestSpec
+}
+
 func (s DriverConfigMaterializationSpec) HostSourcePath(controlDir string) string {
 	return filepath.Join(strings.TrimSpace(controlDir), filepath.FromSlash(s.ControlRelativePath))
 }
@@ -135,6 +161,30 @@ var driverConfigMaterializationSpecs = map[ID][]DriverConfigMaterializationSpec{
 	},
 }
 
+var driverRuntimeLayoutSpecs = map[ID]DriverRuntimeLayoutSpec{
+	Pi: {
+		Env: []DriverRuntimeEnvVarSpec{
+			{Name: "PI_CODING_AGENT_DIR", Value: PiCodingAgentDir},
+			{Name: "PI_CODING_AGENT_SESSION_DIR", Value: PiSessionDir},
+			{Name: "PI_OFFLINE", Value: "1"},
+			{Name: "PI_SKIP_VERSION_CHECK", Value: "1"},
+			{Name: "PI_TELEMETRY", Value: "0"},
+		},
+		HomeDirs: []DriverRuntimeHomeDirSpec{
+			{Label: "pi root dir", AgentHomeRelativePath: ".pi", Mode: 0o750},
+			{Label: "pi agent dir", AgentHomeRelativePath: ".pi/agent", Mode: 0o750},
+			{Label: "pi session dir", AgentHomeRelativePath: ".pi/agent/sessions", Mode: 0o750},
+		},
+		ControlManifest: DriverRuntimeControlManifestSpec{
+			PiCodingAgentDir:        PiCodingAgentDir,
+			PiCodingAgentSessionDir: PiSessionDir,
+			PiOffline:               true,
+			PiSkipVersionCheck:      true,
+			PiTelemetryDisabled:     true,
+		},
+	},
+}
+
 func DriverConfigMaterializationSpecsFor(driver ID) []DriverConfigMaterializationSpec {
 	specs := driverConfigMaterializationSpecs[ID(strings.TrimSpace(string(driver)))]
 	if len(specs) == 0 {
@@ -156,6 +206,14 @@ func AllDriverConfigMaterializationSpecs() []DriverConfigMaterializationSpec {
 		out = append(out, DriverConfigMaterializationSpecsFor(ID(driver))...)
 	}
 	return out
+}
+
+func DriverRuntimeLayoutSpecFor(driver ID) (DriverRuntimeLayoutSpec, bool) {
+	spec, ok := driverRuntimeLayoutSpecs[ID(strings.TrimSpace(string(driver)))]
+	if !ok {
+		return DriverRuntimeLayoutSpec{}, false
+	}
+	return cloneDriverRuntimeLayoutSpec(spec), true
 }
 
 type SnapshotPolicySpec struct {
@@ -449,6 +507,12 @@ func secretGrantSpecKey(domain, scope string) string {
 func cloneDriverSpec(spec DriverSpec) DriverSpec {
 	spec.RequiredRuntimeCapabilities = append([]string(nil), spec.RequiredRuntimeCapabilities...)
 	spec.Phase10Support = append([]string(nil), spec.Phase10Support...)
+	return spec
+}
+
+func cloneDriverRuntimeLayoutSpec(spec DriverRuntimeLayoutSpec) DriverRuntimeLayoutSpec {
+	spec.Env = append([]DriverRuntimeEnvVarSpec(nil), spec.Env...)
+	spec.HomeDirs = append([]DriverRuntimeHomeDirSpec(nil), spec.HomeDirs...)
 	return spec
 }
 
