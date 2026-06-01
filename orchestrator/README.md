@@ -128,18 +128,21 @@ harness:
     checkpoint_image_retention: 720h
 ```
 
-The loader uses strict YAML decoding for the Phase 7 `harness:` schema.
+The loader uses strict YAML decoding for the current `harness:` schema.
+Only the top-level `harness:` document is decoded; unknown top-level or
+nested keys fail startup.
 `harness.default_agent` selects the product `Agent` driver for new sessions;
 `sh` is selected only through product `mode: "shell"`.
 `harness.model_proxy.bind_url` controls the host listener port used for probes
 and egress allow-listing; `harness.model_proxy.sandbox_base_url` is the
 sandbox-visible alias written into generated control manifests.
 
-Legacy files containing only top-level `runtime:` / `claude:` sections still
-load for compatibility, and legacy `claude.proxy_bind_url` /
-`claude.sandbox_base_url` map to `harness.model_proxy`, but mixing them with
-`harness:` is rejected. Legacy `harness.secrets.*` keys are rejected; provider
-credentials stay host-side.
+Legacy top-level `runtime:` / `claude:` sections no longer load. Migrate model
+proxy settings to `harness.model_proxy`; legacy `claude.proxy_bind_url` and
+`claude.sandbox_base_url` are rejected along with other unknown top-level keys.
+Obsolete `harness.session_ttl` and legacy `harness.secrets.*` keys are also
+rejected; use `harness.session_retention`, and keep provider credentials
+host-side.
 
 The selected rootfs must contain an image manifest for the drivers selected by
 product modes. The checked-in lab default needs Pi Agent and Shell:

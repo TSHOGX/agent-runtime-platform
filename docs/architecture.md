@@ -214,6 +214,8 @@ runtime generations, runtime resource instances, network profiles, sandbox
 contracts, Phase 9 input evidence, DataVolume rows, and artifact metadata.
 
 Primary project config is `config/harness.yaml` under the `harness:` schema.
+The config loader decodes only that top-level `harness:` document with strict
+known-field validation, so unknown top-level or nested keys fail startup.
 The checked-in lab profile currently sets:
 
 - `default_agent: pi`
@@ -255,10 +257,11 @@ Important environment overrides:
 - `RUNSC_ROOT`
 
 `HARNESS_SESSION_TTL` is obsolete and fails startup if present. Legacy top-level
-`runtime:` / `claude:` config can still load for compatibility, including
-mapping `claude.proxy_bind_url` and `claude.sandbox_base_url` to
-`harness.model_proxy`, but it cannot be mixed with the `harness:` schema.
-Legacy sandbox secret keys are rejected.
+`runtime:` / `claude:` config no longer loads, and legacy
+`claude.proxy_bind_url` / `claude.sandbox_base_url` settings no longer map into
+the active schema. Configure model proxy settings only under
+`harness.model_proxy`. Obsolete `harness.session_ttl` and legacy
+`harness.secrets.*` keys are rejected.
 
 With `session_retention: 0s`, sessions, messages, artifacts, workspaces, and
 agent homes do not expire automatically. `harness.max_sessions` counts
