@@ -48,7 +48,7 @@ func (e *deploymentCapabilityError) Error() string {
 func (s *Server) resolveModeDeployment(mode string) (deploymentResolution, *deploymentCapabilityError) {
 	mode = strings.TrimSpace(mode)
 	if mode == "" {
-		mode = "agent"
+		return deploymentResolution{}, capabilityError("unsupported_mode", "unsupported mode")
 	}
 	switch mode {
 	case "agent":

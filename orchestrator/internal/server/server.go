@@ -402,14 +402,21 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "agent input is no longer supported")
 		return
 	}
-	mode := "agent"
-	if value, ok := raw["mode"]; ok {
-		if err := json.Unmarshal(value, &mode); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid mode")
-			return
-		}
+	value, ok := raw["mode"]
+	if !ok {
+		writeError(w, http.StatusBadRequest, "mode is required")
+		return
+	}
+	var mode string
+	if err := json.Unmarshal(value, &mode); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid mode")
+		return
 	}
 	mode = strings.TrimSpace(mode)
+	if mode == "" {
+		writeError(w, http.StatusBadRequest, "mode is required")
+		return
+	}
 	driverID, err := s.driverForMode(mode)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -1137,6 +1144,16 @@ func (s *Server) ensureActiveGeneration(ctx context.Context, session store.Sessi
 }
 
 func (s *Server) ensureActiveGenerationWithRestoreRefetch(ctx context.Context, session store.Session, owner string, allowRestoreRefetch bool) (ensuredGeneration, error) {
+	verifySessionDeployment := func() error {
+		mode := strings.TrimSpace(session.Mode)
+		if mode == "" {
+			return fmt.Errorf("session mode is required")
+		}
+		if _, capabilityErr := s.resolveDriverDeployment(mode, agents.ID(session.DriverID)); capabilityErr != nil {
+			return capabilityErr
+		}
+		return nil
+	}
 	activeGenerationID := strings.TrimSpace(session.ActiveGenerationID)
 	if activeGenerationID != "" {
 		status, err := s.store.GetRuntimeGenerationStatus(ctx, session.ID, activeGenerationID)
@@ -1178,8 +1195,8 @@ func (s *Server) ensureActiveGenerationWithRestoreRefetch(ctx context.Context, s
 				IsNew: false,
 			}, nil
 		}
-		if _, capabilityErr := s.resolveDriverDeployment(store.ModeForDriver(session.DriverID), agents.ID(session.DriverID)); capabilityErr != nil {
-			return ensuredGeneration{}, capabilityErr
+		if err := verifySessionDeployment(); err != nil {
+			return ensuredGeneration{}, err
 		}
 		allocation, err := s.store.AllocateGeneration(ctx, store.AllocateGenerationParams{
 			SessionID:            session.ID,
@@ -1194,8 +1211,8 @@ func (s *Server) ensureActiveGenerationWithRestoreRefetch(ctx context.Context, s
 		}
 		return ensuredGeneration{Allocation: allocation, IsNew: true}, nil
 	}
-	if _, capabilityErr := s.resolveDriverDeployment(store.ModeForDriver(session.DriverID), agents.ID(session.DriverID)); capabilityErr != nil {
-		return ensuredGeneration{}, capabilityErr
+	if err := verifySessionDeployment(); err != nil {
+		return ensuredGeneration{}, err
 	}
 	allocation, err := s.store.AllocateGeneration(ctx, store.AllocateGenerationParams{
 		SessionID: session.ID,

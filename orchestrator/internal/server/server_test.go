@@ -79,8 +79,9 @@ func TestCreateSessionModeMapping(t *testing.T) {
 		wantDriver string
 		wantError  string
 	}{
-		{name: "omitted body", wantStatus: http.StatusCreated, wantMode: "agent", wantDriver: "claude_code"},
-		{name: "empty object", body: `{}`, wantStatus: http.StatusCreated, wantMode: "agent", wantDriver: "claude_code"},
+		{name: "omitted body", wantStatus: http.StatusBadRequest, wantError: "mode is required"},
+		{name: "empty object", body: `{}`, wantStatus: http.StatusBadRequest, wantError: "mode is required"},
+		{name: "empty mode", body: `{"mode":" "}`, wantStatus: http.StatusBadRequest, wantError: "mode is required"},
 		{name: "agent mode", body: `{"mode":"agent"}`, wantStatus: http.StatusCreated, wantMode: "agent", wantDriver: "claude_code"},
 		{name: "shell mode", body: `{"mode":"shell"}`, wantStatus: http.StatusCreated, wantMode: "shell", wantDriver: "sh"},
 		{name: "unknown mode", body: `{"mode":"pi"}`, wantStatus: http.StatusBadRequest, wantError: "unsupported mode"},
@@ -238,6 +239,30 @@ func TestResolveAgentModeRequiresExplicitDefaultAgent(t *testing.T) {
 
 	if _, err := srv.resolveModeDeployment("agent"); err == nil || err.code != "default_unavailable" {
 		t.Fatalf("expected missing default agent to make agent mode unavailable, got %v", err)
+	}
+}
+
+func TestResolveModeDeploymentRejectsEmptyMode(t *testing.T) {
+	srv := &Server{cfg: testServerConfig(t.TempDir())}
+
+	if _, err := srv.resolveModeDeployment(""); err == nil || err.code != "unsupported_mode" || err.message != "unsupported mode" {
+		t.Fatalf("expected empty mode to be unsupported, got %v", err)
+	}
+}
+
+func TestPublicSessionDoesNotInferMissingMode(t *testing.T) {
+	now := time.Now().UTC()
+	got := publicSession(store.Session{
+		ID:        "sess_missing_mode",
+		UserID:    labUserID,
+		Status:    string(sessionstate.Created),
+		DriverID:  "claude_code",
+		CreatedAt: now,
+		UpdatedAt: now,
+	})
+
+	if got.Mode != "" || got.ModeLabel != "" {
+		t.Fatalf("public session inferred missing mode as %q/%q", got.Mode, got.ModeLabel)
 	}
 }
 
@@ -634,6 +659,32 @@ func TestCreateSessionSoftLimitUsesPoolExhaustedEnvelope(t *testing.T) {
 	}
 	if body["error_class"] != "pool_exhausted" {
 		t.Fatalf("expected pool_exhausted, got %v", body)
+	}
+}
+
+func TestEnsureActiveGenerationRequiresPersistedSessionMode(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	cfg := testServerConfig(dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_missing_mode_start", string(sessionstate.Created), time.Now().UTC(), nil)
+	session.Mode = ""
+	srv := &Server{
+		cfg:   cfg,
+		store: st,
+		hub:   events.NewHub(),
+		log:   slog.Default(),
+	}
+
+	if _, err := srv.ensureActiveGeneration(ctx, session, store.GenerationLeaseOwner(owner.UUID)); err == nil || !strings.Contains(err.Error(), "session mode is required") {
+		t.Fatalf("expected missing session mode error, got %v", err)
+	}
+	var count int
+	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_generations WHERE session_id = ?`, session.ID).Scan(&count); err != nil {
+		t.Fatalf("count runtime generations: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("missing mode session should not allocate generation, got %d", count)
 	}
 }
 

@@ -25,9 +25,6 @@ type apiSession struct {
 
 func publicSession(session store.Session) apiSession {
 	mode := session.Mode
-	if mode == "" {
-		mode = store.ModeForDriver(session.DriverID)
-	}
 	return apiSession{
 		ID:                    session.ID,
 		UserID:                session.UserID,
@@ -48,10 +45,12 @@ func publicSession(session store.Session) apiSession {
 
 func modeLabel(mode string) string {
 	switch mode {
+	case "agent":
+		return "Agent"
 	case "shell":
 		return "Shell"
 	default:
-		return "Agent"
+		return ""
 	}
 }
 
