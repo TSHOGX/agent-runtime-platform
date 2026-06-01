@@ -1100,19 +1100,27 @@ func (r *Runtime) renderGenerationArtifacts(ctx context.Context, req StartReques
 		return GenerationArtifacts{}, fmt.Errorf("write runtime spec: %w", err)
 	}
 	currentRunsc := r.currentRunscPin(ctx)
-	bundleDigest := digestHex(mustCanonicalJSON(map[string]any{
+	bundleDigestPayload, err := canonicalJSON(map[string]any{
 		"bundle_dir":  filepath.Clean(details.BundleDirPath),
 		"rootfs":      spec.Root.Path,
 		"spec_digest": specDigest,
-	}))
-	runtimeConfigDigest := digestHex(mustCanonicalJSON(map[string]any{
+	})
+	if err != nil {
+		return GenerationArtifacts{}, fmt.Errorf("bundle digest: %w", err)
+	}
+	bundleDigest := digestHex(bundleDigestPayload)
+	runtimeConfigDigestPayload, err := canonicalJSON(map[string]any{
 		"runsc_network":       r.runscNetwork(details),
 		"runsc_overlay2":      r.runscOverlay2(details),
 		"runsc_platform":      currentRunsc.Platform,
 		"runsc_binary_path":   currentRunsc.BinaryPath,
 		"runsc_binary_digest": currentRunsc.BinaryDigest,
 		"rootfs":              spec.Root.Path,
-	}))
+	})
+	if err != nil {
+		return GenerationArtifacts{}, fmt.Errorf("runtime config digest: %w", err)
+	}
+	runtimeConfigDigest := digestHex(runtimeConfigDigestPayload)
 	manifest, err := r.buildGenerationManifest(req, driverSpec, currentRunsc.Version, bundleDigest, runtimeConfigDigest, specDigest)
 	if err != nil {
 		return GenerationArtifacts{}, err
@@ -1733,14 +1741,6 @@ func canonicalJSON(value any) ([]byte, error) {
 		return nil, err
 	}
 	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
-}
-
-func mustCanonicalJSON(value any) []byte {
-	data, err := canonicalJSON(value)
-	if err != nil {
-		return []byte("{}")
-	}
-	return data
 }
 
 func digestHex(data []byte) string {

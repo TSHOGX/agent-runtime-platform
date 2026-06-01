@@ -1426,11 +1426,15 @@ func (s *Server) sandboxContractPayload(session store.Session, details store.Run
 	providerSpec := deployment.ProviderSpec
 	initialDriverStateDigest := strings.TrimSpace(details.DriverStateDigest)
 	if initialDriverStateDigest == "" {
-		initialDriverStateDigest = sandboxContractDigestForPayload(map[string]any{
+		digest, err := sandboxContractDigestForPayload(map[string]any{
 			"schema_version": 1,
 			"driver_id":      driverID,
 			"state_kind":     "missing_driver_state",
 		})
+		if err != nil {
+			return nil, fmt.Errorf("initial driver state digest: %w", err)
+		}
+		initialDriverStateDigest = digest
 	}
 	sandboxIP, err := runtimeResourceSandboxIP(details.SandboxIPCIDR)
 	if err != nil {
@@ -1464,25 +1468,37 @@ func (s *Server) sandboxContractPayload(session store.Session, details store.Run
 	if len(materializedDriverConfig) > 0 {
 		driverConfigPreimage["materialized_driver_config"] = materializedDriverConfig
 	}
-	driverConfigDigest := sandboxContractDigestForPayload(driverConfigPreimage)
-	commandDigest := sandboxContractDigestForPayload(map[string]any{
+	driverConfigDigest, err := sandboxContractDigestForPayload(driverConfigPreimage)
+	if err != nil {
+		return nil, fmt.Errorf("driver config digest: %w", err)
+	}
+	commandDigest, err := sandboxContractDigestForPayload(map[string]any{
 		"driver_id":    driverID,
 		"protocol":     details.OutputFormat,
 		"resume_field": "driver_state",
 	})
-	driverCapabilitiesDigest := sandboxContractDigestForPayload(map[string]any{
+	if err != nil {
+		return nil, fmt.Errorf("command digest: %w", err)
+	}
+	driverCapabilitiesDigest, err := sandboxContractDigestForPayload(map[string]any{
 		"driver_id":     driverID,
 		"capabilities":  driverSpec.RequiredRuntimeCapabilities,
 		"registry_kind": string(driverSpec.Kind),
 	})
+	if err != nil {
+		return nil, fmt.Errorf("driver capabilities digest: %w", err)
+	}
 	providerCapabilitiesDigest := agents.CapabilityDigest(providerSpec)
-	runtimeTemplateDigest := sandboxContractDigestForPayload(map[string]any{
+	runtimeTemplateDigest, err := sandboxContractDigestForPayload(map[string]any{
 		"provider_id":          providerSpec.ID,
 		"runsc_platform":       runscPlatform,
 		"runsc_overlay2":       details.RunscOverlay2,
 		"no_new_privileges":    true,
 		"ambient_capabilities": []string{},
 	})
+	if err != nil {
+		return nil, fmt.Errorf("runtime template digest: %w", err)
+	}
 	secretGrants := []map[string]any{}
 	if details.ModelAccessAllowed {
 		secretGrants = append(secretGrants, map[string]any{
@@ -1505,7 +1521,10 @@ func (s *Server) sandboxContractPayload(session store.Session, details store.Run
 	if err != nil {
 		return nil, err
 	}
-	inputDigests := s.driverManifestInputDigests(deployment)
+	inputDigests, err := s.driverManifestInputDigests(deployment)
+	if err != nil {
+		return nil, err
+	}
 	payload := map[string]any{
 		"sandbox_contract_version": store.SandboxContractVersion,
 		"contract_schema_version":  store.SandboxContractSchemaVersion,
@@ -1667,7 +1686,7 @@ type driverManifestInputDigests struct {
 	AgentManifestDigest string
 }
 
-func (s *Server) driverManifestInputDigests(deployment deploymentResolution) driverManifestInputDigests {
+func (s *Server) driverManifestInputDigests(deployment deploymentResolution) (driverManifestInputDigests, error) {
 	defaultAgent := strings.TrimSpace(s.cfg.DefaultAgent)
 	if defaultAgent == "" {
 		defaultAgent = string(agents.ClaudeCode)
@@ -1675,11 +1694,14 @@ func (s *Server) driverManifestInputDigests(deployment deploymentResolution) dri
 	if canonical, err := agents.CanonicalDriverID(defaultAgent); err == nil {
 		defaultAgent = string(canonical)
 	}
-	runtimeConfigDigest := runtimeConfigDigest(deployment.runtimeConfigPreimage(defaultAgent))
+	runtimeConfigDigest, err := runtimeConfigDigest(deployment.runtimeConfigPreimage(defaultAgent))
+	if err != nil {
+		return driverManifestInputDigests{}, err
+	}
 	return driverManifestInputDigests{
 		RuntimeConfigDigest: runtimeConfigDigest,
 		AgentManifestDigest: deployment.AgentManifest.Digest,
-	}
+	}, nil
 }
 
 func effectiveString(value, defaultValue string) string {
@@ -1690,12 +1712,12 @@ func effectiveString(value, defaultValue string) string {
 	return value
 }
 
-func sandboxContractDigestForPayload(value any) string {
+func sandboxContractDigestForPayload(value any) (string, error) {
 	payload, err := store.CanonicalSandboxContractPayload(value)
 	if err != nil {
-		return "sha256:invalid"
+		return "", err
 	}
-	return store.SandboxContractDigest(payload)
+	return store.SandboxContractDigest(payload), nil
 }
 
 func runtimeArtifactsFromDetails(details store.RuntimeGenerationDetails) runtime.GenerationArtifacts {

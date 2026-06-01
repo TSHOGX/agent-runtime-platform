@@ -511,8 +511,12 @@ func (s *Server) sandboxContractInputEvidenceFor(session store.Session, driverID
 		defaultAgent = string(canonical)
 	}
 	preimage := deployment.runtimeConfigPreimage(defaultAgent)
+	digest, err := runtimeConfigDigest(preimage)
+	if err != nil {
+		return sandboxContractInputEvidence{}, err
+	}
 	return sandboxContractInputEvidence{
-		RuntimeConfigDigest:   runtimeConfigDigest(preimage),
+		RuntimeConfigDigest:   digest,
 		RuntimeConfigPreimage: preimage,
 		AgentManifestDigest:   deployment.AgentManifest.Digest,
 		AgentManifestPayload:  deployment.AgentManifest.Payload,
@@ -546,12 +550,12 @@ func runtimeProviderConfigPreimage(cfg config.RuntimeProviderConfig) map[string]
 	}
 }
 
-func runtimeConfigDigest(preimage map[string]any) string {
+func runtimeConfigDigest(preimage map[string]any) (string, error) {
 	canonical, err := store.CanonicalSandboxContractPayload(preimage)
 	if err != nil {
-		return "sha256:invalid"
+		return "", err
 	}
-	return store.RuntimeConfigInputDigest(canonical)
+	return store.RuntimeConfigInputDigest(canonical), nil
 }
 
 func nullableString(value string) any {

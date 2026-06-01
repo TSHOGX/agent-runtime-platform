@@ -412,11 +412,18 @@ func TestDriverManifestInputDigestsUseSourceConfigAndImageManifest(t *testing.T)
 	if err != nil {
 		t.Fatalf("load manifest: %v", err)
 	}
-	digests := srv.driverManifestInputDigests(deployment)
+	digests, err := srv.driverManifestInputDigests(deployment)
+	if err != nil {
+		t.Fatalf("driver manifest input digests: %v", err)
+	}
 	if digests.AgentManifestDigest != manifest.Digest {
 		t.Fatalf("agent manifest digest = %s want %s", digests.AgentManifestDigest, manifest.Digest)
 	}
-	if want := runtimeConfigDigest(deployment.runtimeConfigPreimage("claude_code")); digests.RuntimeConfigDigest != want {
+	want, err := runtimeConfigDigest(deployment.runtimeConfigPreimage("claude_code"))
+	if err != nil {
+		t.Fatalf("runtime config digest: %v", err)
+	}
+	if digests.RuntimeConfigDigest != want {
 		t.Fatalf("runtime config digest = %s want %s", digests.RuntimeConfigDigest, want)
 	}
 
@@ -426,12 +433,27 @@ func TestDriverManifestInputDigestsUseSourceConfigAndImageManifest(t *testing.T)
 	if capabilityErr != nil {
 		t.Fatalf("resolve shell deployment with pi default: %v", capabilityErr)
 	}
-	changed := srv.driverManifestInputDigests(deploymentWithPiDefault)
+	changed, err := srv.driverManifestInputDigests(deploymentWithPiDefault)
+	if err != nil {
+		t.Fatalf("driver manifest input digests with pi default: %v", err)
+	}
 	if changed.RuntimeConfigDigest == digests.RuntimeConfigDigest {
 		t.Fatalf("shell runtime config digest should change when deployment default agent changes")
 	}
 	if changed.AgentManifestDigest != digests.AgentManifestDigest {
 		t.Fatalf("agent manifest digest should not change when manifest is unchanged: %s vs %s", changed.AgentManifestDigest, digests.AgentManifestDigest)
+	}
+}
+
+func TestSandboxContractDigestForPayloadFailsClosedOnCanonicalizationError(t *testing.T) {
+	if got, err := sandboxContractDigestForPayload(map[string]any{"invalid": func() {}}); err == nil {
+		t.Fatalf("expected canonicalization error, got digest %q", got)
+	}
+}
+
+func TestRuntimeConfigDigestFailsClosedOnCanonicalizationError(t *testing.T) {
+	if got, err := runtimeConfigDigest(map[string]any{"invalid": func() {}}); err == nil {
+		t.Fatalf("expected canonicalization error, got digest %q", got)
 	}
 }
 
