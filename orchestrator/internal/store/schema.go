@@ -31,7 +31,6 @@ CREATE TABLE IF NOT EXISTS sessions (
   status TEXT NOT NULL CHECK(status IN (`+statusCheck+`)),
   driver_id TEXT NOT NULL CHECK(driver_id IN (`+driverCheck+`)),
   mode TEXT NOT NULL CHECK(mode IN ('agent','shell')),
-  restore_id TEXT NOT NULL,
   restore_ms INTEGER,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -626,18 +625,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS runtime_resource_instances_log_dir_path_active
 	if err != nil {
 		return err
 	}
-	return s.dropLegacySessionWorkspaceColumn(ctx)
+	if err := s.dropLegacySessionColumn(ctx, "workspace"); err != nil {
+		return err
+	}
+	return s.dropLegacySessionColumn(ctx, "restore_id")
 }
 
-func (s *Store) dropLegacySessionWorkspaceColumn(ctx context.Context) error {
-	exists, err := tableColumnExists(ctx, s.db, "sessions", "workspace")
+func (s *Store) dropLegacySessionColumn(ctx context.Context, column string) error {
+	exists, err := tableColumnExists(ctx, s.db, "sessions", column)
 	if err != nil {
 		return err
 	}
 	if !exists {
 		return nil
 	}
-	_, err = s.db.ExecContext(ctx, `ALTER TABLE sessions DROP COLUMN workspace`)
+	_, err = s.db.ExecContext(ctx, `ALTER TABLE sessions DROP COLUMN `+quoteSQLiteIdent(column))
 	return err
 }
 

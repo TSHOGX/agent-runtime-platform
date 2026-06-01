@@ -1447,7 +1447,6 @@ func createStoreSessionWithAgent(t *testing.T, ctx context.Context, st *Store, i
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
 		Agent:     agent,
-		RestoreID: "phase3-" + id,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}); err != nil {

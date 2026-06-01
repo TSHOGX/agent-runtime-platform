@@ -535,7 +535,6 @@ func TestCloseSessionReleasesSoftLimitWithoutDeletingHistory(t *testing.T) {
 		UserID:    labUserID,
 		Status:    string(sessionstate.Created),
 		Agent:     "claude_code",
-		RestoreID: "phase3-sess_retained",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -728,9 +727,6 @@ func TestCreateSessionDefersWorkspaceProvisioning(t *testing.T) {
 	session, err := st.GetSession(ctx, created.ID)
 	if err != nil {
 		t.Fatalf("get created session: %v", err)
-	}
-	if strings.HasPrefix(session.RestoreID, "phase3-") {
-		t.Fatalf("new sessions must not receive phase3 restore ids: %+v", session)
 	}
 	workspacePath := filepath.Join(cfg.SessionsRoot, session.ID)
 	if _, err := os.Stat(workspacePath); !errors.Is(err, os.ErrNotExist) {
@@ -927,7 +923,6 @@ func TestMonitorIdleSessionsReEnablesCheckpointedSessionsWhenCheckpointDisabled(
 		UserID:    "lab",
 		Status:    string(sessionstate.Checkpointed),
 		Agent:     "claude_code",
-		RestoreID: "phase3-sess_checkpointed",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -2766,7 +2761,6 @@ func TestSandboxContractPayloadRecordsPiMaterializedConfig(t *testing.T) {
 		Status:    string(sessionstate.Created),
 		Agent:     "pi",
 		Mode:      "agent",
-		RestoreID: "pi-driver",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -5340,7 +5334,6 @@ func createServerTestSession(t *testing.T, ctx context.Context, st *store.Store,
 		UserID:    labUserID,
 		Status:    status,
 		Agent:     "claude_code",
-		RestoreID: "phase3-" + id,
 		CreatedAt: now,
 		UpdatedAt: now,
 		ExpiresAt: expiresAt,

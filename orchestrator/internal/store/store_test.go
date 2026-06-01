@@ -46,7 +46,6 @@ func TestListMessages(t *testing.T) {
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
 		Agent:     "claude_code",
-		RestoreID: "phase3-sess_1",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -58,7 +57,7 @@ func TestListMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get session: %v", err)
 	}
-	if got.ID != want.ID || got.Agent != want.Agent || got.RestoreID != want.RestoreID {
+	if got.ID != want.ID || got.Agent != want.Agent {
 		t.Fatalf("session mismatch: got=%+v want=%+v", got, want)
 	}
 
@@ -107,7 +106,6 @@ func TestCreateSessionDoesNotWriteLegacyAgentHomePathColumn(t *testing.T) {
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
 		Agent:     "claude_code",
-		RestoreID: "phase3-sess_legacy_home",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}); err != nil {
@@ -127,7 +125,7 @@ WHERE id = ?
 	}
 }
 
-func TestFreshSchemaDoesNotCreateLegacySessionWorkspaceColumn(t *testing.T) {
+func TestFreshSchemaDoesNotCreateLegacySessionColumns(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -138,12 +136,14 @@ func TestFreshSchemaDoesNotCreateLegacySessionWorkspaceColumn(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	exists, err := tableColumnExists(ctx, st.db, "sessions", "workspace")
-	if err != nil {
-		t.Fatalf("check sessions.workspace: %v", err)
-	}
-	if exists {
-		t.Fatalf("fresh schema should not create sessions.workspace")
+	for _, column := range []string{"workspace", "restore_id"} {
+		exists, err := tableColumnExists(ctx, st.db, "sessions", column)
+		if err != nil {
+			t.Fatalf("check sessions.%s: %v", column, err)
+		}
+		if exists {
+			t.Fatalf("fresh schema should not create sessions.%s", column)
+		}
 	}
 
 	now := time.Now().UTC()
@@ -152,15 +152,14 @@ func TestFreshSchemaDoesNotCreateLegacySessionWorkspaceColumn(t *testing.T) {
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
 		Agent:     "claude_code",
-		RestoreID: "unused-sess_no_workspace",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}); err != nil {
-		t.Fatalf("create session without legacy workspace: %v", err)
+		t.Fatalf("create session without legacy columns: %v", err)
 	}
 }
 
-func TestMigrateDropsLegacySessionWorkspaceColumn(t *testing.T) {
+func TestMigrateDropsLegacySessionColumns(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -172,10 +171,15 @@ func TestMigrateDropsLegacySessionWorkspaceColumn(t *testing.T) {
 	if _, err := st.db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN workspace TEXT`); err != nil {
 		t.Fatalf("add legacy workspace column: %v", err)
 	}
-	if exists, err := tableColumnExists(ctx, st.db, "sessions", "workspace"); err != nil {
-		t.Fatalf("check added workspace column: %v", err)
-	} else if !exists {
-		t.Fatalf("legacy workspace column was not added")
+	if _, err := st.db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN restore_id TEXT NOT NULL DEFAULT 'legacy'`); err != nil {
+		t.Fatalf("add legacy restore_id column: %v", err)
+	}
+	for _, column := range []string{"workspace", "restore_id"} {
+		if exists, err := tableColumnExists(ctx, st.db, "sessions", column); err != nil {
+			t.Fatalf("check added %s column: %v", column, err)
+		} else if !exists {
+			t.Fatalf("legacy %s column was not added", column)
+		}
 	}
 	if err := st.Close(); err != nil {
 		t.Fatalf("close store: %v", err)
@@ -186,12 +190,14 @@ func TestMigrateDropsLegacySessionWorkspaceColumn(t *testing.T) {
 		t.Fatalf("reopen store: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	exists, err := tableColumnExists(ctx, st.db, "sessions", "workspace")
-	if err != nil {
-		t.Fatalf("check migrated workspace column: %v", err)
-	}
-	if exists {
-		t.Fatalf("migration should drop legacy sessions.workspace")
+	for _, column := range []string{"workspace", "restore_id"} {
+		exists, err := tableColumnExists(ctx, st.db, "sessions", column)
+		if err != nil {
+			t.Fatalf("check migrated %s column: %v", column, err)
+		}
+		if exists {
+			t.Fatalf("migration should drop legacy sessions.%s", column)
+		}
 	}
 }
 
@@ -212,7 +218,6 @@ func TestUpdateSessionStatusAndActivity(t *testing.T) {
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
 		Agent:     "claude_code",
-		RestoreID: "phase3-sess_test",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -263,7 +268,6 @@ func TestFailSessionStoresTypedFailure(t *testing.T) {
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
 		Agent:     "claude_code",
-		RestoreID: "phase3-sess_fail",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -313,7 +317,6 @@ func TestEnqueueTurnMessageCreatesQueuedTurnMessageAndActivatesSession(t *testin
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
 		Agent:     "claude_code",
-		RestoreID: "phase3-sess_enqueue",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -373,7 +376,6 @@ func TestEnqueueTurnMessageRejectsBusySessionWithoutWrites(t *testing.T) {
 		UserID:    "lab",
 		Status:    string(sessionstate.RunningActive),
 		Agent:     "claude_code",
-		RestoreID: "phase3-sess_busy_enqueue",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -422,7 +424,6 @@ func TestListSessionsByStatus(t *testing.T) {
 			UserID:    "lab",
 			Status:    string(sessionstate.RunningIdle),
 			Agent:     "claude_code",
-			RestoreID: "phase3-sess_1",
 			CreatedAt: now,
 			UpdatedAt: now,
 		},
@@ -431,7 +432,6 @@ func TestListSessionsByStatus(t *testing.T) {
 			UserID:    "lab",
 			Status:    string(sessionstate.RunningActive),
 			Agent:     "claude_code",
-			RestoreID: "phase3-sess_2",
 			CreatedAt: now,
 			UpdatedAt: now,
 		},
@@ -440,7 +440,6 @@ func TestListSessionsByStatus(t *testing.T) {
 			UserID:    "lab",
 			Status:    string(sessionstate.RunningIdle),
 			Agent:     "claude_code",
-			RestoreID: "phase3-sess_3",
 			CreatedAt: now,
 			UpdatedAt: now,
 		},
@@ -498,7 +497,6 @@ func TestRejectsLegacyStatuses(t *testing.T) {
 		UserID:    "lab",
 		Status:    "idle",
 		Agent:     "claude_code",
-		RestoreID: "phase3-sess_legacy",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -541,7 +539,6 @@ func TestCountActiveSessionsUsesCanonicalStatuses(t *testing.T) {
 			UserID:    "lab",
 			Status:    string(status),
 			Agent:     "claude_code",
-			RestoreID: "phase3-" + id,
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
@@ -576,7 +573,6 @@ func TestDeleteArtifactPathDeletesFileAndDescendants(t *testing.T) {
 		UserID:    "lab",
 		Status:    string(sessionstate.Created),
 		Agent:     "claude_code",
-		RestoreID: "phase3-sess_artifacts",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}

@@ -33,7 +33,6 @@ func newParserTestServer(t *testing.T) (*Server, *store.Store) {
 		UserID:    "lab",
 		Status:    string(sessionstate.RunningActive),
 		Agent:     "claude_code",
-		RestoreID: "phase3-sess_1",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}); err != nil {
