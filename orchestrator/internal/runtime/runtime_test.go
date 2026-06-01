@@ -54,6 +54,15 @@ func TestRuntimeStartRequiresExplicitDriverID(t *testing.T) {
 	}
 }
 
+func TestRuntimeResourceIdentifiersFailClosed(t *testing.T) {
+	if _, err := shortID(""); err == nil || !strings.Contains(err.Error(), "short generation id is required") {
+		t.Fatalf("expected short id error, got %v", err)
+	}
+	if _, err := hostEgressTableName(""); err == nil || !strings.Contains(err.Error(), "nft identifier is required") {
+		t.Fatalf("expected nft identifier error, got %v", err)
+	}
+}
+
 func TestPathIsMountPointDetectsRootAndTempDir(t *testing.T) {
 	rootIsMount, err := pathIsMountPoint(string(filepath.Separator))
 	if err != nil {
@@ -1285,6 +1294,7 @@ func TestRuntimePostStartProofRecordsContainerAndNetworkEvidence(t *testing.T) {
 	details.RunscNetwork = "sandbox"
 	details.NetnsName = "harness-gen-post-start"
 	details.HostVeth = "hgenpsh"
+	tableName := mustGenerationNftTableName(details)
 	pin := runscPin{
 		Platform:     "systrap",
 		Version:      "runsc proof",
@@ -1295,9 +1305,9 @@ func TestRuntimePostStartProofRecordsContainerAndNetworkEvidence(t *testing.T) {
 	runner := &recordingCommandRunner{
 		outputs: map[string][]byte{
 			pin.BinaryPath + " -root " + runscRoot + " state " + containerID: []byte(`{"id":"` + containerID + `","status":"running"}`),
-			"ip netns list":                                          []byte(details.NetnsName + "\n"),
-			"ip link show " + details.HostVeth:                       []byte("42: " + details.HostVeth + ": <BROADCAST,UP>"),
-			"nft list table inet " + generationNftTableName(details): []byte("table inet " + generationNftTableName(details)),
+			"ip netns list":                    []byte(details.NetnsName + "\n"),
+			"ip link show " + details.HostVeth: []byte("42: " + details.HostVeth + ": <BROADCAST,UP>"),
+			"nft list table inet " + tableName: []byte("table inet " + tableName),
 		},
 	}
 	rt := New(Config{
@@ -2483,7 +2493,7 @@ func testGenerationDetails(dir, generationID string) store.RuntimeGenerationDeta
 		SandboxIPCIDR:              "10.200.1.2/30",
 		SandboxBaseURL:             "http://10.200.1.1:8082",
 		NetnsName:                  "harness-gen-" + generationID,
-		NftTableName:               hostEgressTableName(generationID),
+		NftTableName:               mustHostEgressTableName(generationID),
 		EgressPolicyDigest:         "egress_digest",
 		DriverID:                   "claude_code",
 		Model:                      "sonnet",
@@ -2793,10 +2803,26 @@ func controlManifestForbiddenHostValues(details store.RuntimeGenerationDetails) 
 	if sandboxIP, _, ok := strings.Cut(details.SandboxIPCIDR, "/"); ok {
 		values = append(values, sandboxIP)
 	}
-	if table := generationNftTableName(details); table != "" {
+	if table := mustGenerationNftTableName(details); table != "" {
 		values = append(values, table)
 	}
 	return values
+}
+
+func mustHostEgressTableName(generationID string) string {
+	tableName, err := hostEgressTableName(generationID)
+	if err != nil {
+		panic(err)
+	}
+	return tableName
+}
+
+func mustGenerationNftTableName(details store.RuntimeGenerationDetails) string {
+	tableName, err := generationNftTableName(details)
+	if err != nil {
+		panic(err)
+	}
+	return tableName
 }
 
 func testSandboxUID() int {

@@ -443,7 +443,10 @@ func (r *Runtime) DestroyGenerationResources(ctx context.Context, details store.
 		return cleanup, err
 	}
 	if strings.EqualFold(runscNetwork, "sandbox") {
-		tableName := generationNftTableName(details)
+		tableName, err := generationNftTableName(details)
+		if err != nil {
+			return cleanup, err
+		}
 		if err := r.deleteNetworkResource(ctx, "nft", []string{"delete", "table", "inet", tableName}, true); err != nil {
 			errs = append(errs, err)
 		} else {
@@ -562,7 +565,11 @@ func (r *Runtime) recordGenerationResourceAbsenceEvidence(ctx context.Context, d
 		if err != nil {
 			return err
 		}
-		nft, err := r.nftTableAbsenceEvidence(ctx, generationNftTableName(details))
+		tableName, err := generationNftTableName(details)
+		if err != nil {
+			return err
+		}
+		nft, err := r.nftTableAbsenceEvidence(ctx, tableName)
 		if err != nil {
 			return err
 		}
@@ -669,7 +676,11 @@ func (r *Runtime) runtimePostStartProof(ctx context.Context, details store.Runti
 		if err != nil {
 			return store.RuntimeResourcePostStartProof{}, err
 		}
-		nft, err = r.nftTablePresenceEvidence(ctx, generationNftTableName(details))
+		tableName, err := generationNftTableName(details)
+		if err != nil {
+			return store.RuntimeResourcePostStartProof{}, err
+		}
+		nft, err = r.nftTablePresenceEvidence(ctx, tableName)
 		if err != nil {
 			return store.RuntimeResourcePostStartProof{}, err
 		}
@@ -1661,7 +1672,11 @@ func (r *Runtime) renderSandboxIsolatedRuntimeSpec(req StartRequest, driverSpec 
 	spec.Process.Rlimits = []map[string]any{{"type": "RLIMIT_NOFILE", "hard": 1024, "soft": 1024}}
 	spec.Process.NoNewPrivileges = true
 	spec.Root = specRoot{Path: r.rootFSPath(), Readonly: true}
-	spec.Hostname = "harness-gen-" + shortID(details.GenerationID)
+	shortGenerationID, err := shortID(details.GenerationID)
+	if err != nil {
+		return runtimeSpec{}, "", err
+	}
+	spec.Hostname = "harness-gen-" + shortGenerationID
 	pseudoMounts := RuntimeAdapterPseudoMounts()
 	if err := ValidateRuntimeAdapterPseudoMounts(pseudoMounts); err != nil {
 		return runtimeSpec{}, "", err
@@ -1789,15 +1804,15 @@ func prefixedSHA256(data []byte) string {
 	return "sha256:" + fmt.Sprintf("%x", sum[:])
 }
 
-func shortID(id string) string {
+func shortID(id string) (string, error) {
 	token := strings.NewReplacer("gen_", "", "-", "").Replace(id)
 	if len(token) > 12 {
-		return token[:12]
+		return token[:12], nil
 	}
 	if token == "" {
-		return "unknown"
+		return "", fmt.Errorf("short generation id is required")
 	}
-	return token
+	return token, nil
 }
 
 func joinInts(values []int) string {
@@ -2421,9 +2436,9 @@ func commandFailureContains(output []byte, err error, needles ...string) bool {
 	return commandOutputContains(text, needles...)
 }
 
-func generationNftTableName(details store.RuntimeGenerationDetails) string {
+func generationNftTableName(details store.RuntimeGenerationDetails) (string, error) {
 	if tableName := strings.TrimSpace(details.NftTableName); tableName != "" {
-		return tableName
+		return tableName, nil
 	}
 	return hostEgressTableName(details.GenerationID)
 }
@@ -2471,7 +2486,10 @@ func (r *Runtime) applyHostEgressPolicy(ctx context.Context, details store.Runti
 	if err := r.runNetworkCommand(ctx, "sysctl", "-w", "net.ipv4.ip_forward=1"); err != nil {
 		return err
 	}
-	tableName := hostEgressTableName(details.GenerationID)
+	tableName, err := hostEgressTableName(details.GenerationID)
+	if err != nil {
+		return err
+	}
 	if _, err := r.runner.CombinedOutput(ctx, "nft", "list", "table", "inet", tableName); err == nil {
 		if err := r.runNetworkCommand(ctx, "nft", "delete", "table", "inet", tableName); err != nil {
 			return err
@@ -2511,7 +2529,7 @@ func (r *Runtime) applyHostEgressPolicy(ctx context.Context, details store.Runti
 	return nil
 }
 
-func nftIdentifier(value string) string {
+func nftIdentifier(value string) (string, error) {
 	var b strings.Builder
 	for _, r := range value {
 		switch {
@@ -2523,13 +2541,17 @@ func nftIdentifier(value string) string {
 	}
 	out := b.String()
 	if out == "" {
-		return "unknown"
+		return "", fmt.Errorf("nft identifier is required")
 	}
-	return out
+	return out, nil
 }
 
-func hostEgressTableName(generationID string) string {
-	return "harness_gen_" + nftIdentifier(generationID)
+func hostEgressTableName(generationID string) (string, error) {
+	identifier, err := nftIdentifier(generationID)
+	if err != nil {
+		return "", err
+	}
+	return "harness_gen_" + identifier, nil
 }
 
 func (r *Runtime) runNetworkCommand(ctx context.Context, name string, args ...string) error {

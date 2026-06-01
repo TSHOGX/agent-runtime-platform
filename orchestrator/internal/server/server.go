@@ -578,7 +578,16 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 	}
 	preparedArtifacts := runtimeArtifactsFromDetails(generationDetails)
 	resourceWorkerID := runtimeResourceWorkerID(s.ownerUUID, allocation.Owner)
-	resourceHostID := runtimeResourceHostID()
+	resourceHostID, err := runtimeResourceHostID()
+	if err != nil {
+		if leaseErr := leaseKeeper.err(); leaseErr != nil {
+			return leaseErr
+		}
+		if ensured.RestoreFromCheckpoint || ensured.IsNew {
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+		}
+		return err
+	}
 	var runtimeResourceCreated bool
 	var runtimeResourceInstance store.RuntimeResourceInstance
 	retireRuntimeResource := func() {
@@ -1459,6 +1468,10 @@ func (s *Server) sandboxContractPayload(session store.Session, details store.Run
 	if err != nil {
 		return nil, err
 	}
+	nftTableName, err := runtimeResourceNftTableName(details.GenerationID)
+	if err != nil {
+		return nil, err
+	}
 	var sandboxModelProxyBaseURL any
 	if value := strings.TrimSpace(details.ManifestAnthropicBaseURL); value != "" {
 		sandboxModelProxyBaseURL = value
@@ -1608,7 +1621,7 @@ func (s *Server) sandboxContractPayload(session store.Session, details store.Run
 			"host_veth":        details.HostVeth,
 			"sandbox_veth":     details.SandboxVeth,
 			"host_side_cidr":   details.HostSideCIDR,
-			"nft_table_name":   runtimeResourceNftTableName(details.GenerationID),
+			"nft_table_name":   nftTableName,
 			"egress_policy_id": details.EgressPolicyID,
 		},
 		"runtime_adapter": map[string]any{
@@ -1766,6 +1779,10 @@ func (s *Server) runtimeResourceInstanceParams(details store.RuntimeGenerationDe
 	if err != nil {
 		return store.RuntimeResourceInstanceParams{}, err
 	}
+	nftTableName, err := runtimeResourceNftTableName(details.GenerationID)
+	if err != nil {
+		return store.RuntimeResourceInstanceParams{}, err
+	}
 	return store.RuntimeResourceInstanceParams{
 		GenerationID:           details.GenerationID,
 		SessionID:              details.SessionID,
@@ -1786,7 +1803,7 @@ func (s *Server) runtimeResourceInstanceParams(details store.RuntimeGenerationDe
 		SandboxIP:              sandboxIP,
 		SandboxIPCIDR:          details.SandboxIPCIDR,
 		HostSideCIDR:           details.HostSideCIDR,
-		NftTableName:           runtimeResourceNftTableName(details.GenerationID),
+		NftTableName:           nftTableName,
 		ControlDirPath:         details.ControlDirPath,
 		ControlManifestPath:    details.ControlManifestPath,
 		BundleDirPath:          details.BundleDirPath,
@@ -2183,12 +2200,19 @@ func runtimeResourceWorkerID(ownerUUID, leaseOwner string) string {
 	return workerID
 }
 
-func runtimeResourceHostID() string {
-	host, err := os.Hostname()
+func runtimeResourceHostID() (string, error) {
+	return runtimeResourceHostIDFrom(os.Hostname)
+}
+
+func runtimeResourceHostIDFrom(hostname func() (string, error)) (string, error) {
+	host, err := hostname()
 	if err == nil && strings.TrimSpace(host) != "" {
-		return strings.TrimSpace(host)
+		return strings.TrimSpace(host), nil
 	}
-	return "unknown-host"
+	if err != nil {
+		return "", fmt.Errorf("runtime resource host id: %w", err)
+	}
+	return "", fmt.Errorf("runtime resource host id is required")
 }
 
 func runtimeResourceSandboxIP(cidr string) (string, error) {
@@ -2203,11 +2227,15 @@ func runtimeResourceSandboxIP(cidr string) (string, error) {
 	return "", fmt.Errorf("runtime resource sandbox ip cidr %q is invalid: %w", cidr, err)
 }
 
-func runtimeResourceNftTableName(generationID string) string {
-	return "harness_gen_" + runtimeResourceIdentifier(generationID)
+func runtimeResourceNftTableName(generationID string) (string, error) {
+	identifier, err := runtimeResourceIdentifier(generationID)
+	if err != nil {
+		return "", err
+	}
+	return "harness_gen_" + identifier, nil
 }
 
-func runtimeResourceIdentifier(value string) string {
+func runtimeResourceIdentifier(value string) (string, error) {
 	var b strings.Builder
 	for _, r := range value {
 		switch {
@@ -2219,9 +2247,9 @@ func runtimeResourceIdentifier(value string) string {
 	}
 	out := b.String()
 	if out == "" {
-		return "unknown"
+		return "", fmt.Errorf("runtime resource identifier is required")
 	}
-	return out
+	return out, nil
 }
 
 func (s *Server) runtimeResourceRootPrefixes() map[string]string {

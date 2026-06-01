@@ -250,6 +250,23 @@ func TestResolveModeDeploymentRejectsEmptyMode(t *testing.T) {
 	}
 }
 
+func TestRuntimeResourceHostIDFailsClosed(t *testing.T) {
+	if _, err := runtimeResourceHostIDFrom(func() (string, error) { return " ", nil }); err == nil || !strings.Contains(err.Error(), "host id is required") {
+		t.Fatalf("expected empty hostname error, got %v", err)
+	}
+
+	boom := errors.New("hostname failed")
+	if _, err := runtimeResourceHostIDFrom(func() (string, error) { return "", boom }); !errors.Is(err, boom) {
+		t.Fatalf("expected hostname error, got %v", err)
+	}
+}
+
+func TestRuntimeResourceNftTableNameRequiresIdentifier(t *testing.T) {
+	if _, err := runtimeResourceNftTableName(""); err == nil || !strings.Contains(err.Error(), "identifier is required") {
+		t.Fatalf("expected empty generation id error, got %v", err)
+	}
+}
+
 func TestPublicSessionDoesNotInferMissingMode(t *testing.T) {
 	now := time.Now().UTC()
 	got := publicSession(store.Session{
@@ -1504,7 +1521,7 @@ func TestSendMessageAllocatesReplacementGenerationForFailedActiveGeneration(t *t
 	if err := st.MarkGenerationResourcesLive(ctx, session.ID, old.GenerationID, old.Owner, time.Now().UTC()); err != nil {
 		t.Fatalf("mark old generation live: %v", err)
 	}
-	createServerRuntimeResourceLive(t, ctx, st, session.ID, old, owner.UUID, runtimeResourceHostID(), time.Now().UTC())
+	createServerRuntimeResourceLive(t, ctx, st, session.ID, old, owner.UUID, mustRuntimeResourceHostID(t), time.Now().UTC())
 	if err := st.FailGeneration(ctx, store.FailGenerationParams{
 		SessionID:    session.ID,
 		GenerationID: old.GenerationID,
@@ -2218,7 +2235,7 @@ func TestRunMaintenanceDoesNotColdStartFailedActiveGenerationWithQueuedTurn(t *t
 	if err := st.MarkGenerationResourcesLive(ctx, session.ID, old.GenerationID, old.Owner, time.Now().UTC()); err != nil {
 		t.Fatalf("mark old generation live: %v", err)
 	}
-	createServerRuntimeResourceLive(t, ctx, st, session.ID, old, owner.UUID, runtimeResourceHostID(), time.Now().UTC())
+	createServerRuntimeResourceLive(t, ctx, st, session.ID, old, owner.UUID, mustRuntimeResourceHostID(t), time.Now().UTC())
 	if err := st.FailGeneration(ctx, store.FailGenerationParams{
 		SessionID:    session.ID,
 		GenerationID: old.GenerationID,
@@ -2789,7 +2806,7 @@ func TestStartEnsuredGenerationRenewsLeaseDuringSlowPrepare(t *testing.T) {
 		instance.RunscContainerID != serverRunscContainerID(t, ctx, st, session.ID, allocation.GenerationID) ||
 		instance.RunscBinaryPath != "/usr/local/bin/runsc-test" ||
 		instance.RunscBinaryDigest != "sha256:runsc-test" ||
-		instance.NftTableName != runtimeResourceNftTableName(allocation.GenerationID) {
+		instance.NftTableName != mustRuntimeResourceNftTableName(t, allocation.GenerationID) {
 		t.Fatalf("unexpected runtime resource instance: %+v", instance)
 	}
 	contract, err := st.GetSandboxContractForGeneration(ctx, session.ID, allocation.GenerationID)
@@ -3441,7 +3458,7 @@ func TestDestroySessionCancelsPendingTurnAndReclaimsGeneration(t *testing.T) {
 	if err := st.MarkGenerationResourcesLive(ctx, session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
 		t.Fatalf("mark generation live: %v", err)
 	}
-	createServerRuntimeResourceLive(t, ctx, st, session.ID, allocation, owner.UUID, runtimeResourceHostID(), time.Now().UTC())
+	createServerRuntimeResourceLive(t, ctx, st, session.ID, allocation, owner.UUID, mustRuntimeResourceHostID(t), time.Now().UTC())
 	enqueued, err := st.EnqueueTurnMessage(ctx, store.EnqueueTurnMessageParams{
 		SessionID: session.ID,
 		Content:   "hello",
@@ -3674,7 +3691,7 @@ func TestRunMaintenanceRecoversGenerationThatExpiresAfterStartup(t *testing.T) {
 	if err := st.MarkGenerationResourcesLive(ctx, session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
 		t.Fatalf("mark generation live: %v", err)
 	}
-	createServerRuntimeResourceLive(t, ctx, st, session.ID, allocation, owner.UUID, runtimeResourceHostID(), time.Now().UTC())
+	createServerRuntimeResourceLive(t, ctx, st, session.ID, allocation, owner.UUID, mustRuntimeResourceHostID(t), time.Now().UTC())
 	expiresAt := time.Now().UTC().Add(25 * time.Millisecond)
 	if _, err := st.DBForTest().ExecContext(ctx, `
 UPDATE runtime_generations
@@ -3753,7 +3770,7 @@ func TestExpiredRuntimeRecoverySkipsRepairWhenRuntimeCleanupFails(t *testing.T) 
 	if err := st.MarkGenerationResourcesLive(ctx, session.ID, allocation.GenerationID, allocation.Owner, now.Add(-3*time.Minute+time.Second)); err != nil {
 		t.Fatalf("mark generation live: %v", err)
 	}
-	createServerRuntimeResourceLive(t, ctx, st, session.ID, allocation, owner.UUID, runtimeResourceHostID(), now.Add(-3*time.Minute+2*time.Second))
+	createServerRuntimeResourceLive(t, ctx, st, session.ID, allocation, owner.UUID, mustRuntimeResourceHostID(t), now.Add(-3*time.Minute+2*time.Second))
 	if _, err := st.DBForTest().ExecContext(ctx, `
 UPDATE runtime_generations
 SET status = 'idle',
@@ -3834,7 +3851,7 @@ func TestDestroyReclaimableGenerationResourcesMarksDestroyedOnlyAfterRuntimeClea
 			if err := st.MarkGenerationResourcesLive(ctx, "sess_cleanup", allocation.GenerationID, allocation.Owner, now.Add(-59*time.Second)); err != nil {
 				t.Fatalf("mark resources live: %v", err)
 			}
-			createServerRuntimeResourceLive(t, ctx, st, "sess_cleanup", allocation, owner.UUID, runtimeResourceHostID(), now.Add(-59*time.Second+time.Millisecond))
+			createServerRuntimeResourceLive(t, ctx, st, "sess_cleanup", allocation, owner.UUID, mustRuntimeResourceHostID(t), now.Add(-59*time.Second+time.Millisecond))
 			if err := st.FailGeneration(ctx, store.FailGenerationParams{
 				SessionID:    "sess_cleanup",
 				GenerationID: allocation.GenerationID,
@@ -3954,7 +3971,7 @@ func TestDestroyReclaimableGenerationResourcesRemovesFilesystemWithRealRuntime(t
 	if err := st.MarkGenerationResourcesLive(ctx, "sess_cleanup_real", allocation.GenerationID, allocation.Owner, now.Add(-59*time.Second)); err != nil {
 		t.Fatalf("mark resources live: %v", err)
 	}
-	createServerRuntimeResourceLive(t, ctx, st, "sess_cleanup_real", allocation, owner.UUID, runtimeResourceHostID(), now.Add(-59*time.Second+time.Millisecond))
+	createServerRuntimeResourceLive(t, ctx, st, "sess_cleanup_real", allocation, owner.UUID, mustRuntimeResourceHostID(t), now.Add(-59*time.Second+time.Millisecond))
 	if err := st.FailGeneration(ctx, store.FailGenerationParams{
 		SessionID:    "sess_cleanup_real",
 		GenerationID: allocation.GenerationID,
@@ -3983,8 +4000,8 @@ func TestDestroyReclaimableGenerationResourcesRemovesFilesystemWithRealRuntime(t
 			},
 			fail: map[string]error{
 				currentRunscBinary + " -root " + filepath.Join(dir, "runsc-root") + " state " + details.RunscContainerID: errors.New("not found"),
-				"ip link show " + details.HostVeth:                                         errors.New("does not exist"),
-				"nft list table inet " + runtimeResourceNftTableName(details.GenerationID): errors.New("No such table"),
+				"ip link show " + details.HostVeth:                                                errors.New("does not exist"),
+				"nft list table inet " + mustRuntimeResourceNftTableName(t, details.GenerationID): errors.New("No such table"),
 			},
 		},
 	})
@@ -5487,7 +5504,7 @@ func createServerRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 		SandboxIP:              prefix.Addr().String(),
 		SandboxIPCIDR:          details.SandboxIPCIDR,
 		HostSideCIDR:           details.HostSideCIDR,
-		NftTableName:           runtimeResourceNftTableName(allocation.GenerationID),
+		NftTableName:           mustRuntimeResourceNftTableName(t, allocation.GenerationID),
 		ControlDirPath:         details.ControlDirPath,
 		ControlManifestPath:    details.ControlManifestPath,
 		BundleDirPath:          details.BundleDirPath,
@@ -5694,6 +5711,24 @@ func enableSessionAutoCheckpoint(t *testing.T, ctx context.Context, st *store.St
 	}
 }
 
+func mustRuntimeResourceHostID(t *testing.T) string {
+	t.Helper()
+	hostID, err := runtimeResourceHostID()
+	if err != nil {
+		t.Fatalf("runtime resource host id: %v", err)
+	}
+	return hostID
+}
+
+func mustRuntimeResourceNftTableName(t *testing.T, generationID string) string {
+	t.Helper()
+	tableName, err := runtimeResourceNftTableName(generationID)
+	if err != nil {
+		t.Fatalf("runtime resource nft table name: %v", err)
+	}
+	return tableName
+}
+
 func prepareServerIdleGeneration(t *testing.T, ctx context.Context, st *store.Store, cfg config.Config, ownerUUID, sessionID string) store.GenerationAllocation {
 	t.Helper()
 	now := time.Now().UTC()
@@ -5723,7 +5758,7 @@ func prepareServerIdleGeneration(t *testing.T, ctx context.Context, st *store.St
 	if err := st.MarkGenerationResourcesLive(ctx, sessionID, allocation.GenerationID, allocation.Owner, now.Add(time.Second)); err != nil {
 		t.Fatalf("mark generation live: %v", err)
 	}
-	createServerRuntimeResourceLive(t, ctx, st, sessionID, allocation, ownerUUID, runtimeResourceHostID(), now.Add(2*time.Second))
+	createServerRuntimeResourceLive(t, ctx, st, sessionID, allocation, ownerUUID, mustRuntimeResourceHostID(t), now.Add(2*time.Second))
 	if err := st.UpdateSessionStatusAndActivity(ctx, sessionID, string(sessionstate.RunningIdle), nil, now.Add(-time.Minute)); err != nil {
 		t.Fatalf("mark session idle: %v", err)
 	}
@@ -5804,7 +5839,7 @@ func ensureServerRuntimeResourceLiveForCheckpoint(t *testing.T, ctx context.Cont
 		t.Fatalf("get checkpoint runtime resource instance: %v", err)
 	}
 	allocation := serverGenerationAllocationForTest(t, ctx, st, sessionID, generationID)
-	createServerRuntimeResourceLive(t, ctx, st, sessionID, allocation, "checkpoint-test-owner", runtimeResourceHostID(), now)
+	createServerRuntimeResourceLive(t, ctx, st, sessionID, allocation, "checkpoint-test-owner", mustRuntimeResourceHostID(t), now)
 }
 
 func serverGenerationAllocationForTest(t *testing.T, ctx context.Context, st *store.Store, sessionID, generationID string) store.GenerationAllocation {
