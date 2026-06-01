@@ -25,9 +25,9 @@ HOST_ONLY_DUMMY_API_KEY = "harness-model-proxy-dummy-key"
 CLAUDE_MARKER_DIR = ".harness"
 CLAUDE_SESSION_MARKER = "claude-session-initialized.json"
 PI_CODING_AGENT_DIR = "/agent-home/.pi/agent"
-PI_SESSION_DIR = "/agent-home/.pi/agent/sessions"
-PI_MODELS_SANDBOX_PATH = "/agent-home/.pi/agent/models.json"
-PI_SETTINGS_SANDBOX_PATH = "/agent-home/.pi/agent/settings.json"
+PI_SESSION_DIR = f"{PI_CODING_AGENT_DIR}/sessions"
+PI_MODELS_SANDBOX_PATH = f"{PI_CODING_AGENT_DIR}/models.json"
+PI_SETTINGS_SANDBOX_PATH = f"{PI_CODING_AGENT_DIR}/settings.json"
 PI_HARNESS_PROXY_PROVIDER = "harness_anthropic_proxy"
 DRIVER_STATE_DIGEST_PREFIX = b"driver_state_digest_v1\n"
 
@@ -540,6 +540,7 @@ def validate_pi_runtime_environment():
         got = os.environ.get(name, "")
         if got != want:
             raise RuntimeError(f"{name} must be {want}")
+    return required
 
 
 def validate_pi_config_materialization():
@@ -621,7 +622,7 @@ class PiRPCTurnRunner:
         self.current_grant = dict(grant or {})
 
     def _start(self):
-        validate_pi_runtime_environment()
+        pi_runtime_env = validate_pi_runtime_environment()
         validate_pi_config_materialization()
         if self.proc is not None and self.proc.poll() is None:
             return
@@ -635,20 +636,16 @@ class PiRPCTurnRunner:
             "--model",
             model,
             "--session-dir",
-            PI_SESSION_DIR,
+            pi_runtime_env["PI_CODING_AGENT_SESSION_DIR"],
         ]
         env = {
             "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
             "HOME": "/agent-home",
             "USER": "harness",
             "LOGNAME": "harness",
-            "PI_CODING_AGENT_DIR": PI_CODING_AGENT_DIR,
-            "PI_CODING_AGENT_SESSION_DIR": PI_SESSION_DIR,
-            "PI_OFFLINE": "1",
-            "PI_SKIP_VERSION_CHECK": "1",
-            "PI_TELEMETRY": "0",
             "ANTHROPIC_BASE_URL": os.environ.get("ANTHROPIC_BASE_URL", ""),
         }
+        env.update(pi_runtime_env)
         for optional_name in ("LANG", "TMPDIR"):
             optional_value = os.environ.get(optional_name)
             if optional_value:

@@ -488,7 +488,10 @@ class BridgeClientTest(unittest.TestCase):
             self.assertEqual((status, error_class, error), ("completed", "", ""))
             self.assertEqual(captured["command"][:7], ["/usr/local/bin/pi", "--mode", "rpc", "--provider", "harness_anthropic_proxy", "--model", "sonnet"])
             self.assertIn("--session-dir", captured["command"])
+            self.assertEqual(captured["command"][captured["command"].index("--session-dir") + 1], str(session_dir))
             self.assertNotIn("--no-session", captured["command"])
+            self.assertEqual(captured["env"]["PI_CODING_AGENT_DIR"], str(agent_dir))
+            self.assertEqual(captured["env"]["PI_CODING_AGENT_SESSION_DIR"], str(session_dir))
             self.assertEqual(captured["env"]["PI_OFFLINE"], "1")
             self.assertEqual(captured["env"]["PI_TELEMETRY"], "0")
             writes = [json.loads(value) for value in captured["process"].stdin.writes]
@@ -915,6 +918,34 @@ class BridgeClientTest(unittest.TestCase):
         runner.set_turn_context({"driver_state": {"state_digest": "sha256:" + "c" * 64}})
         with self.assertRaisesRegex(RuntimeError, "state_payload is required"):
             runner._restore_session_if_needed(11)
+
+    def test_validate_pi_runtime_environment_returns_projected_env(self):
+        with tempfile.TemporaryDirectory() as root:
+            agent_dir = Path(root) / "agent"
+            session_dir = agent_dir / "sessions"
+            with mock.patch.object(bridge, "PI_CODING_AGENT_DIR", str(agent_dir)):
+                with mock.patch.object(bridge, "PI_SESSION_DIR", str(session_dir)):
+                    with mock.patch.dict(
+                        os.environ,
+                        {
+                            "PI_CODING_AGENT_DIR": str(agent_dir),
+                            "PI_CODING_AGENT_SESSION_DIR": str(session_dir),
+                            "PI_OFFLINE": "1",
+                            "PI_SKIP_VERSION_CHECK": "1",
+                            "PI_TELEMETRY": "0",
+                        },
+                        clear=True,
+                    ):
+                        self.assertEqual(
+                            bridge.validate_pi_runtime_environment(),
+                            {
+                                "PI_CODING_AGENT_DIR": str(agent_dir),
+                                "PI_CODING_AGENT_SESSION_DIR": str(session_dir),
+                                "PI_OFFLINE": "1",
+                                "PI_SKIP_VERSION_CHECK": "1",
+                                "PI_TELEMETRY": "0",
+                            },
+                        )
 
     def test_normalize_pi_session_file_rejects_symlink_session_root(self):
         with tempfile.TemporaryDirectory() as root:
