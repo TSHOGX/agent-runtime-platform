@@ -20,19 +20,27 @@ type shellInterruptFrame struct {
 
 func InterruptPayloadFor(driver agents.ID) ([]byte, error) {
 	driver = agents.ID(strings.TrimSpace(string(driver)))
+	if err := InterruptSupportedFor(driver); err != nil {
+		return nil, err
+	}
+	renderer := interruptPayloadRenderers[driver]
+	return renderer()
+}
+
+func InterruptSupportedFor(driver agents.ID) error {
+	driver = agents.ID(strings.TrimSpace(string(driver)))
 	spec, ok := agents.DriverSpecFor(string(driver))
 	if !ok {
-		return nil, fmt.Errorf("unsupported driver %q", driver)
+		return fmt.Errorf("unsupported driver %q", driver)
 	}
 	if !agents.DriverSupportsFeature(spec, agents.FeatureInterrupt) ||
 		!agents.DriverSupportsSubCapability(spec, agents.SubCapabilityInterruptAdapter) {
-		return nil, fmt.Errorf("interrupt not supported for driver %q", driver)
+		return fmt.Errorf("interrupt not supported for driver %q", driver)
 	}
-	renderer, ok := interruptPayloadRenderers[driver]
-	if !ok {
-		return nil, fmt.Errorf("interrupt adapter is missing for driver %q", driver)
+	if _, ok := interruptPayloadRenderers[driver]; !ok {
+		return fmt.Errorf("interrupt adapter is missing for driver %q", driver)
 	}
-	return renderer()
+	return nil
 }
 
 func renderShellInterruptPayload() ([]byte, error) {

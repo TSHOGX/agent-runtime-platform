@@ -9,6 +9,9 @@ import (
 )
 
 func TestInterruptPayloadForShell(t *testing.T) {
+	if err := InterruptSupportedFor(agents.Shell); err != nil {
+		t.Fatalf("shell interrupt support: %v", err)
+	}
 	payload, err := InterruptPayloadFor(agents.Shell)
 	if err != nil {
 		t.Fatalf("shell interrupt payload: %v", err)
@@ -24,6 +27,17 @@ func TestInterruptPayloadForShell(t *testing.T) {
 	}
 	if frame.Type != "interrupt" {
 		t.Fatalf("shell interrupt payload = %+v", frame)
+	}
+}
+
+func TestInterruptSupportedForRequiresRegisteredAdapter(t *testing.T) {
+	renderer := interruptPayloadRenderers[agents.Shell]
+	delete(interruptPayloadRenderers, agents.Shell)
+	t.Cleanup(func() { interruptPayloadRenderers[agents.Shell] = renderer })
+
+	err := InterruptSupportedFor(agents.Shell)
+	if err == nil || !strings.Contains(err.Error(), "interrupt adapter is missing for driver") {
+		t.Fatalf("expected missing interrupt adapter error, got %v", err)
 	}
 }
 

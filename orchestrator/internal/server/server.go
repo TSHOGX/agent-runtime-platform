@@ -30,6 +30,7 @@ import (
 	"harness-platform/orchestrator/internal/artifacts"
 	"harness-platform/orchestrator/internal/bridge"
 	"harness-platform/orchestrator/internal/config"
+	"harness-platform/orchestrator/internal/driveradapter"
 	"harness-platform/orchestrator/internal/events"
 	"harness-platform/orchestrator/internal/generationplan"
 	"harness-platform/orchestrator/internal/planprojection"
@@ -3102,8 +3103,7 @@ func (s *Server) interruptSession(w http.ResponseWriter, r *http.Request, sessio
 		writeError(w, http.StatusConflict, "session is not running")
 		return
 	}
-	driverSpec, ok := agents.DriverSpecFor(session.DriverID)
-	if !ok || !agents.DriverSupportsFeature(driverSpec, agents.FeatureInterrupt) {
+	if err := driveradapter.InterruptSupportedFor(agents.ID(session.DriverID)); err != nil {
 		writeError(w, http.StatusConflict, "interrupt is not supported for this session")
 		return
 	}
