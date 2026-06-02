@@ -885,6 +885,11 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 		return err
 	}
+	if err := s.verifyGenerationPlanRuntimeArtifactPaths(ctx, allocation.GenerationID, generationDetails); err != nil {
+		retireRuntimeResource()
+		s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+		return err
+	}
 	if err := s.verifyGenerationPlanDataVolumes(ctx, allocation.GenerationID, dataVolumes); err != nil {
 		retireRuntimeResource()
 		s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
@@ -1762,6 +1767,26 @@ func (s *Server) verifyGenerationPlanNetworkEvidence(ctx context.Context, genera
 		EgressPolicyID:     details.EgressPolicyID,
 		EgressPolicyDigest: details.EgressPolicyDigest,
 		DNSPolicy:          details.DNSPolicy,
+	})
+}
+
+func (s *Server) verifyGenerationPlanRuntimeArtifactPaths(ctx context.Context, generationID string, details store.RuntimeGenerationDetails) error {
+	plan, err := s.store.RequireGenerationPlanForLaunch(ctx, strings.TrimSpace(generationID))
+	if err != nil {
+		return err
+	}
+	if err := generationplan.Validate(generationplan.ValidateParams{Payload: plan.CanonicalPayload}); err != nil {
+		return err
+	}
+	return generationplan.VerifyRuntimeArtifactPathEvidence(generationplan.VerifyRuntimeArtifactPathEvidenceParams{
+		Payload:             plan.CanonicalPayload,
+		ControlDirPath:      details.ControlDirPath,
+		ControlManifestPath: details.ControlManifestPath,
+		BundleDirPath:       details.BundleDirPath,
+		SpecPath:            details.SpecPath,
+		BridgeDirPath:       details.BridgeDirPath,
+		LogDirPath:          details.LogDirPath,
+		NetworkHostsPath:    details.NetworkHostsPath,
 	})
 }
 

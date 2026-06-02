@@ -3780,6 +3780,32 @@ func TestVerifyGenerationPlanNetworkEvidenceChecksStoredPlan(t *testing.T) {
 	}
 }
 
+func TestVerifyGenerationPlanRuntimeArtifactPathsChecksStoredPlan(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, _ := openServerOwnedStore(t, ctx, dir)
+	srv := &Server{store: st}
+	storeServerFrozenEvidencePlan(t, ctx, st, dir, validServerGenerationPlanPayload())
+
+	details := store.RuntimeGenerationDetails{
+		ControlDirPath:      "/var/lib/harness/run/control/gen_frozen_evidence",
+		ControlManifestPath: "/var/lib/harness/run/control/gen_frozen_evidence/session.json",
+		BundleDirPath:       "/var/lib/harness/run/runtime/gen_frozen_evidence",
+		SpecPath:            "/var/lib/harness/run/runtime/gen_frozen_evidence/config.json",
+		BridgeDirPath:       "/var/lib/harness/run/bridge/gen_frozen_evidence",
+		LogDirPath:          "/var/lib/harness/logs/gen_frozen_evidence",
+	}
+	if err := srv.verifyGenerationPlanRuntimeArtifactPaths(ctx, "gen_frozen_evidence", details); err != nil {
+		t.Fatalf("verify runtime artifact paths: %v", err)
+	}
+
+	details.SpecPath = "/var/lib/harness/run/runtime/changed/config.json"
+	if err := srv.verifyGenerationPlanRuntimeArtifactPaths(ctx, "gen_frozen_evidence", details); err == nil ||
+		!strings.Contains(err.Error(), "runtime_artifacts.spec_path mismatch") {
+		t.Fatalf("expected spec path mismatch, got %v", err)
+	}
+}
+
 func TestVerifyGenerationPlanFrozenEvidenceChecksStoredProjectionRows(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

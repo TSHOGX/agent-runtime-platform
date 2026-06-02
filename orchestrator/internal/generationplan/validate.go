@@ -69,6 +69,17 @@ type VerifyNetworkEvidenceParams struct {
 	DNSPolicy          string
 }
 
+type VerifyRuntimeArtifactPathEvidenceParams struct {
+	Payload             any
+	ControlDirPath      string
+	ControlManifestPath string
+	BundleDirPath       string
+	SpecPath            string
+	BridgeDirPath       string
+	LogDirPath          string
+	NetworkHostsPath    string
+}
+
 func Validate(p ValidateParams) error {
 	object, err := decodePlanObject(p.Payload)
 	if err != nil {
@@ -133,6 +144,41 @@ func Validate(p ValidateParams) error {
 	}
 	if err := validateProjectionDigests(object); err != nil {
 		return err
+	}
+	return nil
+}
+
+func VerifyRuntimeArtifactPathEvidence(p VerifyRuntimeArtifactPathEvidenceParams) error {
+	object, err := decodePlanObject(p.Payload)
+	if err != nil {
+		return err
+	}
+	artifacts, err := requireObject(object, "runtime_artifacts")
+	if err != nil {
+		return err
+	}
+	checks := []struct {
+		label string
+		got   string
+		want  string
+	}{
+		{"runtime_artifacts.control_dir_path", stringField(artifacts, "control_dir_path"), p.ControlDirPath},
+		{"runtime_artifacts.control_manifest_path", stringField(artifacts, "control_manifest_path"), p.ControlManifestPath},
+		{"runtime_artifacts.bundle_dir_path", stringField(artifacts, "bundle_dir_path"), p.BundleDirPath},
+		{"runtime_artifacts.spec_path", stringField(artifacts, "spec_path"), p.SpecPath},
+		{"runtime_artifacts.bridge_dir_path", stringField(artifacts, "bridge_dir_path"), p.BridgeDirPath},
+		{"runtime_artifacts.log_dir_path", stringField(artifacts, "log_dir_path"), p.LogDirPath},
+		{"runtime_artifacts.network_hosts_path", optionalStringField(artifacts, "network_hosts_path"), p.NetworkHostsPath},
+	}
+	for _, check := range checks {
+		got := strings.TrimSpace(check.got)
+		want := strings.TrimSpace(check.want)
+		if got == "" && want == "" {
+			continue
+		}
+		if got != want {
+			return fmt.Errorf("generation plan %s mismatch", check.label)
+		}
 	}
 	return nil
 }

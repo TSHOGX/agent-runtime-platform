@@ -593,6 +593,37 @@ func TestVerifyNetworkEvidenceChecksFrozenNetworkIdentity(t *testing.T) {
 	}
 }
 
+func TestVerifyRuntimeArtifactPathEvidenceChecksFrozenPaths(t *testing.T) {
+	payload := validPlanPayload()
+	params := VerifyRuntimeArtifactPathEvidenceParams{
+		Payload:             payload,
+		ControlDirPath:      "/var/lib/harness/run/control/gen_plan",
+		ControlManifestPath: "/var/lib/harness/run/control/gen_plan/session.json",
+		BundleDirPath:       "/var/lib/harness/run/runtime/gen_plan",
+		SpecPath:            "/var/lib/harness/run/runtime/gen_plan/config.json",
+		BridgeDirPath:       "/var/lib/harness/run/bridge/gen_plan",
+		LogDirPath:          "/var/lib/harness/logs/gen_plan",
+	}
+	if err := VerifyRuntimeArtifactPathEvidence(params); err != nil {
+		t.Fatalf("verify runtime artifact paths: %v", err)
+	}
+
+	mismatch := params
+	mismatch.BundleDirPath = "/var/lib/harness/run/runtime/changed"
+	if err := VerifyRuntimeArtifactPathEvidence(mismatch); err == nil || !strings.Contains(err.Error(), "runtime_artifacts.bundle_dir_path mismatch") {
+		t.Fatalf("expected bundle dir mismatch, got %v", err)
+	}
+
+	payloadWithHosts := validPlanPayload()
+	runtimeArtifacts := payloadWithHosts["runtime_artifacts"].(map[string]any)
+	runtimeArtifacts["network_hosts_path"] = "/var/lib/harness/run/network/gen_plan/hosts"
+	params.Payload = payloadWithHosts
+	params.NetworkHostsPath = "/var/lib/harness/run/network/gen_plan/hosts.changed"
+	if err := VerifyRuntimeArtifactPathEvidence(params); err == nil || !strings.Contains(err.Error(), "runtime_artifacts.network_hosts_path mismatch") {
+		t.Fatalf("expected network hosts path mismatch, got %v", err)
+	}
+}
+
 func TestContentSnapshotRefsExtractsPlanSnapshotDigests(t *testing.T) {
 	payload := validPlanPayload()
 	contentSnapshots := payload["content_snapshots"].(map[string]any)
