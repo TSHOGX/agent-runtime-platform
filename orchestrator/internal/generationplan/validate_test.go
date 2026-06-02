@@ -678,6 +678,34 @@ func TestVerifyMountPlanEvidenceChecksDriverConfigMounts(t *testing.T) {
 	}
 }
 
+func TestVerifySandboxContractEvidenceChecksStoredProjectionDigest(t *testing.T) {
+	payload := validPlanPayload()
+	params := VerifySandboxContractEvidenceParams{
+		Payload:          payload,
+		ContractID:       "contract_gen_plan",
+		ContractDigest:   "sha256:sandbox-contract",
+		ProjectionDigest: "sha256:sandbox-contract",
+	}
+	if err := VerifySandboxContractEvidence(params); err != nil {
+		t.Fatalf("verify sandbox contract evidence: %v", err)
+	}
+
+	mismatch := params
+	mismatch.ProjectionDigest = "sha256:changed"
+	if err := VerifySandboxContractEvidence(mismatch); err == nil ||
+		!strings.Contains(err.Error(), "sandbox_contract projection digest mismatch") {
+		t.Fatalf("expected sandbox contract projection mismatch, got %v", err)
+	}
+
+	mismatch = params
+	mismatch.ContractDigest = "sha256:changed"
+	mismatch.ProjectionDigest = "sha256:changed"
+	if err := VerifySandboxContractEvidence(mismatch); err == nil ||
+		!strings.Contains(err.Error(), "runtime_artifacts.sandbox_contract_payload_digest mismatch") {
+		t.Fatalf("expected sandbox contract payload digest mismatch, got %v", err)
+	}
+}
+
 func TestVerifyRuntimeResourceEvidenceChecksFrozenIdentityDigest(t *testing.T) {
 	payload := validPlanPayload()
 	params := VerifyRuntimeResourceEvidenceParams{

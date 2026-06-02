@@ -93,6 +93,13 @@ type VerifyMountPlanEvidenceParams struct {
 	MountPlan runtime.MountPlan
 }
 
+type VerifySandboxContractEvidenceParams struct {
+	Payload          any
+	ContractID       string
+	ContractDigest   string
+	ProjectionDigest string
+}
+
 type VerifyRuntimeResourceEvidenceParams struct {
 	Payload                any
 	ResourceIdentityDigest string
@@ -249,6 +256,39 @@ func VerifyMountPlanEvidence(p VerifyMountPlanEvidenceParams) error {
 		return err
 	}
 	return verifyDriverConfigMountPlanEvidence(object, mounts, runtimeMounts)
+}
+
+func VerifySandboxContractEvidence(p VerifySandboxContractEvidenceParams) error {
+	object, err := decodePlanObject(p.Payload)
+	if err != nil {
+		return err
+	}
+	artifacts, err := requireObject(object, "runtime_artifacts")
+	if err != nil {
+		return err
+	}
+	contractID := strings.TrimSpace(p.ContractID)
+	if contractID == "" {
+		return fmt.Errorf("generation plan sandbox contract id evidence is required")
+	}
+	if strings.TrimSpace(stringField(artifacts, "sandbox_contract_id")) != contractID {
+		return fmt.Errorf("generation plan runtime_artifacts.sandbox_contract_id mismatch")
+	}
+	contractDigest := strings.TrimSpace(p.ContractDigest)
+	if !isSha256(contractDigest) {
+		return fmt.Errorf("generation plan sandbox contract digest evidence is required")
+	}
+	if strings.TrimSpace(stringField(artifacts, "sandbox_contract_payload_digest")) != contractDigest {
+		return fmt.Errorf("generation plan runtime_artifacts.sandbox_contract_payload_digest mismatch")
+	}
+	projectionDigest := strings.TrimSpace(p.ProjectionDigest)
+	if !isSha256(projectionDigest) {
+		return fmt.Errorf("generation plan sandbox_contract projection digest is required")
+	}
+	if projectionDigest != contractDigest {
+		return fmt.Errorf("generation plan sandbox_contract projection digest mismatch")
+	}
+	return nil
 }
 
 func VerifyNetworkEvidence(p VerifyNetworkEvidenceParams) error {

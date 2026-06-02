@@ -779,6 +779,14 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 			return err
 		}
+		if err := s.verifyGenerationPlanSandboxContractEvidence(ctx, allocation.GenerationID, session.ID); err != nil {
+			if leaseErr := leaseKeeper.err(); leaseErr != nil {
+				return leaseErr
+			}
+			retireRuntimeResource()
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+			return err
+		}
 		if err := leaseKeeper.ensureOwned(); err != nil {
 			retireRuntimeResource()
 			return err
@@ -926,6 +934,11 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 	}
 	if !ensured.IsNew {
 		if err := s.verifyGenerationPlanMountPlanEvidence(ctx, allocation.GenerationID, generationDetails, dataVolumes, contentSnapshots); err != nil {
+			retireRuntimeResource()
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+			return err
+		}
+		if err := s.verifyGenerationPlanSandboxContractEvidence(ctx, allocation.GenerationID, session.ID); err != nil {
 			retireRuntimeResource()
 			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 			return err
@@ -1887,6 +1900,31 @@ func (s *Server) verifyGenerationPlanMountPlanEvidence(ctx context.Context, gene
 	return generationplan.VerifyMountPlanEvidence(generationplan.VerifyMountPlanEvidenceParams{
 		Payload:   plan.CanonicalPayload,
 		MountPlan: mountPlan,
+	})
+}
+
+func (s *Server) verifyGenerationPlanSandboxContractEvidence(ctx context.Context, generationID, sessionID string) error {
+	generationID = strings.TrimSpace(generationID)
+	plan, err := s.store.RequireGenerationPlanForLaunch(ctx, generationID)
+	if err != nil {
+		return err
+	}
+	if err := generationplan.Validate(generationplan.ValidateParams{Payload: plan.CanonicalPayload}); err != nil {
+		return err
+	}
+	contract, err := s.store.GetSandboxContractForGeneration(ctx, strings.TrimSpace(sessionID), generationID)
+	if err != nil {
+		return err
+	}
+	projectionDigests, _, err := s.storedGenerationPlanProjectionEvidence(ctx, generationID, plan.PlanDigest)
+	if err != nil {
+		return err
+	}
+	return generationplan.VerifySandboxContractEvidence(generationplan.VerifySandboxContractEvidenceParams{
+		Payload:          plan.CanonicalPayload,
+		ContractID:       contract.ContractID,
+		ContractDigest:   contract.SandboxContractDigest,
+		ProjectionDigest: projectionDigests[store.GenerationPlanProjectionSandboxContract],
 	})
 }
 

@@ -3879,6 +3879,52 @@ WHERE contract_id = ?`, sandboxContractID("gen_frozen_evidence")); err != nil {
 	}
 }
 
+func TestVerifyGenerationPlanSandboxContractEvidenceChecksStoredRows(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_sandbox_contract_verify", string(sessionstate.Created), time.Now().UTC(), nil)
+	cfg := testServerConfig(dir)
+	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     store.GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    serverTestAllocatorConfig(cfg, session.DriverID),
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	rt := &recordingRuntime{}
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: rt,
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+	if err := srv.startEnsuredGeneration(ctx, session, ensuredGeneration{Allocation: allocation, IsNew: true}, startFailureInputAcceptable); err != nil {
+		t.Fatalf("start generation: %v", err)
+	}
+	if err := srv.verifyGenerationPlanSandboxContractEvidence(ctx, allocation.GenerationID, session.ID); err != nil {
+		t.Fatalf("verify sandbox contract evidence: %v", err)
+	}
+
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE generation_plan_projections
+SET payload_digest = 'sha256:changed'
+WHERE generation_id = ?
+  AND projection_kind = ?`, allocation.GenerationID, store.GenerationPlanProjectionSandboxContract); err != nil {
+		t.Fatalf("corrupt sandbox contract projection: %v", err)
+	}
+	if err := srv.verifyGenerationPlanSandboxContractEvidence(ctx, allocation.GenerationID, session.ID); err == nil ||
+		!strings.Contains(err.Error(), "sandbox_contract projection digest mismatch") {
+		t.Fatalf("expected sandbox contract projection mismatch, got %v", err)
+	}
+}
+
 func TestVerifyGenerationPlanFrozenEvidenceChecksStoredProjectionRows(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -7151,6 +7197,11 @@ WHERE id = ?`, sessionID).Scan(&mode); err != nil {
 	} else {
 		runtimeArtifacts["network_hosts_path"] = details.NetworkHostsPath
 	}
+	allocation := serverGenerationAllocationForTest(t, ctx, st, sessionID, generationID)
+	sandboxContractPayload := serverRuntimeResourceSandboxContractPayloadForTest(t, details, allocation, sandboxContractID(generationID))
+	sandboxContractDigest := serverSandboxContractPayloadDigestForTest(t, sandboxContractPayload)
+	runtimeArtifacts["sandbox_contract_id"] = sandboxContractID(generationID)
+	runtimeArtifacts["sandbox_contract_payload_digest"] = sandboxContractDigest
 	runtimeArtifacts["resource_identity_digest"] = serverRuntimeResourceIdentityDigestForPlanFixture(t, details, artifacts)
 	dataVolumes := payload["data_volumes"].(map[string]any)
 	serverApplyWorkspaceVolumePayload(dataVolumes["workspace"].(map[string]any), workspaceVolume)
@@ -7176,7 +7227,7 @@ WHERE id = ?`, sessionID).Scan(&mode); err != nil {
 	projections := append([]store.GenerationPlanProjectionExpectation{{
 		ProjectionKind:    store.GenerationPlanProjectionSandboxContract,
 		ProjectionVersion: store.GenerationPlanProjectionVersion,
-		PayloadDigest:     "sha256:sandbox-contract",
+		PayloadDigest:     sandboxContractDigest,
 	}}, planprojection.ExpectationsForDetails(details, artifacts)...)
 	for _, projection := range projections {
 		if _, err := st.StoreGenerationPlanProjection(ctx, store.StoreGenerationPlanProjectionParams{
@@ -7363,8 +7414,6 @@ func createServerRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 	if err != nil {
 		t.Fatalf("parse sandbox cidr: %v", err)
 	}
-	credentialPolicy := serverCredentialPolicyForTest(t, allocation.DriverState.DriverID)
-	modelAccessAllowed := allocation.DriverState.DriverID == "claude_code"
 	if _, err := st.StoreSandboxContract(ctx, store.StoreSandboxContractParams{
 		ContractID:             contractID,
 		SessionID:              sessionID,
@@ -7372,61 +7421,8 @@ func createServerRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 		SandboxContractVersion: store.SandboxContractVersion,
 		ContractSchemaVersion:  store.SandboxContractSchemaVersion,
 		ContractGateVersion:    store.SandboxContractGateDriverManifest,
-		Payload: map[string]any{
-			"sandbox_contract_version": store.SandboxContractVersion,
-			"contract_schema_version":  store.SandboxContractSchemaVersion,
-			"contract_gate_version":    store.SandboxContractGateDriverManifest,
-			"contract_id":              contractID,
-			"session_id":               sessionID,
-			"generation_id":            allocation.GenerationID,
-			"runtime_profile_id":       allocation.AgentRuntimeProfileID,
-			"network_profile_id":       allocation.NetworkProfileID,
-			"driver": map[string]any{
-				"driver_id":                            allocation.DriverState.DriverID,
-				"driver_version":                       "test",
-				"bridge_protocol":                      "harness_bridge_v2",
-				"bridge_protocol_version":              2,
-				"turn_input_schema":                    "RunTurn",
-				"output_schema":                        "claude_stream_json_v1",
-				"command_argv_digest":                  "sha256:command",
-				"driver_config_digest":                 "sha256:driver-config",
-				"required_runtime_capabilities_digest": "sha256:driver-capabilities",
-				"supports_interrupt":                   false,
-				"supports_compaction":                  true,
-			},
-			"runtime_provider": map[string]any{
-				"provider_id":              "local_runsc",
-				"provider_profile_id":      "local_runsc_default",
-				"isolation_kind":           "gvisor",
-				"template_ref":             "default",
-				"template_digest":          "sha256:template",
-				"capability_vocab_version": "1",
-				"capability_digest":        "sha256:provider-capabilities",
-			},
-			"identity": map[string]any{
-				"model_access_allowed": modelAccessAllowed,
-			},
-			"network_identity": map[string]any{
-				"runsc_network": details.RunscNetwork,
-				"sandbox_ip":    prefix.Addr().String(),
-			},
-			"credential_policy": credentialPolicy,
-			"model_access": map[string]any{
-				"model_access_allowed": modelAccessAllowed,
-			},
-			"driver_runtime": map[string]any{
-				"driver_home_mount":             "/agent-home",
-				"generated_driver_config_mount": "/harness-control/driver/" + allocation.DriverState.DriverID,
-				"materialized_driver_config":    map[string]any{},
-				"initial_driver_state_digest":   allocation.DriverState.StateDigest,
-			},
-			"input_digests": map[string]any{
-				"runtime_config_digest": "sha256:runtime-config",
-				"rootfs_image_digest":   nil,
-				"agent_manifest_digest": "sha256:agent-manifest",
-			},
-		},
-		Now: now,
+		Payload:                serverRuntimeResourceSandboxContractPayloadForTest(t, details, allocation, contractID),
+		Now:                    now,
 	}); err != nil {
 		t.Fatalf("store sandbox contract: %v", err)
 	}
@@ -7512,6 +7508,80 @@ func createServerRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 		t.Fatalf("mark runtime resource live: %v", err)
 	}
 	return instance
+}
+
+func serverRuntimeResourceSandboxContractPayloadForTest(t *testing.T, details store.RuntimeGenerationDetails, allocation store.GenerationAllocation, contractID string) map[string]any {
+	t.Helper()
+	sandboxIP, err := runtimeResourceSandboxIP(details.SandboxIPCIDR)
+	if err != nil {
+		t.Fatalf("sandbox contract sandbox ip for %s: %v", allocation.GenerationID, err)
+	}
+	driverID := allocation.DriverState.DriverID
+	credentialPolicy := serverCredentialPolicyForTest(t, driverID)
+	modelAccessAllowed := driverID == "claude_code"
+	return map[string]any{
+		"sandbox_contract_version": store.SandboxContractVersion,
+		"contract_schema_version":  store.SandboxContractSchemaVersion,
+		"contract_gate_version":    store.SandboxContractGateDriverManifest,
+		"contract_id":              contractID,
+		"session_id":               details.SessionID,
+		"generation_id":            allocation.GenerationID,
+		"runtime_profile_id":       allocation.AgentRuntimeProfileID,
+		"network_profile_id":       allocation.NetworkProfileID,
+		"driver": map[string]any{
+			"driver_id":                            driverID,
+			"driver_version":                       "test",
+			"bridge_protocol":                      "harness_bridge_v2",
+			"bridge_protocol_version":              2,
+			"turn_input_schema":                    "RunTurn",
+			"output_schema":                        "claude_stream_json_v1",
+			"command_argv_digest":                  "sha256:command",
+			"driver_config_digest":                 "sha256:driver-config",
+			"required_runtime_capabilities_digest": "sha256:driver-capabilities",
+			"supports_interrupt":                   false,
+			"supports_compaction":                  true,
+		},
+		"runtime_provider": map[string]any{
+			"provider_id":              "local_runsc",
+			"provider_profile_id":      "local_runsc_default",
+			"isolation_kind":           "gvisor",
+			"template_ref":             "default",
+			"template_digest":          "sha256:template",
+			"capability_vocab_version": "1",
+			"capability_digest":        "sha256:provider-capabilities",
+		},
+		"identity": map[string]any{
+			"model_access_allowed": modelAccessAllowed,
+		},
+		"network_identity": map[string]any{
+			"runsc_network": details.RunscNetwork,
+			"sandbox_ip":    sandboxIP,
+		},
+		"credential_policy": credentialPolicy,
+		"model_access": map[string]any{
+			"model_access_allowed": modelAccessAllowed,
+		},
+		"driver_runtime": map[string]any{
+			"driver_home_mount":             "/agent-home",
+			"generated_driver_config_mount": "/harness-control/driver/" + driverID,
+			"materialized_driver_config":    map[string]any{},
+			"initial_driver_state_digest":   allocation.DriverState.StateDigest,
+		},
+		"input_digests": map[string]any{
+			"runtime_config_digest": "sha256:runtime-config",
+			"rootfs_image_digest":   nil,
+			"agent_manifest_digest": "sha256:agent-manifest",
+		},
+	}
+}
+
+func serverSandboxContractPayloadDigestForTest(t *testing.T, payload map[string]any) string {
+	t.Helper()
+	canonical, err := store.CanonicalSandboxContractPayload(payload)
+	if err != nil {
+		t.Fatalf("canonical sandbox contract payload: %v", err)
+	}
+	return store.SandboxContractDigest(canonical)
 }
 
 func serverCredentialPolicyForTest(t *testing.T, driverID string) map[string]any {
