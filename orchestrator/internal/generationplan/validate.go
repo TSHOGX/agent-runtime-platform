@@ -22,6 +22,7 @@ type VerifyFrozenEvidenceParams struct {
 	RunscBinaryPath                 string
 	RunscBinaryDigest               string
 	ProjectionDigests               map[string]string
+	ContentSnapshotDigests          map[string]string
 	CheckpointBundleDigest          string
 	CheckpointRuntimeConfigDigest   string
 	CheckpointControlManifestDigest string
@@ -132,6 +133,23 @@ func VerifyFrozenEvidence(p VerifyFrozenEvidenceParams) error {
 	}
 	if p.CheckpointControlManifestDigest != "" && strings.TrimSpace(p.CheckpointControlManifestDigest) != projectionDigest(projections, "control_manifest_projected") {
 		return fmt.Errorf("generation plan checkpoint control manifest digest mismatch")
+	}
+	snapshots, err := requireObject(object, "content_snapshots")
+	if err != nil {
+		return err
+	}
+	for kind, value := range snapshots {
+		snapshot, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		expectedDigest := strings.TrimSpace(p.ContentSnapshotDigests[kind])
+		if expectedDigest == "" {
+			return fmt.Errorf("generation plan content snapshot %s digest is required", kind)
+		}
+		if expectedDigest != stringField(snapshot, "digest") {
+			return fmt.Errorf("generation plan content snapshot %s digest mismatch", kind)
+		}
 	}
 	return nil
 }

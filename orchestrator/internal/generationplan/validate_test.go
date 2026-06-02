@@ -86,21 +86,7 @@ func TestValidateRejectsProjectionDigestShape(t *testing.T) {
 
 func TestVerifyFrozenEvidenceChecksRunscAndProjections(t *testing.T) {
 	payload := validPlanPayload()
-	params := VerifyFrozenEvidenceParams{
-		Payload:           payload,
-		RunscPlatform:     "systrap",
-		RunscVersion:      "runsc test",
-		RunscBinaryPath:   "/usr/local/bin/runsc-test",
-		RunscBinaryDigest: "sha256:runsc",
-		ProjectionDigests: map[string]string{
-			"bundle":                     "sha256:bundle",
-			"runtime_config":             "sha256:runtime-config",
-			"control_manifest_projected": "sha256:control-manifest-projected",
-		},
-		CheckpointBundleDigest:          "sha256:bundle",
-		CheckpointRuntimeConfigDigest:   "sha256:runtime-config",
-		CheckpointControlManifestDigest: "sha256:control-manifest-projected",
-	}
+	params := validFrozenEvidenceParams(payload)
 	if err := VerifyFrozenEvidence(params); err != nil {
 		t.Fatalf("verify frozen evidence: %v", err)
 	}
@@ -115,6 +101,36 @@ func TestVerifyFrozenEvidenceChecksRunscAndProjections(t *testing.T) {
 	mismatch.ProjectionDigests = map[string]string{"bundle": "sha256:changed"}
 	if err := VerifyFrozenEvidence(mismatch); err == nil || !strings.Contains(err.Error(), "projection bundle digest mismatch") {
 		t.Fatalf("expected projection mismatch, got %v", err)
+	}
+}
+
+func TestVerifyFrozenEvidenceChecksContentSnapshotDigests(t *testing.T) {
+	payload := validPlanPayload()
+	contentSnapshots := payload["content_snapshots"].(map[string]any)
+	contentSnapshots["skills"] = map[string]any{
+		"kind":                   "skills",
+		"digest":                 "sha256:skills",
+		"immutable_host_path":    "/var/lib/harness/content/skills/sha256-skills",
+		"mount_destination":      "/harness-skills",
+		"source_evidence_digest": "sha256:source",
+		"retention_class":        "active",
+	}
+	params := validFrozenEvidenceParams(payload)
+	params.ContentSnapshotDigests = map[string]string{"skills": "sha256:skills"}
+	if err := VerifyFrozenEvidence(params); err != nil {
+		t.Fatalf("verify content snapshot evidence: %v", err)
+	}
+
+	missing := params
+	missing.ContentSnapshotDigests = nil
+	if err := VerifyFrozenEvidence(missing); err == nil || !strings.Contains(err.Error(), "content snapshot skills digest is required") {
+		t.Fatalf("expected missing content snapshot digest, got %v", err)
+	}
+
+	mismatch := params
+	mismatch.ContentSnapshotDigests = map[string]string{"skills": "sha256:changed"}
+	if err := VerifyFrozenEvidence(mismatch); err == nil || !strings.Contains(err.Error(), "content snapshot skills digest mismatch") {
+		t.Fatalf("expected content snapshot digest mismatch, got %v", err)
 	}
 }
 
@@ -261,6 +277,24 @@ func validPlanPayload() map[string]any {
 		"source_digests":      map[string]any{"runtime_config_digest": "sha256:runtime-config", "agent_manifest_digest": "sha256:agent-manifest"},
 		"projection_digests":  validProjectionPayload(),
 		"mutable_state_scope": map[string]any{"leases": "runtime_generations", "events": "events", "checkpoint_state": "runtime_generations"},
+	}
+}
+
+func validFrozenEvidenceParams(payload map[string]any) VerifyFrozenEvidenceParams {
+	return VerifyFrozenEvidenceParams{
+		Payload:           payload,
+		RunscPlatform:     "systrap",
+		RunscVersion:      "runsc test",
+		RunscBinaryPath:   "/usr/local/bin/runsc-test",
+		RunscBinaryDigest: "sha256:runsc",
+		ProjectionDigests: map[string]string{
+			"bundle":                     "sha256:bundle",
+			"runtime_config":             "sha256:runtime-config",
+			"control_manifest_projected": "sha256:control-manifest-projected",
+		},
+		CheckpointBundleDigest:          "sha256:bundle",
+		CheckpointRuntimeConfigDigest:   "sha256:runtime-config",
+		CheckpointControlManifestDigest: "sha256:control-manifest-projected",
 	}
 }
 

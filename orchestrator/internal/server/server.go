@@ -2144,10 +2144,48 @@ func (s *Server) verifyGenerationPlanFrozenEvidence(ctx context.Context, generat
 		RunscBinaryPath:                 artifacts.RunscBinaryPath,
 		RunscBinaryDigest:               artifacts.RunscBinaryDigest,
 		ProjectionDigests:               generationPlanProjectionDigestMap(artifacts),
+		ContentSnapshotDigests:          generationPlanContentSnapshotDigestMap(plan.CanonicalPayload),
 		CheckpointBundleDigest:          optionalProjectionPayloadDigest("bundle", details.CheckpointBundleDigest),
 		CheckpointRuntimeConfigDigest:   optionalProjectionPayloadDigest("runtime_config", details.CheckpointRuntimeConfigDigest),
 		CheckpointControlManifestDigest: optionalProjectionPayloadDigest("control_manifest_projected", details.CheckpointControlManifestDigest),
 	})
+}
+
+func generationPlanContentSnapshotDigestMap(payload []byte) map[string]string {
+	object, err := generationPlanPayloadObject(payload)
+	if err != nil {
+		return nil
+	}
+	snapshots, ok := object["content_snapshots"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	out := map[string]string{}
+	for kind, value := range snapshots {
+		snapshot, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		digest := strings.TrimSpace(fmt.Sprint(snapshot["digest"]))
+		if digest != "" {
+			out[kind] = digest
+		}
+	}
+	return out
+}
+
+func generationPlanPayloadObject(payload []byte) (map[string]any, error) {
+	canonical, err := store.CanonicalGenerationPlanPayload(payload)
+	if err != nil {
+		return nil, err
+	}
+	var object map[string]any
+	decoder := json.NewDecoder(strings.NewReader(string(canonical)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&object); err != nil {
+		return nil, err
+	}
+	return object, nil
 }
 
 func generationPlanProjectionExpectations(artifacts runtime.GenerationArtifacts) []store.GenerationPlanProjectionExpectation {

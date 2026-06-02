@@ -3308,6 +3308,27 @@ func TestVerifyGenerationPlanFrozenEvidenceSkipsMissingPlan(t *testing.T) {
 	}
 }
 
+func TestGenerationPlanContentSnapshotDigestMap(t *testing.T) {
+	payload := validServerGenerationPlanPayload()
+	contentSnapshots := payload["content_snapshots"].(map[string]any)
+	contentSnapshots["skills"] = map[string]any{
+		"kind":                   "skills",
+		"digest":                 "sha256:skills",
+		"immutable_host_path":    "/var/lib/harness/content/skills/sha256-skills",
+		"mount_destination":      "/harness-skills",
+		"source_evidence_digest": "sha256:skills-source",
+		"retention_class":        "generation_plan",
+	}
+	canonical, err := store.CanonicalGenerationPlanPayload(payload)
+	if err != nil {
+		t.Fatalf("canonical generation plan payload: %v", err)
+	}
+	digests := generationPlanContentSnapshotDigestMap(canonical)
+	if len(digests) != 1 || digests["skills"] != "sha256:skills" {
+		t.Fatalf("content snapshot digests = %+v", digests)
+	}
+}
+
 func TestRuntimeResourceInstanceCheckpointRestoreTransitions(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
