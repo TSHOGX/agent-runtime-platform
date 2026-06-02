@@ -120,21 +120,10 @@ func VerifyFrozenEvidence(p VerifyFrozenEvidenceParams) error {
 		strings.TrimSpace(p.RunscBinaryDigest) != stringField(runsc, "binary_digest") {
 		return fmt.Errorf("generation plan runsc pin mismatch")
 	}
-	projections, err := requireObject(object, "projection_digests")
-	if err != nil {
-		return err
-	}
 	for _, kind := range store.GenerationPlanProjectionKinds() {
 		expectedDigest := strings.TrimSpace(p.ProjectionDigests[kind])
 		if expectedDigest == "" {
 			return fmt.Errorf("generation plan projection %s digest is required", kind)
-		}
-		projection, err := requireObject(projections, kind)
-		if err != nil {
-			return err
-		}
-		if expectedDigest != stringField(projection, "payload_digest") {
-			return fmt.Errorf("generation plan projection %s digest mismatch", kind)
 		}
 		expectedVersion := p.ProjectionVersions[kind]
 		if expectedVersion <= 0 {
@@ -145,17 +134,21 @@ func VerifyFrozenEvidence(p VerifyFrozenEvidenceParams) error {
 		if expectedVersion <= 0 {
 			return fmt.Errorf("generation plan projection %s version is required", kind)
 		}
-		if numberField(projection, "projection_version") != int64(expectedVersion) {
+		registeredVersion, ok := store.GenerationPlanProjectionVersionFor(kind)
+		if !ok {
+			return fmt.Errorf("generation plan projection %s version is required", kind)
+		}
+		if expectedVersion != registeredVersion {
 			return fmt.Errorf("generation plan projection %s version mismatch", kind)
 		}
 	}
-	if p.CheckpointBundleDigest != "" && strings.TrimSpace(p.CheckpointBundleDigest) != projectionDigest(projections, store.GenerationPlanProjectionBundle) {
+	if p.CheckpointBundleDigest != "" && strings.TrimSpace(p.CheckpointBundleDigest) != strings.TrimSpace(p.ProjectionDigests[store.GenerationPlanProjectionBundle]) {
 		return fmt.Errorf("generation plan checkpoint bundle digest mismatch")
 	}
-	if p.CheckpointRuntimeConfigDigest != "" && strings.TrimSpace(p.CheckpointRuntimeConfigDigest) != projectionDigest(projections, store.GenerationPlanProjectionRuntimeConfig) {
+	if p.CheckpointRuntimeConfigDigest != "" && strings.TrimSpace(p.CheckpointRuntimeConfigDigest) != strings.TrimSpace(p.ProjectionDigests[store.GenerationPlanProjectionRuntimeConfig]) {
 		return fmt.Errorf("generation plan checkpoint runtime config digest mismatch")
 	}
-	if p.CheckpointControlManifestDigest != "" && strings.TrimSpace(p.CheckpointControlManifestDigest) != projectionDigest(projections, store.GenerationPlanProjectionControlManifestProjected) {
+	if p.CheckpointControlManifestDigest != "" && strings.TrimSpace(p.CheckpointControlManifestDigest) != strings.TrimSpace(p.ProjectionDigests[store.GenerationPlanProjectionControlManifestProjected]) {
 		return fmt.Errorf("generation plan checkpoint control manifest digest mismatch")
 	}
 	if checkpointEvidencePresent(p) {
@@ -252,14 +245,6 @@ func decodePlanObject(payload any) (map[string]any, error) {
 		return nil, fmt.Errorf("decode generation plan payload: %w", err)
 	}
 	return object, nil
-}
-
-func projectionDigest(projections map[string]any, kind string) string {
-	projection, ok := projections[kind].(map[string]any)
-	if !ok {
-		return ""
-	}
-	return stringField(projection, "payload_digest")
 }
 
 func validatePlanVersion(object map[string]any) error {
@@ -574,9 +559,13 @@ func validateSourceDigests(object map[string]any) error {
 }
 
 func validateProjectionDigests(object map[string]any) error {
-	projections, err := requireObject(object, "projection_digests")
-	if err != nil {
-		return err
+	value, ok := object["projection_digests"]
+	if !ok || value == nil {
+		return nil
+	}
+	projections, ok := value.(map[string]any)
+	if !ok {
+		return fmt.Errorf("generation plan projection_digests must be an object")
 	}
 	for _, kind := range store.GenerationPlanProjectionKinds() {
 		projection, err := requireObject(projections, kind)

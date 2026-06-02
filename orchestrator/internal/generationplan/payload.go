@@ -50,7 +50,6 @@ type RenderPayloadParams struct {
 	NetworkIdentityNftTableName  string
 	BridgeProbe                  BridgeProbePayload
 	FeaturePolicy                map[string]any
-	ProjectionRows               []store.StoreGenerationPlanProjectionParams
 	ContentSnapshots             []store.ContentSnapshotRecord
 	SourceDigests                SourceDigests
 	SandboxContractCompatibility string
@@ -142,14 +141,6 @@ func RenderPayload(p RenderPayloadParams) (map[string]any, error) {
 	}
 	if contentSnapshotMounts, ok := mountPlan["content_snapshots"]; ok {
 		mountsPayload["content_snapshots"] = contentSnapshotMounts
-	}
-	projections := map[string]any{}
-	for _, projection := range p.ProjectionRows {
-		projections[projection.ProjectionKind] = map[string]any{
-			"projection_version": projection.ProjectionVersion,
-			"payload_digest":     projection.PayloadDigest,
-			"materialized_path":  nullablePath(projection.MaterializedPath),
-		}
 	}
 	contentSnapshots, err := RenderContentSnapshotsPayload(p.ContentSnapshots)
 	if err != nil {
@@ -285,7 +276,6 @@ func RenderPayload(p RenderPayloadParams) (map[string]any, error) {
 		"feature_policy":      featurePolicy,
 		"content_snapshots":   contentSnapshots,
 		"source_digests":      map[string]any{"runtime_config_digest": p.SourceDigests.RuntimeConfigDigest, "agent_manifest_digest": p.SourceDigests.AgentManifestDigest},
-		"projection_digests":  projections,
 		"mutable_state_scope": map[string]any{"leases": mutableLeasesScope, "events": mutableEventsScope, "checkpoint_state": mutableCheckpointStateScope},
 	}, nil
 }

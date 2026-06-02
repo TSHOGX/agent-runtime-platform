@@ -1452,6 +1452,9 @@ WHERE g.session_id = ? AND r.resource_state = 'live'`, session.ID).Scan(&resourc
 	if identity["session_id"] != session.ID || identity["generation_id"] != generationID || runscPin["binary_digest"] != "sha256:runsc-test" {
 		t.Fatalf("generation plan did not capture launch identity/runsc pin: %s", plan.CanonicalPayload)
 	}
+	if _, ok := planPayload["projection_digests"]; ok {
+		t.Fatalf("generation plan must not embed projection digests: %s", plan.CanonicalPayload)
+	}
 	driverPlan := planPayload["driver"].(map[string]any)
 	driverCapabilities := driverPlan["capability_snapshot"].(map[string]any)
 	driverFeatures := driverCapabilities["features"].(map[string]any)
@@ -3507,8 +3510,8 @@ WHERE generation_id = ?
 	}
 
 	err := srv.verifyGenerationPlanFrozenEvidence(ctx, "gen_frozen_evidence", serverGenerationPlanFrozenEvidenceDetails(), serverGenerationPlanFrozenEvidenceArtifacts())
-	if err == nil || !strings.Contains(err.Error(), "generation plan projection bundle digest mismatch") {
-		t.Fatalf("expected stored projection row mismatch, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "generation plan checkpoint bundle digest mismatch") {
+		t.Fatalf("expected stored projection row checkpoint mismatch, got %v", err)
 	}
 }
 
@@ -6270,7 +6273,6 @@ func validServerGenerationPlanPayload() map[string]any {
 		"feature_policy":      featurePolicyPayload,
 		"content_snapshots":   map[string]any{"skills": nil, "managed_settings": nil},
 		"source_digests":      map[string]any{"runtime_config_digest": "sha256:runtime-config-source", "agent_manifest_digest": "sha256:agent-manifest"},
-		"projection_digests":  serverPlanProjectionPayload(),
 		"mutable_state_scope": map[string]any{"leases": "runtime_generations", "events": "events", "checkpoint_state": "runtime_generations"},
 	}
 }
@@ -6416,16 +6418,6 @@ WHERE id = ?`, sessionID).Scan(&mode); err != nil {
 	} else {
 		runtimeArtifacts["network_hosts_path"] = details.NetworkHostsPath
 	}
-	projections := payload["projection_digests"].(map[string]any)
-	projections["control_manifest"].(map[string]any)["payload_digest"] = planprojection.PayloadDigest(store.GenerationPlanProjectionControlManifest, artifacts.ManifestDigest)
-	projections["control_manifest"].(map[string]any)["materialized_path"] = details.ControlManifestPath
-	projections["control_manifest_projected"].(map[string]any)["payload_digest"] = planprojection.PayloadDigest(store.GenerationPlanProjectionControlManifestProjected, artifacts.ProjectedManifestDigest)
-	projections["control_manifest_projected"].(map[string]any)["materialized_path"] = details.ControlManifestPath
-	projections["oci_spec"].(map[string]any)["payload_digest"] = planprojection.PayloadDigest(store.GenerationPlanProjectionOCISpec, artifacts.SpecDigest)
-	projections["oci_spec"].(map[string]any)["materialized_path"] = details.SpecPath
-	projections["bundle"].(map[string]any)["payload_digest"] = planprojection.PayloadDigest(store.GenerationPlanProjectionBundle, artifacts.BundleDigest)
-	projections["bundle"].(map[string]any)["materialized_path"] = details.BundleDirPath
-	projections["runtime_config"].(map[string]any)["payload_digest"] = planprojection.PayloadDigest(store.GenerationPlanProjectionRuntimeConfig, artifacts.RuntimeConfigDigest)
 	payload["feature_policy"] = featurePolicyPayload
 	plan, err := st.StoreGenerationPlan(ctx, store.StoreGenerationPlanParams{
 		GenerationID: generationID,
@@ -6464,17 +6456,6 @@ func serverPlanVolumePayload(hostPath, markerPath, destination string) map[strin
 		"runtime_identity_digest": "sha256:identity", "provisioning_marker_path": markerPath,
 		"provisioning_marker_digest": "sha256:marker", "sandbox_destination": destination,
 		"sandbox_uid": 65534, "sandbox_gid": 65534, "sandbox_supplemental_gids": []int{},
-	}
-}
-
-func serverPlanProjectionPayload() map[string]any {
-	return map[string]any{
-		"sandbox_contract":           map[string]any{"projection_version": 1, "payload_digest": "sha256:sandbox-contract", "materialized_path": nil},
-		"control_manifest":           map[string]any{"projection_version": 1, "payload_digest": "sha256:control-manifest", "materialized_path": "/var/lib/harness/run/control/gen_frozen_evidence/session.json"},
-		"control_manifest_projected": map[string]any{"projection_version": 1, "payload_digest": "sha256:control-manifest-projected", "materialized_path": "/var/lib/harness/run/control/gen_frozen_evidence/session.json"},
-		"oci_spec":                   map[string]any{"projection_version": 1, "payload_digest": "sha256:oci-spec", "materialized_path": "/var/lib/harness/run/runtime/gen_frozen_evidence/config.json"},
-		"bundle":                     map[string]any{"projection_version": 1, "payload_digest": "sha256:bundle", "materialized_path": "/var/lib/harness/run/runtime/gen_frozen_evidence"},
-		"runtime_config":             map[string]any{"projection_version": 1, "payload_digest": "sha256:runtime-config", "materialized_path": nil},
 	}
 }
 

@@ -1587,7 +1587,6 @@ func (s *Server) shadowGenerationPlanPayload(session store.Session, details stor
 			PostStartAttempts:       s.cfg.Harness.Probe.PostStartAttempts,
 			PostStartInterval:       s.cfg.Harness.Probe.PostStartInterval.Duration,
 		},
-		ProjectionRows: planprojection.Rows(details, artifacts, sandboxContractPayload, ""),
 		SourceDigests: generationplan.SourceDigests{
 			RuntimeConfigDigest: inputEvidence.RuntimeConfigDigest,
 			AgentManifestDigest: inputEvidence.AgentManifestDigest,

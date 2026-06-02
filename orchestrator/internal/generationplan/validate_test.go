@@ -214,8 +214,9 @@ func TestValidateRejectsUnsupportedContentSnapshotKey(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsProjectionDigestShape(t *testing.T) {
+func TestValidateRejectsMalformedLegacyProjectionDigestShape(t *testing.T) {
 	payload := validPlanPayload()
+	payload["projection_digests"] = validProjectionPayload()
 	projections := payload["projection_digests"].(map[string]any)
 	projections["oci_spec"].(map[string]any)["payload_digest"] = "spec_digest"
 
@@ -248,13 +249,6 @@ func TestVerifyFrozenEvidenceChecksRunscAndProjections(t *testing.T) {
 	mismatch.RunscBinaryDigest = "sha256:changed"
 	if err := VerifyFrozenEvidence(mismatch); err == nil || !strings.Contains(err.Error(), "runsc pin mismatch") {
 		t.Fatalf("expected runsc mismatch, got %v", err)
-	}
-
-	mismatch = params
-	mismatch.ProjectionDigests = cloneStringMap(params.ProjectionDigests)
-	mismatch.ProjectionDigests["bundle"] = "sha256:changed"
-	if err := VerifyFrozenEvidence(mismatch); err == nil || !strings.Contains(err.Error(), "projection bundle digest mismatch") {
-		t.Fatalf("expected projection mismatch, got %v", err)
 	}
 
 	mismatch = params
@@ -516,7 +510,6 @@ func validPlanPayload() map[string]any {
 		"feature_policy":      featurePolicyPayload,
 		"content_snapshots":   map[string]any{"skills": nil, "managed_settings": nil},
 		"source_digests":      map[string]any{"runtime_config_digest": "sha256:runtime-config", "agent_manifest_digest": "sha256:agent-manifest"},
-		"projection_digests":  validProjectionPayload(),
 		"mutable_state_scope": map[string]any{"leases": "runtime_generations", "events": "events", "checkpoint_state": "runtime_generations"},
 	}
 }
