@@ -17,6 +17,9 @@ type ValidateParams struct {
 
 type VerifyFrozenEvidenceParams struct {
 	Payload                         any
+	SessionID                       string
+	GenerationID                    string
+	DriverID                        string
 	RunscPlatform                   string
 	RunscVersion                    string
 	RunscBinaryPath                 string
@@ -101,6 +104,9 @@ func VerifyFrozenEvidence(p VerifyFrozenEvidenceParams) error {
 	if err != nil {
 		return err
 	}
+	if err := verifyFrozenIdentityEvidence(object, p); err != nil {
+		return err
+	}
 	runsc, err := requireObject(object, "runsc_pin")
 	if err != nil {
 		return err
@@ -179,6 +185,36 @@ func VerifyFrozenEvidence(p VerifyFrozenEvidenceParams) error {
 		}
 		if expectedDigest != stringField(snapshot, "digest") {
 			return fmt.Errorf("generation plan content snapshot %s digest mismatch", kind)
+		}
+	}
+	return nil
+}
+
+func verifyFrozenIdentityEvidence(object map[string]any, p VerifyFrozenEvidenceParams) error {
+	identity, err := requireObject(object, "identity")
+	if err != nil {
+		return err
+	}
+	driver, err := requireObject(object, "driver")
+	if err != nil {
+		return err
+	}
+	checks := []struct {
+		label string
+		got   string
+		want  string
+	}{
+		{"identity.session_id", stringField(identity, "session_id"), p.SessionID},
+		{"identity.generation_id", stringField(identity, "generation_id"), p.GenerationID},
+		{"driver.driver_id", stringField(driver, "driver_id"), p.DriverID},
+	}
+	for _, check := range checks {
+		want := strings.TrimSpace(check.want)
+		if want == "" {
+			continue
+		}
+		if strings.TrimSpace(check.got) != want {
+			return fmt.Errorf("generation plan %s mismatch", check.label)
 		}
 	}
 	return nil

@@ -1676,6 +1676,9 @@ func (s *Server) verifyGenerationPlanFrozenEvidence(ctx context.Context, generat
 	runscVersion, runscBinaryPath, runscBinaryDigest := generationPlanRunscEvidence(details, artifacts)
 	return generationplan.VerifyFrozenEvidence(generationplan.VerifyFrozenEvidenceParams{
 		Payload:                         plan.CanonicalPayload,
+		SessionID:                       details.SessionID,
+		GenerationID:                    details.GenerationID,
+		DriverID:                        details.DriverID,
 		RunscPlatform:                   details.RunscPlatform,
 		RunscVersion:                    runscVersion,
 		RunscBinaryPath:                 runscBinaryPath,

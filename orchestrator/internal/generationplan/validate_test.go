@@ -233,6 +233,12 @@ func TestVerifyFrozenEvidenceChecksRunscAndProjections(t *testing.T) {
 	}
 
 	mismatch := params
+	mismatch.SessionID = "sess_changed"
+	if err := VerifyFrozenEvidence(mismatch); err == nil || !strings.Contains(err.Error(), "identity.session_id mismatch") {
+		t.Fatalf("expected identity mismatch, got %v", err)
+	}
+
+	mismatch = params
 	mismatch.RunscBinaryDigest = "sha256:changed"
 	if err := VerifyFrozenEvidence(mismatch); err == nil || !strings.Contains(err.Error(), "runsc pin mismatch") {
 		t.Fatalf("expected runsc mismatch, got %v", err)
@@ -504,6 +510,9 @@ func validPlanPayload() map[string]any {
 func validFrozenEvidenceParams(payload map[string]any) VerifyFrozenEvidenceParams {
 	return VerifyFrozenEvidenceParams{
 		Payload:           payload,
+		SessionID:         "sess_plan",
+		GenerationID:      "gen_plan",
+		DriverID:          "claude_code",
 		RunscPlatform:     "systrap",
 		RunscVersion:      "runsc test",
 		RunscBinaryPath:   "/usr/local/bin/runsc-test",

@@ -3528,6 +3528,46 @@ func TestVerifyGenerationPlanFrozenEvidenceUsesStoredProjectionRows(t *testing.T
 	}
 }
 
+func TestVerifyGenerationPlanFrozenEvidenceChecksPlanIdentity(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, _ := openServerOwnedStore(t, ctx, dir)
+	srv := &Server{store: st}
+	storeServerFrozenEvidencePlan(t, ctx, st, dir, validServerGenerationPlanPayload())
+	plan, err := st.GetGenerationPlan(ctx, "gen_frozen_evidence")
+	if err != nil {
+		t.Fatalf("get generation plan: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(plan.CanonicalPayload, &payload); err != nil {
+		t.Fatalf("decode generation plan: %v", err)
+	}
+	payload["identity"].(map[string]any)["session_id"] = "sess_drifted"
+	canonical, err := store.CanonicalGenerationPlanPayload(payload)
+	if err != nil {
+		t.Fatalf("canonical generation plan: %v", err)
+	}
+	planDigest := store.GenerationPlanDigest(canonical)
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE generation_plans
+SET canonical_payload = ?,
+    plan_digest = ?
+WHERE generation_id = ?`, string(canonical), planDigest, "gen_frozen_evidence"); err != nil {
+		t.Fatalf("mutate generation plan identity: %v", err)
+	}
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE generation_plan_projections
+SET plan_digest = ?
+WHERE generation_id = ?`, planDigest, "gen_frozen_evidence"); err != nil {
+		t.Fatalf("align projection plan digests: %v", err)
+	}
+
+	err = srv.verifyGenerationPlanFrozenEvidence(ctx, "gen_frozen_evidence", serverGenerationPlanFrozenEvidenceDetails(), serverGenerationPlanFrozenEvidenceArtifacts())
+	if err == nil || !strings.Contains(err.Error(), "identity.session_id mismatch") {
+		t.Fatalf("expected plan identity mismatch, got %v", err)
+	}
+}
+
 func TestVerifyGenerationPlanFrozenEvidenceChecksContentSnapshots(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -6295,8 +6335,61 @@ func storeServerGenerationPlanForArtifacts(t *testing.T, ctx context.Context, st
 	if err != nil {
 		t.Fatalf("get generation details for plan %s: %v", generationID, err)
 	}
+	mode := "agent"
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT COALESCE(mode, '')
+FROM sessions
+WHERE id = ?`, sessionID).Scan(&mode); err != nil {
+		t.Fatalf("get session mode for plan %s: %v", generationID, err)
+	}
+	if strings.TrimSpace(mode) == "" {
+		mode = "agent"
+	}
+	driverSpec, ok := agents.DriverSpecFor(details.DriverID)
+	if !ok {
+		t.Fatalf("driver spec missing for %s", details.DriverID)
+	}
+	providerSpec, ok := agents.RuntimeProviderSpecFor("local_runsc")
+	if !ok {
+		t.Fatalf("provider spec missing")
+	}
+	featurePolicy, err := agents.FeaturePolicyPayload(agents.DefaultFeaturePolicyForDriver(driverSpec))
+	if err != nil {
+		t.Fatalf("feature policy for plan %s: %v", generationID, err)
+	}
+	featurePolicyPayload := map[string]any{}
+	for key, value := range featurePolicy {
+		featurePolicyPayload[key] = value
+	}
+	featurePolicyPayload["capability_schema_version"] = agents.DriverCapabilitySchemaVersion
+	featurePolicyPayload["capability_vocab_version"] = providerSpec.CapabilityVocabulary
+	featurePolicyPayload["driver_capabilities"] = agents.DriverCapabilityPayload(driverSpec)
+	featurePolicyPayload["runtime_provider_capabilities"] = agents.RuntimeProviderCapabilityPayload(providerSpec)
+	featurePolicyPayload["legacy_supports_interrupt"] = driverSpec.SupportsInterrupt
+	featurePolicyPayload["legacy_supports_compaction"] = driverSpec.SupportsCompaction
+	featurePolicyPayload["unsupported_features_fail"] = true
+	featurePolicyPayload["credential_bearing_mcp_scope"] = "out_of_scope"
 	payload := validServerGenerationPlanPayload()
-	payload["identity"] = map[string]any{"session_id": sessionID, "generation_id": generationID, "product_mode": "agent"}
+	payload["identity"] = map[string]any{"session_id": sessionID, "generation_id": generationID, "product_mode": mode}
+	driverPlan := payload["driver"].(map[string]any)
+	driverPlan["driver_id"] = string(driverSpec.ID)
+	driverPlan["driver_kind"] = string(driverSpec.Kind)
+	driverPlan["bridge_protocol"] = driverSpec.BridgeProtocol
+	driverPlan["bridge_protocol_version"] = driverSpec.BridgeProtocolVersion
+	driverPlan["turn_input_schema"] = driverSpec.TurnInputSchema
+	driverPlan["output_schema"] = driverSpec.OutputSchema
+	driverPlan["output_format"] = details.OutputFormat
+	if strings.TrimSpace(details.Model) == "" {
+		driverPlan["model"] = nil
+	} else {
+		driverPlan["model"] = details.Model
+	}
+	driverPlan["initial_state_digest"] = details.DriverStateDigest
+	driverPlan["initial_state_version"] = details.DriverStateVersion
+	driverPlan["capability_snapshot"] = agents.DriverCapabilityPayload(driverSpec)
+	runtimeProvider := payload["runtime_provider"].(map[string]any)
+	runtimeProvider["agent_runtime_profile_id"] = details.AgentRuntimeProfileID
+	runtimeProvider["runtime_profile_provider_ref"] = details.RunscPlatform
 	runscPin := payload["runsc_pin"].(map[string]any)
 	runscPin["version"] = artifacts.RunscVersion
 	runscPin["binary_path"] = artifacts.RunscBinaryPath
@@ -6328,6 +6421,7 @@ func storeServerGenerationPlanForArtifacts(t *testing.T, ctx context.Context, st
 	projections["bundle"].(map[string]any)["payload_digest"] = planprojection.PayloadDigest(store.GenerationPlanProjectionBundle, artifacts.BundleDigest)
 	projections["bundle"].(map[string]any)["materialized_path"] = details.BundleDirPath
 	projections["runtime_config"].(map[string]any)["payload_digest"] = planprojection.PayloadDigest(store.GenerationPlanProjectionRuntimeConfig, artifacts.RuntimeConfigDigest)
+	payload["feature_policy"] = featurePolicyPayload
 	plan, err := st.StoreGenerationPlan(ctx, store.StoreGenerationPlanParams{
 		GenerationID: generationID,
 		Payload:      payload,
