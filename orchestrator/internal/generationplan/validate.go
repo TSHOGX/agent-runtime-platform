@@ -39,6 +39,14 @@ type VerifyFrozenEvidenceParams struct {
 	CheckpointPlanDigest            string
 }
 
+type VerifyDataVolumeEvidenceParams struct {
+	Payload                         any
+	WorkspaceHostPath               string
+	WorkspaceRuntimeIdentityDigest  string
+	DriverHomeHostPath              string
+	DriverHomeRuntimeIdentityDigest string
+}
+
 func Validate(p ValidateParams) error {
 	object, err := decodePlanObject(p.Payload)
 	if err != nil {
@@ -103,6 +111,45 @@ func Validate(p ValidateParams) error {
 	}
 	if err := validateProjectionDigests(object); err != nil {
 		return err
+	}
+	return nil
+}
+
+func VerifyDataVolumeEvidence(p VerifyDataVolumeEvidenceParams) error {
+	object, err := decodePlanObject(p.Payload)
+	if err != nil {
+		return err
+	}
+	dataVolumes, err := requireObject(object, "data_volumes")
+	if err != nil {
+		return err
+	}
+	workspace, err := requireObject(dataVolumes, "workspace")
+	if err != nil {
+		return err
+	}
+	agentHome, err := requireObject(dataVolumes, "agent_home")
+	if err != nil {
+		return err
+	}
+	checks := []struct {
+		label string
+		got   string
+		want  string
+	}{
+		{"data_volumes.workspace.host_path", stringField(workspace, "host_path"), p.WorkspaceHostPath},
+		{"data_volumes.workspace.runtime_identity_digest", stringField(workspace, "runtime_identity_digest"), p.WorkspaceRuntimeIdentityDigest},
+		{"data_volumes.agent_home.host_path", stringField(agentHome, "host_path"), p.DriverHomeHostPath},
+		{"data_volumes.agent_home.runtime_identity_digest", stringField(agentHome, "runtime_identity_digest"), p.DriverHomeRuntimeIdentityDigest},
+	}
+	for _, check := range checks {
+		want := strings.TrimSpace(check.want)
+		if want == "" {
+			continue
+		}
+		if strings.TrimSpace(check.got) != want {
+			return fmt.Errorf("generation plan %s mismatch", check.label)
+		}
 	}
 	return nil
 }

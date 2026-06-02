@@ -527,6 +527,32 @@ func TestVerifyFrozenEvidenceChecksContentSnapshotDigests(t *testing.T) {
 	}
 }
 
+func TestVerifyDataVolumeEvidenceChecksFrozenVolumeRefs(t *testing.T) {
+	payload := validPlanPayload()
+	params := VerifyDataVolumeEvidenceParams{
+		Payload:                         payload,
+		WorkspaceHostPath:               "/var/lib/harness/sessions/sess_plan",
+		WorkspaceRuntimeIdentityDigest:  "sha256:workspace-identity",
+		DriverHomeHostPath:              "/var/lib/harness/agent-homes/sess_plan/claude_code",
+		DriverHomeRuntimeIdentityDigest: "sha256:agent-home-identity",
+	}
+	if err := VerifyDataVolumeEvidence(params); err != nil {
+		t.Fatalf("verify data volume evidence: %v", err)
+	}
+
+	mismatch := params
+	mismatch.WorkspaceHostPath = "/var/lib/harness/sessions/changed"
+	if err := VerifyDataVolumeEvidence(mismatch); err == nil || !strings.Contains(err.Error(), "data_volumes.workspace.host_path mismatch") {
+		t.Fatalf("expected workspace host path mismatch, got %v", err)
+	}
+
+	mismatch = params
+	mismatch.DriverHomeRuntimeIdentityDigest = "sha256:changed"
+	if err := VerifyDataVolumeEvidence(mismatch); err == nil || !strings.Contains(err.Error(), "data_volumes.agent_home.runtime_identity_digest mismatch") {
+		t.Fatalf("expected driver-home identity mismatch, got %v", err)
+	}
+}
+
 func TestContentSnapshotRefsExtractsPlanSnapshotDigests(t *testing.T) {
 	payload := validPlanPayload()
 	contentSnapshots := payload["content_snapshots"].(map[string]any)

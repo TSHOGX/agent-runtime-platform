@@ -3711,6 +3711,34 @@ func TestVerifyGenerationPlanFrozenEvidenceChecksExistingPlan(t *testing.T) {
 	}
 }
 
+func TestVerifyGenerationPlanDataVolumesChecksStoredPlan(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, _ := openServerOwnedStore(t, ctx, dir)
+	srv := &Server{store: st}
+	storeServerFrozenEvidencePlan(t, ctx, st, dir, validServerGenerationPlanPayload())
+
+	volumes := sessionRuntimeDataVolumes{
+		Workspace: store.SessionWorkspaceVolume{
+			HostPath:              "/var/lib/harness/sessions/sess_frozen_evidence",
+			RuntimeIdentityDigest: "sha256:identity",
+		},
+		DriverHome: store.SessionDriverHomeVolume{
+			HostPath:              "/var/lib/harness/agent-homes/sess_frozen_evidence/claude_code",
+			RuntimeIdentityDigest: "sha256:identity",
+		},
+	}
+	if err := srv.verifyGenerationPlanDataVolumes(ctx, "gen_frozen_evidence", volumes); err != nil {
+		t.Fatalf("verify data volumes: %v", err)
+	}
+
+	volumes.Workspace.HostPath = "/var/lib/harness/sessions/changed"
+	if err := srv.verifyGenerationPlanDataVolumes(ctx, "gen_frozen_evidence", volumes); err == nil ||
+		!strings.Contains(err.Error(), "data_volumes.workspace.host_path mismatch") {
+		t.Fatalf("expected workspace host path mismatch, got %v", err)
+	}
+}
+
 func TestVerifyGenerationPlanFrozenEvidenceChecksStoredProjectionRows(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -6799,6 +6827,7 @@ WHERE id = ?`, sessionID).Scan(&mode); err != nil {
 	featurePolicyPayload["credential_bearing_mcp_scope"] = "out_of_scope"
 	payload := validServerGenerationPlanPayload()
 	payload["identity"] = map[string]any{"session_id": sessionID, "generation_id": generationID, "product_mode": mode}
+	workspaceVolume, driverHomeVolume := provisionServerGenerationPlanFixtureVolumes(t, ctx, st, sessionID, details)
 	driverPlan := payload["driver"].(map[string]any)
 	driverPlan["driver_id"] = string(driverSpec.ID)
 	driverPlan["driver_kind"] = string(driverSpec.Kind)
@@ -6841,7 +6870,12 @@ WHERE id = ?`, sessionID).Scan(&mode); err != nil {
 	} else {
 		runtimeArtifacts["network_hosts_path"] = details.NetworkHostsPath
 	}
+	dataVolumes := payload["data_volumes"].(map[string]any)
+	serverApplyWorkspaceVolumePayload(dataVolumes["workspace"].(map[string]any), workspaceVolume)
+	serverApplyDriverHomeVolumePayload(dataVolumes["agent_home"].(map[string]any), driverHomeVolume)
 	mounts := payload["mounts"].(map[string]any)
+	mounts["workspace"].(map[string]any)["source"] = workspaceVolume.HostPath
+	mounts["agent_home"].(map[string]any)["source"] = driverHomeVolume.HostPath
 	mounts["control"].(map[string]any)["source"] = details.ControlDirPath
 	mounts["bridge"].(map[string]any)["source"] = details.BridgeDirPath
 	if strings.TrimSpace(details.NetworkHostsPath) == "" {
@@ -6875,6 +6909,78 @@ WHERE id = ?`, sessionID).Scan(&mode); err != nil {
 		}
 	}
 	return plan
+}
+
+func provisionServerGenerationPlanFixtureVolumes(t *testing.T, ctx context.Context, st *store.Store, sessionID string, details store.RuntimeGenerationDetails) (store.SessionWorkspaceVolume, store.SessionDriverHomeVolume) {
+	t.Helper()
+	cfg := serverGenerationPlanFixtureVolumeConfig(t, details)
+	now := time.Now().UTC()
+	workspace, err := st.ProvisionSessionWorkspace(ctx, store.ProvisionSessionWorkspaceParams{
+		SessionID: sessionID,
+		Config:    cfg,
+		Now:       now,
+	})
+	if err != nil {
+		t.Fatalf("provision workspace volume for plan %s: %v", details.GenerationID, err)
+	}
+	driverHome, err := st.ProvisionSessionDriverHome(ctx, store.ProvisionSessionDriverHomeParams{
+		SessionID: sessionID,
+		Driver:    details.DriverID,
+		Config:    cfg,
+		Now:       now,
+	})
+	if err != nil {
+		t.Fatalf("provision driver-home volume for plan %s: %v", details.GenerationID, err)
+	}
+	return workspace, driverHome
+}
+
+func serverGenerationPlanFixtureVolumeConfig(t *testing.T, details store.RuntimeGenerationDetails) store.DataVolumeProvisionerConfig {
+	t.Helper()
+	controlDir := strings.TrimSpace(details.ControlDirPath)
+	if controlDir == "" {
+		t.Fatalf("generation %s control dir path is required for plan fixture volumes", details.GenerationID)
+	}
+	runDir := filepath.Dir(filepath.Dir(controlDir))
+	fixtureRoot := filepath.Dir(runDir)
+	if runDir == "." || fixtureRoot == "." {
+		t.Fatalf("generation %s control dir path %q cannot derive plan fixture roots", details.GenerationID, controlDir)
+	}
+	return store.DataVolumeProvisionerConfig{
+		SessionsRoot:   filepath.Join(fixtureRoot, "sessions"),
+		AgentHomesRoot: filepath.Join(fixtureRoot, "agent-homes"),
+		EvidenceRoot:   filepath.Join(fixtureRoot, "state", "volume-evidence"),
+		LayoutVersion:  store.DataVolumeLayoutVersion,
+		RuntimeIdentity: store.RuntimeIdentity{
+			UID: serverTestSandboxUID(),
+			GID: serverTestSandboxGID(),
+		},
+	}
+}
+
+func serverApplyWorkspaceVolumePayload(payload map[string]any, volume store.SessionWorkspaceVolume) {
+	payload["session_id"] = volume.SessionID
+	payload["host_path"] = volume.HostPath
+	payload["layout_version"] = volume.LayoutVersion
+	payload["runtime_identity_digest"] = volume.RuntimeIdentityDigest
+	payload["provisioning_marker_path"] = volume.ProvisioningMarkerPath
+	payload["provisioning_marker_digest"] = volume.ProvisioningMarkerDigest
+	payload["sandbox_uid"] = volume.SandboxUID
+	payload["sandbox_gid"] = volume.SandboxGID
+	payload["sandbox_supplemental_gids"] = append([]int(nil), volume.SandboxSupplementalGIDs...)
+}
+
+func serverApplyDriverHomeVolumePayload(payload map[string]any, volume store.SessionDriverHomeVolume) {
+	payload["session_id"] = volume.SessionID
+	payload["driver"] = volume.Driver
+	payload["host_path"] = volume.HostPath
+	payload["layout_version"] = volume.LayoutVersion
+	payload["runtime_identity_digest"] = volume.RuntimeIdentityDigest
+	payload["provisioning_marker_path"] = volume.ProvisioningMarkerPath
+	payload["provisioning_marker_digest"] = volume.ProvisioningMarkerDigest
+	payload["sandbox_uid"] = volume.SandboxUID
+	payload["sandbox_gid"] = volume.SandboxGID
+	payload["sandbox_supplemental_gids"] = append([]int(nil), volume.SandboxSupplementalGIDs...)
 }
 
 func serverPlanVolumePayload(hostPath, markerPath, destination string) map[string]any {

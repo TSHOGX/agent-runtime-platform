@@ -880,6 +880,11 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			return err
 		}
 	}
+	if err := s.verifyGenerationPlanDataVolumes(ctx, allocation.GenerationID, dataVolumes); err != nil {
+		retireRuntimeResource()
+		s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+		return err
+	}
 	if err := s.verifyGenerationPlanFrozenEvidenceForLaunch(ctx, allocation.GenerationID, generationDetails, preparedArtifacts, ensured.IsNew); err != nil {
 		retireRuntimeResource()
 		s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
@@ -1714,6 +1719,23 @@ func (s *Server) generationPlanRuntimeArtifacts(ctx context.Context, generationI
 		return runtime.GenerationArtifacts{}, err
 	}
 	return generationplan.RuntimeArtifacts(plan.CanonicalPayload)
+}
+
+func (s *Server) verifyGenerationPlanDataVolumes(ctx context.Context, generationID string, volumes sessionRuntimeDataVolumes) error {
+	plan, err := s.store.RequireGenerationPlanForLaunch(ctx, strings.TrimSpace(generationID))
+	if err != nil {
+		return err
+	}
+	if err := generationplan.Validate(generationplan.ValidateParams{Payload: plan.CanonicalPayload}); err != nil {
+		return err
+	}
+	return generationplan.VerifyDataVolumeEvidence(generationplan.VerifyDataVolumeEvidenceParams{
+		Payload:                         plan.CanonicalPayload,
+		WorkspaceHostPath:               volumes.Workspace.HostPath,
+		WorkspaceRuntimeIdentityDigest:  volumes.Workspace.RuntimeIdentityDigest,
+		DriverHomeHostPath:              volumes.DriverHome.HostPath,
+		DriverHomeRuntimeIdentityDigest: volumes.DriverHome.RuntimeIdentityDigest,
+	})
 }
 
 func runtimeArtifactDigests(artifacts runtime.GenerationArtifacts) store.GenerationRuntimeArtifactDigests {
