@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,37 @@ import (
 	"harness-platform/orchestrator/internal/config"
 	"harness-platform/orchestrator/internal/store"
 )
+
+func (s *Server) deploymentCapabilities(w http.ResponseWriter, r *http.Request) {
+	type modeDTO struct {
+		Mode           string  `json:"mode"`
+		Label          string  `json:"label"`
+		Visible        bool    `json:"visible"`
+		CreateEnabled  bool    `json:"create_enabled"`
+		DisabledReason *string `json:"disabled_reason"`
+	}
+	disabled := func(reason string) *string { return &reason }
+	agentReason := (*string)(nil)
+	agentEnabled := true
+	if _, err := s.resolveModeDeployment("agent"); err != nil {
+		agentEnabled = false
+		agentReason = disabled(err.code)
+	}
+	shellReason := (*string)(nil)
+	shellEnabled := true
+	if _, err := s.resolveModeDeployment("shell"); err != nil {
+		shellEnabled = false
+		shellReason = disabled(err.code)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"schema_version": 1,
+		"default_mode":   "agent",
+		"session_modes": []modeDTO{
+			{Mode: "agent", Label: "Agent", Visible: true, CreateEnabled: agentEnabled, DisabledReason: agentReason},
+			{Mode: "shell", Label: "Shell", Visible: shellEnabled, CreateEnabled: shellEnabled, DisabledReason: shellReason},
+		},
+	})
+}
 
 type deploymentResolution struct {
 	Mode                    string
