@@ -2324,7 +2324,58 @@ WHERE g.session_id = ?
 	details.ModelAccessAllowed = modelAccessAllowed != 0
 	details.RequiresSecretDrop = requiresSecretDrop != 0
 	details.AutoCheckpointEnabled = autoCheckpointEnabled != 0
+	if err := validateRuntimeGenerationDetailsPaths(details); err != nil {
+		return RuntimeGenerationDetails{}, err
+	}
 	return details, nil
+}
+
+func validateRuntimeGenerationDetailsPaths(details RuntimeGenerationDetails) error {
+	required := []struct {
+		label string
+		path  string
+	}{
+		{"control dir path", details.ControlDirPath},
+		{"control manifest path", details.ControlManifestPath},
+		{"bundle dir path", details.BundleDirPath},
+		{"spec path", details.SpecPath},
+		{"checkpoint path", details.CheckpointPath},
+		{"bridge dir path", details.BridgeDirPath},
+		{"log dir path", details.LogDirPath},
+	}
+	for _, field := range required {
+		if strings.TrimSpace(field.path) == "" {
+			return fmt.Errorf("runtime generation %s is required", field.label)
+		}
+		if !runtimeGenerationDetailsPathIsCanonical(field.path) {
+			return fmt.Errorf("runtime generation %s must be canonical absolute", field.label)
+		}
+	}
+	optional := []struct {
+		label string
+		path  string
+	}{
+		{"secrets dir path", details.SecretsDirPath},
+		{"network hosts path", details.NetworkHostsPath},
+		{"runsc binary path", details.RunscBinaryPath},
+		{"checkpoint runsc binary path", details.CheckpointRunscBinaryPath},
+	}
+	for _, field := range optional {
+		if strings.TrimSpace(field.path) == "" {
+			if field.path != "" {
+				return fmt.Errorf("runtime generation %s must be canonical absolute", field.label)
+			}
+			continue
+		}
+		if !runtimeGenerationDetailsPathIsCanonical(field.path) {
+			return fmt.Errorf("runtime generation %s must be canonical absolute", field.label)
+		}
+	}
+	return nil
+}
+
+func runtimeGenerationDetailsPathIsCanonical(path string) bool {
+	return strings.TrimSpace(path) == path && filepath.IsAbs(path) && filepath.Clean(path) == path
 }
 
 func (s *Store) RecordGenerationRuntimeArtifactDigests(ctx context.Context, generationID string, digests GenerationRuntimeArtifactDigests) error {
