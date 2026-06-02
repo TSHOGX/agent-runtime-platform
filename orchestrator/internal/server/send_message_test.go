@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -17,9 +18,130 @@ import (
 	"harness-platform/orchestrator/internal/config"
 	"harness-platform/orchestrator/internal/events"
 	"harness-platform/orchestrator/internal/generationplan"
+	"harness-platform/orchestrator/internal/runtime"
 	"harness-platform/orchestrator/internal/sessionstate"
 	"harness-platform/orchestrator/internal/store"
 )
+
+func TestSendMessageCheckpointImageManifestInvalidFailsExplicitly(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_restore_manifest_invalid", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
+	if _, err := st.DBForTest().ExecContext(ctx, `UPDATE sessions SET driver_id = 'sh', mode = 'shell' WHERE id = ?`, session.ID); err != nil {
+		t.Fatalf("set shell session agent: %v", err)
+	}
+	session.DriverID = "sh"
+	session.Mode = "shell"
+	cfg := testServerConfig(dir)
+	cfg.Harness.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
+	leaseOwner := store.GenerationLeaseOwner(owner.UUID)
+	old, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     leaseOwner,
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    serverTestAllocatorConfig(cfg, "sh"),
+	})
+	if err != nil {
+		t.Fatalf("allocate checkpointed generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, session.ID, old.GenerationID, old.Owner, time.Now().UTC()); err != nil {
+		t.Fatalf("mark checkpointed generation live: %v", err)
+	}
+
+	checkpointPath := filepath.Join(dir, "checkpoints", session.ID)
+	writeServerCheckpointFilesWithoutManifest(t, checkpointPath)
+	manifest, err := buildServerCheckpointImageManifest(checkpointPath)
+	if err != nil {
+		t.Fatalf("build checkpoint image manifest: %v", err)
+	}
+	if err := writeServerJSONFile(filepath.Join(checkpointPath, "harness-checkpoint-manifest.json"), manifest); err != nil {
+		t.Fatalf("write checkpoint image manifest: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(checkpointPath, "pages.img"), []byte("corrupt"), 0o644); err != nil {
+		t.Fatalf("corrupt checkpoint image file: %v", err)
+	}
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE runtime_generation_resources
+SET checkpoint_path = ?
+WHERE generation_id = ?`, checkpointPath, old.GenerationID); err != nil {
+		t.Fatalf("record checkpoint path: %v", err)
+	}
+	runscPath, runscDigest := currentRunscBinaryMetadataForServerTest(t)
+	recordServerRuntimeArtifactsWithRunsc(t, ctx, st, old.GenerationID, "restore_manifest_digest", "runsc test", runscPath, runscDigest)
+	markServerGenerationCheckpointed(t, ctx, st, session.ID, old.GenerationID, time.Now().UTC())
+
+	realRuntime := runtime.New(runtime.Config{
+		SessionsRoot:    cfg.SessionsRoot,
+		AgentHomesRoot:  filepath.Join(dir, "agent-homes"),
+		RootFSPath:      filepath.Join(dir, "rootfs"),
+		BundleRoot:      filepath.Join(dir, "run", "runtime"),
+		RunscNetwork:    "host",
+		RunscOverlay2:   "none",
+		RunDir:          cfg.Harness.RunDir,
+		CommandRunner:   serverCommandRunner{outputs: map[string][]byte{"runsc --version": []byte("runsc test")}},
+		BridgeMode:      "claim-loop",
+		BridgeHeartbeat: time.Second,
+		SandboxUID:      cfg.Harness.SandboxIdentity.UID,
+		SandboxGID:      cfg.Harness.SandboxIdentity.GID,
+	})
+	rt := &restoreValidationRuntime{restore: realRuntime}
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: rt,
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(`{"content":"after corrupt checkpoint"}`))
+	rec := httptest.NewRecorder()
+	srv.sendMessage(rec, req, session.ID)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d body %s", rec.Code, rec.Body.String())
+	}
+	gotSession, err := st.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("get restore-failed session: %v", err)
+	}
+	if gotSession.ActiveGenerationID != old.GenerationID || gotSession.Status != string(sessionstate.RunningIdle) {
+		t.Fatalf("invalid checkpoint should not allocate replacement: %+v old=%s", gotSession, old.GenerationID)
+	}
+	var oldStatus, oldNetwork, oldResources, oldReason string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT g.status, n.allocation_state, r.resource_state, COALESCE(g.failure_reason, '')
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, old.GenerationID).Scan(&oldStatus, &oldNetwork, &oldResources, &oldReason); err != nil {
+		t.Fatalf("query old generation: %v", err)
+	}
+	if oldStatus != "failed" || oldNetwork != "reclaimable" || oldResources != "reclaimable" {
+		t.Fatalf("generation not failed after invalid checkpoint manifest: status=%s network=%s resources=%s reason=%s", oldStatus, oldNetwork, oldResources, oldReason)
+	}
+	if !strings.Contains(oldReason, "checkpoint image manifest") || !strings.Contains(oldReason, "pages.img") {
+		t.Fatalf("old generation failure reason did not include checkpoint manifest mismatch: %q", oldReason)
+	}
+	var queuedTurns int
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM turns
+WHERE session_id = ?`, session.ID).Scan(&queuedTurns); err != nil {
+		t.Fatalf("count turns: %v", err)
+	}
+	if queuedTurns != 0 {
+		t.Fatalf("invalid checkpoint should not enqueue a turn, got %d", queuedTurns)
+	}
+	if got := len(rt.startRequests); got != 1 {
+		t.Fatalf("runtime calls start=%d want 1", got)
+	}
+	if !rt.startRequests[0].RestoreFromCheckpoint || rt.startRequests[0].GenerationID != old.GenerationID {
+		t.Fatalf("start was not restore: %+v", rt.startRequests[0])
+	}
+}
 
 func TestSendMessageRestoreLiveCASFailureDestroysRunscContainerIDBeforeFailing(t *testing.T) {
 	ctx := context.Background()
