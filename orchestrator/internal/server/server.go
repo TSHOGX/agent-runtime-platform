@@ -582,6 +582,16 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		return err
 	}
 	preparedArtifacts := runtimeArtifactsFromDetails(generationDetails)
+	if !ensured.IsNew {
+		preparedArtifacts, err = s.generationPlanRuntimeArtifacts(ctx, allocation.GenerationID)
+		if err != nil {
+			if leaseErr := leaseKeeper.err(); leaseErr != nil {
+				return leaseErr
+			}
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+			return err
+		}
+	}
 	resourceWorkerID := runtimeResourceWorkerID(s.ownerUUID, allocation.Owner)
 	resourceHostID, err := runtimeResourceHostID()
 	if err != nil {
@@ -1603,6 +1613,14 @@ func runtimeArtifactsFromDetails(details store.RuntimeGenerationDetails) runtime
 	}
 }
 
+func (s *Server) generationPlanRuntimeArtifacts(ctx context.Context, generationID string) (runtime.GenerationArtifacts, error) {
+	plan, err := s.store.RequireGenerationPlanForLaunch(ctx, strings.TrimSpace(generationID))
+	if err != nil {
+		return runtime.GenerationArtifacts{}, err
+	}
+	return generationplan.RuntimeArtifacts(plan.CanonicalPayload)
+}
+
 func runtimeArtifactDigests(artifacts runtime.GenerationArtifacts) store.GenerationRuntimeArtifactDigests {
 	return store.GenerationRuntimeArtifactDigests{
 		ControlManifestDigest:          artifacts.ManifestDigest,
@@ -1655,12 +1673,13 @@ func (s *Server) verifyGenerationPlanFrozenEvidence(ctx context.Context, generat
 	if err != nil {
 		return err
 	}
+	runscVersion, runscBinaryPath, runscBinaryDigest := generationPlanRunscEvidence(details, artifacts)
 	return generationplan.VerifyFrozenEvidence(generationplan.VerifyFrozenEvidenceParams{
 		Payload:                         plan.CanonicalPayload,
 		RunscPlatform:                   details.RunscPlatform,
-		RunscVersion:                    artifacts.RunscVersion,
-		RunscBinaryPath:                 artifacts.RunscBinaryPath,
-		RunscBinaryDigest:               artifacts.RunscBinaryDigest,
+		RunscVersion:                    runscVersion,
+		RunscBinaryPath:                 runscBinaryPath,
+		RunscBinaryDigest:               runscBinaryDigest,
 		ProjectionDigests:               projectionDigests,
 		ProjectionVersions:              projectionVersions,
 		ContentSnapshotDigests:          contentSnapshotDigests,
@@ -1670,6 +1689,15 @@ func (s *Server) verifyGenerationPlanFrozenEvidence(ctx context.Context, generat
 		CheckpointDriverStatesDigest:    details.CheckpointDriverStatesDigest,
 		CheckpointPlanDigest:            details.CheckpointPlanDigest,
 	})
+}
+
+func generationPlanRunscEvidence(details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts) (string, string, string) {
+	if strings.TrimSpace(details.RunscVersion) == "" &&
+		strings.TrimSpace(details.RunscBinaryPath) == "" &&
+		strings.TrimSpace(details.RunscBinaryDigest) == "" {
+		return artifacts.RunscVersion, artifacts.RunscBinaryPath, artifacts.RunscBinaryDigest
+	}
+	return details.RunscVersion, details.RunscBinaryPath, details.RunscBinaryDigest
 }
 
 func (s *Server) storedGenerationPlanProjectionEvidence(ctx context.Context, generationID, planDigest string) (map[string]string, map[string]int, error) {
@@ -3310,7 +3338,15 @@ func (s *Server) checkpointGeneration(ctx context.Context, candidate store.Check
 		}
 		return err
 	}
-	if err := s.verifyGenerationPlanFrozenEvidence(ctx, candidate.GenerationID, details, runtimeArtifactsFromDetails(details)); err != nil {
+	artifacts, err := s.generationPlanRuntimeArtifacts(ctx, candidate.GenerationID)
+	if err != nil {
+		abortNow := time.Now().UTC()
+		if abortErr := s.store.AbortGenerationCheckpoint(ctx, candidate.SessionID, candidate.GenerationID, owner, abortNow); abortErr != nil {
+			s.log.Warn("failed to abort generation checkpoint after plan artifact load failure", "session_id", candidate.SessionID, "generation_id", candidate.GenerationID, "error", abortErr)
+		}
+		return err
+	}
+	if err := s.verifyGenerationPlanFrozenEvidence(ctx, candidate.GenerationID, details, artifacts); err != nil {
 		abortNow := time.Now().UTC()
 		if abortErr := s.store.AbortGenerationCheckpoint(ctx, candidate.SessionID, candidate.GenerationID, owner, abortNow); abortErr != nil {
 			s.log.Warn("failed to abort generation checkpoint after plan verification failure", "session_id", candidate.SessionID, "generation_id", candidate.GenerationID, "error", abortErr)
@@ -3349,12 +3385,12 @@ func (s *Server) checkpointGeneration(ctx context.Context, candidate store.Check
 		Owner:                           owner,
 		CheckpointPath:                  details.CheckpointPath,
 		RunscPlatform:                   details.RunscPlatform,
-		RunscVersion:                    details.RunscVersion,
-		RunscBinaryPath:                 details.RunscBinaryPath,
-		RunscBinaryDigest:               details.RunscBinaryDigest,
-		CheckpointBundleDigest:          details.BundleDigest,
-		CheckpointRuntimeConfigDigest:   details.RuntimeConfigDigest,
-		CheckpointControlManifestDigest: details.ProjectedControlManifestDigest,
+		RunscVersion:                    artifacts.RunscVersion,
+		RunscBinaryPath:                 artifacts.RunscBinaryPath,
+		RunscBinaryDigest:               artifacts.RunscBinaryDigest,
+		CheckpointBundleDigest:          artifacts.BundleDigest,
+		CheckpointRuntimeConfigDigest:   artifacts.RuntimeConfigDigest,
+		CheckpointControlManifestDigest: artifacts.ProjectedManifestDigest,
 		CheckpointPlanDigest:            plan.PlanDigest,
 		Now:                             completeNow,
 	}); err != nil {

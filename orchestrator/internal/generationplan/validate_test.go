@@ -78,6 +78,30 @@ func TestMaterializedDriverConfigPayloadIsPlanEvidence(t *testing.T) {
 	}
 }
 
+func TestRuntimeArtifactsHydratesFromPlanPayload(t *testing.T) {
+	canonical, err := store.CanonicalGenerationPlanPayload(validPlanPayload())
+	if err != nil {
+		t.Fatalf("canonical plan payload: %v", err)
+	}
+	artifacts, err := RuntimeArtifacts(canonical)
+	if err != nil {
+		t.Fatalf("runtime artifacts: %v", err)
+	}
+	if artifacts.BundleDir != "/var/lib/harness/run/runtime/gen_plan" ||
+		artifacts.SpecPath != "/var/lib/harness/run/runtime/gen_plan/config.json" ||
+		artifacts.ManifestPath != "/var/lib/harness/run/control/gen_plan/session.json" ||
+		artifacts.ManifestDigest != "manifest_digest" ||
+		artifacts.ProjectedManifestDigest != "projected_manifest_digest" ||
+		artifacts.BundleDigest != "bundle_digest" ||
+		artifacts.RuntimeConfigDigest != "runtime_config_digest" ||
+		artifacts.SpecDigest != "spec_digest" ||
+		artifacts.RunscVersion != "runsc test" ||
+		artifacts.RunscBinaryPath != "/usr/local/bin/runsc-test" ||
+		artifacts.RunscBinaryDigest != "sha256:runsc" {
+		t.Fatalf("unexpected runtime artifacts: %+v", artifacts)
+	}
+}
+
 func TestRenderContentSnapshotsPayloadFreezesImmutableRefs(t *testing.T) {
 	payload, err := RenderContentSnapshotsPayload([]store.ContentSnapshotRecord{
 		{

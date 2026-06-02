@@ -1263,6 +1263,7 @@ func TestMonitorIdleSessionsCheckpointsEligibleGeneration(t *testing.T) {
 	if err := bridge.TouchCheckpointReady(details.BridgeDirPath, time.Now().UTC()); err != nil {
 		t.Fatalf("touch ready: %v", err)
 	}
+	mutateServerRuntimeArtifactDigestMirrors(t, ctx, st, allocation.GenerationID)
 	rt := &recordingRuntime{}
 	runCtx, cancel := context.WithCancel(ctx)
 	srv := &Server{
@@ -1850,6 +1851,7 @@ func TestSendMessageRestoresCheckpointedGeneration(t *testing.T) {
 	}
 	recordServerRuntimeArtifacts(t, ctx, st, allocation.GenerationID, "restore_manifest_digest", "runsc restore-test")
 	markServerGenerationCheckpointed(t, ctx, st, session.ID, allocation.GenerationID, time.Now().UTC())
+	mutateServerRuntimeArtifactDigestMirrors(t, ctx, st, allocation.GenerationID)
 
 	rt := &recordingRuntime{}
 	srv := &Server{
@@ -1909,6 +1911,10 @@ WHERE session_id = ?
 	if start.GenerationID != allocation.GenerationID ||
 		!start.RestoreFromCheckpoint ||
 		start.PreparedArtifacts.ManifestDigest != "restore_manifest_digest" ||
+		start.PreparedArtifacts.ProjectedManifestDigest != "restore_manifest_digest" ||
+		start.PreparedArtifacts.BundleDigest != "bundle_digest" ||
+		start.PreparedArtifacts.RuntimeConfigDigest != "runtime_config_digest" ||
+		start.PreparedArtifacts.SpecDigest != "spec_digest" ||
 		start.PreparedArtifacts.RunscVersion != "runsc restore-test" ||
 		start.PreparedArtifacts.RunscBinaryPath != "/usr/local/bin/runsc-test" ||
 		start.PreparedArtifacts.RunscBinaryDigest != "sha256:runsc-test" ||
@@ -6031,6 +6037,20 @@ WHERE generation_id = ?`, generationID).Scan(&sessionID); err != nil {
 	storeServerGenerationPlanForArtifacts(t, ctx, st, sessionID, generationID, artifacts)
 }
 
+func mutateServerRuntimeArtifactDigestMirrors(t *testing.T, ctx context.Context, st *store.Store, generationID string) {
+	t.Helper()
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE runtime_generation_resources
+SET control_manifest_digest = 'mutated_manifest_digest',
+    projected_control_manifest_digest = 'mutated_projected_manifest_digest',
+    bundle_digest = 'mutated_bundle_digest',
+    runtime_config_digest = 'mutated_runtime_config_digest',
+    spec_digest = 'mutated_spec_digest'
+WHERE generation_id = ?`, generationID); err != nil {
+		t.Fatalf("mutate runtime artifact digest mirrors: %v", err)
+	}
+}
+
 func currentRunscBinaryMetadataForServerTest(t *testing.T) (string, string) {
 	t.Helper()
 	path, err := exec.LookPath("runsc")
@@ -6271,6 +6291,10 @@ VALUES (?, ?, 'allocating', 'owner', ?)`, "gen_frozen_evidence", session.ID, tim
 
 func storeServerGenerationPlanForArtifacts(t *testing.T, ctx context.Context, st *store.Store, sessionID, generationID string, artifacts runtime.GenerationArtifacts) store.GenerationPlanRecord {
 	t.Helper()
+	details, err := st.GetRuntimeGenerationDetails(ctx, sessionID, generationID)
+	if err != nil {
+		t.Fatalf("get generation details for plan %s: %v", generationID, err)
+	}
 	payload := validServerGenerationPlanPayload()
 	payload["identity"] = map[string]any{"session_id": sessionID, "generation_id": generationID, "product_mode": "agent"}
 	runscPin := payload["runsc_pin"].(map[string]any)
@@ -6280,14 +6304,29 @@ func storeServerGenerationPlanForArtifacts(t *testing.T, ctx context.Context, st
 	runtimeArtifacts := payload["runtime_artifacts"].(map[string]any)
 	runtimeArtifacts["control_manifest_digest"] = artifacts.ManifestDigest
 	runtimeArtifacts["projected_control_manifest_digest"] = artifacts.ProjectedManifestDigest
+	runtimeArtifacts["control_dir_path"] = details.ControlDirPath
+	runtimeArtifacts["control_manifest_path"] = details.ControlManifestPath
+	runtimeArtifacts["bundle_dir_path"] = details.BundleDirPath
 	runtimeArtifacts["bundle_digest"] = artifacts.BundleDigest
 	runtimeArtifacts["runtime_config_digest"] = artifacts.RuntimeConfigDigest
+	runtimeArtifacts["spec_path"] = details.SpecPath
 	runtimeArtifacts["spec_digest"] = artifacts.SpecDigest
+	runtimeArtifacts["bridge_dir_path"] = details.BridgeDirPath
+	runtimeArtifacts["log_dir_path"] = details.LogDirPath
+	if strings.TrimSpace(details.NetworkHostsPath) == "" {
+		runtimeArtifacts["network_hosts_path"] = nil
+	} else {
+		runtimeArtifacts["network_hosts_path"] = details.NetworkHostsPath
+	}
 	projections := payload["projection_digests"].(map[string]any)
 	projections["control_manifest"].(map[string]any)["payload_digest"] = planprojection.PayloadDigest(store.GenerationPlanProjectionControlManifest, artifacts.ManifestDigest)
+	projections["control_manifest"].(map[string]any)["materialized_path"] = details.ControlManifestPath
 	projections["control_manifest_projected"].(map[string]any)["payload_digest"] = planprojection.PayloadDigest(store.GenerationPlanProjectionControlManifestProjected, artifacts.ProjectedManifestDigest)
+	projections["control_manifest_projected"].(map[string]any)["materialized_path"] = details.ControlManifestPath
 	projections["oci_spec"].(map[string]any)["payload_digest"] = planprojection.PayloadDigest(store.GenerationPlanProjectionOCISpec, artifacts.SpecDigest)
+	projections["oci_spec"].(map[string]any)["materialized_path"] = details.SpecPath
 	projections["bundle"].(map[string]any)["payload_digest"] = planprojection.PayloadDigest(store.GenerationPlanProjectionBundle, artifacts.BundleDigest)
+	projections["bundle"].(map[string]any)["materialized_path"] = details.BundleDirPath
 	projections["runtime_config"].(map[string]any)["payload_digest"] = planprojection.PayloadDigest(store.GenerationPlanProjectionRuntimeConfig, artifacts.RuntimeConfigDigest)
 	plan, err := st.StoreGenerationPlan(ctx, store.StoreGenerationPlanParams{
 		GenerationID: generationID,
