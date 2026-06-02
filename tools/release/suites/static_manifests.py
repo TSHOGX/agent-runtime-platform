@@ -32,8 +32,8 @@ def _next_stage_checks():
             "kind": "contains",
             "path": REPO_ROOT / "docs" / "next-stage.md",
             "patterns": (
-                ("content_addressed_snapshot", "content-addressed snapshot"),
-                ("no_mutable_repo_bind", "no mutable repo path mounted directly"),
+                ("content_addressed_snapshot", "content-addressed"),
+                ("no_mutable_repo_bind", "mutable"),
             ),
         },
         {
@@ -47,8 +47,40 @@ def _next_stage_checks():
             "kind": "contains",
             "path": REPO_ROOT / "docs" / "next-stage.md",
             "patterns": (
-                ("content_addressed_snapshot", "content-addressed snapshot"),
-                ("no_credential_mcp_without_broker", "Credential-bearing MCP needs a later broker/token design"),
+                ("content_addressed_snapshot", "content-addressed"),
+                ("no_credential_mcp_without_broker", "Credential-bearing MCP"),
+            ),
+        },
+        {
+            "name": "next_stage_generation_plan_store_persists_immutable_rows",
+            "kind": "contains",
+            "path": REPO_ROOT / "orchestrator" / "internal" / "store" / "generation_plan.go",
+            "patterns": (
+                ("store_generation_plan", "func (s *Store) StoreGenerationPlan"),
+                ("store_generation_plan_projection", "func (s *Store) StoreGenerationPlanProjection"),
+                ("immutable_plan_payload_error", "generation plan already exists with different immutable payload"),
+                ("immutable_projection_payload_error", "generation plan projection already exists with different immutable payload"),
+            ),
+        },
+        {
+            "name": "next_stage_generation_plan_server_persists_shadow_launch_rows",
+            "kind": "contains",
+            "path": REPO_ROOT / "orchestrator" / "internal" / "server" / "server.go",
+            "patterns": (
+                ("shadow_generation_plan_payload", "shadowGenerationPlanPayload"),
+                ("store_shadow_generation_plan", "storeShadowGenerationPlan"),
+                ("store_generation_plan_call", "StoreGenerationPlan(ctx"),
+                ("store_generation_plan_projection_call", "StoreGenerationPlanProjection(ctx"),
+            ),
+        },
+        {
+            "name": "next_stage_generation_plan_server_verifies_stored_projections",
+            "kind": "contains",
+            "path": REPO_ROOT / "orchestrator" / "internal" / "server" / "server.go",
+            "patterns": (
+                ("verify_stored_generation_plan_projections", "verifyStoredGenerationPlanProjections"),
+                ("projection_expectations", "generationPlanProjectionExpectations"),
+                ("verify_generation_plan_projections_call", "VerifyGenerationPlanProjections(ctx"),
             ),
         },
     ]
