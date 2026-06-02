@@ -102,6 +102,82 @@ func TestStoreContentSnapshotIsImmutableAndListsByKind(t *testing.T) {
 	}
 }
 
+func TestListRetainedContentSnapshotReferencesReadsGenerationPlans(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	skills, err := st.StoreContentSnapshot(ctx, StoreContentSnapshotParams{
+		Kind:                 ContentSnapshotKindSkills,
+		Digest:               "sha256:skills",
+		ImmutableHostPath:    "/var/lib/harness/content/skills/sha256-skills",
+		MountDestination:     ContentSnapshotSkillsMount,
+		SourceEvidenceDigest: "sha256:skills-source",
+		RetentionClass:       "generation_plan",
+	})
+	if err != nil {
+		t.Fatalf("store skills snapshot: %v", err)
+	}
+	managed, err := st.StoreContentSnapshot(ctx, StoreContentSnapshotParams{
+		Kind:                 ContentSnapshotKindManagedSettings,
+		Digest:               "sha256:settings",
+		ImmutableHostPath:    "/var/lib/harness/content/managed-settings/sha256-settings",
+		MountDestination:     ContentSnapshotManagedSettingsMount,
+		SourceEvidenceDigest: "sha256:settings-source",
+		RetentionClass:       "generation_plan",
+	})
+	if err != nil {
+		t.Fatalf("store managed settings snapshot: %v", err)
+	}
+	if _, err := st.StoreContentSnapshot(ctx, StoreContentSnapshotParams{
+		Kind:                 ContentSnapshotKindSkills,
+		Digest:               "sha256:unused",
+		ImmutableHostPath:    "/var/lib/harness/content/skills/sha256-unused",
+		MountDestination:     ContentSnapshotSkillsMount,
+		SourceEvidenceDigest: "sha256:unused-source",
+		RetentionClass:       "generation_plan",
+	}); err != nil {
+		t.Fatalf("store unreferenced snapshot: %v", err)
+	}
+
+	for _, generation := range []struct {
+		sessionID    string
+		generationID string
+		status       string
+		snapshots    []ContentSnapshotRecord
+	}{
+		{sessionID: "sess_snapshot_active", generationID: "gen_snapshot_active", status: "active", snapshots: []ContentSnapshotRecord{skills}},
+		{sessionID: "sess_snapshot_checkpointed", generationID: "gen_snapshot_checkpointed", status: "checkpointed", snapshots: []ContentSnapshotRecord{managed}},
+		{sessionID: "sess_snapshot_failed", generationID: "gen_snapshot_failed", status: "failed", snapshots: []ContentSnapshotRecord{skills}},
+	} {
+		createStoreSession(t, ctx, st, generation.sessionID)
+		createRuntimeGenerationForPlanTest(t, ctx, st, generation.sessionID, generation.generationID, generation.status)
+		if _, err := st.StoreGenerationPlan(ctx, StoreGenerationPlanParams{
+			GenerationID: generation.generationID,
+			Payload:      contentSnapshotPlanPayload(generation.generationID, generation.snapshots),
+		}); err != nil {
+			t.Fatalf("store retained plan %s: %v", generation.generationID, err)
+		}
+	}
+
+	references, err := st.ListRetainedContentSnapshotReferences(ctx)
+	if err != nil {
+		t.Fatalf("list retained snapshot references: %v", err)
+	}
+	if len(references) != 3 {
+		t.Fatalf("retained references count=%d want 3: %+v", len(references), references)
+	}
+	assertRetainedContentSnapshotReference(t, references, "gen_snapshot_active", "active", skills)
+	assertRetainedContentSnapshotReference(t, references, "gen_snapshot_checkpointed", "checkpointed", managed)
+	assertRetainedContentSnapshotReference(t, references, "gen_snapshot_failed", "failed", skills)
+	if hasRetainedContentSnapshotReference(references, "sha256:unused") {
+		t.Fatalf("unreferenced snapshot should not be retained: %+v", references)
+	}
+}
+
 func TestStoreContentSnapshotRejectsInvalidReferences(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
@@ -153,6 +229,56 @@ func TestStoreContentSnapshotRejectsInvalidReferences(t *testing.T) {
 		!strings.Contains(err.Error(), "managed settings content snapshot mount destination must be /harness-managed-settings") {
 		t.Fatalf("expected managed settings mount destination error, got %v", err)
 	}
+}
+
+func contentSnapshotPlanPayload(generationID string, snapshots []ContentSnapshotRecord) map[string]any {
+	contentSnapshots := map[string]any{
+		ContentSnapshotKindSkills:          nil,
+		ContentSnapshotKindManagedSettings: nil,
+	}
+	for _, snapshot := range snapshots {
+		contentSnapshots[snapshot.Kind] = map[string]any{
+			"kind":                   snapshot.Kind,
+			"digest":                 snapshot.Digest,
+			"immutable_host_path":    snapshot.ImmutableHostPath,
+			"mount_destination":      snapshot.MountDestination,
+			"source_evidence_digest": snapshot.SourceEvidenceDigest,
+			"retention_class":        snapshot.RetentionClass,
+		}
+	}
+	return map[string]any{
+		"generation_id":     generationID,
+		"plan_version":      GenerationPlanVersion,
+		"content_snapshots": contentSnapshots,
+	}
+}
+
+func assertRetainedContentSnapshotReference(t *testing.T, references []RetainedContentSnapshotReference, generationID, status string, snapshot ContentSnapshotRecord) {
+	t.Helper()
+	for _, ref := range references {
+		if ref.GenerationID != generationID || ref.Kind != snapshot.Kind || ref.Digest != snapshot.Digest {
+			continue
+		}
+		if ref.GenerationStatus != status ||
+			ref.PlanDigest == "" ||
+			ref.ImmutableHostPath != snapshot.ImmutableHostPath ||
+			ref.MountDestination != snapshot.MountDestination ||
+			ref.SourceEvidenceDigest != snapshot.SourceEvidenceDigest ||
+			ref.RetentionClass != snapshot.RetentionClass {
+			t.Fatalf("retained reference mismatch: got %+v want generation=%s status=%s snapshot=%+v", ref, generationID, status, snapshot)
+		}
+		return
+	}
+	t.Fatalf("missing retained reference generation=%s snapshot=%+v in %+v", generationID, snapshot, references)
+}
+
+func hasRetainedContentSnapshotReference(references []RetainedContentSnapshotReference, digest string) bool {
+	for _, ref := range references {
+		if ref.Digest == digest {
+			return true
+		}
+	}
+	return false
 }
 
 func TestGetContentSnapshotRejectsCorruptSkillsMountDestination(t *testing.T) {

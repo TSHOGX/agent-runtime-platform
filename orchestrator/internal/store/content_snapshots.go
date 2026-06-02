@@ -3,8 +3,10 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -24,6 +26,18 @@ type ContentSnapshotRecord struct {
 	SourceEvidenceDigest string
 	RetentionClass       string
 	CreatedAt            time.Time
+}
+
+type RetainedContentSnapshotReference struct {
+	GenerationID         string
+	GenerationStatus     string
+	PlanDigest           string
+	Kind                 string
+	Digest               string
+	ImmutableHostPath    string
+	MountDestination     string
+	SourceEvidenceDigest string
+	RetentionClass       string
 }
 
 type StoreContentSnapshotParams struct {
@@ -118,6 +132,53 @@ ORDER BY snapshot_kind, snapshot_digest`
 	return records, rows.Err()
 }
 
+func (s *Store) ListRetainedContentSnapshotReferences(ctx context.Context) ([]RetainedContentSnapshotReference, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT p.generation_id, g.status, p.plan_digest, p.canonical_payload
+FROM generation_plans p
+JOIN runtime_generations g ON g.generation_id = p.generation_id
+ORDER BY p.generation_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	references := []RetainedContentSnapshotReference{}
+	for rows.Next() {
+		var generationID, generationStatus, planDigest, canonicalPayload string
+		if err := rows.Scan(&generationID, &generationStatus, &planDigest, &canonicalPayload); err != nil {
+			return nil, err
+		}
+		if err := VerifyGenerationPlanDigest([]byte(canonicalPayload), planDigest); err != nil {
+			return nil, fmt.Errorf("generation plan %s: %w", generationID, err)
+		}
+		refs, err := retainedContentSnapshotReferencesFromPlan([]byte(canonicalPayload))
+		if err != nil {
+			return nil, fmt.Errorf("generation plan %s content snapshot references: %w", generationID, err)
+		}
+		for _, ref := range refs {
+			ref.GenerationID = generationID
+			ref.GenerationStatus = generationStatus
+			ref.PlanDigest = planDigest
+			references = append(references, ref)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(references, func(i, j int) bool {
+		left, right := references[i], references[j]
+		if left.Kind != right.Kind {
+			return left.Kind < right.Kind
+		}
+		if left.Digest != right.Digest {
+			return left.Digest < right.Digest
+		}
+		return left.GenerationID < right.GenerationID
+	})
+	return references, nil
+}
+
 func validateContentSnapshotParams(p StoreContentSnapshotParams) error {
 	if !knownContentSnapshotKind(p.Kind) {
 		return fmt.Errorf("unsupported content snapshot kind %q", p.Kind)
@@ -150,6 +211,59 @@ func validateContentSnapshotParams(p StoreContentSnapshotParams) error {
 		return fmt.Errorf("content snapshot retention class is required")
 	}
 	return nil
+}
+
+func retainedContentSnapshotReferencesFromPlan(canonicalPayload []byte) ([]RetainedContentSnapshotReference, error) {
+	var object map[string]any
+	decoder := json.NewDecoder(strings.NewReader(string(canonicalPayload)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&object); err != nil {
+		return nil, err
+	}
+	rawSnapshots, ok := object["content_snapshots"].(map[string]any)
+	if !ok {
+		return nil, nil
+	}
+	references := []RetainedContentSnapshotReference{}
+	for kind, rawSnapshot := range rawSnapshots {
+		if rawSnapshot == nil {
+			continue
+		}
+		snapshot, ok := rawSnapshot.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("content_snapshots.%s must be an object or null", kind)
+		}
+		ref := RetainedContentSnapshotReference{
+			Kind:                 strings.TrimSpace(contentSnapshotPlanString(snapshot["kind"])),
+			Digest:               strings.TrimSpace(contentSnapshotPlanString(snapshot["digest"])),
+			ImmutableHostPath:    strings.TrimSpace(contentSnapshotPlanString(snapshot["immutable_host_path"])),
+			MountDestination:     strings.TrimSpace(contentSnapshotPlanString(snapshot["mount_destination"])),
+			SourceEvidenceDigest: strings.TrimSpace(contentSnapshotPlanString(snapshot["source_evidence_digest"])),
+			RetentionClass:       strings.TrimSpace(contentSnapshotPlanString(snapshot["retention_class"])),
+		}
+		if ref.Kind != strings.TrimSpace(kind) {
+			return nil, fmt.Errorf("content_snapshots.%s.kind must be %s", kind, strings.TrimSpace(kind))
+		}
+		if err := validateContentSnapshotParams(StoreContentSnapshotParams{
+			Kind:                 ref.Kind,
+			Digest:               ref.Digest,
+			ImmutableHostPath:    ref.ImmutableHostPath,
+			MountDestination:     ref.MountDestination,
+			SourceEvidenceDigest: ref.SourceEvidenceDigest,
+			RetentionClass:       ref.RetentionClass,
+		}); err != nil {
+			return nil, fmt.Errorf("content_snapshots.%s: %w", kind, err)
+		}
+		references = append(references, ref)
+	}
+	return references, nil
+}
+
+func contentSnapshotPlanString(value any) string {
+	if s, ok := value.(string); ok {
+		return s
+	}
+	return ""
 }
 
 func knownContentSnapshotKind(kind string) bool {
