@@ -7,6 +7,7 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 ROOTFS_DIR="${ROOTFS_DIR:-${SCRIPT_DIR}/rootfs}"
 UBUNTU_SUITE="${UBUNTU_SUITE:-noble}"
 UBUNTU_MIRROR="${UBUNTU_MIRROR:-http://archive.ubuntu.com/ubuntu}"
+UBUNTU_COMPONENTS="${UBUNTU_COMPONENTS:-main,universe}"
 FORCE="${FORCE:-0}"
 SANDBOX_AGENT_DRIVERS="${SANDBOX_AGENT_DRIVERS:-claude_code}"
 PI_CODING_AGENT_VERSION="${PI_CODING_AGENT_VERSION:-0.77.0}"
@@ -318,7 +319,7 @@ fi
 
 log "bootstrapping Ubuntu ${UBUNTU_SUITE} rootfs"
 mkdir -p "${ROOTFS_DIR}"
-debootstrap --variant=minbase "${UBUNTU_SUITE}" "${ROOTFS_DIR}" "${UBUNTU_MIRROR}"
+debootstrap --variant=minbase --components="${UBUNTU_COMPONENTS}" "${UBUNTU_SUITE}" "${ROOTFS_DIR}" "${UBUNTU_MIRROR}"
 
 log "installing apt packages"
 chroot "${ROOTFS_DIR}" /bin/sh -lc "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${APT_PACKAGES[*]} && apt-get clean && rm -rf /var/lib/apt/lists/*"
