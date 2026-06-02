@@ -3169,6 +3169,67 @@ func TestStartEnsuredGenerationLeavesBridgeClaimsUntilLivePoll(t *testing.T) {
 	}
 }
 
+func TestVerifyStoredGenerationPlanProjectionsChecksExistingRows(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, _ := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_projection_verify", string(sessionstate.Created), time.Now().UTC(), nil)
+	generationID := "gen_projection_verify"
+	if _, err := st.DBForTest().ExecContext(ctx, `
+INSERT INTO runtime_generations (generation_id, session_id, status, lease_owner, lease_expires_at)
+VALUES (?, ?, 'allocating', 'owner', ?)`, generationID, session.ID, time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("insert runtime generation: %v", err)
+	}
+	plan, err := st.StoreGenerationPlan(ctx, store.StoreGenerationPlanParams{
+		GenerationID: generationID,
+		Payload:      map[string]any{"generation_id": generationID, "plan_version": 1},
+	})
+	if err != nil {
+		t.Fatalf("store generation plan: %v", err)
+	}
+	artifacts := testGenerationArtifacts()
+	for _, expectation := range generationPlanProjectionExpectations(artifacts) {
+		if _, err := st.StoreGenerationPlanProjection(ctx, store.StoreGenerationPlanProjectionParams{
+			GenerationID:      generationID,
+			PlanDigest:        plan.PlanDigest,
+			ProjectionKind:    expectation.ProjectionKind,
+			ProjectionVersion: 1,
+			PayloadDigest:     expectation.PayloadDigest,
+		}); err != nil {
+			t.Fatalf("store projection %s: %v", expectation.ProjectionKind, err)
+		}
+	}
+
+	srv := &Server{store: st}
+	verified, err := srv.verifyStoredGenerationPlanProjections(ctx, generationID, artifacts)
+	if err != nil {
+		t.Fatalf("verify matching projections: %v", err)
+	}
+	if !verified {
+		t.Fatalf("expected existing plan projections to verify")
+	}
+	mismatch := artifacts
+	mismatch.SpecDigest = "changed_spec_digest"
+	if _, err := srv.verifyStoredGenerationPlanProjections(ctx, generationID, mismatch); err == nil ||
+		!strings.Contains(err.Error(), "oci_spec digest mismatch") {
+		t.Fatalf("expected projection mismatch, got %v", err)
+	}
+}
+
+func TestVerifyStoredGenerationPlanProjectionsSkipsMissingPlan(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, _ := openServerOwnedStore(t, ctx, dir)
+	srv := &Server{store: st}
+	verified, err := srv.verifyStoredGenerationPlanProjections(ctx, "missing_plan_generation", testGenerationArtifacts())
+	if err != nil {
+		t.Fatalf("optional missing plan should not fail: %v", err)
+	}
+	if verified {
+		t.Fatalf("missing plan should report verified=false")
+	}
+}
+
 func TestRuntimeResourceInstanceCheckpointRestoreTransitions(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

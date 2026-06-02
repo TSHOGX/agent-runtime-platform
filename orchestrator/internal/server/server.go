@@ -795,6 +795,16 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 		return err
 	}
+	if _, err := s.verifyStoredGenerationPlanProjections(ctx, allocation.GenerationID, preparedArtifacts); err != nil {
+		if ensured.RestoreFromCheckpoint {
+			retireRuntimeResource()
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+			return err
+		}
+		retireRuntimeResource()
+		s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+		return err
+	}
 	startReq := s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, preparedArtifacts, dataVolumes)
 	startReq.RestoreFromCheckpoint = ensured.RestoreFromCheckpoint
 	result := s.runtime.Start(startCtx, startReq, nil)
@@ -2086,6 +2096,23 @@ func runtimeArtifactDigests(artifacts runtime.GenerationArtifacts) store.Generat
 		RunscVersion:                   artifacts.RunscVersion,
 		RunscBinaryPath:                artifacts.RunscBinaryPath,
 		RunscBinaryDigest:              artifacts.RunscBinaryDigest,
+	}
+}
+
+func (s *Server) verifyStoredGenerationPlanProjections(ctx context.Context, generationID string, artifacts runtime.GenerationArtifacts) (bool, error) {
+	return s.store.VerifyGenerationPlanProjections(ctx, store.VerifyGenerationPlanProjectionsParams{
+		GenerationID: generationID,
+		Expected:     generationPlanProjectionExpectations(artifacts),
+	})
+}
+
+func generationPlanProjectionExpectations(artifacts runtime.GenerationArtifacts) []store.GenerationPlanProjectionExpectation {
+	return []store.GenerationPlanProjectionExpectation{
+		{ProjectionKind: "control_manifest", PayloadDigest: projectionPayloadDigest("control_manifest", artifacts.ManifestDigest)},
+		{ProjectionKind: "control_manifest_projected", PayloadDigest: projectionPayloadDigest("control_manifest_projected", artifacts.ProjectedManifestDigest)},
+		{ProjectionKind: "oci_spec", PayloadDigest: projectionPayloadDigest("oci_spec", artifacts.SpecDigest)},
+		{ProjectionKind: "bundle", PayloadDigest: projectionPayloadDigest("bundle", artifacts.BundleDigest)},
+		{ProjectionKind: "runtime_config", PayloadDigest: projectionPayloadDigest("runtime_config", artifacts.RuntimeConfigDigest)},
 	}
 }
 
