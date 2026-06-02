@@ -1516,172 +1516,43 @@ func (s *Server) shadowGenerationPlanPayload(session store.Session, details stor
 	if err != nil {
 		return nil, err
 	}
-	featurePolicy, err := generationplan.RenderFeaturePolicyPayload(driverSpec, providerSpec)
-	if err != nil {
-		return nil, err
-	}
-	projections := map[string]any{}
-	for _, projection := range planprojection.Rows(details, artifacts, sandboxContractPayload, "") {
-		projections[projection.ProjectionKind] = map[string]any{
-			"projection_version": projection.ProjectionVersion,
-			"payload_digest":     projection.PayloadDigest,
-			"materialized_path":  nullableProjectionPath(projection.MaterializedPath),
-		}
-	}
-	return map[string]any{
-		"plan_version": store.GenerationPlanVersion,
-		"identity": map[string]any{
-			"session_id":    session.ID,
-			"generation_id": details.GenerationID,
-			"product_mode":  mode,
+	return generationplan.RenderPayload(generationplan.RenderPayloadParams{
+		Session:                      session,
+		Details:                      details,
+		Artifacts:                    artifacts,
+		SandboxContractPayload:       sandboxContractPayload,
+		SandboxContractPayloadDigest: planprojection.SandboxContractPayloadDigest(sandboxContractPayload),
+		ResourceIdentityDigest:       resourceIdentityDigest,
+		Volumes: generationplan.DataVolumes{
+			Workspace:  volumes.Workspace,
+			DriverHome: volumes.DriverHome,
 		},
-		"driver": map[string]any{
-			"driver_id":               driverID,
-			"driver_kind":             string(driverSpec.Kind),
-			"bridge_protocol":         driverSpec.BridgeProtocol,
-			"bridge_protocol_version": driverSpec.BridgeProtocolVersion,
-			"turn_input_schema":       driverSpec.TurnInputSchema,
-			"output_schema":           driverSpec.OutputSchema,
-			"output_format":           details.OutputFormat,
-			"model":                   nullableProjectionPath(details.Model),
-			"initial_state_digest":    details.DriverStateDigest,
-			"initial_state_version":   details.DriverStateVersion,
-			"capability_snapshot":     agents.DriverCapabilityPayload(driverSpec),
+		DriverSpec:                  driverSpec,
+		ProviderSpec:                providerSpec,
+		RuntimeProviderConfigID:     deployment.RuntimeProviderConfigID,
+		RootFSPath:                  s.cfg.RootFSPath,
+		SandboxIP:                   sandboxIP,
+		NetworkIdentityNftTableName: nftTableName,
+		BridgeProbe: generationplan.BridgeProbePayload{
+			BridgeHeartbeatInterval: s.cfg.Harness.Bridge.HeartbeatInterval.Duration,
+			BridgePollInterval:      s.cfg.Harness.Bridge.PollInterval.Duration,
+			LeaseTTL:                s.cfg.Harness.Bridge.LeaseTTL.Duration,
+			AckStartedGrace:         s.cfg.Harness.Bridge.AckStartedGrace.Duration,
+			ReconnectGrace:          s.cfg.Harness.Bridge.ReconnectGrace.Duration,
+			ProbeHealthzStatuses:    s.cfg.Harness.Probe.AcceptStatus.GetHealthz,
+			PreStartAttempts:        s.cfg.Harness.Probe.PreStartAttempts,
+			PreStartInterval:        s.cfg.Harness.Probe.PreStartInterval.Duration,
+			PostStartAttempts:       s.cfg.Harness.Probe.PostStartAttempts,
+			PostStartInterval:       s.cfg.Harness.Probe.PostStartInterval.Duration,
 		},
-		"runtime_provider": map[string]any{
-			"provider_id":                  providerSpec.ID,
-			"provider_config_id":           deployment.RuntimeProviderConfigID,
-			"provider_profile_id":          providerSpec.ProviderProfileID,
-			"isolation_kind":               providerSpec.IsolationKind,
-			"template_ref":                 providerSpec.TemplateRef,
-			"capability_vocab_version":     providerSpec.CapabilityVocabulary,
-			"capability_digest":            agents.CapabilityDigest(providerSpec),
-			"capability_snapshot":          agents.RuntimeProviderCapabilityPayload(providerSpec),
-			"snapshot_policy":              providerSpec.SnapshotPolicy,
-			"agent_runtime_profile_id":     details.AgentRuntimeProfileID,
-			"runtime_profile_provider_ref": details.RunscPlatform,
+		ProjectionRows: planprojection.Rows(details, artifacts, sandboxContractPayload, ""),
+		SourceDigests: generationplan.SourceDigests{
+			RuntimeConfigDigest: inputEvidence.RuntimeConfigDigest,
+			AgentManifestDigest: inputEvidence.AgentManifestDigest,
 		},
-		"runsc_pin": map[string]any{
-			"platform":      details.RunscPlatform,
-			"version":       artifacts.RunscVersion,
-			"binary_path":   artifacts.RunscBinaryPath,
-			"binary_digest": artifacts.RunscBinaryDigest,
-		},
-		"image": map[string]any{
-			"agent_manifest_digest": inputEvidence.AgentManifestDigest,
-			"rootfs_path":           filepath.Clean(s.cfg.RootFSPath),
-			"rootfs_image_digest":   nil,
-		},
-		"bridge_probe": map[string]any{
-			"bridge_mode":              "claim-loop",
-			"bridge_heartbeat_seconds": durationSeconds(s.cfg.Harness.Bridge.HeartbeatInterval.Duration),
-			"bridge_poll_seconds":      durationSeconds(s.cfg.Harness.Bridge.PollInterval.Duration),
-			"lease_ttl_seconds":        durationSeconds(s.cfg.Harness.Bridge.LeaseTTL.Duration),
-			"ack_started_grace_seconds": durationSeconds(
-				s.cfg.Harness.Bridge.AckStartedGrace.Duration,
-			),
-			"reconnect_grace_seconds":  durationSeconds(s.cfg.Harness.Bridge.ReconnectGrace.Duration),
-			"probe_url":                details.ProbeURL,
-			"probe_healthz_statuses":   append([]int(nil), s.cfg.Harness.Probe.AcceptStatus.GetHealthz...),
-			"pre_start_attempts":       s.cfg.Harness.Probe.PreStartAttempts,
-			"pre_start_interval_secs":  durationSeconds(s.cfg.Harness.Probe.PreStartInterval.Duration),
-			"post_start_attempts":      s.cfg.Harness.Probe.PostStartAttempts,
-			"post_start_interval_secs": durationSeconds(s.cfg.Harness.Probe.PostStartInterval.Duration),
-		},
-		"network": map[string]any{
-			"network_profile_id":   details.NetworkProfileID,
-			"runsc_network":        details.RunscNetwork,
-			"runsc_overlay2":       details.RunscOverlay2,
-			"sandbox_ip":           sandboxIP,
-			"sandbox_ip_cidr":      details.SandboxIPCIDR,
-			"host_gateway_ip":      details.HostGatewayIP,
-			"sandbox_base_url":     details.SandboxBaseURL,
-			"host_proxy_bind_url":  details.HostProxyBindURL,
-			"proxy_port":           details.ProxyPort,
-			"netns_name":           details.NetnsName,
-			"netns_path":           details.NetnsPath,
-			"host_veth":            details.HostVeth,
-			"sandbox_veth":         details.SandboxVeth,
-			"host_side_cidr":       details.HostSideCIDR,
-			"nft_table_name":       nftTableName,
-			"egress_policy_id":     details.EgressPolicyID,
-			"egress_policy_digest": details.EgressPolicyDigest,
-			"dns_policy":           details.DNSPolicy,
-		},
-		"data_volumes": map[string]any{
-			"workspace": map[string]any{
-				"session_id":                   volumes.Workspace.SessionID,
-				"host_path":                    volumes.Workspace.HostPath,
-				"layout_version":               volumes.Workspace.LayoutVersion,
-				"runtime_identity_digest":      volumes.Workspace.RuntimeIdentityDigest,
-				"provisioning_marker_path":     volumes.Workspace.ProvisioningMarkerPath,
-				"provisioning_marker_digest":   volumes.Workspace.ProvisioningMarkerDigest,
-				"sandbox_destination":          "/workspace",
-				"sandbox_uid":                  volumes.Workspace.SandboxUID,
-				"sandbox_gid":                  volumes.Workspace.SandboxGID,
-				"sandbox_supplemental_gids":    append([]int(nil), volumes.Workspace.SandboxSupplementalGIDs...),
-				"artifact_watcher_scope":       "workspace_only",
-				"platform_content_mount_scope": "none",
-			},
-			"agent_home": map[string]any{
-				"session_id":                 volumes.DriverHome.SessionID,
-				"driver":                     volumes.DriverHome.Driver,
-				"host_path":                  volumes.DriverHome.HostPath,
-				"layout_version":             volumes.DriverHome.LayoutVersion,
-				"runtime_identity_digest":    volumes.DriverHome.RuntimeIdentityDigest,
-				"provisioning_marker_path":   volumes.DriverHome.ProvisioningMarkerPath,
-				"provisioning_marker_digest": volumes.DriverHome.ProvisioningMarkerDigest,
-				"sandbox_destination":        "/agent-home",
-				"sandbox_uid":                volumes.DriverHome.SandboxUID,
-				"sandbox_gid":                volumes.DriverHome.SandboxGID,
-				"sandbox_supplemental_gids":  append([]int(nil), volumes.DriverHome.SandboxSupplementalGIDs...),
-			},
-		},
-		"mounts": map[string]any{
-			"workspace":                      sandboxContractPayload["mount_plan"].(map[string]any)["workspace"],
-			"agent_home":                     sandboxContractPayload["mount_plan"].(map[string]any)["agent_home"],
-			"control":                        sandboxContractPayload["mount_plan"].(map[string]any)["control"],
-			"bridge":                         sandboxContractPayload["mount_plan"].(map[string]any)["bridge"],
-			"network_hosts_path":             nullableProjectionPath(details.NetworkHostsPath),
-			"driver_config_materializations": sandboxContractPayload["mount_plan"].(map[string]any)["driver_config_materializations"],
-		},
-		"runtime_artifacts": map[string]any{
-			"control_dir_path":                     details.ControlDirPath,
-			"control_manifest_path":                details.ControlManifestPath,
-			"control_manifest_digest":              artifacts.ManifestDigest,
-			"projected_control_manifest_digest":    artifacts.ProjectedManifestDigest,
-			"bundle_dir_path":                      details.BundleDirPath,
-			"bundle_digest":                        artifacts.BundleDigest,
-			"runtime_config_digest":                artifacts.RuntimeConfigDigest,
-			"spec_path":                            details.SpecPath,
-			"spec_digest":                          artifacts.SpecDigest,
-			"bridge_dir_path":                      details.BridgeDirPath,
-			"log_dir_path":                         details.LogDirPath,
-			"network_hosts_path":                   nullableProjectionPath(details.NetworkHostsPath),
-			"materialized_driver_config":           generationplan.MaterializedDriverConfigPayload(artifacts.MaterializedDriverConfig),
-			"resource_identity_digest":             resourceIdentityDigest,
-			"sandbox_contract_id":                  sandboxContractID(details.GenerationID),
-			"sandbox_contract_payload_digest":      planprojection.SandboxContractPayloadDigest(sandboxContractPayload),
-			"sandbox_contract_compatibility_shape": store.SandboxContractVersion,
-		},
-		"feature_policy":      featurePolicy,
-		"content_snapshots":   map[string]any{"skills": nil, "managed_settings": nil},
-		"source_digests":      map[string]any{"runtime_config_digest": inputEvidence.RuntimeConfigDigest, "agent_manifest_digest": inputEvidence.AgentManifestDigest},
-		"projection_digests":  projections,
-		"mutable_state_scope": map[string]any{"leases": "runtime_generations", "events": "events", "checkpoint_state": "runtime_generations"},
-	}, nil
-}
-
-func durationSeconds(duration time.Duration) string {
-	return fmt.Sprintf("%.9f", duration.Seconds())
-}
-
-func nullableProjectionPath(value string) any {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return nil
-	}
-	return value
+		SandboxContractCompatibility: store.SandboxContractVersion,
+		SandboxContractID:            sandboxContractID(details.GenerationID),
+	})
 }
 
 func runtimeArtifactsFromDetails(details store.RuntimeGenerationDetails) runtime.GenerationArtifacts {
