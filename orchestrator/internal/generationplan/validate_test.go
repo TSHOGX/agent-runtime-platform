@@ -624,6 +624,23 @@ func TestVerifyRuntimeArtifactPathEvidenceChecksFrozenPaths(t *testing.T) {
 	}
 }
 
+func TestVerifyRuntimeResourceEvidenceChecksFrozenIdentityDigest(t *testing.T) {
+	payload := validPlanPayload()
+	params := VerifyRuntimeResourceEvidenceParams{
+		Payload:                payload,
+		ResourceIdentityDigest: "sha256:resource",
+	}
+	if err := VerifyRuntimeResourceEvidence(params); err != nil {
+		t.Fatalf("verify runtime resource evidence: %v", err)
+	}
+
+	params.ResourceIdentityDigest = "sha256:changed"
+	if err := VerifyRuntimeResourceEvidence(params); err == nil ||
+		!strings.Contains(err.Error(), "runtime_artifacts.resource_identity_digest mismatch") {
+		t.Fatalf("expected resource identity digest mismatch, got %v", err)
+	}
+}
+
 func TestContentSnapshotRefsExtractsPlanSnapshotDigests(t *testing.T) {
 	payload := validPlanPayload()
 	contentSnapshots := payload["content_snapshots"].(map[string]any)

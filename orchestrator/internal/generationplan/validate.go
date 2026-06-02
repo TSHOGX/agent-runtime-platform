@@ -80,6 +80,11 @@ type VerifyRuntimeArtifactPathEvidenceParams struct {
 	NetworkHostsPath    string
 }
 
+type VerifyRuntimeResourceEvidenceParams struct {
+	Payload                any
+	ResourceIdentityDigest string
+}
+
 func Validate(p ValidateParams) error {
 	object, err := decodePlanObject(p.Payload)
 	if err != nil {
@@ -144,6 +149,25 @@ func Validate(p ValidateParams) error {
 	}
 	if err := validateProjectionDigests(object); err != nil {
 		return err
+	}
+	return nil
+}
+
+func VerifyRuntimeResourceEvidence(p VerifyRuntimeResourceEvidenceParams) error {
+	object, err := decodePlanObject(p.Payload)
+	if err != nil {
+		return err
+	}
+	artifacts, err := requireObject(object, "runtime_artifacts")
+	if err != nil {
+		return err
+	}
+	expectedDigest := strings.TrimSpace(p.ResourceIdentityDigest)
+	if expectedDigest == "" {
+		return nil
+	}
+	if strings.TrimSpace(stringField(artifacts, "resource_identity_digest")) != expectedDigest {
+		return fmt.Errorf("generation plan runtime_artifacts.resource_identity_digest mismatch")
 	}
 	return nil
 }

@@ -3806,6 +3806,22 @@ func TestVerifyGenerationPlanRuntimeArtifactPathsChecksStoredPlan(t *testing.T) 
 	}
 }
 
+func TestVerifyGenerationPlanRuntimeResourceEvidenceChecksStoredPlan(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, _ := openServerOwnedStore(t, ctx, dir)
+	srv := &Server{store: st}
+	storeServerFrozenEvidencePlan(t, ctx, st, dir, validServerGenerationPlanPayload())
+
+	if err := srv.verifyGenerationPlanRuntimeResourceEvidence(ctx, "gen_frozen_evidence", "sha256:resource"); err != nil {
+		t.Fatalf("verify runtime resource evidence: %v", err)
+	}
+	if err := srv.verifyGenerationPlanRuntimeResourceEvidence(ctx, "gen_frozen_evidence", "sha256:changed"); err == nil ||
+		!strings.Contains(err.Error(), "runtime_artifacts.resource_identity_digest mismatch") {
+		t.Fatalf("expected resource identity mismatch, got %v", err)
+	}
+}
+
 func TestVerifyGenerationPlanFrozenEvidenceChecksStoredProjectionRows(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -6962,6 +6978,7 @@ WHERE id = ?`, sessionID).Scan(&mode); err != nil {
 	} else {
 		runtimeArtifacts["network_hosts_path"] = details.NetworkHostsPath
 	}
+	runtimeArtifacts["resource_identity_digest"] = serverRuntimeResourceIdentityDigestForPlanFixture(t, details, artifacts)
 	dataVolumes := payload["data_volumes"].(map[string]any)
 	serverApplyWorkspaceVolumePayload(dataVolumes["workspace"].(map[string]any), workspaceVolume)
 	serverApplyDriverHomeVolumePayload(dataVolumes["agent_home"].(map[string]any), driverHomeVolume)
@@ -7001,6 +7018,58 @@ WHERE id = ?`, sessionID).Scan(&mode); err != nil {
 		}
 	}
 	return plan
+}
+
+func serverRuntimeResourceIdentityDigestForPlanFixture(t *testing.T, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts) string {
+	t.Helper()
+	sandboxIP, err := runtimeResourceSandboxIP(details.SandboxIPCIDR)
+	if err != nil {
+		t.Fatalf("runtime resource sandbox ip for plan %s: %v", details.GenerationID, err)
+	}
+	nftTableName, err := runtimeResourceNftTableName(details.GenerationID)
+	if err != nil {
+		t.Fatalf("runtime resource nft table for plan %s: %v", details.GenerationID, err)
+	}
+	params := store.RuntimeResourceInstanceParams{
+		GenerationID:           details.GenerationID,
+		SessionID:              details.SessionID,
+		ContractID:             sandboxContractID(details.GenerationID),
+		SandboxContractVersion: store.SandboxContractVersion,
+		HostID:                 mustRuntimeResourceHostID(t),
+		RunscContainerID:       details.RunscContainerID,
+		RunscPlatform:          details.RunscPlatform,
+		RunscVersion:           artifacts.RunscVersion,
+		RunscBinaryPath:        artifacts.RunscBinaryPath,
+		RunscBinaryDigest:      artifacts.RunscBinaryDigest,
+		NetworkProfileID:       details.NetworkProfileID,
+		NetnsName:              details.NetnsName,
+		NetnsPath:              details.NetnsPath,
+		HostVeth:               details.HostVeth,
+		SandboxVeth:            details.SandboxVeth,
+		HostGatewayIP:          details.HostGatewayIP,
+		SandboxIP:              sandboxIP,
+		SandboxIPCIDR:          details.SandboxIPCIDR,
+		HostSideCIDR:           details.HostSideCIDR,
+		NftTableName:           nftTableName,
+		ControlDirPath:         details.ControlDirPath,
+		ControlManifestPath:    details.ControlManifestPath,
+		BundleDirPath:          details.BundleDirPath,
+		SpecPath:               details.SpecPath,
+		CheckpointPath:         details.CheckpointPath,
+		BridgeDirPath:          details.BridgeDirPath,
+		NetworkHostsPath:       details.NetworkHostsPath,
+		LogDirPath:             details.LogDirPath,
+		RootPrefixes: map[string]string{
+			"run_dir":      filepath.Dir(filepath.Dir(details.ControlDirPath)),
+			"control_root": filepath.Dir(details.ControlDirPath),
+			"bridge_root":  filepath.Dir(details.BridgeDirPath),
+		},
+	}
+	_, digest, err := store.RuntimeResourceIdentityForParams(params)
+	if err != nil {
+		t.Fatalf("runtime resource identity for plan %s: %v", details.GenerationID, err)
+	}
+	return digest
 }
 
 func provisionServerGenerationPlanFixtureVolumes(t *testing.T, ctx context.Context, st *store.Store, sessionID string, details store.RuntimeGenerationDetails) (store.SessionWorkspaceVolume, store.SessionDriverHomeVolume) {

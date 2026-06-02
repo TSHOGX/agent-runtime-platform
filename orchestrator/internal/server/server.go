@@ -617,6 +617,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 	}
 	var runtimeResourceCreated bool
 	var runtimeResourceInstance store.RuntimeResourceInstance
+	resourceIdentityDigest := ""
 	sandboxContractDigest := ""
 	var artifactProjection runtime.GenerationArtifactProjection
 	retireRuntimeResource := func() {
@@ -659,7 +660,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 			return err
 		}
-		_, resourceIdentityDigest, err := store.RuntimeResourceIdentityForParams(runtimeResourceParams)
+		_, resourceIdentityDigest, err = store.RuntimeResourceIdentityForParams(runtimeResourceParams)
 		if err != nil {
 			if leaseErr := leaseKeeper.err(); leaseErr != nil {
 				return leaseErr
@@ -854,6 +855,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		}
 		runtimeResourceCreated = resourceTracked
 		runtimeResourceInstance = instance
+		resourceIdentityDigest = instance.ResourceIdentityDigest
 	}
 	if runtimeResourceCreated {
 		generationDetails = runtimeDetailsWithResourceInstance(generationDetails, runtimeResourceInstance)
@@ -886,6 +888,11 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		return err
 	}
 	if err := s.verifyGenerationPlanRuntimeArtifactPaths(ctx, allocation.GenerationID, generationDetails); err != nil {
+		retireRuntimeResource()
+		s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+		return err
+	}
+	if err := s.verifyGenerationPlanRuntimeResourceEvidence(ctx, allocation.GenerationID, resourceIdentityDigest); err != nil {
 		retireRuntimeResource()
 		s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 		return err
@@ -1787,6 +1794,24 @@ func (s *Server) verifyGenerationPlanRuntimeArtifactPaths(ctx context.Context, g
 		BridgeDirPath:       details.BridgeDirPath,
 		LogDirPath:          details.LogDirPath,
 		NetworkHostsPath:    details.NetworkHostsPath,
+	})
+}
+
+func (s *Server) verifyGenerationPlanRuntimeResourceEvidence(ctx context.Context, generationID, resourceIdentityDigest string) error {
+	resourceIdentityDigest = strings.TrimSpace(resourceIdentityDigest)
+	if resourceIdentityDigest == "" {
+		return nil
+	}
+	plan, err := s.store.RequireGenerationPlanForLaunch(ctx, strings.TrimSpace(generationID))
+	if err != nil {
+		return err
+	}
+	if err := generationplan.Validate(generationplan.ValidateParams{Payload: plan.CanonicalPayload}); err != nil {
+		return err
+	}
+	return generationplan.VerifyRuntimeResourceEvidence(generationplan.VerifyRuntimeResourceEvidenceParams{
+		Payload:                plan.CanonicalPayload,
+		ResourceIdentityDigest: resourceIdentityDigest,
 	})
 }
 
