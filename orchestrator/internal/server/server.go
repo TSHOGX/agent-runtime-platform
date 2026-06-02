@@ -1432,7 +1432,7 @@ func (s *Server) runtimeStartRequest(session store.Session, generationID string,
 	}
 }
 
-func (s *Server) generationContentSnapshots(_ context.Context, session store.Session, details store.RuntimeGenerationDetails) ([]store.ContentSnapshotRecord, error) {
+func (s *Server) generationContentSnapshots(ctx context.Context, session store.Session, details store.RuntimeGenerationDetails) ([]store.ContentSnapshotRecord, error) {
 	driverID, err := agents.CanonicalDriverID(details.DriverID)
 	if err != nil {
 		return nil, err
@@ -1446,19 +1446,39 @@ func (s *Server) generationContentSnapshots(_ context.Context, session store.Ses
 		return nil, capabilityErr
 	}
 	policy := agents.DefaultFeaturePolicyForDriver(deployment.DriverSpec)
-	if feature, ok := requiredContentSnapshotFeatureWithoutSelection(policy); ok {
-		return nil, fmt.Errorf("content snapshot selection for required feature %s is not configured", feature)
-	}
-	return nil, nil
+	return s.selectGenerationContentSnapshots(ctx, policy)
 }
 
-func requiredContentSnapshotFeatureWithoutSelection(policy agents.FeaturePolicy) (agents.FeatureID, bool) {
-	for _, feature := range []agents.FeatureID{agents.FeatureSkillsSnapshot, agents.FeatureManagedSettings} {
-		if policy[feature] == agents.FeaturePolicyRequired {
-			return feature, true
+type contentSnapshotFeatureRequirement struct {
+	feature agents.FeatureID
+	kind    string
+}
+
+var contentSnapshotFeatureRequirements = []contentSnapshotFeatureRequirement{
+	{feature: agents.FeatureSkillsSnapshot, kind: store.ContentSnapshotKindSkills},
+	{feature: agents.FeatureManagedSettings, kind: store.ContentSnapshotKindManagedSettings},
+}
+
+func (s *Server) selectGenerationContentSnapshots(ctx context.Context, policy agents.FeaturePolicy) ([]store.ContentSnapshotRecord, error) {
+	selected := []store.ContentSnapshotRecord{}
+	for _, requirement := range contentSnapshotFeatureRequirements {
+		if policy[requirement.feature] != agents.FeaturePolicyRequired {
+			continue
+		}
+		records, err := s.store.ListContentSnapshots(ctx, requirement.kind)
+		if err != nil {
+			return nil, err
+		}
+		switch len(records) {
+		case 0:
+			return nil, fmt.Errorf("content snapshot selection for required feature %s has no %s snapshot", requirement.feature, requirement.kind)
+		case 1:
+			selected = append(selected, records[0])
+		default:
+			return nil, fmt.Errorf("content snapshot selection for required feature %s is ambiguous: %d %s snapshots", requirement.feature, len(records), requirement.kind)
 		}
 	}
-	return "", false
+	return selected, nil
 }
 
 func (s *Server) generationContentSnapshotsForStart(ctx context.Context, session store.Session, details store.RuntimeGenerationDetails, isNew bool) ([]store.ContentSnapshotRecord, error) {

@@ -3393,26 +3393,83 @@ func TestServerRenderersThreadContentSnapshots(t *testing.T) {
 	}
 }
 
-func TestRequiredContentSnapshotFeatureWithoutSelectionFailsClosed(t *testing.T) {
+func TestSelectGenerationContentSnapshotsRequiresSingleImmutableSnapshot(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, _ := openServerOwnedStore(t, ctx, dir)
+	srv := &Server{store: st}
 	policy := agents.FeaturePolicy{
 		agents.FeatureSkillsSnapshot:  agents.FeaturePolicyRequired,
 		agents.FeatureManagedSettings: agents.FeaturePolicyDisabled,
 	}
-	feature, required := requiredContentSnapshotFeatureWithoutSelection(policy)
-	if !required || feature != agents.FeatureSkillsSnapshot {
-		t.Fatalf("required snapshot feature = %s/%v", feature, required)
+
+	if _, err := srv.selectGenerationContentSnapshots(ctx, policy); err == nil ||
+		!strings.Contains(err.Error(), "required feature skills_snapshot has no skills snapshot") {
+		t.Fatalf("expected missing skills snapshot selection error, got %v", err)
+	}
+
+	skills, err := st.StoreContentSnapshot(ctx, store.StoreContentSnapshotParams{
+		Kind:                 store.ContentSnapshotKindSkills,
+		Digest:               "sha256:skills",
+		ImmutableHostPath:    "/var/lib/harness/content/skills/sha256-skills",
+		MountDestination:     store.ContentSnapshotSkillsMount,
+		SourceEvidenceDigest: "sha256:skills-source",
+		RetentionClass:       "generation_plan",
+	})
+	if err != nil {
+		t.Fatalf("store skills snapshot: %v", err)
+	}
+	selected, err := srv.selectGenerationContentSnapshots(ctx, policy)
+	if err != nil {
+		t.Fatalf("select single skills snapshot: %v", err)
+	}
+	if len(selected) != 1 || selected[0].Digest != skills.Digest {
+		t.Fatalf("selected snapshots = %+v want %+v", selected, skills)
+	}
+
+	if _, err := st.StoreContentSnapshot(ctx, store.StoreContentSnapshotParams{
+		Kind:                 store.ContentSnapshotKindSkills,
+		Digest:               "sha256:skills-other",
+		ImmutableHostPath:    "/var/lib/harness/content/skills/sha256-skills-other",
+		MountDestination:     store.ContentSnapshotSkillsMount,
+		SourceEvidenceDigest: "sha256:skills-source-other",
+		RetentionClass:       "generation_plan",
+	}); err != nil {
+		t.Fatalf("store second skills snapshot: %v", err)
+	}
+	if _, err := srv.selectGenerationContentSnapshots(ctx, policy); err == nil ||
+		!strings.Contains(err.Error(), "required feature skills_snapshot is ambiguous") {
+		t.Fatalf("expected ambiguous skills snapshot selection error, got %v", err)
 	}
 
 	policy[agents.FeatureSkillsSnapshot] = agents.FeaturePolicyDisabled
 	policy[agents.FeatureManagedSettings] = agents.FeaturePolicyRequired
-	feature, required = requiredContentSnapshotFeatureWithoutSelection(policy)
-	if !required || feature != agents.FeatureManagedSettings {
-		t.Fatalf("required managed settings feature = %s/%v", feature, required)
+	managed, err := st.StoreContentSnapshot(ctx, store.StoreContentSnapshotParams{
+		Kind:                 store.ContentSnapshotKindManagedSettings,
+		Digest:               "sha256:settings",
+		ImmutableHostPath:    "/var/lib/harness/content/managed-settings/sha256-settings",
+		MountDestination:     store.ContentSnapshotManagedSettingsMount,
+		SourceEvidenceDigest: "sha256:settings-source",
+		RetentionClass:       "generation_plan",
+	})
+	if err != nil {
+		t.Fatalf("store managed settings snapshot: %v", err)
+	}
+	selected, err = srv.selectGenerationContentSnapshots(ctx, policy)
+	if err != nil {
+		t.Fatalf("select managed settings snapshot: %v", err)
+	}
+	if len(selected) != 1 || selected[0].Digest != managed.Digest {
+		t.Fatalf("selected managed settings snapshots = %+v want %+v", selected, managed)
 	}
 
 	policy[agents.FeatureManagedSettings] = agents.FeaturePolicyUnsupported
-	if feature, required := requiredContentSnapshotFeatureWithoutSelection(policy); required || feature != "" {
-		t.Fatalf("unexpected required snapshot feature = %s/%v", feature, required)
+	selected, err = srv.selectGenerationContentSnapshots(ctx, policy)
+	if err != nil {
+		t.Fatalf("unsupported snapshot feature should not select: %v", err)
+	}
+	if len(selected) != 0 {
+		t.Fatalf("unsupported snapshot feature selected snapshots: %+v", selected)
 	}
 }
 
