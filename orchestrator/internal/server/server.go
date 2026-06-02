@@ -1662,6 +1662,9 @@ func (s *Server) generationPlanRuntimeArtifacts(ctx context.Context, generationI
 	if err != nil {
 		return runtime.GenerationArtifacts{}, err
 	}
+	if err := generationplan.Validate(generationplan.ValidateParams{Payload: plan.CanonicalPayload}); err != nil {
+		return runtime.GenerationArtifacts{}, err
+	}
 	return generationplan.RuntimeArtifacts(plan.CanonicalPayload)
 }
 
