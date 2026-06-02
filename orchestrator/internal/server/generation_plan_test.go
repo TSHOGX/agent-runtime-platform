@@ -3,12 +3,14 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"harness-platform/orchestrator/internal/events"
 	"harness-platform/orchestrator/internal/generationplan"
 	"harness-platform/orchestrator/internal/planprojection"
 	"harness-platform/orchestrator/internal/sessionstate"
@@ -367,6 +369,52 @@ WHERE contract_id = ?`, sandboxContractID("gen_frozen_evidence")); err != nil {
 	if err := srv.verifyGenerationPlanSourceDigestEvidence(ctx, "sess_frozen_evidence", "gen_frozen_evidence"); err == nil ||
 		!strings.Contains(err.Error(), "source_digests.agent_manifest_digest mismatch") {
 		t.Fatalf("expected agent manifest source digest mismatch, got %v", err)
+	}
+}
+
+func TestVerifyGenerationPlanSandboxContractEvidenceChecksStoredRows(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_sandbox_contract_verify", string(sessionstate.Created), time.Now().UTC(), nil)
+	cfg := testServerConfig(dir)
+	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     store.GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    serverTestAllocatorConfig(cfg, session.DriverID),
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	rt := &recordingRuntime{}
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: rt,
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+	if err := srv.startEnsuredGeneration(ctx, session, ensuredGeneration{Allocation: allocation, IsNew: true}, startFailureInputAcceptable); err != nil {
+		t.Fatalf("start generation: %v", err)
+	}
+	if err := srv.verifyGenerationPlanSandboxContractEvidence(ctx, allocation.GenerationID, session.ID); err != nil {
+		t.Fatalf("verify sandbox contract evidence: %v", err)
+	}
+
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE generation_plan_projections
+SET payload_digest = 'sha256:changed'
+WHERE generation_id = ?
+  AND projection_kind = ?`, allocation.GenerationID, store.GenerationPlanProjectionSandboxContract); err != nil {
+		t.Fatalf("corrupt sandbox contract projection: %v", err)
+	}
+	if err := srv.verifyGenerationPlanSandboxContractEvidence(ctx, allocation.GenerationID, session.ID); err == nil ||
+		!strings.Contains(err.Error(), "sandbox_contract projection digest mismatch") {
+		t.Fatalf("expected sandbox contract projection mismatch, got %v", err)
 	}
 }
 
