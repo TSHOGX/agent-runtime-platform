@@ -1609,6 +1609,9 @@ func TestFreshStartStoresGenerationPlanBeforeMaterializationAndNetworkPrepare(t 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("expected status 202, got %d body %s", rec.Code, rec.Body.String())
 	}
+	if !rt.planSeenBeforeMaterializeRender {
+		t.Fatalf("runtime artifact materialization render ran before generation plan rows were stored")
+	}
 	if !rt.planSeenBeforeMaterialize {
 		t.Fatalf("runtime artifact materialization ran before generation plan rows were stored")
 	}
@@ -1652,8 +1655,8 @@ func TestSendMessageReusesActiveGenerationArtifacts(t *testing.T) {
 		t.Fatalf("expected first status 202, got %d body %s", rec.Code, rec.Body.String())
 	}
 	waitForSessionStatus(t, ctx, st, session.ID, string(sessionstate.RunningActive))
-	if got := atomic.LoadInt64(&instantRuntimePrepareCalls); got != 1 {
-		t.Fatalf("first turn prepare calls=%d want 1", got)
+	if got := atomic.LoadInt64(&instantRuntimePrepareCalls); got != 2 {
+		t.Fatalf("first turn prepare calls=%d want 2", got)
 	}
 	var generationID string
 	var firstTurnID int64
@@ -1709,7 +1712,7 @@ WHERE g.session_id = ?
 		t.Fatalf("expected second status 202, got %d body %s", rec.Code, rec.Body.String())
 	}
 	waitForSessionStatus(t, ctx, st, session.ID, string(sessionstate.RunningActive))
-	if got := atomic.LoadInt64(&instantRuntimePrepareCalls); got != 1 {
+	if got := atomic.LoadInt64(&instantRuntimePrepareCalls); got != 2 {
 		t.Fatalf("active generation should reuse prepared artifacts, prepare calls=%d", got)
 	}
 	var completedTurns, queuedTurns int
@@ -1831,7 +1834,7 @@ WHERE session_id = ?
 		t.Fatalf("queued replacement turn count=%d want 1", queuedTurns)
 	}
 	prepareRequests, startRequests := rt.requests()
-	if len(prepareRequests) != 1 || len(startRequests) != 1 {
+	if len(prepareRequests) != 2 || len(startRequests) != 1 {
 		t.Fatalf("runtime calls prepare=%d start=%d", len(prepareRequests), len(startRequests))
 	}
 	if startRequests[0].GenerationID != gotSession.ActiveGenerationID {
@@ -2159,7 +2162,7 @@ WHERE session_id = ?
 		t.Fatalf("retry should enqueue exactly one turn, got %d", queuedTurns)
 	}
 	prepareRequests, startRequests := rt.requests()
-	if len(prepareRequests) != 1 || len(startRequests) != 2 {
+	if len(prepareRequests) != 2 || len(startRequests) != 2 {
 		t.Fatalf("runtime calls prepare=%d start=%d", len(prepareRequests), len(startRequests))
 	}
 	if !startRequests[0].RestoreFromCheckpoint || startRequests[0].GenerationID != old.GenerationID {
@@ -3024,15 +3027,20 @@ func TestStartEnsuredGenerationRenewsLeaseDuringSlowPrepare(t *testing.T) {
 		t.Fatalf("verify driver home volume: %v", err)
 	}
 	prepares, starts := rt.requests()
-	if len(prepares) != 1 || len(starts) != 1 {
+	if len(prepares) != 2 || len(starts) != 1 {
 		t.Fatalf("runtime requests prepare=%d start=%d", len(prepares), len(starts))
 	}
-	if prepares[0].WorkspaceHostPath != workspaceVolume.HostPath ||
-		prepares[0].AgentHomeHostPath != driverHomeVolume.HostPath ||
-		starts[0].WorkspaceHostPath != workspaceVolume.HostPath ||
+	for _, prepare := range prepares {
+		if prepare.WorkspaceHostPath != workspaceVolume.HostPath ||
+			prepare.AgentHomeHostPath != driverHomeVolume.HostPath {
+			t.Fatalf("runtime render did not receive data volume paths: prepare=%+v workspace=%+v home=%+v",
+				prepare, workspaceVolume, driverHomeVolume)
+		}
+	}
+	if starts[0].WorkspaceHostPath != workspaceVolume.HostPath ||
 		starts[0].AgentHomeHostPath != driverHomeVolume.HostPath {
-		t.Fatalf("runtime did not receive data volume paths: prepare=%+v start=%+v workspace=%+v home=%+v",
-			prepares[0], starts[0], workspaceVolume, driverHomeVolume)
+		t.Fatalf("runtime start did not receive data volume paths: start=%+v workspace=%+v home=%+v",
+			starts[0], workspaceVolume, driverHomeVolume)
 	}
 	instance, err := st.GetRuntimeResourceInstance(ctx, allocation.GenerationID)
 	if err != nil {
@@ -6057,11 +6065,35 @@ type planOrderRuntime struct {
 	store                                   *store.Store
 	t                                       *testing.T
 	planSeenBeforeNetwork                   bool
+	planSeenBeforeMaterializeRender         bool
 	planSeenBeforeMaterialize               bool
 	projectionVerificationObserved          bool
 	projectionVerificationBeforeMaterialize bool
 	runtimeResourceClaimedBeforeNetwork     bool
 	runtimeResourceClaimedBeforeMaterialize bool
+}
+
+func (r *planOrderRuntime) RenderGenerationArtifacts(ctx context.Context, req runtime.StartRequest) (runtime.GenerationArtifactProjection, error) {
+	r.t.Helper()
+	projection, err := r.recordingRuntime.RenderGenerationArtifacts(ctx, req)
+	if err != nil {
+		return runtime.GenerationArtifactProjection{}, err
+	}
+	plan, err := r.store.GetGenerationPlan(ctx, req.GenerationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return projection, nil
+	}
+	if err != nil {
+		return runtime.GenerationArtifactProjection{}, fmt.Errorf("get generation plan before materialize render: %w", err)
+	}
+	planArtifacts, err := generationplan.RuntimeArtifacts(plan.CanonicalPayload)
+	if err != nil {
+		return runtime.GenerationArtifactProjection{}, fmt.Errorf("read generation plan runtime artifacts before materialize render: %w", err)
+	}
+	if reflect.DeepEqual(req.PreparedArtifacts, planArtifacts) {
+		r.planSeenBeforeMaterializeRender = true
+	}
+	return projection, nil
 }
 
 type blockingPrepareRuntime struct {
