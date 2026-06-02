@@ -3823,6 +3823,30 @@ func TestVerifyGenerationPlanRuntimeResourceEvidenceChecksStoredPlan(t *testing.
 	}
 }
 
+func TestVerifyGenerationPlanSourceDigestEvidenceChecksStoredInputEvidence(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, _ := openServerOwnedStore(t, ctx, dir)
+	srv := &Server{store: st}
+	plan := storeServerFrozenEvidencePlan(t, ctx, st, dir, validServerGenerationPlanPayload())
+	storeServerSyntheticSandboxContractParentForPlan(t, ctx, st, plan)
+	storeServerSandboxContractInputEvidenceFromPlan(t, ctx, st, plan)
+
+	if err := srv.verifyGenerationPlanSourceDigestEvidence(ctx, "gen_frozen_evidence"); err != nil {
+		t.Fatalf("verify source digest evidence: %v", err)
+	}
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE sandbox_contract_input_evidence
+SET agent_manifest_digest = 'sha256:changed'
+WHERE contract_id = ?`, sandboxContractID("gen_frozen_evidence")); err != nil {
+		t.Fatalf("mutate sandbox contract input evidence: %v", err)
+	}
+	if err := srv.verifyGenerationPlanSourceDigestEvidence(ctx, "gen_frozen_evidence"); err == nil ||
+		!strings.Contains(err.Error(), "source_digests.agent_manifest_digest mismatch") {
+		t.Fatalf("expected agent manifest source digest mismatch, got %v", err)
+	}
+}
+
 func TestVerifyGenerationPlanFrozenEvidenceChecksStoredProjectionRows(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -6876,6 +6900,115 @@ VALUES (?, ?, 'allocating', 'owner', ?)`, "gen_frozen_evidence", session.ID, tim
 	return plan
 }
 
+type serverGenerationPlanSourceDigestsForTest struct {
+	RuntimeConfigDigest string
+	AgentManifestDigest string
+}
+
+func storeServerSyntheticSandboxContractParentForPlan(t *testing.T, ctx context.Context, st *store.Store, plan store.GenerationPlanRecord) {
+	t.Helper()
+	sessionID := serverGenerationPlanSessionID(t, plan.CanonicalPayload)
+	contractID := sandboxContractID(plan.GenerationID)
+	canonicalPayload, err := store.CanonicalSandboxContractPayload(map[string]any{
+		"contract_id":               contractID,
+		"session_id":                sessionID,
+		"generation_id":             plan.GenerationID,
+		"sandbox_contract_version":  store.SandboxContractVersion,
+		"contract_schema_version":   store.SandboxContractSchemaVersion,
+		"contract_gate_version":     store.SandboxContractGateDriverManifest,
+		"synthetic_test_parent_row": true,
+	})
+	if err != nil {
+		t.Fatalf("canonical synthetic sandbox contract parent: %v", err)
+	}
+	if _, err := st.DBForTest().ExecContext(ctx, `
+INSERT INTO sandbox_contracts (
+  contract_id, generation_id, session_id, sandbox_contract_version,
+  contract_schema_version, contract_gate_version, canonical_payload,
+  sandbox_contract_digest, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(contract_id) DO NOTHING`,
+		contractID, plan.GenerationID, sessionID, store.SandboxContractVersion,
+		store.SandboxContractSchemaVersion, store.SandboxContractGateDriverManifest,
+		string(canonicalPayload), store.SandboxContractDigest(canonicalPayload),
+		time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("store synthetic sandbox contract parent: %v", err)
+	}
+}
+
+func storeServerSandboxContractInputEvidenceFromGenerationPlanIfPresent(t *testing.T, ctx context.Context, st *store.Store, generationID string) {
+	t.Helper()
+	plan, err := st.GetGenerationPlan(ctx, generationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return
+	}
+	if err != nil {
+		t.Fatalf("get generation plan for input evidence: %v", err)
+	}
+	storeServerSandboxContractInputEvidenceFromPlan(t, ctx, st, plan)
+}
+
+func storeServerSandboxContractInputEvidenceFromPlan(t *testing.T, ctx context.Context, st *store.Store, plan store.GenerationPlanRecord) {
+	t.Helper()
+	digests := serverGenerationPlanSourceDigests(t, plan.CanonicalPayload)
+	contractID := sandboxContractID(plan.GenerationID)
+	if _, err := st.DBForTest().ExecContext(ctx, `
+INSERT INTO sandbox_contract_input_evidence (
+  contract_id, runtime_config_digest, runtime_config_preimage,
+  agent_manifest_digest, agent_manifest_payload, created_at
+) VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(contract_id) DO NOTHING`,
+		contractID, digests.RuntimeConfigDigest, "{}",
+		digests.AgentManifestDigest, "{}", time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("store sandbox contract input evidence: %v", err)
+	}
+	evidence, err := st.GetSandboxContractInputEvidence(ctx, contractID)
+	if err != nil {
+		t.Fatalf("get sandbox contract input evidence: %v", err)
+	}
+	if evidence.RuntimeConfigDigest != digests.RuntimeConfigDigest ||
+		evidence.AgentManifestDigest != digests.AgentManifestDigest {
+		t.Fatalf("sandbox contract input evidence mismatch: evidence=%+v want=%+v", evidence, digests)
+	}
+}
+
+func serverGenerationPlanSessionID(t *testing.T, canonicalPayload []byte) string {
+	t.Helper()
+	var payload map[string]any
+	if err := json.Unmarshal(canonicalPayload, &payload); err != nil {
+		t.Fatalf("decode generation plan payload: %v", err)
+	}
+	identity, ok := payload["identity"].(map[string]any)
+	if !ok {
+		t.Fatalf("generation plan missing identity: %s", canonicalPayload)
+	}
+	sessionID, _ := identity["session_id"].(string)
+	if strings.TrimSpace(sessionID) == "" {
+		t.Fatalf("generation plan missing identity.session_id: %s", canonicalPayload)
+	}
+	return sessionID
+}
+
+func serverGenerationPlanSourceDigests(t *testing.T, canonicalPayload []byte) serverGenerationPlanSourceDigestsForTest {
+	t.Helper()
+	var payload map[string]any
+	if err := json.Unmarshal(canonicalPayload, &payload); err != nil {
+		t.Fatalf("decode generation plan payload: %v", err)
+	}
+	sourceDigests, ok := payload["source_digests"].(map[string]any)
+	if !ok {
+		t.Fatalf("generation plan missing source_digests: %s", canonicalPayload)
+	}
+	digests := serverGenerationPlanSourceDigestsForTest{}
+	digests.RuntimeConfigDigest, _ = sourceDigests["runtime_config_digest"].(string)
+	digests.AgentManifestDigest, _ = sourceDigests["agent_manifest_digest"].(string)
+	if strings.TrimSpace(digests.RuntimeConfigDigest) == "" ||
+		strings.TrimSpace(digests.AgentManifestDigest) == "" {
+		t.Fatalf("generation plan missing source digests: %s", canonicalPayload)
+	}
+	return digests
+}
+
 func storeServerGenerationPlanForArtifacts(t *testing.T, ctx context.Context, st *store.Store, sessionID, generationID string, artifacts runtime.GenerationArtifacts) store.GenerationPlanRecord {
 	t.Helper()
 	details, err := st.GetRuntimeGenerationDetails(ctx, sessionID, generationID)
@@ -7265,6 +7398,7 @@ func createServerRuntimeResourceLive(t *testing.T, ctx context.Context, st *stor
 	}); err != nil {
 		t.Fatalf("store sandbox contract: %v", err)
 	}
+	storeServerSandboxContractInputEvidenceFromGenerationPlanIfPresent(t, ctx, st, allocation.GenerationID)
 	artifacts := testGenerationArtifacts()
 	if strings.TrimSpace(details.RunscVersion) != "" {
 		artifacts.RunscVersion = details.RunscVersion

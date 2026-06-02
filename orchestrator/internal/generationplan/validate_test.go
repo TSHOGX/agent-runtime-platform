@@ -639,6 +639,32 @@ func TestVerifyRuntimeResourceEvidenceChecksFrozenIdentityDigest(t *testing.T) {
 	}
 }
 
+func TestVerifySourceDigestEvidenceChecksStoredInputDigests(t *testing.T) {
+	payload := validPlanPayload()
+	params := VerifySourceDigestEvidenceParams{
+		Payload:             payload,
+		RuntimeConfigDigest: "sha256:runtime-config",
+		AgentManifestDigest: "sha256:agent-manifest",
+	}
+	if err := VerifySourceDigestEvidence(params); err != nil {
+		t.Fatalf("verify source digest evidence: %v", err)
+	}
+
+	missing := params
+	missing.RuntimeConfigDigest = ""
+	if err := VerifySourceDigestEvidence(missing); err == nil ||
+		!strings.Contains(err.Error(), "source_digests.runtime_config_digest evidence is required") {
+		t.Fatalf("expected missing runtime config evidence, got %v", err)
+	}
+
+	mismatch := params
+	mismatch.AgentManifestDigest = "sha256:changed"
+	if err := VerifySourceDigestEvidence(mismatch); err == nil ||
+		!strings.Contains(err.Error(), "source_digests.agent_manifest_digest mismatch") {
+		t.Fatalf("expected agent manifest evidence mismatch, got %v", err)
+	}
+}
+
 func TestContentSnapshotRefsExtractsPlanSnapshotDigests(t *testing.T) {
 	payload := validPlanPayload()
 	contentSnapshots := payload["content_snapshots"].(map[string]any)

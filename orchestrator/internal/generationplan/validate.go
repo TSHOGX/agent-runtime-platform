@@ -47,6 +47,12 @@ type VerifyDataVolumeEvidenceParams struct {
 	DriverHomeRuntimeIdentityDigest string
 }
 
+type VerifySourceDigestEvidenceParams struct {
+	Payload             any
+	RuntimeConfigDigest string
+	AgentManifestDigest string
+}
+
 type VerifyNetworkEvidenceParams struct {
 	Payload            any
 	NetworkProfileID   string
@@ -250,6 +256,35 @@ func VerifyNetworkEvidence(p VerifyNetworkEvidenceParams) error {
 	}
 	if p.ProxyPort > 0 && numberField(network, "proxy_port") != int64(p.ProxyPort) {
 		return fmt.Errorf("generation plan network.proxy_port mismatch")
+	}
+	return nil
+}
+
+func VerifySourceDigestEvidence(p VerifySourceDigestEvidenceParams) error {
+	object, err := decodePlanObject(p.Payload)
+	if err != nil {
+		return err
+	}
+	sourceDigests, err := requireObject(object, "source_digests")
+	if err != nil {
+		return err
+	}
+	checks := []struct {
+		field string
+		got   string
+		want  string
+	}{
+		{"runtime_config_digest", p.RuntimeConfigDigest, stringField(sourceDigests, "runtime_config_digest")},
+		{"agent_manifest_digest", p.AgentManifestDigest, stringField(sourceDigests, "agent_manifest_digest")},
+	}
+	for _, check := range checks {
+		got, want := strings.TrimSpace(check.got), strings.TrimSpace(check.want)
+		if !isSha256(got) {
+			return fmt.Errorf("generation plan source_digests.%s evidence is required", check.field)
+		}
+		if got != want {
+			return fmt.Errorf("generation plan source_digests.%s mismatch", check.field)
+		}
 	}
 	return nil
 }

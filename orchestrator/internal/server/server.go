@@ -912,6 +912,11 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 		return err
 	}
+	if err := s.verifyGenerationPlanSourceDigestEvidence(ctx, allocation.GenerationID); err != nil {
+		retireRuntimeResource()
+		s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+		return err
+	}
 	if err := s.verifyGenerationPlanFrozenEvidenceForLaunch(ctx, allocation.GenerationID, generationDetails, preparedArtifacts, ensured.IsNew); err != nil {
 		retireRuntimeResource()
 		s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
@@ -1839,6 +1844,26 @@ func (s *Server) verifyGenerationPlanDataVolumes(ctx context.Context, generation
 		WorkspaceRuntimeIdentityDigest:  volumes.Workspace.RuntimeIdentityDigest,
 		DriverHomeHostPath:              volumes.DriverHome.HostPath,
 		DriverHomeRuntimeIdentityDigest: volumes.DriverHome.RuntimeIdentityDigest,
+	})
+}
+
+func (s *Server) verifyGenerationPlanSourceDigestEvidence(ctx context.Context, generationID string) error {
+	generationID = strings.TrimSpace(generationID)
+	plan, err := s.store.RequireGenerationPlanForLaunch(ctx, generationID)
+	if err != nil {
+		return err
+	}
+	if err := generationplan.Validate(generationplan.ValidateParams{Payload: plan.CanonicalPayload}); err != nil {
+		return err
+	}
+	inputEvidence, err := s.store.GetSandboxContractInputEvidence(ctx, sandboxContractID(generationID))
+	if err != nil {
+		return err
+	}
+	return generationplan.VerifySourceDigestEvidence(generationplan.VerifySourceDigestEvidenceParams{
+		Payload:             plan.CanonicalPayload,
+		RuntimeConfigDigest: inputEvidence.RuntimeConfigDigest,
+		AgentManifestDigest: inputEvidence.AgentManifestDigest,
 	})
 }
 
