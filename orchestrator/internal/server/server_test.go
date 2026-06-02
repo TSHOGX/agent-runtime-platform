@@ -6390,6 +6390,8 @@ WHERE id = ?`, sessionID).Scan(&mode); err != nil {
 	runtimeProvider := payload["runtime_provider"].(map[string]any)
 	runtimeProvider["agent_runtime_profile_id"] = details.AgentRuntimeProfileID
 	runtimeProvider["runtime_profile_provider_ref"] = details.RunscPlatform
+	networkPlan := payload["network"].(map[string]any)
+	networkPlan["network_profile_id"] = details.NetworkProfileID
 	runscPin := payload["runsc_pin"].(map[string]any)
 	runscPin["version"] = artifacts.RunscVersion
 	runscPin["binary_path"] = artifacts.RunscBinaryPath

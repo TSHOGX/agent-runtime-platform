@@ -20,6 +20,9 @@ type VerifyFrozenEvidenceParams struct {
 	SessionID                       string
 	GenerationID                    string
 	DriverID                        string
+	OutputFormat                    string
+	NetworkProfileID                string
+	AgentRuntimeProfileID           string
 	RunscPlatform                   string
 	RunscVersion                    string
 	RunscBinaryPath                 string
@@ -199,6 +202,14 @@ func verifyFrozenIdentityEvidence(object map[string]any, p VerifyFrozenEvidenceP
 	if err != nil {
 		return err
 	}
+	provider, err := requireObject(object, "runtime_provider")
+	if err != nil {
+		return err
+	}
+	network, err := requireObject(object, "network")
+	if err != nil {
+		return err
+	}
 	checks := []struct {
 		label string
 		got   string
@@ -207,6 +218,9 @@ func verifyFrozenIdentityEvidence(object map[string]any, p VerifyFrozenEvidenceP
 		{"identity.session_id", stringField(identity, "session_id"), p.SessionID},
 		{"identity.generation_id", stringField(identity, "generation_id"), p.GenerationID},
 		{"driver.driver_id", stringField(driver, "driver_id"), p.DriverID},
+		{"driver.output_format", stringField(driver, "output_format"), p.OutputFormat},
+		{"runtime_provider.agent_runtime_profile_id", stringField(provider, "agent_runtime_profile_id"), p.AgentRuntimeProfileID},
+		{"network.network_profile_id", stringField(network, "network_profile_id"), p.NetworkProfileID},
 	}
 	for _, check := range checks {
 		want := strings.TrimSpace(check.want)
