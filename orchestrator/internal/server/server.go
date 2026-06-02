@@ -1404,75 +1404,8 @@ func sandboxContractID(generationID string) string {
 	return "contract_" + strings.TrimSpace(generationID)
 }
 
-func driverConfigMaterializationPayload(driverID string, entries []runtime.DriverConfigMaterialization) (map[string]any, map[string]any, error) {
-	driverID = strings.TrimSpace(driverID)
-	specs := agents.DriverConfigMaterializationSpecsFor(agents.ID(driverID))
-	if len(specs) == 0 {
-		if len(entries) != 0 {
-			return nil, nil, fmt.Errorf("driver %s does not support driver config materialization", driverID)
-		}
-		return map[string]any{}, nil, nil
-	}
-	if len(entries) != len(specs) {
-		return nil, nil, fmt.Errorf("driver %s config materialization requires %d projections", driverID, len(specs))
-	}
-	runtimePayload := map[string]any{}
-	mountPayload := map[string]any{}
-	expected := map[string]agents.DriverConfigMaterializationSpec{}
-	for _, spec := range specs {
-		expected[spec.Name] = spec
-	}
-	seen := map[string]struct{}{}
-	for _, entry := range entries {
-		name := strings.TrimSpace(entry.Name)
-		want, ok := expected[name]
-		if !ok {
-			return nil, nil, fmt.Errorf("unsupported %s driver config materialization %q", driverID, entry.Name)
-		}
-		if _, ok := seen[name]; ok {
-			return nil, nil, fmt.Errorf("duplicate %s driver config materialization %q", driverID, name)
-		}
-		seen[name] = struct{}{}
-		if entry.SourceProjectionPath != want.SourceProjectionPath || entry.SandboxDestination != want.SandboxDestination {
-			return nil, nil, fmt.Errorf("%s driver config materialization %s path mismatch", driverID, name)
-		}
-		if !strings.HasPrefix(strings.TrimSpace(entry.SourceDigest), "sha256:") {
-			return nil, nil, fmt.Errorf("%s driver config materialization %s digest is required", driverID, name)
-		}
-		if entry.DestinationMutableBySandbox != want.DestinationMutableBySandbox {
-			return nil, nil, fmt.Errorf("%s driver config materialization %s mutability mismatch", driverID, name)
-		}
-		runtimePayload[name] = map[string]any{
-			"source_projection_path":         entry.SourceProjectionPath,
-			"source_digest":                  entry.SourceDigest,
-			"sandbox_destination":            entry.SandboxDestination,
-			"destination_mutable_by_sandbox": entry.DestinationMutableBySandbox,
-		}
-		mountPayload[name] = map[string]any{
-			"type":                           want.MountType,
-			"mode":                           want.MountMode,
-			"exact":                          want.MountExact,
-			"source_projection_path":         entry.SourceProjectionPath,
-			"sandbox_destination":            entry.SandboxDestination,
-			"destination_mutable_by_sandbox": entry.DestinationMutableBySandbox,
-		}
-	}
-	if len(seen) != len(expected) {
-		return nil, nil, fmt.Errorf("%s driver config materialization missing required projections", driverID)
-	}
-	return runtimePayload, mountPayload, nil
-}
-
 func (s *Server) sandboxContractPayload(session store.Session, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, resourceIdentityDigest string, volumes sessionRuntimeDataVolumes) (map[string]any, error) {
-	runscPlatform := strings.TrimSpace(details.RunscPlatform)
-	if runscPlatform == "" {
-		return nil, fmt.Errorf("runsc platform is required")
-	}
 	driverID := strings.TrimSpace(details.DriverID)
-	driverSpec, ok := agents.DriverSpecFor(driverID)
-	if !ok {
-		return nil, fmt.Errorf("unsupported driver %q", driverID)
-	}
 	mode := strings.TrimSpace(session.Mode)
 	if mode == "" {
 		return nil, fmt.Errorf("session mode is required")
@@ -1481,13 +1414,7 @@ func (s *Server) sandboxContractPayload(session store.Session, details store.Run
 	if capabilityErr != nil {
 		return nil, capabilityErr
 	}
-	driverSpec = deployment.DriverSpec
-	providerSpec := deployment.ProviderSpec
-	initialDriverStateDigest := strings.TrimSpace(details.DriverStateDigest)
-	if initialDriverStateDigest == "" {
-		return nil, fmt.Errorf("initial driver state digest is required")
-	}
-	sandboxIP, err := runtimeResourceSandboxIP(details.SandboxIPCIDR)
+	inputDigests, err := s.driverManifestInputDigests(deployment)
 	if err != nil {
 		return nil, err
 	}
@@ -1495,245 +1422,23 @@ func (s *Server) sandboxContractPayload(session store.Session, details store.Run
 	if err != nil {
 		return nil, err
 	}
-	var sandboxModelProxyBaseURL any
-	if value := strings.TrimSpace(details.ManifestAnthropicBaseURL); value != "" {
-		sandboxModelProxyBaseURL = value
-	}
-	mountPlan := map[string]any{
-		"workspace":  map[string]any{"source": volumes.Workspace.HostPath, "destination": "/workspace", "mode": "rw"},
-		"agent_home": map[string]any{"source": volumes.DriverHome.HostPath, "destination": "/agent-home", "mode": "rw"},
-		"control":    map[string]any{"source": details.ControlDirPath, "destination": "/harness-control", "mode": "ro"},
-		"bridge":     map[string]any{"source": details.BridgeDirPath, "destination": "/harness-control/bridge", "mode": "rw"},
-	}
-	if strings.TrimSpace(details.NetworkHostsPath) != "" {
-		mountPlan["network_hosts"] = map[string]any{"source": details.NetworkHostsPath, "destination": "/etc/hosts", "mode": "ro"}
-	}
-	materializedDriverConfig, mountMaterializations, err := driverConfigMaterializationPayload(driverID, artifacts.MaterializedDriverConfig)
-	if err != nil {
-		return nil, err
-	}
-	if len(mountMaterializations) > 0 {
-		mountPlan["driver_config_materializations"] = mountMaterializations
-	}
-	driverConfigPreimage := map[string]any{
-		"driver_id":     driverID,
-		"model":         details.Model,
-		"output_format": details.OutputFormat,
-	}
-	if len(materializedDriverConfig) > 0 {
-		driverConfigPreimage["materialized_driver_config"] = materializedDriverConfig
-	}
-	driverConfigDigest, err := sandboxContractDigestForPayload(driverConfigPreimage)
-	if err != nil {
-		return nil, fmt.Errorf("driver config digest: %w", err)
-	}
-	commandDigest, err := sandboxContractDigestForPayload(map[string]any{
-		"driver_id":    driverID,
-		"protocol":     details.OutputFormat,
-		"resume_field": "driver_state",
+	return planprojection.RenderSandboxContract(planprojection.SandboxContractParams{
+		Session:                     session,
+		Details:                     details,
+		Artifacts:                   artifacts,
+		ResourceIdentityDigest:      resourceIdentityDigest,
+		NetworkIdentityNftTableName: nftTableName,
+		Volumes: planprojection.DataVolumes{
+			Workspace:  volumes.Workspace,
+			DriverHome: volumes.DriverHome,
+		},
+		DriverSpec:   deployment.DriverSpec,
+		ProviderSpec: deployment.ProviderSpec,
+		InputDigests: planprojection.SandboxContractInputDigests{
+			RuntimeConfigDigest: inputDigests.RuntimeConfigDigest,
+			AgentManifestDigest: inputDigests.AgentManifestDigest,
+		},
 	})
-	if err != nil {
-		return nil, fmt.Errorf("command digest: %w", err)
-	}
-	driverCapabilitiesDigest, err := sandboxContractDigestForPayload(map[string]any{
-		"driver_id":     driverID,
-		"capabilities":  driverSpec.RequiredRuntimeCapabilities,
-		"registry_kind": string(driverSpec.Kind),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("driver capabilities digest: %w", err)
-	}
-	providerCapabilitiesDigest := agents.CapabilityDigest(providerSpec)
-	runtimeTemplateDigest, err := sandboxContractDigestForPayload(map[string]any{
-		"provider_id":          providerSpec.ID,
-		"runsc_platform":       runscPlatform,
-		"runsc_overlay2":       details.RunscOverlay2,
-		"no_new_privileges":    true,
-		"ambient_capabilities": []string{},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("runtime template digest: %w", err)
-	}
-	secretGrants := []map[string]any{}
-	if details.ModelAccessAllowed {
-		secretGrants = append(secretGrants, map[string]any{
-			"grant_id":                  "model_provider:anthropic_proxy",
-			"domain":                    "model_provider",
-			"scope":                     "anthropic_messages",
-			"exposure_mode":             "proxy_only",
-			"ttl_seconds":               nil,
-			"allowed_drivers":           []string{driverID},
-			"allowed_runtime_providers": []string{providerSpec.ID},
-		})
-	}
-	credentialPreimage := map[string]any{
-		"provider_credentials": "host-only",
-		"sandbox_secret_mount": "absent",
-		"proxy_token":          "absent",
-		"secret_grants":        secretGrants,
-	}
-	credentialDigest, err := store.CredentialPolicyDigest(credentialPreimage)
-	if err != nil {
-		return nil, err
-	}
-	inputDigests, err := s.driverManifestInputDigests(deployment)
-	if err != nil {
-		return nil, err
-	}
-	payload := map[string]any{
-		"sandbox_contract_version": store.SandboxContractVersion,
-		"contract_schema_version":  store.SandboxContractSchemaVersion,
-		"contract_gate_version":    store.SandboxContractGateDriverManifest,
-		"contract_id":              sandboxContractID(details.GenerationID),
-		"session_id":               details.SessionID,
-		"generation_id":            details.GenerationID,
-		"driver": map[string]any{
-			"driver_id":                            driverID,
-			"driver_version":                       "bundled",
-			"bridge_protocol":                      driverSpec.BridgeProtocol,
-			"bridge_protocol_version":              driverSpec.BridgeProtocolVersion,
-			"turn_input_schema":                    driverSpec.TurnInputSchema,
-			"output_schema":                        driverSpec.OutputSchema,
-			"command_argv_digest":                  commandDigest,
-			"driver_config_digest":                 driverConfigDigest,
-			"required_runtime_capabilities_digest": driverCapabilitiesDigest,
-			"supports_interrupt":                   driverSpec.SupportsInterrupt,
-			"supports_compaction":                  driverSpec.SupportsCompaction,
-		},
-		"runtime_provider": map[string]any{
-			"provider_id":              providerSpec.ID,
-			"provider_profile_id":      providerSpec.ProviderProfileID,
-			"isolation_kind":           providerSpec.IsolationKind,
-			"template_ref":             providerSpec.TemplateRef,
-			"template_digest":          runtimeTemplateDigest,
-			"capability_vocab_version": providerSpec.CapabilityVocabulary,
-			"capability_digest":        providerCapabilitiesDigest,
-			"provider_specific": map[string]any{
-				"runsc_container_id":   details.RunscContainerID,
-				"runsc_platform":       runscPlatform,
-				"runsc_version":        artifacts.RunscVersion,
-				"runsc_binary_path":    artifacts.RunscBinaryPath,
-				"runsc_binary_digest":  artifacts.RunscBinaryDigest,
-				"runsc_overlay2":       details.RunscOverlay2,
-				"no_new_privileges":    true,
-				"ambient_capabilities": []string{},
-				"required_annotations": map[string]any{
-					bridge.BridgeMountDestination: map[string]string{
-						"dev.gvisor.spec.mount./harness-control/bridge.type":  "bind",
-						"dev.gvisor.spec.mount./harness-control/bridge.share": "exclusive",
-					},
-				},
-			},
-		},
-		"runtime_profile_id": details.AgentRuntimeProfileID,
-		"network_profile_id": details.NetworkProfileID,
-		"identity": map[string]any{
-			"sandbox_uid":               details.SandboxUID,
-			"sandbox_gid":               details.SandboxGID,
-			"sandbox_supplemental_gids": append([]int(nil), details.SandboxSupplementalGIDs...),
-			"model_access_allowed":      details.ModelAccessAllowed,
-		},
-		"mount_plan": mountPlan,
-		"network_identity": map[string]any{
-			"runsc_network":    details.RunscNetwork,
-			"sandbox_ip":       sandboxIP,
-			"sandbox_ip_cidr":  details.SandboxIPCIDR,
-			"host_gateway_ip":  details.HostGatewayIP,
-			"netns_name":       details.NetnsName,
-			"netns_path":       details.NetnsPath,
-			"host_veth":        details.HostVeth,
-			"sandbox_veth":     details.SandboxVeth,
-			"host_side_cidr":   details.HostSideCIDR,
-			"nft_table_name":   nftTableName,
-			"egress_policy_id": details.EgressPolicyID,
-		},
-		"runtime_adapter": map[string]any{
-			"kind":                 "runsc",
-			"runsc_platform":       runscPlatform,
-			"runsc_version":        artifacts.RunscVersion,
-			"runsc_binary_path":    artifacts.RunscBinaryPath,
-			"runsc_binary_digest":  artifacts.RunscBinaryDigest,
-			"runsc_container_id":   details.RunscContainerID,
-			"runsc_network":        details.RunscNetwork,
-			"runsc_overlay2":       details.RunscOverlay2,
-			"no_new_privileges":    true,
-			"ambient_capabilities": []string{},
-			"forbidden_capabilities": []string{
-				"CAP_NET_ADMIN",
-				"CAP_NET_RAW",
-				"CAP_SYS_ADMIN",
-			},
-			"required_annotations": map[string]any{
-				bridge.BridgeMountDestination: map[string]string{
-					"dev.gvisor.spec.mount./harness-control/bridge.type":  "bind",
-					"dev.gvisor.spec.mount./harness-control/bridge.share": "exclusive",
-				},
-			},
-		},
-		"resource_identity": map[string]any{
-			"resource_identity_digest": resourceIdentityDigest,
-		},
-		"data_volumes": map[string]any{
-			"workspace": map[string]any{
-				"table":                      "session_workspaces",
-				"session_id":                 volumes.Workspace.SessionID,
-				"host_path":                  volumes.Workspace.HostPath,
-				"layout_version":             volumes.Workspace.LayoutVersion,
-				"runtime_identity_digest":    volumes.Workspace.RuntimeIdentityDigest,
-				"provisioning_marker_path":   volumes.Workspace.ProvisioningMarkerPath,
-				"provisioning_marker_digest": volumes.Workspace.ProvisioningMarkerDigest,
-				"sandbox_destination":        "/workspace",
-				"provisioning_evidence_root": filepath.Dir(filepath.Dir(volumes.Workspace.ProvisioningMarkerPath)),
-			},
-			"agent_home": map[string]any{
-				"table":                      "session_driver_homes",
-				"session_id":                 volumes.DriverHome.SessionID,
-				"driver":                     volumes.DriverHome.Driver,
-				"driver_home_key":            volumes.DriverHome.Driver,
-				"host_path":                  volumes.DriverHome.HostPath,
-				"layout_version":             volumes.DriverHome.LayoutVersion,
-				"runtime_identity_digest":    volumes.DriverHome.RuntimeIdentityDigest,
-				"provisioning_marker_path":   volumes.DriverHome.ProvisioningMarkerPath,
-				"provisioning_marker_digest": volumes.DriverHome.ProvisioningMarkerDigest,
-				"sandbox_destination":        "/agent-home",
-				"provisioning_evidence_root": filepath.Dir(filepath.Dir(filepath.Dir(volumes.DriverHome.ProvisioningMarkerPath))),
-			},
-		},
-		"credential_policy": map[string]any{
-			"provider_credentials": "host-only",
-			"sandbox_secret_mount": "absent",
-			"proxy_token":          "absent",
-			"digest":               credentialDigest,
-			"secret_grants":        secretGrants,
-		},
-		"model_access": map[string]any{
-			"model_access_allowed":         details.ModelAccessAllowed,
-			"active_turn_required":         true,
-			"provider_protocol":            "anthropic_messages",
-			"sandbox_model_proxy_base_url": sandboxModelProxyBaseURL,
-		},
-		"snapshot_policy": map[string]any{
-			"provider_supports_snapshot_disk":   providerSpec.SnapshotPolicy.ProviderSupportsSnapshotDisk,
-			"provider_supports_snapshot_memory": providerSpec.SnapshotPolicy.ProviderSupportsSnapshotMemory,
-			"provider_supports_branch":          providerSpec.SnapshotPolicy.ProviderSupportsBranch,
-			"branch_count_limit":                providerSpec.SnapshotPolicy.BranchCountLimit,
-			"must_quiesce_processes":            providerSpec.SnapshotPolicy.MustQuiesceProcesses,
-			"stream_disconnects_on_snapshot":    providerSpec.SnapshotPolicy.StreamDisconnectsOnSnapshot,
-			"snapshot_semantic":                 providerSpec.SnapshotPolicy.SnapshotSemantic,
-		},
-		"driver_runtime": map[string]any{
-			"driver_home_mount":             "/agent-home",
-			"generated_driver_config_mount": "/harness-control/driver/" + driverID,
-			"materialized_driver_config":    materializedDriverConfig,
-			"initial_driver_state_digest":   initialDriverStateDigest,
-		},
-		"input_digests": map[string]any{
-			"runtime_config_digest": inputDigests.RuntimeConfigDigest,
-			"rootfs_image_digest":   nil,
-			"agent_manifest_digest": inputDigests.AgentManifestDigest,
-		},
-	}
-	return payload, nil
 }
 
 type driverManifestInputDigests struct {
@@ -1757,11 +1462,7 @@ func (s *Server) driverManifestInputDigests(deployment deploymentResolution) (dr
 }
 
 func sandboxContractDigestForPayload(value any) (string, error) {
-	payload, err := store.CanonicalSandboxContractPayload(value)
-	if err != nil {
-		return "", err
-	}
-	return store.SandboxContractDigest(payload), nil
+	return planprojection.SandboxContractDigestForPayload(value)
 }
 
 func (s *Server) storeShadowGenerationPlan(ctx context.Context, session store.Session, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, sandboxContractPayload map[string]any, resourceIdentityDigest string, volumes sessionRuntimeDataVolumes, inputEvidence sandboxContractInputEvidence) error {
