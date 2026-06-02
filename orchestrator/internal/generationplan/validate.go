@@ -515,8 +515,9 @@ func validateContentSnapshots(object map[string]any, featurePolicy map[string]an
 		if err := validateContentSnapshot(key, snapshot); err != nil {
 			return err
 		}
-		if key == store.ContentSnapshotKindSkills {
-			if err := validateSkillsSnapshotMountEvidence(object, snapshot); err != nil {
+		switch key {
+		case store.ContentSnapshotKindSkills, store.ContentSnapshotKindManagedSettings:
+			if err := validateContentSnapshotMountEvidence(object, key, snapshot); err != nil {
 				return err
 			}
 		}
@@ -570,31 +571,35 @@ func validateContentSnapshot(name string, snapshot map[string]any) error {
 	if !strings.HasPrefix(stringField(snapshot, "mount_destination"), "/") {
 		return fmt.Errorf("generation plan content_snapshots.%s.mount_destination must be absolute", name)
 	}
-	if name == store.ContentSnapshotKindSkills && stringField(snapshot, "mount_destination") != store.ContentSnapshotSkillsMount {
-		return fmt.Errorf("generation plan content_snapshots.%s.mount_destination must be %s", name, store.ContentSnapshotSkillsMount)
+	if destination, ok := contentSnapshotMountDestination(name); ok && stringField(snapshot, "mount_destination") != destination {
+		return fmt.Errorf("generation plan content_snapshots.%s.mount_destination must be %s", name, destination)
 	}
 	return nil
 }
 
-func validateSkillsSnapshotMountEvidence(object map[string]any, snapshot map[string]any) error {
+func validateContentSnapshotMountEvidence(object map[string]any, kind string, snapshot map[string]any) error {
 	mounts, ok := object["mounts"].(map[string]any)
 	if !ok {
-		return fmt.Errorf("generation plan mounts object is required for skills content snapshot")
+		return fmt.Errorf("generation plan mounts object is required for %s content snapshot", kind)
 	}
 	contentSnapshots, ok := mounts["content_snapshots"].(map[string]any)
 	if !ok {
-		return fmt.Errorf("generation plan mounts.content_snapshots is required for skills content snapshot")
+		return fmt.Errorf("generation plan mounts.content_snapshots is required for %s content snapshot", kind)
 	}
-	mount, ok := contentSnapshots[store.ContentSnapshotKindSkills].(map[string]any)
+	mount, ok := contentSnapshots[kind].(map[string]any)
 	if !ok {
-		return fmt.Errorf("generation plan mounts.content_snapshots.skills is required")
+		return fmt.Errorf("generation plan mounts.content_snapshots.%s is required", kind)
+	}
+	mountName, ok := contentSnapshotMountName(kind)
+	if !ok {
+		return fmt.Errorf("generation plan content snapshot %s mount surface is unsupported", kind)
 	}
 	checks := []struct {
 		field string
 		got   string
 		want  string
 	}{
-		{"mount_name", stringField(mount, "mount_name"), "skills_snapshot"},
+		{"mount_name", stringField(mount, "mount_name"), mountName},
 		{"type", stringField(mount, "type"), "bind"},
 		{"mode", stringField(mount, "mode"), "ro"},
 		{"source", stringField(mount, "source"), stringField(snapshot, "immutable_host_path")},
@@ -603,13 +608,35 @@ func validateSkillsSnapshotMountEvidence(object map[string]any, snapshot map[str
 	}
 	for _, check := range checks {
 		if strings.TrimSpace(check.got) != strings.TrimSpace(check.want) {
-			return fmt.Errorf("generation plan mounts.content_snapshots.skills.%s mismatch", check.field)
+			return fmt.Errorf("generation plan mounts.content_snapshots.%s.%s mismatch", kind, check.field)
 		}
 	}
 	if boolField(mount, "exact") != true {
-		return fmt.Errorf("generation plan mounts.content_snapshots.skills.exact must be true")
+		return fmt.Errorf("generation plan mounts.content_snapshots.%s.exact must be true", kind)
 	}
 	return nil
+}
+
+func contentSnapshotMountName(kind string) (string, bool) {
+	switch strings.TrimSpace(kind) {
+	case store.ContentSnapshotKindSkills:
+		return "skills_snapshot", true
+	case store.ContentSnapshotKindManagedSettings:
+		return "managed_settings_snapshot", true
+	default:
+		return "", false
+	}
+}
+
+func contentSnapshotMountDestination(kind string) (string, bool) {
+	switch strings.TrimSpace(kind) {
+	case store.ContentSnapshotKindSkills:
+		return store.ContentSnapshotSkillsMount, true
+	case store.ContentSnapshotKindManagedSettings:
+		return store.ContentSnapshotManagedSettingsMount, true
+	default:
+		return "", false
+	}
 }
 
 func validateContentSnapshotMountScope(object map[string]any, snapshots map[string]any) error {

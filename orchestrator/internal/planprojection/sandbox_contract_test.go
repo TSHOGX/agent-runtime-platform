@@ -22,6 +22,14 @@ func TestRenderSandboxContractIncludesSkillsSnapshotMountFacts(t *testing.T) {
 			SourceEvidenceDigest: "sha256:skills-source",
 			RetentionClass:       "generation_plan",
 		},
+		{
+			Kind:                 store.ContentSnapshotKindManagedSettings,
+			Digest:               "sha256:settings",
+			ImmutableHostPath:    filepath.Join(dir, "content", "managed-settings", "sha256-settings"),
+			MountDestination:     store.ContentSnapshotManagedSettingsMount,
+			SourceEvidenceDigest: "sha256:settings-source",
+			RetentionClass:       "generation_plan",
+		},
 	}
 
 	payload, err := RenderSandboxContract(params)
@@ -42,6 +50,18 @@ func TestRenderSandboxContractIncludesSkillsSnapshotMountFacts(t *testing.T) {
 		skills["retention_class"] != "generation_plan" {
 		t.Fatalf("unexpected skills snapshot mount facts: %+v", skills)
 	}
+	settings := contentSnapshots[store.ContentSnapshotKindManagedSettings].(map[string]any)
+	if settings["mount_name"] != "managed_settings_snapshot" ||
+		settings["type"] != "bind" ||
+		settings["mode"] != "ro" ||
+		settings["exact"] != true ||
+		settings["source"] != filepath.Join(dir, "content", "managed-settings", "sha256-settings") ||
+		settings["destination"] != store.ContentSnapshotManagedSettingsMount ||
+		settings["digest"] != "sha256:settings" ||
+		settings["source_evidence_digest"] != "sha256:settings-source" ||
+		settings["retention_class"] != "generation_plan" {
+		t.Fatalf("unexpected managed settings snapshot mount facts: %+v", settings)
+	}
 }
 
 func TestRenderSandboxContractRejectsUnsupportedContentSnapshotMount(t *testing.T) {
@@ -49,11 +69,11 @@ func TestRenderSandboxContractRejectsUnsupportedContentSnapshotMount(t *testing.
 	params := validSandboxContractParams(t, dir)
 	params.ContentSnapshots = []store.ContentSnapshotRecord{
 		{
-			Kind:                 store.ContentSnapshotKindManagedSettings,
-			Digest:               "sha256:settings",
-			ImmutableHostPath:    filepath.Join(dir, "content", "managed-settings", "sha256-settings"),
-			MountDestination:     "/harness-managed-settings",
-			SourceEvidenceDigest: "sha256:settings-source",
+			Kind:                 "workspace",
+			Digest:               "sha256:workspace",
+			ImmutableHostPath:    filepath.Join(dir, "content", "workspace", "sha256-workspace"),
+			MountDestination:     "/workspace-content",
+			SourceEvidenceDigest: "sha256:workspace-source",
 			RetentionClass:       "generation_plan",
 		},
 	}
@@ -61,6 +81,26 @@ func TestRenderSandboxContractRejectsUnsupportedContentSnapshotMount(t *testing.
 	_, err := RenderSandboxContract(params)
 	if err == nil || !strings.Contains(err.Error(), "unsupported content snapshot kind") {
 		t.Fatalf("expected unsupported content snapshot error, got %v", err)
+	}
+}
+
+func TestRenderSandboxContractRejectsContentSnapshotMountDestinationDrift(t *testing.T) {
+	dir := t.TempDir()
+	params := validSandboxContractParams(t, dir)
+	params.ContentSnapshots = []store.ContentSnapshotRecord{
+		{
+			Kind:                 store.ContentSnapshotKindManagedSettings,
+			Digest:               "sha256:settings",
+			ImmutableHostPath:    filepath.Join(dir, "content", "managed-settings", "sha256-settings"),
+			MountDestination:     "/other-managed-settings",
+			SourceEvidenceDigest: "sha256:settings-source",
+			RetentionClass:       "generation_plan",
+		},
+	}
+
+	_, err := RenderSandboxContract(params)
+	if err == nil || !strings.Contains(err.Error(), "content snapshot managed_settings mount destination must be /harness-managed-settings") {
+		t.Fatalf("expected managed settings mount destination error, got %v", err)
 	}
 }
 

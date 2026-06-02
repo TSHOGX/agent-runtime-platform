@@ -10,9 +10,10 @@ import (
 )
 
 const (
-	ContentSnapshotKindSkills          = "skills"
-	ContentSnapshotKindManagedSettings = "managed_settings"
-	ContentSnapshotSkillsMount         = "/harness-skills"
+	ContentSnapshotKindSkills           = "skills"
+	ContentSnapshotKindManagedSettings  = "managed_settings"
+	ContentSnapshotSkillsMount          = "/harness-skills"
+	ContentSnapshotManagedSettingsMount = "/harness-managed-settings"
 )
 
 type ContentSnapshotRecord struct {
@@ -139,6 +140,9 @@ func validateContentSnapshotParams(p StoreContentSnapshotParams) error {
 	if p.Kind == ContentSnapshotKindSkills && p.MountDestination != ContentSnapshotSkillsMount {
 		return fmt.Errorf("skills content snapshot mount destination must be %s", ContentSnapshotSkillsMount)
 	}
+	if p.Kind == ContentSnapshotKindManagedSettings && p.MountDestination != ContentSnapshotManagedSettingsMount {
+		return fmt.Errorf("managed settings content snapshot mount destination must be %s", ContentSnapshotManagedSettingsMount)
+	}
 	if p.SourceEvidenceDigest == "" || !strings.HasPrefix(p.SourceEvidenceDigest, "sha256:") {
 		return fmt.Errorf("content snapshot source evidence digest is required")
 	}
@@ -199,6 +203,9 @@ func scanContentSnapshot(row scanner) (ContentSnapshotRecord, error) {
 	}
 	if record.Kind == ContentSnapshotKindSkills && record.MountDestination != ContentSnapshotSkillsMount {
 		return ContentSnapshotRecord{}, fmt.Errorf("skills content snapshot mount destination must be %s", ContentSnapshotSkillsMount)
+	}
+	if record.Kind == ContentSnapshotKindManagedSettings && record.MountDestination != ContentSnapshotManagedSettingsMount {
+		return ContentSnapshotRecord{}, fmt.Errorf("managed settings content snapshot mount destination must be %s", ContentSnapshotManagedSettingsMount)
 	}
 	if record.RetentionClass == "" {
 		return ContentSnapshotRecord{}, fmt.Errorf("content snapshot retention class is invalid")

@@ -204,6 +204,24 @@ func TestValidateRejectsSkillsSnapshotMountDrift(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsManagedSettingsSnapshotMountDrift(t *testing.T) {
+	payload := validPlanPayload()
+	contentSnapshots := payload["content_snapshots"].(map[string]any)
+	contentSnapshots["managed_settings"] = map[string]any{
+		"kind":                   "managed_settings",
+		"digest":                 "sha256:settings",
+		"immutable_host_path":    "/var/lib/harness/content/managed-settings/sha256-settings",
+		"mount_destination":      "/other-managed-settings",
+		"source_evidence_digest": "sha256:source",
+		"retention_class":        "active",
+	}
+
+	err := Validate(ValidateParams{Payload: payload})
+	if err == nil || !strings.Contains(err.Error(), "content_snapshots.managed_settings.mount_destination must be /harness-managed-settings") {
+		t.Fatalf("expected managed settings mount destination error, got %v", err)
+	}
+}
+
 func TestValidateRejectsUnsupportedContentSnapshotKey(t *testing.T) {
 	payload := validPlanPayload()
 	contentSnapshots := payload["content_snapshots"].(map[string]any)
@@ -248,6 +266,27 @@ func TestValidateRequiresContentSnapshotMountScope(t *testing.T) {
 	err := Validate(ValidateParams{Payload: payload})
 	if err == nil || !strings.Contains(err.Error(), "platform_content_mount_scope must be immutable_content_snapshots") {
 		t.Fatalf("expected content snapshot mount scope error, got %v", err)
+	}
+}
+
+func TestValidateRequiresManagedSettingsSnapshotMountEvidence(t *testing.T) {
+	payload := validPlanPayload()
+	contentSnapshots := payload["content_snapshots"].(map[string]any)
+	settings := validManagedSettingsSnapshotPayload()
+	contentSnapshots["managed_settings"] = settings
+
+	err := Validate(ValidateParams{Payload: payload})
+	if err == nil || !strings.Contains(err.Error(), "mounts.content_snapshots is required for managed_settings content snapshot") {
+		t.Fatalf("expected missing managed settings mount evidence error, got %v", err)
+	}
+
+	addManagedSettingsSnapshotMount(payload, settings)
+	mounts := payload["mounts"].(map[string]any)
+	snapshotMounts := mounts["content_snapshots"].(map[string]any)
+	snapshotMounts["managed_settings"].(map[string]any)["mount_name"] = "settings_snapshot"
+	err = Validate(ValidateParams{Payload: payload})
+	if err == nil || !strings.Contains(err.Error(), "mounts.content_snapshots.managed_settings.mount_name mismatch") {
+		t.Fatalf("expected managed settings mount name mismatch, got %v", err)
 	}
 }
 
@@ -642,18 +681,40 @@ func validSkillsSnapshotPayload() map[string]any {
 	}
 }
 
+func validManagedSettingsSnapshotPayload() map[string]any {
+	return map[string]any{
+		"kind":                   "managed_settings",
+		"digest":                 "sha256:settings",
+		"immutable_host_path":    "/var/lib/harness/content/managed-settings/sha256-settings",
+		"mount_destination":      "/harness-managed-settings",
+		"source_evidence_digest": "sha256:source",
+		"retention_class":        "active",
+	}
+}
+
 func addSkillsSnapshotMount(payload map[string]any, snapshot map[string]any) {
+	addContentSnapshotMount(payload, "skills", "skills_snapshot", snapshot)
+}
+
+func addManagedSettingsSnapshotMount(payload map[string]any, snapshot map[string]any) {
+	addContentSnapshotMount(payload, "managed_settings", "managed_settings_snapshot", snapshot)
+}
+
+func addContentSnapshotMount(payload map[string]any, kind, mountName string, snapshot map[string]any) {
 	mounts := payload["mounts"].(map[string]any)
-	mounts["content_snapshots"] = map[string]any{
-		"skills": map[string]any{
-			"mount_name":  "skills_snapshot",
-			"type":        "bind",
-			"mode":        "ro",
-			"exact":       true,
-			"source":      snapshot["immutable_host_path"],
-			"destination": snapshot["mount_destination"],
-			"digest":      snapshot["digest"],
-		},
+	snapshotMounts, ok := mounts["content_snapshots"].(map[string]any)
+	if !ok {
+		snapshotMounts = map[string]any{}
+		mounts["content_snapshots"] = snapshotMounts
+	}
+	snapshotMounts[kind] = map[string]any{
+		"mount_name":  mountName,
+		"type":        "bind",
+		"mode":        "ro",
+		"exact":       true,
+		"source":      snapshot["immutable_host_path"],
+		"destination": snapshot["mount_destination"],
+		"digest":      snapshot["digest"],
 	}
 	workspace := payload["data_volumes"].(map[string]any)["workspace"].(map[string]any)
 	workspace["platform_content_mount_scope"] = "immutable_content_snapshots"

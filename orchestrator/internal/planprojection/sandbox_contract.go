@@ -392,11 +392,11 @@ func ContentSnapshotMountPayload(records []store.ContentSnapshotRecord) (map[str
 	seen := map[string]struct{}{}
 	for _, record := range records {
 		kind := strings.TrimSpace(record.Kind)
-		switch kind {
-		case store.ContentSnapshotKindSkills:
-		case "":
+		mountName, destination, ok := contentSnapshotMountSurface(kind)
+		if kind == "" {
 			return nil, fmt.Errorf("content snapshot kind is required")
-		default:
+		}
+		if !ok {
 			return nil, fmt.Errorf("unsupported content snapshot kind %q for sandbox contract mount plan", record.Kind)
 		}
 		if _, ok := seen[kind]; ok {
@@ -410,9 +410,8 @@ func ContentSnapshotMountPayload(records []store.ContentSnapshotRecord) (map[str
 		if source == "" || !filepath.IsAbs(source) {
 			return nil, fmt.Errorf("content snapshot %s immutable host path must be absolute", kind)
 		}
-		destination := strings.TrimSpace(record.MountDestination)
-		if destination != store.ContentSnapshotSkillsMount {
-			return nil, fmt.Errorf("content snapshot %s mount destination must be %s", kind, store.ContentSnapshotSkillsMount)
+		if strings.TrimSpace(record.MountDestination) != destination {
+			return nil, fmt.Errorf("content snapshot %s mount destination must be %s", kind, destination)
 		}
 		if strings.TrimSpace(record.SourceEvidenceDigest) == "" || !strings.HasPrefix(strings.TrimSpace(record.SourceEvidenceDigest), "sha256:") {
 			return nil, fmt.Errorf("content snapshot %s source evidence digest is required", kind)
@@ -421,7 +420,7 @@ func ContentSnapshotMountPayload(records []store.ContentSnapshotRecord) (map[str
 			return nil, fmt.Errorf("content snapshot %s retention class is required", kind)
 		}
 		out[kind] = map[string]any{
-			"mount_name":             "skills_snapshot",
+			"mount_name":             mountName,
 			"type":                   "bind",
 			"mode":                   "ro",
 			"exact":                  true,
@@ -433,4 +432,15 @@ func ContentSnapshotMountPayload(records []store.ContentSnapshotRecord) (map[str
 		}
 	}
 	return out, nil
+}
+
+func contentSnapshotMountSurface(kind string) (string, string, bool) {
+	switch strings.TrimSpace(kind) {
+	case store.ContentSnapshotKindSkills:
+		return "skills_snapshot", store.ContentSnapshotSkillsMount, true
+	case store.ContentSnapshotKindManagedSettings:
+		return "managed_settings_snapshot", store.ContentSnapshotManagedSettingsMount, true
+	default:
+		return "", "", false
+	}
 }

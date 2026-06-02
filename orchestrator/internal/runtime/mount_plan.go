@@ -50,14 +50,15 @@ var scratchMountPlanAllowList = map[string]allowedMountPlanSurface{
 
 func contentMountPlanSurfaces() map[string]allowedMountPlanSurface {
 	allow := map[string]allowedMountPlanSurface{
-		"workspace":       {Destination: "/workspace", Type: "bind", Mode: "rw"},
-		"agent_home":      {Destination: "/agent-home", Type: "bind", Mode: "rw"},
-		"control":         {Destination: "/harness-control", Type: "bind", Mode: "ro"},
-		"bridge":          {Destination: bridge.BridgeMountDestination, Type: "bind", Mode: "rw"},
-		"bridge_inbox":    {Destination: filepath.Join(bridge.BridgeMountDestination, bridge.InboxDir), Type: "bind", Mode: "ro"},
-		"bridge_host_tmp": {Destination: filepath.Join(bridge.BridgeMountDestination, bridge.HostTmpDir), Type: "bind", Mode: "ro"},
-		"network_hosts":   {Destination: "/etc/hosts", Type: "bind", Mode: "ro"},
-		"skills_snapshot": {Destination: store.ContentSnapshotSkillsMount, Type: "bind", Mode: "ro"},
+		"workspace":                 {Destination: "/workspace", Type: "bind", Mode: "rw"},
+		"agent_home":                {Destination: "/agent-home", Type: "bind", Mode: "rw"},
+		"control":                   {Destination: "/harness-control", Type: "bind", Mode: "ro"},
+		"bridge":                    {Destination: bridge.BridgeMountDestination, Type: "bind", Mode: "rw"},
+		"bridge_inbox":              {Destination: filepath.Join(bridge.BridgeMountDestination, bridge.InboxDir), Type: "bind", Mode: "ro"},
+		"bridge_host_tmp":           {Destination: filepath.Join(bridge.BridgeMountDestination, bridge.HostTmpDir), Type: "bind", Mode: "ro"},
+		"network_hosts":             {Destination: "/etc/hosts", Type: "bind", Mode: "ro"},
+		"skills_snapshot":           {Destination: store.ContentSnapshotSkillsMount, Type: "bind", Mode: "ro"},
+		"managed_settings_snapshot": {Destination: store.ContentSnapshotManagedSettingsMount, Type: "bind", Mode: "ro"},
 	}
 	for _, spec := range agents.AllDriverConfigMaterializationSpecs() {
 		allow[spec.MountName] = allowedMountPlanSurface{
@@ -95,19 +96,38 @@ func BuildSandboxMountPlan(input SandboxMountPlanInputs) (MountPlan, error) {
 		plan.Content = append(plan.Content, exactBindMount(spec.MountName, spec.HostSourcePath(details.ControlDirPath), spec.SandboxDestination, spec.MountMode, driverConfigMaterializationMountOptions(spec), nil))
 	}
 	for _, snapshot := range input.ContentSnapshots {
-		switch strings.TrimSpace(snapshot.Kind) {
-		case store.ContentSnapshotKindSkills:
-			plan.Content = append(plan.Content, exactBindMount("skills_snapshot", snapshot.ImmutableHostPath, store.ContentSnapshotSkillsMount, "ro", []string{"bind", "ro", "nosuid", "nodev", "noexec"}, nil))
-		case "":
-			return MountPlan{}, fmt.Errorf("content snapshot kind is required")
-		default:
-			return MountPlan{}, fmt.Errorf("unsupported content snapshot kind %q for sandbox mount plan", snapshot.Kind)
+		mountName, destination, err := contentSnapshotMountSurface(snapshot)
+		if err != nil {
+			return MountPlan{}, err
 		}
+		plan.Content = append(plan.Content, exactBindMount(mountName, snapshot.ImmutableHostPath, destination, "ro", []string{"bind", "ro", "nosuid", "nodev", "noexec"}, nil))
 	}
 	if err := plan.Validate(); err != nil {
 		return MountPlan{}, err
 	}
 	return plan, nil
+}
+
+func contentSnapshotMountSurface(snapshot store.ContentSnapshotRecord) (string, string, error) {
+	kind := strings.TrimSpace(snapshot.Kind)
+	var mountName string
+	var destination string
+	switch kind {
+	case store.ContentSnapshotKindSkills:
+		mountName = "skills_snapshot"
+		destination = store.ContentSnapshotSkillsMount
+	case store.ContentSnapshotKindManagedSettings:
+		mountName = "managed_settings_snapshot"
+		destination = store.ContentSnapshotManagedSettingsMount
+	case "":
+		return "", "", fmt.Errorf("content snapshot kind is required")
+	default:
+		return "", "", fmt.Errorf("unsupported content snapshot kind %q for sandbox mount plan", snapshot.Kind)
+	}
+	if strings.TrimSpace(snapshot.MountDestination) != destination {
+		return "", "", fmt.Errorf("content snapshot %s mount destination must be %s", kind, destination)
+	}
+	return mountName, destination, nil
 }
 
 func (p MountPlan) Validate() error {

@@ -39,7 +39,7 @@ func TestStoreContentSnapshotIsImmutableAndListsByKind(t *testing.T) {
 		Kind:                 ContentSnapshotKindManagedSettings,
 		Digest:               "sha256:settings",
 		ImmutableHostPath:    "/var/lib/harness/content/managed-settings/sha256-settings",
-		MountDestination:     "/harness-managed-settings",
+		MountDestination:     ContentSnapshotManagedSettingsMount,
 		SourceEvidenceDigest: "sha256:settings-source",
 		RetentionClass:       "generation_plan",
 		Now:                  now.Add(time.Second),
@@ -144,6 +144,15 @@ func TestStoreContentSnapshotRejectsInvalidReferences(t *testing.T) {
 		!strings.Contains(err.Error(), "unsupported content snapshot kind") {
 		t.Fatalf("expected invalid list kind error, got %v", err)
 	}
+	managed := base
+	managed.Kind = ContentSnapshotKindManagedSettings
+	managed.Digest = "sha256:settings"
+	managed.ImmutableHostPath = "/var/lib/harness/content/managed-settings/sha256-settings"
+	managed.MountDestination = "/other-managed-settings"
+	if _, err := st.StoreContentSnapshot(ctx, managed); err == nil ||
+		!strings.Contains(err.Error(), "managed settings content snapshot mount destination must be /harness-managed-settings") {
+		t.Fatalf("expected managed settings mount destination error, got %v", err)
+	}
 }
 
 func TestGetContentSnapshotRejectsCorruptSkillsMountDestination(t *testing.T) {
@@ -173,6 +182,36 @@ WHERE snapshot_kind = ?
 	if _, err := st.GetContentSnapshot(ctx, ContentSnapshotKindSkills, "sha256:skills"); err == nil ||
 		!strings.Contains(err.Error(), "skills content snapshot mount destination must be /harness-skills") {
 		t.Fatalf("expected corrupt skills mount rejection, got %v", err)
+	}
+}
+
+func TestGetContentSnapshotRejectsCorruptManagedSettingsMountDestination(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if _, err := st.StoreContentSnapshot(ctx, StoreContentSnapshotParams{
+		Kind:                 ContentSnapshotKindManagedSettings,
+		Digest:               "sha256:settings",
+		ImmutableHostPath:    "/var/lib/harness/content/managed-settings/sha256-settings",
+		MountDestination:     ContentSnapshotManagedSettingsMount,
+		SourceEvidenceDigest: "sha256:settings-source",
+		RetentionClass:       "generation_plan",
+	}); err != nil {
+		t.Fatalf("store managed settings snapshot: %v", err)
+	}
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE content_snapshots
+SET mount_destination = '/other-managed-settings'
+WHERE snapshot_kind = ?
+  AND snapshot_digest = ?`, ContentSnapshotKindManagedSettings, "sha256:settings"); err != nil {
+		t.Fatalf("corrupt managed settings mount destination: %v", err)
+	}
+	if _, err := st.GetContentSnapshot(ctx, ContentSnapshotKindManagedSettings, "sha256:settings"); err == nil ||
+		!strings.Contains(err.Error(), "managed settings content snapshot mount destination must be /harness-managed-settings") {
+		t.Fatalf("expected corrupt managed settings mount rejection, got %v", err)
 	}
 }
 
