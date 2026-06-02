@@ -1630,15 +1630,15 @@ func (s *Server) verifyGenerationPlanFrozenEvidence(ctx context.Context, generat
 		ProjectionDigests:               planprojection.DigestMap(artifacts),
 		ProjectionVersions:              planprojection.VersionMap(artifacts),
 		ContentSnapshotDigests:          contentSnapshotDigests,
-		CheckpointBundleDigest:          optionalProjectionPayloadDigest(store.GenerationPlanProjectionBundle, details.CheckpointBundleDigest),
-		CheckpointRuntimeConfigDigest:   optionalProjectionPayloadDigest(store.GenerationPlanProjectionRuntimeConfig, details.CheckpointRuntimeConfigDigest),
-		CheckpointControlManifestDigest: optionalProjectionPayloadDigest(store.GenerationPlanProjectionControlManifestProjected, details.CheckpointControlManifestDigest),
+		CheckpointBundleDigest:          generationplan.OptionalProjectionPayloadDigest(store.GenerationPlanProjectionBundle, details.CheckpointBundleDigest),
+		CheckpointRuntimeConfigDigest:   generationplan.OptionalProjectionPayloadDigest(store.GenerationPlanProjectionRuntimeConfig, details.CheckpointRuntimeConfigDigest),
+		CheckpointControlManifestDigest: generationplan.OptionalProjectionPayloadDigest(store.GenerationPlanProjectionControlManifestProjected, details.CheckpointControlManifestDigest),
 		CheckpointDriverStatesDigest:    details.CheckpointDriverStatesDigest,
 	})
 }
 
 func (s *Server) generationPlanContentSnapshotDigests(ctx context.Context, payload []byte) (map[string]string, error) {
-	refs := generationPlanContentSnapshotRefs(payload)
+	refs := generationplan.ContentSnapshotRefs(payload)
 	out := map[string]string{}
 	for kind, digest := range refs {
 		record, err := s.store.GetContentSnapshot(ctx, kind, digest)
@@ -1648,50 +1648,6 @@ func (s *Server) generationPlanContentSnapshotDigests(ctx context.Context, paylo
 		out[kind] = record.Digest
 	}
 	return out, nil
-}
-
-func generationPlanContentSnapshotRefs(payload []byte) map[string]string {
-	object, err := generationPlanPayloadObject(payload)
-	if err != nil {
-		return nil
-	}
-	snapshots, ok := object["content_snapshots"].(map[string]any)
-	if !ok {
-		return nil
-	}
-	out := map[string]string{}
-	for kind, value := range snapshots {
-		snapshot, ok := value.(map[string]any)
-		if !ok {
-			continue
-		}
-		digest := strings.TrimSpace(fmt.Sprint(snapshot["digest"]))
-		if digest != "" {
-			out[kind] = digest
-		}
-	}
-	return out
-}
-
-func generationPlanPayloadObject(payload []byte) (map[string]any, error) {
-	canonical, err := store.CanonicalGenerationPlanPayload(payload)
-	if err != nil {
-		return nil, err
-	}
-	var object map[string]any
-	decoder := json.NewDecoder(strings.NewReader(string(canonical)))
-	decoder.UseNumber()
-	if err := decoder.Decode(&object); err != nil {
-		return nil, err
-	}
-	return object, nil
-}
-
-func optionalProjectionPayloadDigest(kind, value string) string {
-	if strings.TrimSpace(value) == "" {
-		return ""
-	}
-	return planprojection.PayloadDigest(kind, value)
 }
 
 func (s *Server) runtimeResourceInstanceParams(details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, hostID string) (store.RuntimeResourceInstanceParams, error) {

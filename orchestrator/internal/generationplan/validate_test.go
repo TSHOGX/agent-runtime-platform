@@ -216,6 +216,39 @@ func TestVerifyFrozenEvidenceChecksContentSnapshotDigests(t *testing.T) {
 	}
 }
 
+func TestContentSnapshotRefsExtractsPlanSnapshotDigests(t *testing.T) {
+	payload := validPlanPayload()
+	contentSnapshots := payload["content_snapshots"].(map[string]any)
+	contentSnapshots["skills"] = map[string]any{
+		"kind":                   "skills",
+		"digest":                 "sha256:skills",
+		"immutable_host_path":    "/var/lib/harness/content/skills/sha256-skills",
+		"mount_destination":      "/harness-skills",
+		"source_evidence_digest": "sha256:source",
+		"retention_class":        "active",
+	}
+	canonical, err := store.CanonicalGenerationPlanPayload(payload)
+	if err != nil {
+		t.Fatalf("canonical plan payload: %v", err)
+	}
+	refs := ContentSnapshotRefs(canonical)
+	if len(refs) != 1 || refs["skills"] != "sha256:skills" {
+		t.Fatalf("content snapshot refs = %+v", refs)
+	}
+}
+
+func TestOptionalProjectionPayloadDigest(t *testing.T) {
+	if got := OptionalProjectionPayloadDigest(store.GenerationPlanProjectionBundle, ""); got != "" {
+		t.Fatalf("empty optional projection digest = %q", got)
+	}
+	if got := OptionalProjectionPayloadDigest(store.GenerationPlanProjectionBundle, "sha256:bundle"); got != "sha256:bundle" {
+		t.Fatalf("prefixed optional projection digest = %q", got)
+	}
+	if got := OptionalProjectionPayloadDigest(store.GenerationPlanProjectionBundle, "bundle_digest"); got == "" || !strings.HasPrefix(got, "sha256:") {
+		t.Fatalf("optional projection digest = %q", got)
+	}
+}
+
 func validPlanPayload() map[string]any {
 	driver, _ := agents.DriverSpecFor("claude_code")
 	provider, _ := agents.RuntimeProviderSpecFor("local_runsc")

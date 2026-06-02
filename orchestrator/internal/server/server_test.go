@@ -3565,7 +3565,7 @@ func TestGenerationPlanContentSnapshotRefs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("canonical generation plan payload: %v", err)
 	}
-	digests := generationPlanContentSnapshotRefs(canonical)
+	digests := generationplan.ContentSnapshotRefs(canonical)
 	if len(digests) != 1 || digests["skills"] != "sha256:skills" {
 		t.Fatalf("content snapshot digests = %+v", digests)
 	}
