@@ -2266,6 +2266,27 @@ func TestPreparePiGenerationMaterializesReadOnlyConfig(t *testing.T) {
 	}
 }
 
+func TestRenderDriverConfigProjectionRejectsNonCanonicalControlDir(t *testing.T) {
+	dir := t.TempDir()
+	rt := New(Config{})
+	details := testGenerationDetails(dir, "gen_pi_config_path")
+	details.DriverID = "pi"
+	details.OutputFormat = "pi_rpc_events_v1.0"
+	details.Model = "sonnet"
+	details.ManifestAnthropicBaseURL = "http://harness-model-proxy.internal:8082"
+	details.ControlDirPath = filepath.Dir(details.ControlDirPath) + string(filepath.Separator) + "same" + string(filepath.Separator) + ".." + string(filepath.Separator) + filepath.Base(details.ControlDirPath)
+
+	_, err := rt.renderDriverConfigProjection(StartRequest{
+		SessionID:    details.SessionID,
+		GenerationID: details.GenerationID,
+		DriverID:     "pi",
+		Generation:   details,
+	})
+	if err == nil || !strings.Contains(err.Error(), "driver config control dir path must be canonical absolute") {
+		t.Fatalf("expected non-canonical driver config control dir error, got %v", err)
+	}
+}
+
 func TestWriteDriverConfigProjectionReturnsNilWithoutSpecsOrRenderer(t *testing.T) {
 	dir := t.TempDir()
 	rt := New(Config{})

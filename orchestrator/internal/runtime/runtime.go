@@ -1483,6 +1483,9 @@ func (r *Runtime) renderDriverConfigProjection(req StartRequest) (driverConfigPr
 		return driverConfigProjection{}, fmt.Errorf("%s driver config projection renderer is missing", driver)
 	}
 	details := req.Generation
+	if err := validateRuntimeArtifactPathEvidence("driver config", "control dir path", details.ControlDirPath); err != nil {
+		return driverConfigProjection{}, err
+	}
 	payloads, err := renderer(details)
 	if err != nil {
 		return driverConfigProjection{}, err
