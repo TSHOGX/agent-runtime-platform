@@ -773,9 +773,7 @@ class PiRPCTurnRunner:
                 error = event.get("message") or event.get("error") or "pi rpc error"
                 break
             if event_type in {"turn_end", "agent_end"}:
-                terminal_status = str(event.get("status") or "").strip()
-                if not terminal_status:
-                    raise RuntimeError("pi terminal event status is required")
+                terminal_status = str(event.get("status") or "completed").strip().lower()
                 if terminal_status not in {"completed", "success", "ok"}:
                     status = "failed"
                     error_class = "agent_execution_failed"
@@ -984,7 +982,6 @@ def execute_grant(client, runner, grant):
     content = str(run_turn.get("content") or "")
     output_sequence = int(client.last_output_sequence_by_turn.get(turn_id, 0)) + 1
     client.clear_checkpoint_ready()
-    client.ack_turn_started(turn_id, sandbox_source_ip())
 
     def emit(stream, line):
         nonlocal output_sequence
@@ -993,6 +990,7 @@ def execute_grant(client, runner, grant):
         output_sequence += 1
 
     try:
+        client.ack_turn_started(turn_id, sandbox_source_ip())
         if hasattr(runner, "set_turn_context"):
             runner.set_turn_context(grant)
         result = runner.run_turn(content, emit)

@@ -1739,6 +1739,16 @@ WHERE id = ?`, turnID).Scan(&status, &generationID, &leaseOwner, &leaseExpires, 
 	if status != "queued" || generationID.Valid || leaseOwner.Valid || leaseExpires.Valid || claimRequest.Valid || attempt != 1 {
 		t.Fatalf("leased turn was not reset for retry: status=%s gen=%v owner=%v expires=%v claim=%v attempt=%d", status, generationID, leaseOwner, leaseExpires, claimRequest, attempt)
 	}
+	var sessionStatus string
+	if err := st.db.QueryRowContext(ctx, `
+SELECT status
+FROM sessions
+WHERE id = 'sess_requeue'`).Scan(&sessionStatus); err != nil {
+		t.Fatalf("query session status: %v", err)
+	}
+	if sessionStatus != "running_idle" {
+		t.Fatalf("session status after requeue recovery=%s want running_idle", sessionStatus)
+	}
 	var generationStatus, networkState, resourceState string
 	if err := st.db.QueryRowContext(ctx, `
 SELECT g.status, n.allocation_state, r.resource_state

@@ -3770,6 +3770,119 @@ WHERE generation_id = ?`, allocation.GenerationID).Scan(&errorClass, &leaseOwner
 	}
 }
 
+func TestRunMaintenanceRecoversCurrentOwnerExpiredLeasedTurn(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	now := time.Now().UTC()
+	session := createServerTestSession(t, ctx, st, dir, "sess_current_owner_expired", string(sessionstate.RunningActive), now.Add(-2*time.Minute), nil)
+	cfg := testServerConfig(dir)
+	cfg.Harness.Bridge.HeartbeatInterval = config.Duration{Duration: 10 * time.Millisecond}
+	cfg.Harness.Bridge.ReconnectGrace = config.Duration{Duration: 20 * time.Millisecond}
+	leaseOwner := store.GenerationLeaseOwner(owner.UUID)
+	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     leaseOwner,
+		LeaseTTL:  time.Minute,
+		Now:       now.Add(-2 * time.Minute),
+		Config:    serverTestAllocatorConfig(cfg, session.DriverID),
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, session.ID, allocation.GenerationID, allocation.Owner, now.Add(-2*time.Minute+time.Second)); err != nil {
+		t.Fatalf("mark generation live: %v", err)
+	}
+	createServerRuntimeResourceLive(t, ctx, st, session.ID, allocation, owner.UUID, mustRuntimeResourceHostID(t), now.Add(-2*time.Minute+2*time.Second))
+	turnID, err := st.EnqueueTurn(ctx, session.ID, "hi", now.Add(-2*time.Minute+3*time.Second))
+	if err != nil {
+		t.Fatalf("enqueue turn: %v", err)
+	}
+	expiredAt := now.Add(-time.Minute)
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE runtime_generations
+SET status = 'active',
+    lease_owner = ?,
+    lease_expires_at = ?,
+    last_seen_at = ?
+WHERE generation_id = ?`,
+		leaseOwner,
+		expiredAt.Format(time.RFC3339Nano),
+		expiredAt.Add(-time.Minute).Format(time.RFC3339Nano),
+		allocation.GenerationID,
+	); err != nil {
+		t.Fatalf("expire generation: %v", err)
+	}
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE turns
+SET status = 'leased',
+    generation_id = ?,
+    lease_owner = ?,
+    lease_expires_at = ?,
+    claim_request_id = 'claim-expired',
+    claim_granted_at = ?
+WHERE id = ?`,
+		allocation.GenerationID,
+		leaseOwner,
+		expiredAt.Format(time.RFC3339Nano),
+		expiredAt.Add(-time.Minute).Format(time.RFC3339Nano),
+		turnID,
+	); err != nil {
+		t.Fatalf("expire leased turn: %v", err)
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	rt := &recordingRuntime{}
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: rt,
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+	done := make(chan error, 1)
+	go func() {
+		done <- srv.RunMaintenance(runCtx)
+	}()
+
+	waitForGenerationStatus(t, runCtx, st, allocation.GenerationID, "failed")
+	cancel()
+	err = <-done
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("maintenance exit err=%v, want context canceled", err)
+	}
+
+	var turnStatus string
+	var turnGeneration sql.NullString
+	var attempt int
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT status, generation_id, attempt
+FROM turns
+WHERE id = ?`, turnID).Scan(&turnStatus, &turnGeneration, &attempt); err != nil {
+		t.Fatalf("query recovered turn: %v", err)
+	}
+	if turnStatus != "queued" || turnGeneration.Valid || attempt != 1 {
+		t.Fatalf("leased turn was not requeued: status=%s generation=%v attempt=%d", turnStatus, turnGeneration, attempt)
+	}
+	var sessionStatus string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT status
+FROM sessions
+WHERE id = ?`, session.ID).Scan(&sessionStatus); err != nil {
+		t.Fatalf("query recovered session: %v", err)
+	}
+	if sessionStatus != string(sessionstate.RunningIdle) {
+		t.Fatalf("recovered session status=%s want %s", sessionStatus, sessionstate.RunningIdle)
+	}
+	runscID := serverRunscContainerID(t, ctx, st, session.ID, allocation.GenerationID)
+	if got := rt.runtimeDestroyRequests(); len(got) != 1 || got[0] != runscID {
+		t.Fatalf("maintenance should destroy expired runtime %q before repair, got %+v", runscID, got)
+	}
+}
+
 func TestExpiredRuntimeRecoverySkipsRepairWhenRuntimeCleanupFails(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

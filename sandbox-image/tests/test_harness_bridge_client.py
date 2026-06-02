@@ -602,6 +602,29 @@ class BridgeClientTest(unittest.TestCase):
             stderr = next(message for message in messages if message["type"] == "emit_output" and message["payload"]["stream"] == "stderr")
             self.assertEqual(stderr["payload"]["payload"]["line"], "runner status is required")
 
+    def test_execute_grant_completes_failed_when_sandbox_source_ip_fails(self):
+        with tempfile.TemporaryDirectory() as root:
+            client = bridge.BridgeClient(root, "sess", "gen", "sh", poll_interval=0.001)
+
+            class ShouldNotRun:
+                def run_turn(self, content, emit):
+                    raise AssertionError("runner should not execute without source ip")
+
+            with mock.patch.object(bridge, "sandbox_source_ip", side_effect=RuntimeError("ip command missing")):
+                bridge.execute_grant(
+                    client,
+                    ShouldNotRun(),
+                    {"turn_id": 9, "sequence": 1, "turn_input_schema": "RunTurn", "input": {"content": "run"}},
+                )
+
+            messages = [envelope for _, _, envelope in bridge.Queue(root, bridge.OUTBOX).read_all()]
+            self.assertNotIn("ack_turn_started", [message["type"] for message in messages])
+            completion = messages[-1]
+            self.assertEqual(completion["type"], "ack_turn_completed")
+            self.assertEqual(completion["payload"]["status"], "failed")
+            self.assertEqual(completion["payload"]["error_class"], "agent_execution_failed")
+            self.assertEqual(completion["payload"]["error"], "ip command missing")
+
     def test_pi_rpc_runner_uses_session_rpc_and_returns_driver_state_update(self):
         class FakeStdin:
             def __init__(self):
@@ -732,7 +755,7 @@ class BridgeClientTest(unittest.TestCase):
             self.assertEqual(update["state_payload"]["selected_session_id"], "pi-session-1")
             self.assertTrue(update["state_digest"].startswith("sha256:"))
 
-    def test_pi_rpc_runner_requires_terminal_event_status(self):
+    def test_pi_rpc_runner_allows_terminal_event_without_status(self):
         class FakeStdin:
             def __init__(self):
                 self.writes = []
@@ -768,18 +791,34 @@ class BridgeClientTest(unittest.TestCase):
             agent_dir = Path(root) / "agent"
             session_dir = agent_dir / "sessions"
             session_dir.mkdir(parents=True)
+            session_file = session_dir / "session-1.jsonl"
+            session_file.write_text("{}\n", encoding="utf-8")
             models = agent_dir / "models.json"
             settings = agent_dir / "settings.json"
             for path in (models, settings):
                 path.write_text("{}\n", encoding="utf-8")
                 path.chmod(0o444)
+            lines = [
+                '{"type":"turn_end"}\n',
+                json.dumps(
+                    {
+                        "id": "harness-turn-9-stats",
+                        "type": "response",
+                        "command": "get_session_stats",
+                        "success": True,
+                        "data": {"sessionFile": str(session_file), "sessionId": "pi-session-1"},
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n",
+            ]
 
             patches = [
                 mock.patch.object(bridge, "PI_CODING_AGENT_DIR", str(agent_dir)),
                 mock.patch.object(bridge, "PI_SESSION_DIR", str(session_dir)),
                 mock.patch.object(bridge, "PI_MODELS_SANDBOX_PATH", str(models)),
                 mock.patch.object(bridge, "PI_SETTINGS_SANDBOX_PATH", str(settings)),
-                mock.patch.object(bridge.subprocess, "Popen", return_value=FakeProcess(['{"type":"turn_end"}\n'])),
+                mock.patch.object(bridge.subprocess, "Popen", return_value=FakeProcess(lines)),
                 mock.patch.dict(
                     os.environ,
                     {
@@ -808,8 +847,10 @@ class BridgeClientTest(unittest.TestCase):
                         },
                     }
                 )
-                with self.assertRaisesRegex(RuntimeError, "pi terminal event status is required"):
-                    runner.run_turn("hello", lambda stream, line: None)
+                status, error_class, error, update = runner.run_turn("hello", lambda stream, line: None)
+
+            self.assertEqual((status, error_class, error), ("completed", "", ""))
+            self.assertEqual(update["state_payload"]["selected_session_id"], "pi-session-1")
 
     def test_pi_rpc_runner_keeps_stderr_out_of_json_rpc_stream(self):
         class FakeStdin:

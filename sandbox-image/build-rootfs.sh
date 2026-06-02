@@ -21,6 +21,7 @@ APT_PACKAGES=(
   ca-certificates
   curl
   git
+  iproute2
   nodejs
   npm
   python3

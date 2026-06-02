@@ -2408,13 +2408,6 @@ func (s *Server) RunMaintenance(ctx context.Context) error {
 		if _, err := s.RecoverExpiredRuntimeResources(ctx, now); err != nil && !errors.Is(err, context.Canceled) {
 			s.log.Warn("allocation recovery failed", "error", err)
 		}
-		if _, err := s.store.RenewLiveGenerationLeases(ctx, store.RenewLiveGenerationsParams{
-			Owner:    owner,
-			LeaseTTL: s.cfg.Harness.Bridge.LeaseTTL.Duration,
-			Now:      now,
-		}); err != nil && !errors.Is(err, context.Canceled) {
-			s.log.Warn("generation lease renewal failed", "error", err)
-		}
 		generations, err := s.store.ListBridgePollGenerations(ctx, owner, now, s.cfg.Harness.Bridge.AckStartedGrace.Duration)
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {

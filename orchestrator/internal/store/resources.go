@@ -1529,7 +1529,7 @@ SET status = CASE
       WHEN EXISTS (
         SELECT 1 FROM turns
         WHERE turns.session_id = sessions.id
-          AND turns.status IN ('queued','leased','running')
+          AND turns.status IN ('leased','running')
       ) THEN 'running_active'
       ELSE 'running_idle'
     END,
