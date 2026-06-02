@@ -1647,12 +1647,8 @@ func (s *Server) verifyGenerationPlanFrozenEvidence(ctx context.Context, generat
 	if err := generationplan.Validate(generationplan.ValidateParams{Payload: plan.CanonicalPayload}); err != nil {
 		return err
 	}
-	if _, err := s.store.VerifyGenerationPlanProjections(ctx, store.VerifyGenerationPlanProjectionsParams{
-		GenerationID: generationID,
-		PlanDigest:   plan.PlanDigest,
-		Expected:     generationPlanProjectionExpectations(artifacts, ""),
-		RequirePlan:  true,
-	}); err != nil {
+	projectionDigests, projectionVersions, err := s.storedGenerationPlanProjectionEvidence(ctx, generationID, plan.PlanDigest)
+	if err != nil {
 		return err
 	}
 	contentSnapshotDigests, err := s.generationPlanContentSnapshotDigests(ctx, plan.CanonicalPayload)
@@ -1665,8 +1661,8 @@ func (s *Server) verifyGenerationPlanFrozenEvidence(ctx context.Context, generat
 		RunscVersion:                    artifacts.RunscVersion,
 		RunscBinaryPath:                 artifacts.RunscBinaryPath,
 		RunscBinaryDigest:               artifacts.RunscBinaryDigest,
-		ProjectionDigests:               planprojection.DigestMap(artifacts),
-		ProjectionVersions:              planprojection.VersionMap(artifacts),
+		ProjectionDigests:               projectionDigests,
+		ProjectionVersions:              projectionVersions,
 		ContentSnapshotDigests:          contentSnapshotDigests,
 		CheckpointBundleDigest:          generationplan.OptionalProjectionPayloadDigest(store.GenerationPlanProjectionBundle, details.CheckpointBundleDigest),
 		CheckpointRuntimeConfigDigest:   generationplan.OptionalProjectionPayloadDigest(store.GenerationPlanProjectionRuntimeConfig, details.CheckpointRuntimeConfigDigest),
@@ -1674,6 +1670,35 @@ func (s *Server) verifyGenerationPlanFrozenEvidence(ctx context.Context, generat
 		CheckpointDriverStatesDigest:    details.CheckpointDriverStatesDigest,
 		CheckpointPlanDigest:            details.CheckpointPlanDigest,
 	})
+}
+
+func (s *Server) storedGenerationPlanProjectionEvidence(ctx context.Context, generationID, planDigest string) (map[string]string, map[string]int, error) {
+	records, err := s.store.ListGenerationPlanProjections(ctx, generationID)
+	if err != nil {
+		return nil, nil, err
+	}
+	digests := map[string]string{}
+	versions := map[string]int{}
+	for _, record := range records {
+		kind := strings.TrimSpace(record.ProjectionKind)
+		if kind == "" {
+			return nil, nil, fmt.Errorf("generation plan projection kind is required")
+		}
+		if strings.TrimSpace(record.PlanDigest) != strings.TrimSpace(planDigest) {
+			return nil, nil, fmt.Errorf("generation plan projection %s plan digest mismatch: got %s want %s", kind, record.PlanDigest, planDigest)
+		}
+		digests[kind] = record.PayloadDigest
+		versions[kind] = record.ProjectionVersion
+	}
+	for _, kind := range store.GenerationPlanProjectionKinds() {
+		if strings.TrimSpace(digests[kind]) == "" {
+			return nil, nil, fmt.Errorf("generation plan projection %s is required", kind)
+		}
+		if versions[kind] <= 0 {
+			return nil, nil, fmt.Errorf("generation plan projection %s version is required", kind)
+		}
+	}
+	return digests, versions, nil
 }
 
 func (s *Server) generationPlanContentSnapshotDigests(ctx context.Context, payload []byte) (map[string]string, error) {

@@ -3503,6 +3503,25 @@ WHERE generation_id = ?
 	}
 }
 
+func TestVerifyGenerationPlanFrozenEvidenceUsesStoredProjectionRows(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, _ := openServerOwnedStore(t, ctx, dir)
+	srv := &Server{store: st}
+	storeServerFrozenEvidencePlan(t, ctx, st, dir, validServerGenerationPlanPayload())
+
+	artifacts := serverGenerationPlanFrozenEvidenceArtifacts()
+	artifacts.ManifestDigest = "sha256:mutated-control-manifest-row"
+	artifacts.ProjectedManifestDigest = "sha256:mutated-projected-manifest-row"
+	artifacts.BundleDigest = "sha256:mutated-bundle-row"
+	artifacts.RuntimeConfigDigest = "sha256:mutated-runtime-config-row"
+	artifacts.SpecDigest = "sha256:mutated-spec-row"
+
+	if err := srv.verifyGenerationPlanFrozenEvidence(ctx, "gen_frozen_evidence", serverGenerationPlanFrozenEvidenceDetails(), artifacts); err != nil {
+		t.Fatalf("verify frozen evidence from stored projection rows: %v", err)
+	}
+}
+
 func TestVerifyGenerationPlanFrozenEvidenceChecksContentSnapshots(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -6211,6 +6230,7 @@ VALUES (?, ?, 'allocating', 'owner', ?)`, "gen_frozen_evidence", session.ID, tim
 		t.Fatalf("store generation plan: %v", err)
 	}
 	for kind, digest := range map[string]string{
+		"sandbox_contract":           "sha256:sandbox-contract",
 		"control_manifest":           "sha256:control-manifest",
 		"control_manifest_projected": "sha256:control-manifest-projected",
 		"oci_spec":                   "sha256:oci-spec",
