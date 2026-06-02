@@ -263,6 +263,69 @@ func TestValidateRejectsMutableContentSnapshotReference(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsNonCanonicalLaunchPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(map[string]any)
+		want string
+	}{
+		{
+			name: "runsc binary",
+			edit: func(payload map[string]any) {
+				payload["runsc_pin"].(map[string]any)["binary_path"] = "/usr/local/bin/../bin/runsc-test"
+			},
+			want: "runsc_pin.binary_path must be canonical absolute",
+		},
+		{
+			name: "rootfs",
+			edit: func(payload map[string]any) {
+				payload["image"].(map[string]any)["rootfs_path"] = "var/lib/harness/rootfs"
+			},
+			want: "image.rootfs_path must be canonical absolute",
+		},
+		{
+			name: "netns",
+			edit: func(payload map[string]any) {
+				payload["network"].(map[string]any)["netns_path"] = "/var/run/netns/../netns/harness-gen-plan"
+			},
+			want: "network.netns_path must be canonical absolute",
+		},
+		{
+			name: "workspace host",
+			edit: func(payload map[string]any) {
+				workspace := payload["data_volumes"].(map[string]any)["workspace"].(map[string]any)
+				workspace["host_path"] = "relative/workspace"
+			},
+			want: "data_volumes.workspace.host_path must be canonical absolute",
+		},
+		{
+			name: "driver home marker",
+			edit: func(payload map[string]any) {
+				agentHome := payload["data_volumes"].(map[string]any)["agent_home"].(map[string]any)
+				agentHome["provisioning_marker_path"] = "/var/lib/harness/evidence/driver-homes/../driver-home.json"
+			},
+			want: "data_volumes.agent_home.provisioning_marker_path must be canonical absolute",
+		},
+		{
+			name: "runtime artifact",
+			edit: func(payload map[string]any) {
+				artifacts := payload["runtime_artifacts"].(map[string]any)
+				artifacts["bundle_dir_path"] = "/var/lib/harness/run/runtime/../runtime/gen_plan"
+			},
+			want: "runtime_artifacts.bundle_dir_path must be canonical absolute",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := validPlanPayload()
+			tc.edit(payload)
+			err := Validate(ValidateParams{Payload: payload})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
 func TestValidateRejectsContentSnapshotKindMismatch(t *testing.T) {
 	payload := validPlanPayload()
 	contentSnapshots := payload["content_snapshots"].(map[string]any)

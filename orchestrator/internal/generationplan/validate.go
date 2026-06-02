@@ -828,8 +828,8 @@ func validateRunscPin(object map[string]any) error {
 	if !isSha256(stringField(runsc, "binary_digest")) {
 		return fmt.Errorf("generation plan runsc_pin.binary_digest is required")
 	}
-	if !filepath.IsAbs(stringField(runsc, "binary_path")) {
-		return fmt.Errorf("generation plan runsc_pin.binary_path must be absolute")
+	if !isCanonicalAbsolutePath(stringField(runsc, "binary_path")) {
+		return fmt.Errorf("generation plan runsc_pin.binary_path must be canonical absolute")
 	}
 	return nil
 }
@@ -842,8 +842,8 @@ func validateImage(object map[string]any) error {
 	if !isSha256(stringField(image, "agent_manifest_digest")) {
 		return fmt.Errorf("generation plan image.agent_manifest_digest is required")
 	}
-	if !filepath.IsAbs(stringField(image, "rootfs_path")) {
-		return fmt.Errorf("generation plan image.rootfs_path must be absolute")
+	if !isCanonicalAbsolutePath(stringField(image, "rootfs_path")) {
+		return fmt.Errorf("generation plan image.rootfs_path must be canonical absolute")
 	}
 	if value := image["rootfs_image_digest"]; value != nil && !isSha256(fmt.Sprint(value)) {
 		return fmt.Errorf("generation plan image.rootfs_image_digest must be sha256 when present")
@@ -870,8 +870,8 @@ func validateNetwork(object map[string]any) error {
 	if _, err := netip.ParsePrefix(stringField(network, "sandbox_ip_cidr")); err != nil {
 		return fmt.Errorf("generation plan network.sandbox_ip_cidr is invalid: %w", err)
 	}
-	if !filepath.IsAbs(stringField(network, "netns_path")) {
-		return fmt.Errorf("generation plan network.netns_path must be absolute")
+	if !isCanonicalAbsolutePath(stringField(network, "netns_path")) {
+		return fmt.Errorf("generation plan network.netns_path must be canonical absolute")
 	}
 	return nil
 }
@@ -895,8 +895,8 @@ func validateDataVolumes(object map[string]any) error {
 			return fmt.Errorf("generation plan data_volumes.%s.layout_version is required", name)
 		}
 		for _, key := range []string{"host_path", "provisioning_marker_path"} {
-			if !filepath.IsAbs(stringField(volume, key)) {
-				return fmt.Errorf("generation plan data_volumes.%s.%s must be absolute", name, key)
+			if !isCanonicalAbsolutePath(stringField(volume, key)) {
+				return fmt.Errorf("generation plan data_volumes.%s.%s must be canonical absolute", name, key)
 			}
 		}
 		for _, key := range []string{"runtime_identity_digest", "provisioning_marker_digest"} {
@@ -917,8 +917,8 @@ func validateRuntimeArtifacts(object map[string]any, driver agents.DriverSpec) e
 		return err
 	}
 	for _, key := range []string{"control_dir_path", "control_manifest_path", "bundle_dir_path", "spec_path", "bridge_dir_path", "log_dir_path"} {
-		if !filepath.IsAbs(stringField(artifacts, key)) {
-			return fmt.Errorf("generation plan runtime_artifacts.%s must be absolute", key)
+		if !isCanonicalAbsolutePath(stringField(artifacts, key)) {
+			return fmt.Errorf("generation plan runtime_artifacts.%s must be canonical absolute", key)
 		}
 	}
 	for _, key := range []string{"control_manifest_digest", "projected_control_manifest_digest", "bundle_digest", "runtime_config_digest", "spec_digest", "resource_identity_digest", "sandbox_contract_payload_digest"} {
