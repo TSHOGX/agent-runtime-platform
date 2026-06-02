@@ -154,7 +154,7 @@ func TestDefaultFeaturePolicyAndPayloadAreStable(t *testing.T) {
 	policy := DefaultFeaturePolicyForDriver(claude)
 	if policy[FeatureCompaction] != FeaturePolicyRequired ||
 		policy[FeatureInterrupt] != FeaturePolicyUnsupported ||
-		policy[FeatureOperatorPolicyPrompt] != FeaturePolicyDisabled {
+		policy[FeatureOperatorPolicyPrompt] != FeaturePolicyUnsupported {
 		t.Fatalf("unexpected default policy: %+v", policy)
 	}
 	if err := ValidateFeaturePolicy(policy, claude, provider); err != nil {
@@ -167,7 +167,7 @@ func TestDefaultFeaturePolicyAndPayloadAreStable(t *testing.T) {
 	if len(payload) != len(AllFeatureIDs()) ||
 		payload[string(FeatureCompaction)] != string(FeaturePolicyRequired) ||
 		payload[string(FeatureInterrupt)] != string(FeaturePolicyUnsupported) ||
-		payload[string(FeatureSkillsSnapshot)] != string(FeaturePolicyDisabled) {
+		payload[string(FeatureSkillsSnapshot)] != string(FeaturePolicyUnsupported) {
 		t.Fatalf("unexpected feature policy payload: %+v", payload)
 	}
 }

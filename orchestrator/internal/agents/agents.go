@@ -328,12 +328,17 @@ func DriverSupportsSubCapability(spec DriverSpec, capability SubCapabilityID) bo
 }
 
 func DefaultFeaturePolicyForDriver(spec DriverSpec) FeaturePolicy {
-	policy := disabledFeaturePolicy()
+	policy := FeaturePolicy{}
+	for _, feature := range allFeatureIDs {
+		if !DriverSupportsFeature(spec, feature) {
+			policy[feature] = FeaturePolicyUnsupported
+			continue
+		}
+		policy[feature] = FeaturePolicyDisabled
+	}
 	for _, feature := range []FeatureID{FeatureCompaction, FeatureInterrupt} {
 		if DriverSupportsFeature(spec, feature) {
 			policy[feature] = FeaturePolicyRequired
-		} else {
-			policy[feature] = FeaturePolicyUnsupported
 		}
 	}
 	return policy
