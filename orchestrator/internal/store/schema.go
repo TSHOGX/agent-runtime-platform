@@ -195,6 +195,17 @@ CREATE TABLE IF NOT EXISTS generation_plan_projections (
   PRIMARY KEY (generation_id, projection_kind)
 );
 
+CREATE TABLE IF NOT EXISTS content_snapshots (
+  snapshot_kind TEXT NOT NULL CHECK(snapshot_kind IN ('skills','managed_settings')),
+  snapshot_digest TEXT NOT NULL CHECK(snapshot_digest LIKE 'sha256:%'),
+  immutable_host_path TEXT NOT NULL CHECK(immutable_host_path <> ''),
+  mount_destination TEXT NOT NULL CHECK(mount_destination <> ''),
+  source_evidence_digest TEXT NOT NULL CHECK(source_evidence_digest LIKE 'sha256:%'),
+  retention_class TEXT NOT NULL CHECK(retention_class <> ''),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (snapshot_kind, snapshot_digest)
+);
+
 CREATE TABLE IF NOT EXISTS network_profiles (
   network_profile_id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,

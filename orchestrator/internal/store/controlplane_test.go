@@ -28,7 +28,7 @@ func TestFreshSchemaCreatesCurrentRuntimeTables(t *testing.T) {
 		"active_model_request_contexts", "network_profiles", "agent_runtime_profiles",
 		"egress_policies", "orchestrator_owner", "sandbox_contracts",
 		"sandbox_contract_artifacts", "sandbox_contract_input_evidence",
-		"generation_plans", "generation_plan_projections",
+		"generation_plans", "generation_plan_projections", "content_snapshots",
 		"session_workspaces", "session_driver_homes",
 		"runtime_resource_instances", "session_driver_states",
 	} {

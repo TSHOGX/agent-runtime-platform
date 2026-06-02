@@ -63,6 +63,18 @@ def _next_stage_checks():
             ),
         },
         {
+            "name": "next_stage_content_snapshots_store_persists_immutable_rows",
+            "kind": "contains",
+            "path": REPO_ROOT / "orchestrator" / "internal" / "store" / "content_snapshots.go",
+            "patterns": (
+                ("store_content_snapshot", "func (s *Store) StoreContentSnapshot"),
+                ("list_content_snapshots", "func (s *Store) ListContentSnapshots"),
+                ("immutable_snapshot_payload_error", "content snapshot already exists with different immutable payload"),
+                ("skills_snapshot_kind", "ContentSnapshotKindSkills"),
+                ("managed_settings_snapshot_kind", "ContentSnapshotKindManagedSettings"),
+            ),
+        },
+        {
             "name": "next_stage_generation_plan_server_persists_shadow_launch_rows",
             "kind": "contains",
             "path": REPO_ROOT / "orchestrator" / "internal" / "server" / "server.go",
