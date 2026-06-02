@@ -1948,7 +1948,9 @@ func TestRenderGenerationArtifactProjectionIsPure(t *testing.T) {
 		}
 	}
 
-	if err := rt.MaterializeGenerationArtifacts(req, projection); err != nil {
+	materializeReq := req
+	materializeReq.PreparedArtifacts = artifacts
+	if err := rt.MaterializeGenerationArtifacts(materializeReq, projection); err != nil {
 		t.Fatalf("materialize generation artifact projection: %v", err)
 	}
 	for _, path := range []string{details.SpecPath, details.ControlManifestPath, details.NetworkHostsPath} {
@@ -1961,6 +1963,44 @@ func TestRenderGenerationArtifactProjectionIsPure(t *testing.T) {
 			t.Fatalf("materialize should write %s: %v", entry.HostSourcePath, err)
 		}
 	}
+}
+
+func TestMaterializeGenerationArtifactsRejectsProjectionDigestMismatch(t *testing.T) {
+	dir := t.TempDir()
+	installFakeRunsc(t, dir, "render-generation-artifacts")
+	runner := &recordingCommandRunner{
+		outputs: map[string][]byte{"runsc --version": []byte("runsc render")},
+	}
+	rt := New(Config{
+		SessionsRoot:         filepath.Join(dir, "sessions"),
+		AgentHomesRoot:       filepath.Join(dir, "agent-homes"),
+		BundleRoot:           filepath.Join(dir, "bundle", "out"),
+		RootFSPath:           filepath.Join(dir, "rootfs"),
+		BridgeMode:           "claim-loop",
+		BridgeHeartbeat:      20 * time.Second,
+		BridgePollInterval:   5 * time.Millisecond,
+		ProbeHealthzStatuses: []int{200},
+		CommandRunner:        runner,
+	})
+	details := testGenerationDetails(dir, "gen_render_projection_mismatch")
+	req := withDataVolumePathsForTest(dir, StartRequest{
+		SessionID:    details.SessionID,
+		GenerationID: details.GenerationID,
+		DriverID:     details.DriverID,
+		Generation:   details,
+	})
+	projection, err := rt.RenderGenerationArtifacts(context.Background(), req)
+	if err != nil {
+		t.Fatalf("render generation artifact projection: %v", err)
+	}
+	req.PreparedArtifacts = projection.Artifacts
+	projection.RuntimeSpec.Hostname = "changed-hostname"
+
+	err = rt.MaterializeGenerationArtifacts(req, projection)
+	if err == nil || !strings.Contains(err.Error(), "materialization projection spec digest mismatch") {
+		t.Fatalf("expected materialization projection digest mismatch, got %v", err)
+	}
+	assertGenerationFilesystemMissing(t, generationFilesystemPaths(details))
 }
 
 func TestPreparePiGenerationMaterializesReadOnlyConfig(t *testing.T) {

@@ -1219,6 +1219,9 @@ func (r *Runtime) RenderGenerationArtifacts(ctx context.Context, req StartReques
 
 func (r *Runtime) MaterializeGenerationArtifacts(req StartRequest, projection GenerationArtifactProjection) error {
 	details := req.Generation
+	if err := r.verifyMaterializationProjection(req, projection); err != nil {
+		return err
+	}
 	if err := r.prepareGenerationDirs(req); err != nil {
 		return err
 	}
@@ -1243,6 +1246,147 @@ func (r *Runtime) MaterializeGenerationArtifacts(req StartRequest, projection Ge
 		return fmt.Errorf("write control manifest: %w", err)
 	}
 	return nil
+}
+
+func (r *Runtime) verifyMaterializationProjection(req StartRequest, projection GenerationArtifactProjection) error {
+	expected := req.PreparedArtifacts
+	if !generationArtifactDigestEvidenceComplete(expected) {
+		expected = projection.Artifacts
+	}
+	actual, err := r.materializationProjectionArtifacts(req, projection, expected)
+	if err != nil {
+		return err
+	}
+	checks := []struct {
+		field string
+		got   string
+		want  string
+		path  bool
+	}{
+		{"bundle dir", actual.BundleDir, expected.BundleDir, true},
+		{"spec path", actual.SpecPath, expected.SpecPath, true},
+		{"control manifest path", actual.ManifestPath, expected.ManifestPath, true},
+		{"spec digest", actual.SpecDigest, expected.SpecDigest, false},
+		{"control manifest digest", actual.ManifestDigest, expected.ManifestDigest, false},
+		{"projected control manifest digest", actual.ProjectedManifestDigest, expected.ProjectedManifestDigest, false},
+		{"bundle digest", actual.BundleDigest, expected.BundleDigest, false},
+		{"runtime config digest", actual.RuntimeConfigDigest, expected.RuntimeConfigDigest, false},
+		{"runsc version", actual.RunscVersion, expected.RunscVersion, false},
+		{"runsc binary path", actual.RunscBinaryPath, expected.RunscBinaryPath, true},
+		{"runsc binary digest", actual.RunscBinaryDigest, expected.RunscBinaryDigest, false},
+	}
+	for _, check := range checks {
+		got, want := strings.TrimSpace(check.got), strings.TrimSpace(check.want)
+		if check.path && got != "" && want != "" {
+			got, want = filepath.Clean(got), filepath.Clean(want)
+		}
+		if want == "" {
+			return fmt.Errorf("materialization projection expected %s is required", check.field)
+		}
+		if got != want {
+			return fmt.Errorf("materialization projection %s mismatch: got %q want %q", check.field, check.got, check.want)
+		}
+	}
+	if !driverConfigMaterializationsEqual(actual.MaterializedDriverConfig, expected.MaterializedDriverConfig) {
+		return fmt.Errorf("materialization projection driver config mismatch")
+	}
+	return nil
+}
+
+func (r *Runtime) materializationProjectionArtifacts(req StartRequest, projection GenerationArtifactProjection, expected GenerationArtifacts) (GenerationArtifacts, error) {
+	details := req.Generation
+	specPayload, err := canonicalJSON(projection.RuntimeSpec)
+	if err != nil {
+		return GenerationArtifacts{}, fmt.Errorf("materialization projection spec digest: %w", err)
+	}
+	specDigest := digestHex(specPayload)
+	manifestDigest, manifestFile, err := wrapControlManifest(projection.ControlManifestFile.Payload)
+	if err != nil {
+		return GenerationArtifacts{}, fmt.Errorf("materialization projection control manifest digest: %w", err)
+	}
+	if strings.TrimSpace(projection.ControlManifestFile.Digest) != "" && projection.ControlManifestFile.Digest != manifestFile.Digest {
+		return GenerationArtifacts{}, fmt.Errorf("materialization projection control manifest embedded digest mismatch")
+	}
+	projectedManifestDigest, err := projectedControlManifestDigest(projection.ControlManifestFile.Payload)
+	if err != nil {
+		return GenerationArtifacts{}, fmt.Errorf("materialization projection projected control manifest digest: %w", err)
+	}
+	bundleDigestPayload, err := canonicalJSON(map[string]any{
+		"bundle_dir":  filepath.Clean(details.BundleDirPath),
+		"rootfs":      projection.RuntimeSpec.Root.Path,
+		"spec_digest": specDigest,
+	})
+	if err != nil {
+		return GenerationArtifacts{}, fmt.Errorf("materialization projection bundle digest: %w", err)
+	}
+	runscNetwork, err := r.runscNetwork(details)
+	if err != nil {
+		return GenerationArtifacts{}, err
+	}
+	runscOverlay2, err := r.runscOverlay2(details)
+	if err != nil {
+		return GenerationArtifacts{}, err
+	}
+	runscPlatform, err := requiredRunscPlatform(details)
+	if err != nil {
+		return GenerationArtifacts{}, err
+	}
+	runtimeConfigDigestPayload, err := canonicalJSON(map[string]any{
+		"runsc_network":       runscNetwork,
+		"runsc_overlay2":      runscOverlay2,
+		"runsc_platform":      runscPlatform,
+		"runsc_binary_path":   expected.RunscBinaryPath,
+		"runsc_binary_digest": expected.RunscBinaryDigest,
+		"rootfs":              projection.RuntimeSpec.Root.Path,
+	})
+	if err != nil {
+		return GenerationArtifacts{}, fmt.Errorf("materialization projection runtime config digest: %w", err)
+	}
+	return GenerationArtifacts{
+		BundleDir:                details.BundleDirPath,
+		SpecPath:                 details.SpecPath,
+		ManifestPath:             details.ControlManifestPath,
+		ManifestDigest:           manifestDigest,
+		ProjectedManifestDigest:  projectedManifestDigest,
+		BundleDigest:             digestHex(bundleDigestPayload),
+		RuntimeConfigDigest:      digestHex(runtimeConfigDigestPayload),
+		SpecDigest:               specDigest,
+		RunscVersion:             projection.ControlManifestFile.Payload.RunscVersion,
+		RunscBinaryPath:          expected.RunscBinaryPath,
+		RunscBinaryDigest:        expected.RunscBinaryDigest,
+		MaterializedDriverConfig: projection.DriverConfig.Entries,
+	}, nil
+}
+
+func generationArtifactDigestEvidenceComplete(artifacts GenerationArtifacts) bool {
+	return strings.TrimSpace(artifacts.BundleDir) != "" &&
+		strings.TrimSpace(artifacts.SpecPath) != "" &&
+		strings.TrimSpace(artifacts.ManifestPath) != "" &&
+		strings.TrimSpace(artifacts.ManifestDigest) != "" &&
+		strings.TrimSpace(artifacts.ProjectedManifestDigest) != "" &&
+		strings.TrimSpace(artifacts.BundleDigest) != "" &&
+		strings.TrimSpace(artifacts.RuntimeConfigDigest) != "" &&
+		strings.TrimSpace(artifacts.SpecDigest) != "" &&
+		strings.TrimSpace(artifacts.RunscVersion) != "" &&
+		strings.TrimSpace(artifacts.RunscBinaryPath) != "" &&
+		strings.TrimSpace(artifacts.RunscBinaryDigest) != ""
+}
+
+func driverConfigMaterializationsEqual(left, right []DriverConfigMaterialization) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i].Name != right[i].Name ||
+			left[i].SourceProjectionPath != right[i].SourceProjectionPath ||
+			left[i].HostSourcePath != right[i].HostSourcePath ||
+			left[i].SourceDigest != right[i].SourceDigest ||
+			left[i].SandboxDestination != right[i].SandboxDestination ||
+			left[i].DestinationMutableBySandbox != right[i].DestinationMutableBySandbox {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *Runtime) prepareGenerationDirs(req StartRequest) error {
