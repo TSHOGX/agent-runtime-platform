@@ -1454,6 +1454,9 @@ func renderOptionalNetworkHostsProjection(details store.RuntimeGenerationDetails
 	if path == "" {
 		return networkHostsProjection{}, nil
 	}
+	if details.NetworkHostsPath != path || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return networkHostsProjection{}, fmt.Errorf("network hosts path %q must be canonical absolute path", details.NetworkHostsPath)
+	}
 	payload, err := renderNetworkHostsProjection(details)
 	if err != nil {
 		return networkHostsProjection{}, err

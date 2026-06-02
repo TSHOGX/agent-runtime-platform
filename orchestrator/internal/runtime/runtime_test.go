@@ -2410,6 +2410,18 @@ func TestRenderNetworkHostsProjectionRejectsNonAliasModelProxyHosts(t *testing.T
 	}
 }
 
+func TestRenderOptionalNetworkHostsProjectionRejectsNonCanonicalPath(t *testing.T) {
+	dir := t.TempDir()
+	details := testGenerationDetails(dir, "gen_hosts_path")
+	networkHostsPath := filepath.Join(dir, "run", "network", "gen-"+details.GenerationID, "hosts")
+	details.NetworkHostsPath = filepath.Dir(networkHostsPath) + string(filepath.Separator) + "same" + string(filepath.Separator) + ".." + string(filepath.Separator) + filepath.Base(networkHostsPath)
+
+	_, err := renderOptionalNetworkHostsProjection(details)
+	if err == nil || !strings.Contains(err.Error(), "network hosts path") || !strings.Contains(err.Error(), "canonical absolute") {
+		t.Fatalf("expected non-canonical network hosts path error, got %v", err)
+	}
+}
+
 func TestPrepareGenerationConcurrentSessionsUseDistinctControlManifests(t *testing.T) {
 	dir := t.TempDir()
 	rt := New(Config{
