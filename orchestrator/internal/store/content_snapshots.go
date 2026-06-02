@@ -12,6 +12,7 @@ import (
 const (
 	ContentSnapshotKindSkills          = "skills"
 	ContentSnapshotKindManagedSettings = "managed_settings"
+	ContentSnapshotSkillsMount         = "/harness-skills"
 )
 
 type ContentSnapshotRecord struct {
@@ -134,6 +135,9 @@ func validateContentSnapshotParams(p StoreContentSnapshotParams) error {
 	}
 	if !filepath.IsAbs(p.MountDestination) {
 		return fmt.Errorf("content snapshot mount destination must be absolute")
+	}
+	if p.Kind == ContentSnapshotKindSkills && p.MountDestination != ContentSnapshotSkillsMount {
+		return fmt.Errorf("skills content snapshot mount destination must be %s", ContentSnapshotSkillsMount)
 	}
 	if p.SourceEvidenceDigest == "" || !strings.HasPrefix(p.SourceEvidenceDigest, "sha256:") {
 		return fmt.Errorf("content snapshot source evidence digest is required")

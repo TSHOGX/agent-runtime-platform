@@ -161,6 +161,24 @@ func TestValidateRejectsContentSnapshotKindMismatch(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsSkillsSnapshotMountDrift(t *testing.T) {
+	payload := validPlanPayload()
+	contentSnapshots := payload["content_snapshots"].(map[string]any)
+	contentSnapshots["skills"] = map[string]any{
+		"kind":                   "skills",
+		"digest":                 "sha256:skills",
+		"immutable_host_path":    "/var/lib/harness/content/skills/sha256-skills",
+		"mount_destination":      "/other-skills",
+		"source_evidence_digest": "sha256:source",
+		"retention_class":        "active",
+	}
+
+	err := Validate(ValidateParams{Payload: payload})
+	if err == nil || !strings.Contains(err.Error(), "content_snapshots.skills.mount_destination must be /harness-skills") {
+		t.Fatalf("expected skills mount destination error, got %v", err)
+	}
+}
+
 func TestValidateRejectsUnsupportedContentSnapshotKey(t *testing.T) {
 	payload := validPlanPayload()
 	contentSnapshots := payload["content_snapshots"].(map[string]any)

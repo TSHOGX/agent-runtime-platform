@@ -504,6 +504,9 @@ func validateContentSnapshot(name string, snapshot map[string]any) error {
 	if !strings.HasPrefix(stringField(snapshot, "mount_destination"), "/") {
 		return fmt.Errorf("generation plan content_snapshots.%s.mount_destination must be absolute", name)
 	}
+	if name == store.ContentSnapshotKindSkills && stringField(snapshot, "mount_destination") != store.ContentSnapshotSkillsMount {
+		return fmt.Errorf("generation plan content_snapshots.%s.mount_destination must be %s", name, store.ContentSnapshotSkillsMount)
+	}
 	return nil
 }
 

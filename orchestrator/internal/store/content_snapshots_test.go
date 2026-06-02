@@ -127,6 +127,7 @@ func TestStoreContentSnapshotRejectsInvalidReferences(t *testing.T) {
 		{name: "digest", edit: func(p *StoreContentSnapshotParams) { p.Digest = "skills" }, want: "content snapshot digest is required"},
 		{name: "host path", edit: func(p *StoreContentSnapshotParams) { p.ImmutableHostPath = "relative/skills" }, want: "immutable host path must be absolute"},
 		{name: "mount destination", edit: func(p *StoreContentSnapshotParams) { p.MountDestination = "harness-skills" }, want: "mount destination must be absolute"},
+		{name: "skills mount destination", edit: func(p *StoreContentSnapshotParams) { p.MountDestination = "/other-skills" }, want: "skills content snapshot mount destination must be /harness-skills"},
 		{name: "source evidence", edit: func(p *StoreContentSnapshotParams) { p.SourceEvidenceDigest = "source" }, want: "source evidence digest is required"},
 		{name: "retention class", edit: func(p *StoreContentSnapshotParams) { p.RetentionClass = "" }, want: "retention class is required"},
 	} {
