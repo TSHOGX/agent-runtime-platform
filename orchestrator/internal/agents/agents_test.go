@@ -142,6 +142,35 @@ func TestFeaturePolicyValidationFailsClosed(t *testing.T) {
 	}
 }
 
+func TestFeaturePolicyValidationRequiresRendererAndArtifacts(t *testing.T) {
+	claude, ok := DriverSpecFor("claude_code")
+	if !ok {
+		t.Fatalf("claude driver spec missing")
+	}
+	provider, ok := RuntimeProviderSpecFor("local_runsc")
+	if !ok {
+		t.Fatalf("provider spec missing")
+	}
+	original := featureDefinitions[FeatureCompaction]
+	t.Cleanup(func() { featureDefinitions[FeatureCompaction] = original })
+
+	missingRenderer := original
+	missingRenderer.AdapterRenderer = ""
+	featureDefinitions[FeatureCompaction] = missingRenderer
+	err := ValidateFeaturePolicy(FeaturePolicy{FeatureCompaction: FeaturePolicyRequired}, claude, provider)
+	if err == nil || !strings.Contains(err.Error(), "feature compaction requires adapter renderer") {
+		t.Fatalf("expected missing renderer error, got %v", err)
+	}
+
+	missingArtifacts := original
+	missingArtifacts.ProducedArtifacts = nil
+	featureDefinitions[FeatureCompaction] = missingArtifacts
+	err = ValidateFeaturePolicy(FeaturePolicy{FeatureCompaction: FeaturePolicyRequired}, claude, provider)
+	if err == nil || !strings.Contains(err.Error(), "feature compaction requires produced artifacts") {
+		t.Fatalf("expected missing produced artifacts error, got %v", err)
+	}
+}
+
 func TestDefaultFeaturePolicyAndPayloadAreStable(t *testing.T) {
 	claude, ok := DriverSpecFor("claude_code")
 	if !ok {

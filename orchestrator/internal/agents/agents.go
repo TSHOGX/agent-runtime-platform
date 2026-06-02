@@ -376,6 +376,12 @@ func ValidateFeaturePolicy(policy FeaturePolicy, driver DriverSpec, provider Run
 		if !ok {
 			return fmt.Errorf("feature %s has no registered definition", feature)
 		}
+		if strings.TrimSpace(definition.AdapterRenderer) == "" {
+			return fmt.Errorf("feature %s requires adapter renderer", feature)
+		}
+		if len(definition.ProducedArtifacts) == 0 {
+			return fmt.Errorf("feature %s requires produced artifacts", feature)
+		}
 		if driver.Capabilities.Features[feature] != CapabilitySupported {
 			return fmt.Errorf("feature %s requires driver %s support, got %s", feature, driver.ID, driver.Capabilities.Features[feature])
 		}
