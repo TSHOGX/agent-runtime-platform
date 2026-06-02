@@ -771,6 +771,18 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			return err
 		}
 		networkDetails := runtimeDetailsWithResourceInstance(generationDetails, runtimeResourceInstance)
+		if err := s.verifyGenerationPlanMountPlanEvidence(ctx, allocation.GenerationID, networkDetails, dataVolumes, contentSnapshots); err != nil {
+			if leaseErr := leaseKeeper.err(); leaseErr != nil {
+				return leaseErr
+			}
+			retireRuntimeResource()
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+			return err
+		}
+		if err := leaseKeeper.ensureOwned(); err != nil {
+			retireRuntimeResource()
+			return err
+		}
 		materializeRequest := s.runtimeStartRequest(session, allocation.GenerationID, networkDetails, preparedArtifacts, dataVolumes, contentSnapshots)
 		if err := s.runtime.MaterializeGenerationArtifacts(materializeRequest, artifactProjection); err != nil {
 			if leaseErr := leaseKeeper.err(); leaseErr != nil {
@@ -911,6 +923,13 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		retireRuntimeResource()
 		s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 		return err
+	}
+	if !ensured.IsNew {
+		if err := s.verifyGenerationPlanMountPlanEvidence(ctx, allocation.GenerationID, generationDetails, dataVolumes, contentSnapshots); err != nil {
+			retireRuntimeResource()
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+			return err
+		}
 	}
 	if err := s.verifyGenerationPlanSourceDigestEvidence(ctx, allocation.GenerationID); err != nil {
 		retireRuntimeResource()
@@ -1844,6 +1863,30 @@ func (s *Server) verifyGenerationPlanDataVolumes(ctx context.Context, generation
 		WorkspaceRuntimeIdentityDigest:  volumes.Workspace.RuntimeIdentityDigest,
 		DriverHomeHostPath:              volumes.DriverHome.HostPath,
 		DriverHomeRuntimeIdentityDigest: volumes.DriverHome.RuntimeIdentityDigest,
+	})
+}
+
+func (s *Server) verifyGenerationPlanMountPlanEvidence(ctx context.Context, generationID string, details store.RuntimeGenerationDetails, volumes sessionRuntimeDataVolumes, contentSnapshots []store.ContentSnapshotRecord) error {
+	plan, err := s.store.RequireGenerationPlanForLaunch(ctx, strings.TrimSpace(generationID))
+	if err != nil {
+		return err
+	}
+	if err := generationplan.Validate(generationplan.ValidateParams{Payload: plan.CanonicalPayload}); err != nil {
+		return err
+	}
+	mountPlan, err := runtime.BuildSandboxMountPlan(runtime.SandboxMountPlanInputs{
+		Generation:        details,
+		WorkspaceHostPath: volumes.Workspace.HostPath,
+		AgentHomeHostPath: volumes.DriverHome.HostPath,
+		NetworkHostsPath:  details.NetworkHostsPath,
+		ContentSnapshots:  contentSnapshots,
+	})
+	if err != nil {
+		return err
+	}
+	return generationplan.VerifyMountPlanEvidence(generationplan.VerifyMountPlanEvidenceParams{
+		Payload:   plan.CanonicalPayload,
+		MountPlan: mountPlan,
 	})
 }
 

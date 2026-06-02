@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"net/netip"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"harness-platform/orchestrator/internal/agents"
+	"harness-platform/orchestrator/internal/runtime"
 	"harness-platform/orchestrator/internal/store"
 )
 
@@ -84,6 +86,11 @@ type VerifyRuntimeArtifactPathEvidenceParams struct {
 	BridgeDirPath       string
 	LogDirPath          string
 	NetworkHostsPath    string
+}
+
+type VerifyMountPlanEvidenceParams struct {
+	Payload   any
+	MountPlan runtime.MountPlan
 }
 
 type VerifyRuntimeResourceEvidenceParams struct {
@@ -213,6 +220,37 @@ func VerifyRuntimeArtifactPathEvidence(p VerifyRuntimeArtifactPathEvidenceParams
 	return nil
 }
 
+func VerifyMountPlanEvidence(p VerifyMountPlanEvidenceParams) error {
+	object, err := decodePlanObject(p.Payload)
+	if err != nil {
+		return err
+	}
+	mounts, err := requireObject(object, "mounts")
+	if err != nil {
+		return err
+	}
+	runtimeMounts, err := runtimeMountPlanMountsByName(p.MountPlan)
+	if err != nil {
+		return err
+	}
+	for _, name := range []string{"workspace", "agent_home", "control", "bridge"} {
+		mount, err := requireObject(mounts, name)
+		if err != nil {
+			return err
+		}
+		if err := verifyPlanMountAgainstRuntime("mounts."+name, mount, runtimeMounts[name]); err != nil {
+			return err
+		}
+	}
+	if err := verifyNetworkHostsMountPlanEvidence(mounts, runtimeMounts); err != nil {
+		return err
+	}
+	if err := verifyContentSnapshotMountPlanEvidence(mounts, runtimeMounts); err != nil {
+		return err
+	}
+	return verifyDriverConfigMountPlanEvidence(object, mounts, runtimeMounts)
+}
+
 func VerifyNetworkEvidence(p VerifyNetworkEvidenceParams) error {
 	object, err := decodePlanObject(p.Payload)
 	if err != nil {
@@ -258,6 +296,182 @@ func VerifyNetworkEvidence(p VerifyNetworkEvidenceParams) error {
 		return fmt.Errorf("generation plan network.proxy_port mismatch")
 	}
 	return nil
+}
+
+func runtimeMountPlanMountsByName(plan runtime.MountPlan) (map[string]runtime.MountPlanMount, error) {
+	mounts := map[string]runtime.MountPlanMount{}
+	for _, mount := range append(append([]runtime.MountPlanMount{}, plan.Content...), plan.Scratch...) {
+		name := strings.TrimSpace(mount.Name)
+		if name == "" {
+			return nil, fmt.Errorf("runtime mount plan mount name is required")
+		}
+		if _, ok := mounts[name]; ok {
+			return nil, fmt.Errorf("runtime mount plan mount %s is duplicated", name)
+		}
+		mounts[name] = mount
+	}
+	return mounts, nil
+}
+
+func verifyNetworkHostsMountPlanEvidence(mounts map[string]any, runtimeMounts map[string]runtime.MountPlanMount) error {
+	path := strings.TrimSpace(optionalStringField(mounts, "network_hosts_path"))
+	runtimeMount, ok := runtimeMounts["network_hosts"]
+	if path == "" {
+		if ok {
+			return fmt.Errorf("generation plan mounts.network_hosts_path runtime mount must be absent")
+		}
+		return nil
+	}
+	if !ok {
+		return fmt.Errorf("generation plan mounts.network_hosts_path runtime mount is required")
+	}
+	expected := map[string]any{"source": path, "destination": "/etc/hosts", "mode": "ro", "type": "bind", "exact": true}
+	return verifyPlanMountAgainstRuntime("mounts.network_hosts_path", expected, runtimeMount)
+}
+
+func verifyContentSnapshotMountPlanEvidence(mounts map[string]any, runtimeMounts map[string]runtime.MountPlanMount) error {
+	contentSnapshots, ok := mounts["content_snapshots"].(map[string]any)
+	if !ok || len(contentSnapshots) == 0 {
+		for _, name := range []string{"skills_snapshot", "managed_settings_snapshot"} {
+			if _, ok := runtimeMounts[name]; ok {
+				return fmt.Errorf("generation plan mounts.content_snapshots runtime mount %s must be absent", name)
+			}
+		}
+		return nil
+	}
+	kinds := sortedMapKeys(contentSnapshots)
+	for _, kind := range kinds {
+		mount, ok := contentSnapshots[kind].(map[string]any)
+		if !ok {
+			return fmt.Errorf("generation plan mounts.content_snapshots.%s must be an object", kind)
+		}
+		mountName := strings.TrimSpace(stringField(mount, "mount_name"))
+		if mountName == "" {
+			return fmt.Errorf("generation plan mounts.content_snapshots.%s.mount_name is required", kind)
+		}
+		if err := verifyPlanMountAgainstRuntime("mounts.content_snapshots."+kind, mount, runtimeMounts[mountName]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func verifyDriverConfigMountPlanEvidence(object, mounts map[string]any, runtimeMounts map[string]runtime.MountPlanMount) error {
+	driver, err := requireObject(object, "driver")
+	if err != nil {
+		return err
+	}
+	driverID := strings.TrimSpace(stringField(driver, "driver_id"))
+	specs := agents.DriverConfigMaterializationSpecsFor(agents.ID(driverID))
+	if len(specs) == 0 {
+		return verifyNoDriverConfigRuntimeMounts(runtimeMounts)
+	}
+	materializedMounts, ok := mounts["driver_config_materializations"].(map[string]any)
+	if !ok || len(materializedMounts) == 0 {
+		return fmt.Errorf("generation plan mounts.driver_config_materializations is required for driver %s", driverID)
+	}
+	artifacts, err := requireObject(object, "runtime_artifacts")
+	if err != nil {
+		return err
+	}
+	entries, err := materializedDriverConfigArtifacts(artifacts, strings.TrimSpace(stringField(artifacts, "control_dir_path")))
+	if err != nil {
+		return err
+	}
+	entriesByName := map[string]runtime.DriverConfigMaterialization{}
+	for _, entry := range entries {
+		entriesByName[entry.Name] = entry
+	}
+	specsByName := map[string]agents.DriverConfigMaterializationSpec{}
+	for _, spec := range specs {
+		specsByName[spec.Name] = spec
+	}
+	names := sortedMapKeys(materializedMounts)
+	for _, name := range names {
+		mount, ok := materializedMounts[name].(map[string]any)
+		if !ok {
+			return fmt.Errorf("generation plan mounts.driver_config_materializations.%s must be an object", name)
+		}
+		entry, ok := entriesByName[name]
+		if !ok {
+			return fmt.Errorf("generation plan mounts.driver_config_materializations.%s runtime artifact is required", name)
+		}
+		spec, ok := specsByName[name]
+		if !ok {
+			return fmt.Errorf("generation plan mounts.driver_config_materializations.%s is unsupported for driver %s", name, driverID)
+		}
+		expected := map[string]any{
+			"source":      entry.HostSourcePath,
+			"destination": entry.SandboxDestination,
+			"mode":        stringField(mount, "mode"),
+			"type":        stringField(mount, "type"),
+			"exact":       boolField(mount, "exact"),
+		}
+		if err := verifyPlanMountAgainstRuntime("mounts.driver_config_materializations."+name, expected, runtimeMounts[spec.MountName]); err != nil {
+			return err
+		}
+	}
+	if len(names) != len(specs) {
+		return fmt.Errorf("generation plan mounts.driver_config_materializations missing required driver %s mounts", driverID)
+	}
+	return nil
+}
+
+func verifyNoDriverConfigRuntimeMounts(runtimeMounts map[string]runtime.MountPlanMount) error {
+	for _, spec := range agents.AllDriverConfigMaterializationSpecs() {
+		if _, ok := runtimeMounts[spec.MountName]; ok {
+			return fmt.Errorf("generation plan mounts.driver_config_materializations runtime mount %s must be absent", spec.MountName)
+		}
+	}
+	return nil
+}
+
+func verifyPlanMountAgainstRuntime(label string, planMount map[string]any, runtimeMount runtime.MountPlanMount) error {
+	if strings.TrimSpace(runtimeMount.Name) == "" {
+		return fmt.Errorf("generation plan %s runtime mount is required", label)
+	}
+	checks := []struct {
+		field string
+		got   string
+		want  string
+	}{
+		{"source", runtimeMount.Source, stringField(planMount, "source")},
+		{"destination", runtimeMount.Destination, stringField(planMount, "destination")},
+		{"mode", runtimeMount.Mode, stringField(planMount, "mode")},
+	}
+	for _, check := range checks {
+		if strings.TrimSpace(check.got) != strings.TrimSpace(check.want) {
+			return fmt.Errorf("generation plan %s.%s mismatch", label, check.field)
+		}
+	}
+	if _, ok := planMount["type"]; ok && strings.TrimSpace(runtimeMount.Type) != strings.TrimSpace(stringField(planMount, "type")) {
+		return fmt.Errorf("generation plan %s.type mismatch", label)
+	}
+	if _, ok := planMount["exact"]; ok && runtimeMountExact(runtimeMount) != boolField(planMount, "exact") {
+		return fmt.Errorf("generation plan %s.exact mismatch", label)
+	}
+	return nil
+}
+
+func runtimeMountExact(mount runtime.MountPlanMount) bool {
+	if mount.Type != "bind" {
+		return false
+	}
+	for _, option := range mount.Options {
+		if option == "rbind" {
+			return false
+		}
+	}
+	return true
+}
+
+func sortedMapKeys(values map[string]any) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func VerifySourceDigestEvidence(p VerifySourceDigestEvidenceParams) error {

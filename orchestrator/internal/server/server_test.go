@@ -3807,6 +3807,38 @@ func TestVerifyGenerationPlanRuntimeArtifactPathsChecksStoredPlan(t *testing.T) 
 	}
 }
 
+func TestVerifyGenerationPlanMountPlanEvidenceChecksStoredPlan(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, _ := openServerOwnedStore(t, ctx, dir)
+	srv := &Server{store: st}
+	storeServerFrozenEvidencePlan(t, ctx, st, dir, validServerGenerationPlanPayload())
+
+	details := store.RuntimeGenerationDetails{
+		GenerationID:   "gen_frozen_evidence",
+		DriverID:       "claude_code",
+		ControlDirPath: "/var/lib/harness/run/control/gen_frozen_evidence",
+		BridgeDirPath:  "/var/lib/harness/run/bridge/gen_frozen_evidence",
+	}
+	volumes := sessionRuntimeDataVolumes{
+		Workspace: store.SessionWorkspaceVolume{
+			HostPath: "/var/lib/harness/sessions/sess_frozen_evidence",
+		},
+		DriverHome: store.SessionDriverHomeVolume{
+			HostPath: "/var/lib/harness/agent-homes/sess_frozen_evidence/claude_code",
+		},
+	}
+	if err := srv.verifyGenerationPlanMountPlanEvidence(ctx, "gen_frozen_evidence", details, volumes, nil); err != nil {
+		t.Fatalf("verify mount plan evidence: %v", err)
+	}
+
+	volumes.Workspace.HostPath = "/var/lib/harness/sessions/changed"
+	if err := srv.verifyGenerationPlanMountPlanEvidence(ctx, "gen_frozen_evidence", details, volumes, nil); err == nil ||
+		!strings.Contains(err.Error(), "mounts.workspace.source mismatch") {
+		t.Fatalf("expected workspace mount mismatch, got %v", err)
+	}
+}
+
 func TestVerifyGenerationPlanRuntimeResourceEvidenceChecksStoredPlan(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

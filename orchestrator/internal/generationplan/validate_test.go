@@ -622,6 +622,62 @@ func TestVerifyRuntimeArtifactPathEvidenceChecksFrozenPaths(t *testing.T) {
 	}
 }
 
+func TestVerifyMountPlanEvidenceChecksRuntimeMountPlan(t *testing.T) {
+	payload := validPlanPayload()
+	mountPlan := mountPlanForPayload(t, payload, nil)
+	if err := VerifyMountPlanEvidence(VerifyMountPlanEvidenceParams{Payload: payload, MountPlan: mountPlan}); err != nil {
+		t.Fatalf("verify mount plan evidence: %v", err)
+	}
+
+	mutated := mountPlanForPayload(t, payload, nil)
+	mutateMountSource(t, &mutated, "workspace", "/var/lib/harness/sessions/changed")
+	if err := VerifyMountPlanEvidence(VerifyMountPlanEvidenceParams{Payload: payload, MountPlan: mutated}); err == nil ||
+		!strings.Contains(err.Error(), "mounts.workspace.source mismatch") {
+		t.Fatalf("expected workspace mount mismatch, got %v", err)
+	}
+}
+
+func TestVerifyMountPlanEvidenceChecksContentSnapshotMounts(t *testing.T) {
+	payload := validPlanPayload()
+	skills := validSkillsSnapshotPayload()
+	payload["content_snapshots"].(map[string]any)["skills"] = skills
+	addSkillsSnapshotMount(payload, skills)
+	snapshots := []store.ContentSnapshotRecord{{
+		Kind:                 store.ContentSnapshotKindSkills,
+		Digest:               "sha256:skills",
+		ImmutableHostPath:    "/var/lib/harness/content/skills/sha256-skills",
+		MountDestination:     store.ContentSnapshotSkillsMount,
+		SourceEvidenceDigest: "sha256:source",
+		RetentionClass:       "active",
+	}}
+	mountPlan := mountPlanForPayload(t, payload, snapshots)
+	if err := VerifyMountPlanEvidence(VerifyMountPlanEvidenceParams{Payload: payload, MountPlan: mountPlan}); err != nil {
+		t.Fatalf("verify content snapshot mount plan evidence: %v", err)
+	}
+
+	mutated := mountPlanForPayload(t, payload, snapshots)
+	mutateMountSource(t, &mutated, "skills_snapshot", "/var/lib/harness/content/skills/changed")
+	if err := VerifyMountPlanEvidence(VerifyMountPlanEvidenceParams{Payload: payload, MountPlan: mutated}); err == nil ||
+		!strings.Contains(err.Error(), "mounts.content_snapshots.skills.source mismatch") {
+		t.Fatalf("expected skills snapshot mount mismatch, got %v", err)
+	}
+}
+
+func TestVerifyMountPlanEvidenceChecksDriverConfigMounts(t *testing.T) {
+	payload := validPiPlanPayload(t)
+	mountPlan := mountPlanForPayload(t, payload, nil)
+	if err := VerifyMountPlanEvidence(VerifyMountPlanEvidenceParams{Payload: payload, MountPlan: mountPlan}); err != nil {
+		t.Fatalf("verify driver config mount plan evidence: %v", err)
+	}
+
+	mutated := mountPlanForPayload(t, payload, nil)
+	mutateMountSource(t, &mutated, "pi_settings_config", "/var/lib/harness/run/control/gen_plan/driver/pi/changed.json")
+	if err := VerifyMountPlanEvidence(VerifyMountPlanEvidenceParams{Payload: payload, MountPlan: mutated}); err == nil ||
+		!strings.Contains(err.Error(), "mounts.driver_config_materializations.settings.source mismatch") {
+		t.Fatalf("expected driver config mount mismatch, got %v", err)
+	}
+}
+
 func TestVerifyRuntimeResourceEvidenceChecksFrozenIdentityDigest(t *testing.T) {
 	payload := validPlanPayload()
 	params := VerifyRuntimeResourceEvidenceParams{
@@ -1019,6 +1075,43 @@ func addContentSnapshotMount(payload map[string]any, kind, mountName string, sna
 	}
 	workspace := payload["data_volumes"].(map[string]any)["workspace"].(map[string]any)
 	workspace["platform_content_mount_scope"] = "immutable_content_snapshots"
+}
+
+func mountPlanForPayload(t *testing.T, payload map[string]any, snapshots []store.ContentSnapshotRecord) runtime.MountPlan {
+	t.Helper()
+	driver := payload["driver"].(map[string]any)
+	artifacts := payload["runtime_artifacts"].(map[string]any)
+	volumes := payload["data_volumes"].(map[string]any)
+	workspace := volumes["workspace"].(map[string]any)
+	agentHome := volumes["agent_home"].(map[string]any)
+	details := store.RuntimeGenerationDetails{
+		DriverID:         driver["driver_id"].(string),
+		ControlDirPath:   artifacts["control_dir_path"].(string),
+		BridgeDirPath:    artifacts["bridge_dir_path"].(string),
+		NetworkHostsPath: stringValue(artifacts["network_hosts_path"]),
+	}
+	mountPlan, err := runtime.BuildSandboxMountPlan(runtime.SandboxMountPlanInputs{
+		Generation:        details,
+		WorkspaceHostPath: workspace["host_path"].(string),
+		AgentHomeHostPath: agentHome["host_path"].(string),
+		NetworkHostsPath:  details.NetworkHostsPath,
+		ContentSnapshots:  snapshots,
+	})
+	if err != nil {
+		t.Fatalf("build runtime mount plan: %v", err)
+	}
+	return mountPlan
+}
+
+func mutateMountSource(t *testing.T, mountPlan *runtime.MountPlan, name, source string) {
+	t.Helper()
+	for i := range mountPlan.Content {
+		if mountPlan.Content[i].Name == name {
+			mountPlan.Content[i].Source = source
+			return
+		}
+	}
+	t.Fatalf("runtime mount %s not found in %+v", name, mountPlan.Content)
 }
 
 func validVolumePayload(hostPath, markerPath, destination string) map[string]any {
