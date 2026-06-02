@@ -3858,6 +3858,33 @@ WHERE generation_id = ?`, string(canonical), store.GenerationPlanDigest(canonica
 	}
 }
 
+func TestGenerationContentSnapshotsForStartValidatesStoredPlan(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, _ := openServerOwnedStore(t, ctx, dir)
+	srv := &Server{store: st}
+	storeServerFrozenEvidencePlan(t, ctx, st, dir, validServerGenerationPlanPayload())
+
+	payload := validServerGenerationPlanPayload()
+	payload["runtime_artifacts"].(map[string]any)["materialized_driver_config"] = "invalid"
+	canonical, err := store.CanonicalGenerationPlanPayload(payload)
+	if err != nil {
+		t.Fatalf("canonical invalid generation plan payload: %v", err)
+	}
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE generation_plans
+SET canonical_payload = ?,
+    plan_digest = ?
+WHERE generation_id = ?`, string(canonical), store.GenerationPlanDigest(canonical), "gen_frozen_evidence"); err != nil {
+		t.Fatalf("corrupt generation plan payload: %v", err)
+	}
+
+	_, err = srv.generationContentSnapshotsForStart(ctx, store.Session{}, store.RuntimeGenerationDetails{GenerationID: "gen_frozen_evidence"}, false)
+	if err == nil || !strings.Contains(err.Error(), "runtime_artifacts.materialized_driver_config must be an array") {
+		t.Fatalf("expected stored plan validation error, got %v", err)
+	}
+}
+
 func TestRuntimeResourceInstanceCheckpointRestoreTransitions(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

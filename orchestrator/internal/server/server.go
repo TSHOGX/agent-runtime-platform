@@ -1469,6 +1469,9 @@ func (s *Server) generationContentSnapshotsForStart(ctx context.Context, session
 	if err != nil {
 		return nil, err
 	}
+	if err := generationplan.Validate(generationplan.ValidateParams{Payload: plan.CanonicalPayload}); err != nil {
+		return nil, err
+	}
 	return s.generationPlanContentSnapshotRecords(ctx, plan.CanonicalPayload)
 }
 
