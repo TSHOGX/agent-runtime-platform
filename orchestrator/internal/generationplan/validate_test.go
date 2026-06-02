@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"harness-platform/orchestrator/internal/agents"
+	"harness-platform/orchestrator/internal/runtime"
 	"harness-platform/orchestrator/internal/store"
 )
 
@@ -53,6 +54,27 @@ func TestRenderFeaturePolicyPayloadUsesTypedCapabilities(t *testing.T) {
 	plan["feature_policy"] = payload
 	if err := Validate(ValidateParams{Payload: plan}); err != nil {
 		t.Fatalf("rendered feature policy should validate: %v", err)
+	}
+}
+
+func TestMaterializedDriverConfigPayloadIsPlanEvidence(t *testing.T) {
+	payload := MaterializedDriverConfigPayload([]runtime.DriverConfigMaterialization{
+		{
+			Name:                        "settings",
+			SourceProjectionPath:        "/harness-control/driver/pi/settings.json",
+			SourceDigest:                "sha256:settings",
+			SandboxDestination:          "/home/pi/.config/settings.json",
+			DestinationMutableBySandbox: false,
+		},
+	})
+	if len(payload) != 1 ||
+		payload[0]["name"] != "settings" ||
+		payload[0]["source_projection_path"] != "/harness-control/driver/pi/settings.json" ||
+		payload[0]["source_digest"] != "sha256:settings" ||
+		payload[0]["sandbox_destination"] != "/home/pi/.config/settings.json" ||
+		payload[0]["destination_mutable_by_sandbox"] != false ||
+		payload[0]["projection_materialization_kind"] != "driver_config" {
+		t.Fatalf("unexpected materialized driver config payload: %+v", payload)
 	}
 }
 

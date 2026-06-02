@@ -1658,7 +1658,7 @@ func (s *Server) shadowGenerationPlanPayload(session store.Session, details stor
 			"bridge_dir_path":                      details.BridgeDirPath,
 			"log_dir_path":                         details.LogDirPath,
 			"network_hosts_path":                   nullableProjectionPath(details.NetworkHostsPath),
-			"materialized_driver_config":           materializedDriverConfigPayload(artifacts.MaterializedDriverConfig),
+			"materialized_driver_config":           generationplan.MaterializedDriverConfigPayload(artifacts.MaterializedDriverConfig),
 			"resource_identity_digest":             resourceIdentityDigest,
 			"sandbox_contract_id":                  sandboxContractID(details.GenerationID),
 			"sandbox_contract_payload_digest":      planprojection.SandboxContractPayloadDigest(sandboxContractPayload),
@@ -1670,21 +1670,6 @@ func (s *Server) shadowGenerationPlanPayload(session store.Session, details stor
 		"projection_digests":  projections,
 		"mutable_state_scope": map[string]any{"leases": "runtime_generations", "events": "events", "checkpoint_state": "runtime_generations"},
 	}, nil
-}
-
-func materializedDriverConfigPayload(entries []runtime.DriverConfigMaterialization) []map[string]any {
-	payload := make([]map[string]any, 0, len(entries))
-	for _, entry := range entries {
-		payload = append(payload, map[string]any{
-			"name":                            entry.Name,
-			"source_projection_path":          entry.SourceProjectionPath,
-			"source_digest":                   entry.SourceDigest,
-			"sandbox_destination":             entry.SandboxDestination,
-			"destination_mutable_by_sandbox":  entry.DestinationMutableBySandbox,
-			"projection_materialization_kind": "driver_config",
-		})
-	}
-	return payload
 }
 
 func durationSeconds(duration time.Duration) string {
