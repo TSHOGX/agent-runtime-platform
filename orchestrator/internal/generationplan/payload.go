@@ -117,7 +117,11 @@ func RenderPayload(p RenderPayloadParams) (map[string]any, error) {
 	}
 	platformContentMountScope := strings.TrimSpace(p.PlatformContentMountScope)
 	if platformContentMountScope == "" {
-		platformContentMountScope = "none"
+		if len(p.ContentSnapshots) > 0 {
+			platformContentMountScope = "immutable_content_snapshots"
+		} else {
+			platformContentMountScope = "none"
+		}
 	}
 	mutableLeasesScope := strings.TrimSpace(p.MutableLeasesScope)
 	if mutableLeasesScope == "" {

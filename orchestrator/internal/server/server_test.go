@@ -3600,6 +3600,8 @@ func TestVerifyGenerationPlanFrozenEvidenceChecksContentSnapshots(t *testing.T) 
 			"digest":      "sha256:skills",
 		},
 	}
+	workspaceVolume := planPayload["data_volumes"].(map[string]any)["workspace"].(map[string]any)
+	workspaceVolume["platform_content_mount_scope"] = "immutable_content_snapshots"
 	plan := storeServerFrozenEvidencePlan(t, ctx, st, dir, planPayload)
 	if _, err := st.StoreContentSnapshot(ctx, store.StoreContentSnapshotParams{
 		Kind:                 store.ContentSnapshotKindSkills,

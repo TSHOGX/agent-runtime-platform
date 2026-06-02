@@ -236,6 +236,21 @@ func TestValidateRequiresSkillsSnapshotMountEvidence(t *testing.T) {
 	}
 }
 
+func TestValidateRequiresContentSnapshotMountScope(t *testing.T) {
+	payload := validPlanPayload()
+	contentSnapshots := payload["content_snapshots"].(map[string]any)
+	skills := validSkillsSnapshotPayload()
+	contentSnapshots["skills"] = skills
+	addSkillsSnapshotMount(payload, skills)
+	workspace := payload["data_volumes"].(map[string]any)["workspace"].(map[string]any)
+	workspace["platform_content_mount_scope"] = "none"
+
+	err := Validate(ValidateParams{Payload: payload})
+	if err == nil || !strings.Contains(err.Error(), "platform_content_mount_scope must be immutable_content_snapshots") {
+		t.Fatalf("expected content snapshot mount scope error, got %v", err)
+	}
+}
+
 func TestValidateRejectsMalformedLegacyProjectionDigestShape(t *testing.T) {
 	payload := validPlanPayload()
 	payload["projection_digests"] = validProjectionPayload()
@@ -613,6 +628,8 @@ func addSkillsSnapshotMount(payload map[string]any, snapshot map[string]any) {
 			"digest":      snapshot["digest"],
 		},
 	}
+	workspace := payload["data_volumes"].(map[string]any)["workspace"].(map[string]any)
+	workspace["platform_content_mount_scope"] = "immutable_content_snapshots"
 }
 
 func validVolumePayload(hostPath, markerPath, destination string) map[string]any {

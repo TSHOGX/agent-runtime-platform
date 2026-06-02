@@ -521,7 +521,7 @@ func validateContentSnapshots(object map[string]any) error {
 			}
 		}
 	}
-	return nil
+	return validateContentSnapshotMountScope(object, snapshots)
 }
 
 func validateContentSnapshot(name string, snapshot map[string]any) error {
@@ -582,6 +582,31 @@ func validateSkillsSnapshotMountEvidence(object map[string]any, snapshot map[str
 	}
 	if boolField(mount, "exact") != true {
 		return fmt.Errorf("generation plan mounts.content_snapshots.skills.exact must be true")
+	}
+	return nil
+}
+
+func validateContentSnapshotMountScope(object map[string]any, snapshots map[string]any) error {
+	hasSnapshot := false
+	for _, value := range snapshots {
+		if _, ok := value.(map[string]any); ok {
+			hasSnapshot = true
+			break
+		}
+	}
+	if !hasSnapshot {
+		return nil
+	}
+	dataVolumes, err := requireObject(object, "data_volumes")
+	if err != nil {
+		return err
+	}
+	workspace, err := requireObject(dataVolumes, "workspace")
+	if err != nil {
+		return err
+	}
+	if stringField(workspace, "platform_content_mount_scope") != "immutable_content_snapshots" {
+		return fmt.Errorf("generation plan data_volumes.workspace.platform_content_mount_scope must be immutable_content_snapshots when content snapshots are mounted")
 	}
 	return nil
 }
