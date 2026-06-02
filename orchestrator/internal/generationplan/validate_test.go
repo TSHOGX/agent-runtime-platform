@@ -403,15 +403,13 @@ func TestValidateRequiredContentSnapshotSelections(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsMalformedLegacyProjectionDigestShape(t *testing.T) {
+func TestValidateRejectsEmbeddedProjectionDigests(t *testing.T) {
 	payload := validPlanPayload()
-	payload["projection_digests"] = validProjectionPayload()
-	projections := payload["projection_digests"].(map[string]any)
-	projections["oci_spec"].(map[string]any)["payload_digest"] = "spec_digest"
+	payload["projection_digests"] = map[string]any{}
 
 	err := Validate(ValidateParams{Payload: payload})
-	if err == nil || !strings.Contains(err.Error(), "projection_digests.oci_spec.payload_digest is required") {
-		t.Fatalf("expected projection digest error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "projection_digests must be stored outside the plan") {
+		t.Fatalf("expected embedded projection digest error, got %v", err)
 	}
 }
 
@@ -1011,16 +1009,5 @@ func validVolumePayload(hostPath, markerPath, destination string) map[string]any
 		"sandbox_supplemental_gids":    []int{},
 		"artifact_watcher_scope":       "workspace_only",
 		"platform_content_mount_scope": "none",
-	}
-}
-
-func validProjectionPayload() map[string]any {
-	return map[string]any{
-		"sandbox_contract":           map[string]any{"projection_version": 1, "payload_digest": "sha256:sandbox-contract", "materialized_path": nil},
-		"control_manifest":           map[string]any{"projection_version": 1, "payload_digest": "sha256:control-manifest", "materialized_path": "/var/lib/harness/run/control/gen_plan/session.json"},
-		"control_manifest_projected": map[string]any{"projection_version": 1, "payload_digest": "sha256:control-manifest-projected", "materialized_path": "/var/lib/harness/run/control/gen_plan/session.json"},
-		"oci_spec":                   map[string]any{"projection_version": 1, "payload_digest": "sha256:oci-spec", "materialized_path": "/var/lib/harness/run/runtime/gen_plan/config.json"},
-		"bundle":                     map[string]any{"projection_version": 1, "payload_digest": "sha256:bundle", "materialized_path": "/var/lib/harness/run/runtime/gen_plan"},
-		"runtime_config":             map[string]any{"projection_version": 1, "payload_digest": "sha256:runtime-config", "materialized_path": nil},
 	}
 }

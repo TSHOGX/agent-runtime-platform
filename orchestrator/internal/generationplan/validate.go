@@ -1043,29 +1043,8 @@ func validateSourceDigests(object map[string]any) error {
 }
 
 func validateProjectionDigests(object map[string]any) error {
-	value, ok := object["projection_digests"]
-	if !ok || value == nil {
-		return nil
-	}
-	projections, ok := value.(map[string]any)
-	if !ok {
-		return fmt.Errorf("generation plan projection_digests must be an object")
-	}
-	for _, kind := range store.GenerationPlanProjectionKinds() {
-		projection, err := requireObject(projections, kind)
-		if err != nil {
-			return err
-		}
-		version, _ := store.GenerationPlanProjectionVersionFor(kind)
-		if numberField(projection, "projection_version") != int64(version) {
-			return fmt.Errorf("generation plan projection_digests.%s.projection_version = %d, want %d", kind, numberField(projection, "projection_version"), version)
-		}
-		if !isSha256(stringField(projection, "payload_digest")) {
-			return fmt.Errorf("generation plan projection_digests.%s.payload_digest is required", kind)
-		}
-		if path := optionalStringField(projection, "materialized_path"); path != "" && !filepath.IsAbs(path) {
-			return fmt.Errorf("generation plan projection_digests.%s.materialized_path must be absolute", kind)
-		}
+	if _, ok := object["projection_digests"]; ok {
+		return fmt.Errorf("generation plan projection_digests must be stored outside the plan")
 	}
 	return nil
 }
