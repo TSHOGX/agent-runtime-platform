@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +18,178 @@ import (
 	"harness-platform/orchestrator/internal/sessionstate"
 	"harness-platform/orchestrator/internal/store"
 )
+
+func TestExistingStartVerifiesStoredGenerationPlanEvidence(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_plan_verify_start", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
+	cfg := testServerConfig(dir)
+	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     store.GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    serverTestAllocatorConfig(cfg, "claude_code"),
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	rt := &recordingRuntime{}
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: rt,
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+	if err := srv.startEnsuredGeneration(ctx, session, ensuredGeneration{Allocation: allocation, IsNew: true}, startFailureInputAcceptable); err != nil {
+		t.Fatalf("initial start: %v", err)
+	}
+	if err := st.UpdateSessionStatusAndActivity(ctx, session.ID, string(sessionstate.RunningIdle), nil, time.Now().UTC()); err != nil {
+		t.Fatalf("mark session idle: %v", err)
+	}
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE runtime_generations
+SET status = 'idle'
+WHERE generation_id = ?`, allocation.GenerationID); err != nil {
+		t.Fatalf("mark generation idle: %v", err)
+	}
+	plan, err := st.GetGenerationPlan(ctx, allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get generation plan: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(plan.CanonicalPayload, &payload); err != nil {
+		t.Fatalf("decode generation plan: %v", err)
+	}
+	payload["runsc_pin"].(map[string]any)["binary_digest"] = "sha256:changed-runsc"
+	canonical, err := store.CanonicalGenerationPlanPayload(payload)
+	if err != nil {
+		t.Fatalf("canonical corrupt plan: %v", err)
+	}
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE generation_plans
+SET canonical_payload = ?,
+    plan_digest = ?
+WHERE generation_id = ?`, string(canonical), store.GenerationPlanDigest(canonical), allocation.GenerationID); err != nil {
+		t.Fatalf("corrupt stored plan: %v", err)
+	}
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE generation_plan_projections
+SET plan_digest = ?
+WHERE generation_id = ?`, store.GenerationPlanDigest(canonical), allocation.GenerationID); err != nil {
+		t.Fatalf("align corrupt plan projection digests: %v", err)
+	}
+	rt = &recordingRuntime{}
+	srv = &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: rt,
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(`{"content":"hello"}`))
+	rec := httptest.NewRecorder()
+	srv.sendMessage(rec, req, session.ID)
+	if rec.Code != http.StatusInternalServerError ||
+		!strings.Contains(rec.Body.String(), "generation plan runsc pin mismatch") {
+		t.Fatalf("expected frozen evidence failure, got status %d body %s", rec.Code, rec.Body.String())
+	}
+	_, starts := rt.requests()
+	if len(starts) != 0 {
+		t.Fatalf("runtime start should not run after frozen evidence mismatch: %+v", starts)
+	}
+}
+
+func TestFreshStartStoresGenerationPlanBeforeMaterializationAndNetworkPrepare(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_plan_before_network", string(sessionstate.Created), time.Now().UTC(), nil)
+	rt := &planOrderRuntime{store: st, t: t}
+	srv := &Server{
+		cfg:     testServerConfig(dir),
+		store:   st,
+		runtime: rt,
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(`{"content":"hello"}`))
+	rec := httptest.NewRecorder()
+	srv.sendMessage(rec, req, session.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status 202, got %d body %s", rec.Code, rec.Body.String())
+	}
+	if !rt.planSeenBeforeMaterializeRender {
+		t.Fatalf("runtime artifact materialization render ran before generation plan rows were stored")
+	}
+	if !rt.planSeenBeforeMaterialize {
+		t.Fatalf("runtime artifact materialization ran before generation plan rows were stored")
+	}
+	if !rt.projectionVerificationBeforeMaterialize {
+		t.Fatalf("runtime artifact materialization ran before generation plan projections were verified")
+	}
+	if !rt.runtimeResourceClaimedBeforeMaterialize {
+		t.Fatalf("runtime artifact materialization ran before claiming the runtime resource")
+	}
+	if !rt.planSeenBeforeNetwork {
+		t.Fatalf("network preparation ran before generation plan rows were stored")
+	}
+	if !rt.projectionVerificationObserved {
+		t.Fatalf("network preparation ran before generation plan projections were verified")
+	}
+	if !rt.runtimeResourceClaimedBeforeNetwork {
+		t.Fatalf("network preparation ran before claiming the runtime resource")
+	}
+}
+
+func TestFreshStartReverifiesStoredGenerationPlanProjectionsBeforeMaterialization(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_projection_reverify_materialize", string(sessionstate.Created), time.Now().UTC(), nil)
+	cfg := testServerConfig(dir)
+	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     store.GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    serverTestAllocatorConfig(cfg, session.DriverID),
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	rt := &corruptProjectionBeforeMaterializeRuntime{store: st, t: t}
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: rt,
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+
+	err = srv.startEnsuredGeneration(ctx, session, ensuredGeneration{Allocation: allocation, IsNew: true}, startFailureInputAcceptable)
+	if err == nil || !strings.Contains(err.Error(), "generation plan projection bundle digest mismatch") {
+		t.Fatalf("expected pre-materialization projection mismatch, got %v", err)
+	}
+	if !rt.corrupted {
+		t.Fatalf("test runtime did not corrupt stored projection row")
+	}
+	if rt.materialized {
+		t.Fatalf("materialization should not run after stored projection mismatch")
+	}
+}
 
 func TestVerifyStoredGenerationPlanProjectionsChecksExistingRows(t *testing.T) {
 	ctx := context.Background()
