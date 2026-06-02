@@ -6766,6 +6766,14 @@ WHERE id = ?`, sessionID).Scan(&mode); err != nil {
 	} else {
 		runtimeArtifacts["network_hosts_path"] = details.NetworkHostsPath
 	}
+	mounts := payload["mounts"].(map[string]any)
+	mounts["control"].(map[string]any)["source"] = details.ControlDirPath
+	mounts["bridge"].(map[string]any)["source"] = details.BridgeDirPath
+	if strings.TrimSpace(details.NetworkHostsPath) == "" {
+		mounts["network_hosts_path"] = nil
+	} else {
+		mounts["network_hosts_path"] = details.NetworkHostsPath
+	}
 	payload["feature_policy"] = featurePolicyPayload
 	plan, err := st.StoreGenerationPlan(ctx, store.StoreGenerationPlanParams{
 		GenerationID: generationID,

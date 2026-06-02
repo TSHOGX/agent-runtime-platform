@@ -352,6 +352,30 @@ func TestValidateRequiresManagedSettingsSnapshotMountEvidence(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsBaseMountEvidenceDrift(t *testing.T) {
+	payload := validPlanPayload()
+	mounts := payload["mounts"].(map[string]any)
+	mounts["workspace"].(map[string]any)["source"] = "/var/lib/harness/sessions/other"
+
+	err := Validate(ValidateParams{Payload: payload})
+	if err == nil || !strings.Contains(err.Error(), "mounts.workspace.source mismatch") {
+		t.Fatalf("expected workspace mount source mismatch, got %v", err)
+	}
+}
+
+func TestValidateRejectsNetworkHostsMountEvidenceDrift(t *testing.T) {
+	payload := validPlanPayload()
+	mounts := payload["mounts"].(map[string]any)
+	runtimeArtifacts := payload["runtime_artifacts"].(map[string]any)
+	mounts["network_hosts_path"] = "/var/lib/harness/run/network/gen_plan/hosts"
+	runtimeArtifacts["network_hosts_path"] = "/var/lib/harness/run/network/gen_plan/hosts.changed"
+
+	err := Validate(ValidateParams{Payload: payload})
+	if err == nil || !strings.Contains(err.Error(), "mounts.network_hosts_path mismatch") {
+		t.Fatalf("expected network hosts mount mismatch, got %v", err)
+	}
+}
+
 func TestValidateRequiredContentSnapshotSelections(t *testing.T) {
 	policy := map[string]any{
 		string(agents.FeatureSkillsSnapshot):  string(agents.FeaturePolicyRequired),
