@@ -132,6 +132,17 @@ func RenderPayload(p RenderPayloadParams) (map[string]any, error) {
 	if mutableCheckpointStateScope == "" {
 		mutableCheckpointStateScope = "runtime_generations"
 	}
+	mountsPayload := map[string]any{
+		"workspace":                      mountPlan["workspace"],
+		"agent_home":                     mountPlan["agent_home"],
+		"control":                        mountPlan["control"],
+		"bridge":                         mountPlan["bridge"],
+		"network_hosts_path":             nullablePath(details.NetworkHostsPath),
+		"driver_config_materializations": mountPlan["driver_config_materializations"],
+	}
+	if contentSnapshotMounts, ok := mountPlan["content_snapshots"]; ok {
+		mountsPayload["content_snapshots"] = contentSnapshotMounts
+	}
 	projections := map[string]any{}
 	for _, projection := range p.ProjectionRows {
 		projections[projection.ProjectionKind] = map[string]any{
@@ -251,14 +262,7 @@ func RenderPayload(p RenderPayloadParams) (map[string]any, error) {
 				"sandbox_supplemental_gids":  append([]int(nil), p.Volumes.DriverHome.SandboxSupplementalGIDs...),
 			},
 		},
-		"mounts": map[string]any{
-			"workspace":                      mountPlan["workspace"],
-			"agent_home":                     mountPlan["agent_home"],
-			"control":                        mountPlan["control"],
-			"bridge":                         mountPlan["bridge"],
-			"network_hosts_path":             nullablePath(details.NetworkHostsPath),
-			"driver_config_materializations": mountPlan["driver_config_materializations"],
-		},
+		"mounts": mountsPayload,
 		"runtime_artifacts": map[string]any{
 			"control_dir_path":                     details.ControlDirPath,
 			"control_manifest_path":                details.ControlManifestPath,

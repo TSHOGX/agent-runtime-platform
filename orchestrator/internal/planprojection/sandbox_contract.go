@@ -115,6 +115,7 @@ type SandboxContractParams struct {
 	DriverSpec                  agents.DriverSpec
 	ProviderSpec                agents.RuntimeProviderSpec
 	InputDigests                SandboxContractInputDigests
+	ContentSnapshots            []store.ContentSnapshotRecord
 }
 
 func RenderSandboxContract(p SandboxContractParams) (map[string]any, error) {
@@ -155,6 +156,13 @@ func RenderSandboxContract(p SandboxContractParams) (map[string]any, error) {
 	}
 	if strings.TrimSpace(details.NetworkHostsPath) != "" {
 		mountPlan["network_hosts"] = map[string]any{"source": details.NetworkHostsPath, "destination": "/etc/hosts", "mode": "ro"}
+	}
+	contentSnapshotMounts, err := ContentSnapshotMountPayload(p.ContentSnapshots)
+	if err != nil {
+		return nil, err
+	}
+	if len(contentSnapshotMounts) > 0 {
+		mountPlan["content_snapshots"] = contentSnapshotMounts
 	}
 	materializedDriverConfig, mountMaterializations, err := DriverConfigMaterializationPayload(driverID, p.Artifacts.MaterializedDriverConfig)
 	if err != nil {
@@ -377,4 +385,52 @@ func RenderSandboxContract(p SandboxContractParams) (map[string]any, error) {
 			"agent_manifest_digest": p.InputDigests.AgentManifestDigest,
 		},
 	}, nil
+}
+
+func ContentSnapshotMountPayload(records []store.ContentSnapshotRecord) (map[string]any, error) {
+	out := map[string]any{}
+	seen := map[string]struct{}{}
+	for _, record := range records {
+		kind := strings.TrimSpace(record.Kind)
+		switch kind {
+		case store.ContentSnapshotKindSkills:
+		case "":
+			return nil, fmt.Errorf("content snapshot kind is required")
+		default:
+			return nil, fmt.Errorf("unsupported content snapshot kind %q for sandbox contract mount plan", record.Kind)
+		}
+		if _, ok := seen[kind]; ok {
+			return nil, fmt.Errorf("duplicate content snapshot kind %q for sandbox contract mount plan", kind)
+		}
+		seen[kind] = struct{}{}
+		if strings.TrimSpace(record.Digest) == "" || !strings.HasPrefix(strings.TrimSpace(record.Digest), "sha256:") {
+			return nil, fmt.Errorf("content snapshot %s digest is required", kind)
+		}
+		source := strings.TrimSpace(record.ImmutableHostPath)
+		if source == "" || !filepath.IsAbs(source) {
+			return nil, fmt.Errorf("content snapshot %s immutable host path must be absolute", kind)
+		}
+		destination := strings.TrimSpace(record.MountDestination)
+		if destination != store.ContentSnapshotSkillsMount {
+			return nil, fmt.Errorf("content snapshot %s mount destination must be %s", kind, store.ContentSnapshotSkillsMount)
+		}
+		if strings.TrimSpace(record.SourceEvidenceDigest) == "" || !strings.HasPrefix(strings.TrimSpace(record.SourceEvidenceDigest), "sha256:") {
+			return nil, fmt.Errorf("content snapshot %s source evidence digest is required", kind)
+		}
+		if strings.TrimSpace(record.RetentionClass) == "" {
+			return nil, fmt.Errorf("content snapshot %s retention class is required", kind)
+		}
+		out[kind] = map[string]any{
+			"mount_name":             "skills_snapshot",
+			"type":                   "bind",
+			"mode":                   "ro",
+			"exact":                  true,
+			"source":                 filepath.Clean(source),
+			"destination":            destination,
+			"digest":                 strings.TrimSpace(record.Digest),
+			"source_evidence_digest": strings.TrimSpace(record.SourceEvidenceDigest),
+			"retention_class":        strings.TrimSpace(record.RetentionClass),
+		}
+	}
+	return out, nil
 }
