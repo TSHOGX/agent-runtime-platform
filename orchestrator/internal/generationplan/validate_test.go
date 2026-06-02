@@ -242,6 +242,16 @@ func TestContentSnapshotRefsExtractsPlanSnapshotDigests(t *testing.T) {
 	if len(refs) != 1 || refs["skills"] != "sha256:skills" {
 		t.Fatalf("content snapshot refs = %+v", refs)
 	}
+	fullRefs := ContentSnapshotReferences(canonical)
+	if len(fullRefs) != 1 ||
+		fullRefs["skills"].Kind != "skills" ||
+		fullRefs["skills"].Digest != "sha256:skills" ||
+		fullRefs["skills"].ImmutableHostPath != "/var/lib/harness/content/skills/sha256-skills" ||
+		fullRefs["skills"].MountDestination != "/harness-skills" ||
+		fullRefs["skills"].SourceEvidenceDigest != "sha256:source" ||
+		fullRefs["skills"].RetentionClass != "active" {
+		t.Fatalf("content snapshot full refs = %+v", fullRefs)
+	}
 }
 
 func TestOptionalProjectionPayloadDigest(t *testing.T) {

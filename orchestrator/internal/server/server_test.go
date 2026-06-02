@@ -3557,6 +3557,25 @@ func TestVerifyGenerationPlanFrozenEvidenceChecksContentSnapshots(t *testing.T) 
 	}
 
 	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE content_snapshots
+SET mount_destination = '/harness-skills-drifted'
+WHERE snapshot_kind = ?
+  AND snapshot_digest = ?`, store.ContentSnapshotKindSkills, "sha256:skills"); err != nil {
+		t.Fatalf("mutate stored content snapshot: %v", err)
+	}
+	if err := srv.verifyGenerationPlanFrozenEvidence(ctx, "gen_frozen_evidence", details, artifacts); err == nil ||
+		!strings.Contains(err.Error(), "content snapshot skills mount_destination mismatch") {
+		t.Fatalf("expected content snapshot metadata mismatch, got %v", err)
+	}
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE content_snapshots
+SET mount_destination = '/harness-skills'
+WHERE snapshot_kind = ?
+  AND snapshot_digest = ?`, store.ContentSnapshotKindSkills, "sha256:skills"); err != nil {
+		t.Fatalf("restore stored content snapshot: %v", err)
+	}
+
+	if _, err := st.DBForTest().ExecContext(ctx, `
 DELETE FROM content_snapshots
 WHERE snapshot_kind = ?
   AND snapshot_digest = ?`, store.ContentSnapshotKindSkills, "sha256:skills"); err != nil {

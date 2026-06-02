@@ -1702,16 +1702,40 @@ func (s *Server) storedGenerationPlanProjectionEvidence(ctx context.Context, gen
 }
 
 func (s *Server) generationPlanContentSnapshotDigests(ctx context.Context, payload []byte) (map[string]string, error) {
-	refs := generationplan.ContentSnapshotRefs(payload)
+	refs := generationplan.ContentSnapshotReferences(payload)
 	out := map[string]string{}
-	for kind, digest := range refs {
-		record, err := s.store.GetContentSnapshot(ctx, kind, digest)
+	for kind, ref := range refs {
+		record, err := s.store.GetContentSnapshot(ctx, kind, ref.Digest)
 		if err != nil {
 			return nil, fmt.Errorf("generation plan content snapshot %s: %w", kind, err)
+		}
+		if err := verifyGenerationPlanContentSnapshotRef(kind, ref, record); err != nil {
+			return nil, err
 		}
 		out[kind] = record.Digest
 	}
 	return out, nil
+}
+
+func verifyGenerationPlanContentSnapshotRef(kind string, ref generationplan.ContentSnapshotRef, record store.ContentSnapshotRecord) error {
+	checks := []struct {
+		field string
+		got   string
+		want  string
+	}{
+		{"kind", ref.Kind, record.Kind},
+		{"digest", ref.Digest, record.Digest},
+		{"immutable_host_path", ref.ImmutableHostPath, record.ImmutableHostPath},
+		{"mount_destination", ref.MountDestination, record.MountDestination},
+		{"source_evidence_digest", ref.SourceEvidenceDigest, record.SourceEvidenceDigest},
+		{"retention_class", ref.RetentionClass, record.RetentionClass},
+	}
+	for _, check := range checks {
+		if strings.TrimSpace(check.got) != strings.TrimSpace(check.want) {
+			return fmt.Errorf("generation plan content snapshot %s %s mismatch: got %s want %s", kind, check.field, check.got, check.want)
+		}
+	}
+	return nil
 }
 
 func (s *Server) runtimeResourceInstanceParams(details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, hostID string) (store.RuntimeResourceInstanceParams, error) {
