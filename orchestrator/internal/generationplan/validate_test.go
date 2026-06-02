@@ -44,6 +44,35 @@ func TestValidateRejectsMutableContentSnapshotReference(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsContentSnapshotKindMismatch(t *testing.T) {
+	payload := validPlanPayload()
+	contentSnapshots := payload["content_snapshots"].(map[string]any)
+	contentSnapshots["managed_settings"] = map[string]any{
+		"kind":                   "skills",
+		"digest":                 "sha256:settings",
+		"immutable_host_path":    "/var/lib/harness/content/managed-settings/sha256-settings",
+		"mount_destination":      "/harness-managed-settings",
+		"source_evidence_digest": "sha256:source",
+		"retention_class":        "active",
+	}
+
+	err := Validate(ValidateParams{Payload: payload})
+	if err == nil || !strings.Contains(err.Error(), "content_snapshots.managed_settings.kind must be managed_settings") {
+		t.Fatalf("expected content snapshot kind error, got %v", err)
+	}
+}
+
+func TestValidateRejectsUnsupportedContentSnapshotKey(t *testing.T) {
+	payload := validPlanPayload()
+	contentSnapshots := payload["content_snapshots"].(map[string]any)
+	contentSnapshots["workspace"] = nil
+
+	err := Validate(ValidateParams{Payload: payload})
+	if err == nil || !strings.Contains(err.Error(), "content_snapshots.workspace is unsupported") {
+		t.Fatalf("expected content snapshot key error, got %v", err)
+	}
+}
+
 func TestValidateRejectsProjectionDigestShape(t *testing.T) {
 	payload := validPlanPayload()
 	projections := payload["projection_digests"].(map[string]any)

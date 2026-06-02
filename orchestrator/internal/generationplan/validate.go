@@ -405,6 +405,12 @@ func validateContentSnapshots(object map[string]any) error {
 	if err != nil {
 		return err
 	}
+	allowed := map[string]bool{"skills": true, "managed_settings": true}
+	for key := range snapshots {
+		if !allowed[key] {
+			return fmt.Errorf("generation plan content_snapshots.%s is unsupported", key)
+		}
+	}
 	for _, key := range []string{"skills", "managed_settings"} {
 		value, ok := snapshots[key]
 		if !ok {
@@ -429,6 +435,9 @@ func validateContentSnapshot(name string, snapshot map[string]any) error {
 		if strings.TrimSpace(stringField(snapshot, key)) == "" {
 			return fmt.Errorf("generation plan content_snapshots.%s.%s is required", name, key)
 		}
+	}
+	if strings.TrimSpace(stringField(snapshot, "kind")) != name {
+		return fmt.Errorf("generation plan content_snapshots.%s.kind must be %s", name, name)
 	}
 	for _, key := range []string{"digest", "source_evidence_digest"} {
 		if !isSha256(stringField(snapshot, key)) {
