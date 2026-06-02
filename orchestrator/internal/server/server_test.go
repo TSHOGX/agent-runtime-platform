@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -6100,6 +6101,13 @@ func (r *planOrderRuntime) requireStoredPlanAndMaterializationClaim(ctx context.
 	plan, err := r.store.GetGenerationPlan(ctx, req.GenerationID)
 	if err != nil {
 		return fmt.Errorf("get generation plan before %s: %w", phase, err)
+	}
+	planArtifacts, err := generationplan.RuntimeArtifacts(plan.CanonicalPayload)
+	if err != nil {
+		return fmt.Errorf("read generation plan runtime artifacts before %s: %w", phase, err)
+	}
+	if !reflect.DeepEqual(req.PreparedArtifacts, planArtifacts) {
+		return fmt.Errorf("prepared artifacts before %s did not come from stored plan: got %+v want %+v", phase, req.PreparedArtifacts, planArtifacts)
 	}
 	projections, err := r.store.ListGenerationPlanProjections(ctx, req.GenerationID)
 	if err != nil {

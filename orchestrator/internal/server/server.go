@@ -727,6 +727,15 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 			return err
 		}
+		preparedArtifacts, err = s.generationPlanRuntimeArtifacts(ctx, allocation.GenerationID)
+		if err != nil {
+			if leaseErr := leaseKeeper.err(); leaseErr != nil {
+				return leaseErr
+			}
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+			return err
+		}
+		artifactProjection.Artifacts = preparedArtifacts
 		if err := leaseKeeper.ensureOwned(); err != nil {
 			return err
 		}
