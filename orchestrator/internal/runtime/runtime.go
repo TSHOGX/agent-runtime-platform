@@ -24,6 +24,7 @@ import (
 
 	"harness-platform/orchestrator/internal/agents"
 	"harness-platform/orchestrator/internal/bridge"
+	"harness-platform/orchestrator/internal/driveradapter"
 	"harness-platform/orchestrator/internal/store"
 )
 
@@ -1230,7 +1231,7 @@ func (r *Runtime) writeNetworkHostsProjection(details store.RuntimeGenerationDet
 func (r *Runtime) writeDriverConfigProjection(req StartRequest) ([]DriverConfigMaterialization, error) {
 	driver := agents.ID(strings.TrimSpace(driverID(req)))
 	specs := agents.DriverConfigMaterializationSpecsFor(driver)
-	renderer, ok := driverConfigProjectionRenderers[driver]
+	renderer, ok := driveradapter.ConfigProjectionRendererFor(driver)
 	if len(specs) == 0 {
 		if ok {
 			return nil, fmt.Errorf("%s driver config materialization specs are missing", driver)
@@ -1269,66 +1270,6 @@ func (r *Runtime) writeDriverConfigProjection(req StartRequest) ([]DriverConfigM
 		entries[i].SourceDigest = prefixedSHA256(payload)
 	}
 	return entries, nil
-}
-
-type driverConfigProjectionRenderer func(store.RuntimeGenerationDetails) (map[string]any, error)
-
-var driverConfigProjectionRenderers = map[agents.ID]driverConfigProjectionRenderer{
-	agents.Pi: renderPiDriverConfigProjection,
-}
-
-func renderPiDriverConfigProjection(details store.RuntimeGenerationDetails) (map[string]any, error) {
-	projection, err := buildPiDriverConfigProjection(details)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{
-		"models":   projection.Models,
-		"settings": projection.Settings,
-	}, nil
-}
-
-type piDriverConfigProjection struct {
-	Models   map[string]any
-	Settings map[string]any
-}
-
-func buildPiDriverConfigProjection(details store.RuntimeGenerationDetails) (piDriverConfigProjection, error) {
-	model := strings.TrimSpace(details.Model)
-	if model == "" {
-		return piDriverConfigProjection{}, fmt.Errorf("pi model is required")
-	}
-	baseURL := strings.TrimSpace(details.ManifestAnthropicBaseURL)
-	if baseURL == "" {
-		return piDriverConfigProjection{}, fmt.Errorf("pi sandbox model proxy base url is required")
-	}
-	return piDriverConfigProjection{
-		Models: map[string]any{
-			"providers": map[string]any{
-				agents.PiHarnessProxyProvider: map[string]any{
-					"baseUrl": baseURL,
-					"api":     "anthropic-messages",
-					"apiKey":  "harness-model-proxy-dummy-key",
-					"models": []map[string]any{
-						{
-							"id": model,
-						},
-					},
-				},
-			},
-		},
-		Settings: map[string]any{
-			"schema_version":      1,
-			"coding_agent_dir":    agents.PiCodingAgentDir,
-			"session_dir":         agents.PiSessionDir,
-			"offline":             true,
-			"skip_version_check":  true,
-			"telemetry":           false,
-			"provider":            agents.PiHarnessProxyProvider,
-			"model":               model,
-			"production_sessions": true,
-		},
-	}, nil
 }
 
 func renderNetworkHostsProjection(details store.RuntimeGenerationDetails) ([]byte, error) {

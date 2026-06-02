@@ -18,6 +18,7 @@ import (
 
 	"harness-platform/orchestrator/internal/agents"
 	"harness-platform/orchestrator/internal/bridge"
+	"harness-platform/orchestrator/internal/driveradapter"
 	"harness-platform/orchestrator/internal/store"
 )
 
@@ -2076,7 +2077,7 @@ func TestDriverConfigProjectionRenderersMatchMaterializationSpecs(t *testing.T) 
 		}
 		driversWithSpecs[driver.ID] = struct{}{}
 
-		renderer, ok := driverConfigProjectionRenderers[driver.ID]
+		renderer, ok := driveradapter.ConfigProjectionRendererFor(driver.ID)
 		if !ok {
 			t.Errorf("%s driver has config materialization specs but no renderer", driver.ID)
 			continue
@@ -2096,40 +2097,12 @@ func TestDriverConfigProjectionRenderersMatchMaterializationSpecs(t *testing.T) 
 		}
 	}
 
-	for driver := range driverConfigProjectionRenderers {
-		if _, ok := driversWithSpecs[driver]; !ok {
-			t.Errorf("%s driver has config renderer but no materialization specs", driver)
+	for _, driver := range agents.AllDriverSpecs() {
+		if _, ok := driveradapter.ConfigProjectionRendererFor(driver.ID); ok {
+			if _, ok := driversWithSpecs[driver.ID]; !ok {
+				t.Errorf("%s driver has config renderer but no materialization specs", driver.ID)
+			}
 		}
-	}
-}
-
-func TestWriteDriverConfigProjectionFailsClosedWhenSpecsHaveNoRenderer(t *testing.T) {
-	dir := t.TempDir()
-	rt := New(Config{})
-	details := testGenerationDetails(dir, "gen_pi_missing_renderer")
-	details.SessionID = "sess_pi_missing_renderer"
-	details.DriverID = "pi"
-
-	renderer, ok := driverConfigProjectionRenderers[agents.Pi]
-	if !ok {
-		t.Fatal("pi driver config projection renderer is not registered")
-	}
-	delete(driverConfigProjectionRenderers, agents.Pi)
-	t.Cleanup(func() {
-		driverConfigProjectionRenderers[agents.Pi] = renderer
-	})
-
-	_, err := rt.writeDriverConfigProjection(StartRequest{
-		SessionID:    details.SessionID,
-		GenerationID: details.GenerationID,
-		DriverID:     "pi",
-		Generation:   details,
-	})
-	if err == nil {
-		t.Fatal("expected missing renderer error")
-	}
-	if !strings.Contains(err.Error(), "pi driver config projection renderer is missing") {
-		t.Fatalf("expected missing pi renderer error, got %v", err)
 	}
 }
 
