@@ -309,11 +309,17 @@ func scanContentSnapshot(row scanner) (ContentSnapshotRecord, error) {
 	if record.SourceEvidenceDigest == "" || !strings.HasPrefix(record.SourceEvidenceDigest, "sha256:") {
 		return ContentSnapshotRecord{}, fmt.Errorf("content snapshot source evidence digest is invalid")
 	}
-	if record.ImmutableHostPath == "" || !filepath.IsAbs(record.ImmutableHostPath) {
-		return ContentSnapshotRecord{}, fmt.Errorf("content snapshot immutable host path is invalid")
+	if record.ImmutableHostPath == "" ||
+		strings.TrimSpace(record.ImmutableHostPath) != record.ImmutableHostPath ||
+		!filepath.IsAbs(record.ImmutableHostPath) ||
+		filepath.Clean(record.ImmutableHostPath) != record.ImmutableHostPath {
+		return ContentSnapshotRecord{}, fmt.Errorf("content snapshot immutable host path must be canonical absolute")
 	}
-	if record.MountDestination == "" || !filepath.IsAbs(record.MountDestination) {
-		return ContentSnapshotRecord{}, fmt.Errorf("content snapshot mount destination is invalid")
+	if record.MountDestination == "" ||
+		strings.TrimSpace(record.MountDestination) != record.MountDestination ||
+		!filepath.IsAbs(record.MountDestination) ||
+		filepath.Clean(record.MountDestination) != record.MountDestination {
+		return ContentSnapshotRecord{}, fmt.Errorf("content snapshot mount destination must be canonical absolute")
 	}
 	if record.Kind == ContentSnapshotKindSkills && record.MountDestination != ContentSnapshotSkillsMount {
 		return ContentSnapshotRecord{}, fmt.Errorf("skills content snapshot mount destination must be %s", ContentSnapshotSkillsMount)

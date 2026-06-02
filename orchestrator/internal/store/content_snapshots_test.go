@@ -345,6 +345,67 @@ WHERE snapshot_kind = ?
 	}
 }
 
+func TestGetContentSnapshotRejectsCorruptCanonicalPaths(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		column string
+		value  string
+		want   string
+	}{
+		{
+			name:   "unclean host path",
+			column: "immutable_host_path",
+			value:  "/var/lib/harness/content/skills/../skills-current",
+			want:   "content snapshot immutable host path must be canonical absolute",
+		},
+		{
+			name:   "host path whitespace",
+			column: "immutable_host_path",
+			value:  "/var/lib/harness/content/skills/sha256-skills ",
+			want:   "content snapshot immutable host path must be canonical absolute",
+		},
+		{
+			name:   "unclean mount destination",
+			column: "mount_destination",
+			value:  "/harness-skills/..",
+			want:   "content snapshot mount destination must be canonical absolute",
+		},
+		{
+			name:   "mount destination whitespace",
+			column: "mount_destination",
+			value:  "/harness-skills ",
+			want:   "content snapshot mount destination must be canonical absolute",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+			if err != nil {
+				t.Fatalf("open: %v", err)
+			}
+			t.Cleanup(func() { _ = st.Close() })
+			if _, err := st.StoreContentSnapshot(ctx, StoreContentSnapshotParams{
+				Kind:                 ContentSnapshotKindSkills,
+				Digest:               "sha256:skills",
+				ImmutableHostPath:    "/var/lib/harness/content/skills/sha256-skills",
+				MountDestination:     ContentSnapshotSkillsMount,
+				SourceEvidenceDigest: "sha256:skills-source",
+				RetentionClass:       "generation_plan",
+			}); err != nil {
+				t.Fatalf("store skills snapshot: %v", err)
+			}
+			query := "UPDATE content_snapshots SET " + tt.column + " = ? WHERE snapshot_kind = ? AND snapshot_digest = ?"
+			if _, err := st.DBForTest().ExecContext(ctx, query, tt.value, ContentSnapshotKindSkills, "sha256:skills"); err != nil {
+				t.Fatalf("corrupt %s: %v", tt.column, err)
+			}
+			if _, err := st.GetContentSnapshot(ctx, ContentSnapshotKindSkills, "sha256:skills"); err == nil ||
+				!strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected corrupt canonical path rejection %q, got %v", tt.want, err)
+			}
+		})
+	}
+}
+
 func TestGetContentSnapshotNoRows(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
