@@ -1632,6 +1632,45 @@ func TestFreshStartStoresGenerationPlanBeforeMaterializationAndNetworkPrepare(t 
 	}
 }
 
+func TestFreshStartReverifiesStoredGenerationPlanProjectionsBeforeMaterialization(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_projection_reverify_materialize", string(sessionstate.Created), time.Now().UTC(), nil)
+	cfg := testServerConfig(dir)
+	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     store.GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    serverTestAllocatorConfig(cfg, session.DriverID),
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	rt := &corruptProjectionBeforeMaterializeRuntime{store: st, t: t}
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: rt,
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+
+	err = srv.startEnsuredGeneration(ctx, session, ensuredGeneration{Allocation: allocation, IsNew: true}, startFailureInputAcceptable)
+	if err == nil || !strings.Contains(err.Error(), "generation plan projection bundle digest mismatch") {
+		t.Fatalf("expected pre-materialization projection mismatch, got %v", err)
+	}
+	if !rt.corrupted {
+		t.Fatalf("test runtime did not corrupt stored projection row")
+	}
+	if rt.materialized {
+		t.Fatalf("materialization should not run after stored projection mismatch")
+	}
+}
+
 func TestSendMessageReusesActiveGenerationArtifacts(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -6073,6 +6112,14 @@ type planOrderRuntime struct {
 	runtimeResourceClaimedBeforeMaterialize bool
 }
 
+type corruptProjectionBeforeMaterializeRuntime struct {
+	recordingRuntime
+	store        *store.Store
+	t            *testing.T
+	corrupted    bool
+	materialized bool
+}
+
 func (r *planOrderRuntime) RenderGenerationArtifacts(ctx context.Context, req runtime.StartRequest) (runtime.GenerationArtifactProjection, error) {
 	r.t.Helper()
 	projection, err := r.recordingRuntime.RenderGenerationArtifacts(ctx, req)
@@ -6094,6 +6141,42 @@ func (r *planOrderRuntime) RenderGenerationArtifacts(ctx context.Context, req ru
 		r.planSeenBeforeMaterializeRender = true
 	}
 	return projection, nil
+}
+
+func (r *corruptProjectionBeforeMaterializeRuntime) RenderGenerationArtifacts(ctx context.Context, req runtime.StartRequest) (runtime.GenerationArtifactProjection, error) {
+	r.t.Helper()
+	projection, err := r.recordingRuntime.RenderGenerationArtifacts(ctx, req)
+	if err != nil {
+		return runtime.GenerationArtifactProjection{}, err
+	}
+	plan, err := r.store.GetGenerationPlan(ctx, req.GenerationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return projection, nil
+	}
+	if err != nil {
+		return runtime.GenerationArtifactProjection{}, fmt.Errorf("get generation plan before corrupting projection: %w", err)
+	}
+	planArtifacts, err := generationplan.RuntimeArtifacts(plan.CanonicalPayload)
+	if err != nil {
+		return runtime.GenerationArtifactProjection{}, fmt.Errorf("read generation plan runtime artifacts before corrupting projection: %w", err)
+	}
+	if r.corrupted || !reflect.DeepEqual(req.PreparedArtifacts, planArtifacts) {
+		return projection, nil
+	}
+	if _, err := r.store.DBForTest().ExecContext(ctx, `
+UPDATE generation_plan_projections
+SET payload_digest = 'sha256:changed-before-materialize'
+WHERE generation_id = ?
+  AND projection_kind = ?`, req.GenerationID, store.GenerationPlanProjectionBundle); err != nil {
+		return runtime.GenerationArtifactProjection{}, fmt.Errorf("corrupt generation plan projection before materialize: %w", err)
+	}
+	r.corrupted = true
+	return projection, nil
+}
+
+func (r *corruptProjectionBeforeMaterializeRuntime) MaterializeGenerationArtifacts(req runtime.StartRequest, projection runtime.GenerationArtifactProjection) error {
+	r.materialized = true
+	return r.recordingRuntime.MaterializeGenerationArtifacts(req, projection)
 }
 
 type blockingPrepareRuntime struct {
