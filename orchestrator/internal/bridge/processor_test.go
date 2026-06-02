@@ -2,6 +2,8 @@ package bridge
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +16,8 @@ import (
 	"harness-platform/orchestrator/internal/sessionstate"
 	"harness-platform/orchestrator/internal/store"
 )
+
+const checkpointImageManifestDigestForBridgeTest = "sha256:checkpoint-image-manifest"
 
 func TestProcessorRequiresHelloAndProbeBeforeClaimGrant(t *testing.T) {
 	ctx := context.Background()
@@ -346,6 +350,7 @@ func TestProcessorRequiresProbeBeforeRestoredGenerationClaimsTurn(t *testing.T) 
 		t.Fatalf("record generation artifacts: %v", err)
 	}
 	now := time.Now().UTC()
+	storeBridgeCheckpointTestGenerationPlan(t, ctx, st, allocation.GenerationID)
 	markBridgeGenerationCheckpointed(t, ctx, st, sessionID, allocation.GenerationID, now)
 	restoring, err := st.ClaimCheckpointedGenerationForRestore(ctx, store.ClaimCheckpointedGenerationParams{
 		SessionID:    sessionID,
@@ -1648,6 +1653,10 @@ func bridgePostStartProofForTest(instance store.RuntimeResourceInstance) *store.
 func markBridgeGenerationCheckpointed(t *testing.T, ctx context.Context, st *store.Store, sessionID, generationID string, now time.Time) {
 	t.Helper()
 	fence := bridgeCheckpointDriverStateFenceForTest(t, ctx, st, sessionID, generationID)
+	plan, err := st.GetGenerationPlan(ctx, generationID)
+	if err != nil {
+		t.Fatalf("get checkpoint generation plan: %v", err)
+	}
 	if _, err := st.DBForTest().ExecContext(ctx, `
 UPDATE runtime_generations
 SET status = 'checkpointed',
@@ -1656,19 +1665,39 @@ SET status = 'checkpointed',
     checkpoint_agent_runtime_profile_id = agent_runtime_profile_id,
     checkpoint_runsc_version = runsc_version,
     checkpoint_runsc_platform = runsc_platform,
-    checkpoint_bundle_digest = 'bundle_digest',
-    checkpoint_runtime_config_digest = 'runtime_config_digest',
+    checkpoint_runsc_binary_path = (
+      SELECT runsc_binary_path
+      FROM runtime_generation_resources
+      WHERE runtime_generation_resources.generation_id = runtime_generations.generation_id
+    ),
+    checkpoint_runsc_binary_digest = (
+      SELECT runsc_binary_digest
+      FROM runtime_generation_resources
+      WHERE runtime_generation_resources.generation_id = runtime_generations.generation_id
+    ),
+    checkpoint_bundle_digest = (
+      SELECT bundle_digest
+      FROM runtime_generation_resources
+      WHERE runtime_generation_resources.generation_id = runtime_generations.generation_id
+    ),
+    checkpoint_runtime_config_digest = (
+      SELECT runtime_config_digest
+      FROM runtime_generation_resources
+      WHERE runtime_generation_resources.generation_id = runtime_generations.generation_id
+    ),
     checkpoint_control_manifest_digest = (
-      SELECT control_manifest_digest
+      SELECT projected_control_manifest_digest
       FROM runtime_generation_resources
       WHERE runtime_generation_resources.generation_id = runtime_generations.generation_id
     ),
     checkpoint_driver_states_digest = ?,
+    checkpoint_plan_digest = ?,
+    checkpoint_image_manifest_digest = ?,
     lease_owner = NULL,
     lease_expires_at = NULL,
     last_seen_at = ?
 WHERE generation_id = ?
-  AND session_id = ?`, formatStoreTimeForBridgeTest(now), fence, formatStoreTimeForBridgeTest(now), generationID, sessionID); err != nil {
+  AND session_id = ?`, formatStoreTimeForBridgeTest(now), fence, plan.PlanDigest, checkpointImageManifestDigestForBridgeTest, formatStoreTimeForBridgeTest(now), generationID, sessionID); err != nil {
 		t.Fatalf("set checkpointed generation: %v", err)
 	}
 	if _, err := st.DBForTest().ExecContext(ctx, `
@@ -1687,6 +1716,94 @@ WHERE generation_id = ?`, generationID); err != nil {
 	if err := st.UpdateSessionStatus(ctx, sessionID, string(sessionstate.Checkpointed), nil); err != nil {
 		t.Fatalf("set checkpointed session: %v", err)
 	}
+}
+
+func storeBridgeCheckpointTestGenerationPlan(t *testing.T, ctx context.Context, st *store.Store, generationID string) store.GenerationPlanRecord {
+	t.Helper()
+	plan, err := st.StoreGenerationPlan(ctx, store.StoreGenerationPlanParams{
+		GenerationID: generationID,
+		Payload:      map[string]any{"generation_id": generationID, "plan_version": store.GenerationPlanVersion},
+	})
+	if err != nil {
+		t.Fatalf("store generation plan for %s: %v", generationID, err)
+	}
+
+	var controlManifest, projectedControlManifest, spec, bundle, runtimeConfig string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT COALESCE(control_manifest_digest, ''),
+       COALESCE(projected_control_manifest_digest, ''),
+       COALESCE(spec_digest, ''),
+       COALESCE(bundle_digest, ''),
+       COALESCE(runtime_config_digest, '')
+FROM runtime_generation_resources
+WHERE generation_id = ?`, generationID).Scan(
+		&controlManifest,
+		&projectedControlManifest,
+		&spec,
+		&bundle,
+		&runtimeConfig,
+	); err != nil {
+		t.Fatalf("query generation artifact digests for %s: %v", generationID, err)
+	}
+
+	for _, projection := range []store.StoreGenerationPlanProjectionParams{
+		{
+			GenerationID:      generationID,
+			PlanDigest:        plan.PlanDigest,
+			ProjectionKind:    store.GenerationPlanProjectionSandboxContract,
+			ProjectionVersion: store.GenerationPlanProjectionVersion,
+			PayloadDigest:     "sha256:sandbox-contract",
+		},
+		{
+			GenerationID:      generationID,
+			PlanDigest:        plan.PlanDigest,
+			ProjectionKind:    store.GenerationPlanProjectionControlManifest,
+			ProjectionVersion: store.GenerationPlanProjectionVersion,
+			PayloadDigest:     bridgeProjectionPayloadDigest(store.GenerationPlanProjectionControlManifest, controlManifest),
+		},
+		{
+			GenerationID:      generationID,
+			PlanDigest:        plan.PlanDigest,
+			ProjectionKind:    store.GenerationPlanProjectionControlManifestProjected,
+			ProjectionVersion: store.GenerationPlanProjectionVersion,
+			PayloadDigest:     bridgeProjectionPayloadDigest(store.GenerationPlanProjectionControlManifestProjected, projectedControlManifest),
+		},
+		{
+			GenerationID:      generationID,
+			PlanDigest:        plan.PlanDigest,
+			ProjectionKind:    store.GenerationPlanProjectionOCISpec,
+			ProjectionVersion: store.GenerationPlanProjectionVersion,
+			PayloadDigest:     bridgeProjectionPayloadDigest(store.GenerationPlanProjectionOCISpec, spec),
+		},
+		{
+			GenerationID:      generationID,
+			PlanDigest:        plan.PlanDigest,
+			ProjectionKind:    store.GenerationPlanProjectionBundle,
+			ProjectionVersion: store.GenerationPlanProjectionVersion,
+			PayloadDigest:     bridgeProjectionPayloadDigest(store.GenerationPlanProjectionBundle, bundle),
+		},
+		{
+			GenerationID:      generationID,
+			PlanDigest:        plan.PlanDigest,
+			ProjectionKind:    store.GenerationPlanProjectionRuntimeConfig,
+			ProjectionVersion: store.GenerationPlanProjectionVersion,
+			PayloadDigest:     bridgeProjectionPayloadDigest(store.GenerationPlanProjectionRuntimeConfig, runtimeConfig),
+		},
+	} {
+		if _, err := st.StoreGenerationPlanProjection(ctx, projection); err != nil {
+			t.Fatalf("store generation plan projection %s for %s: %v", projection.ProjectionKind, generationID, err)
+		}
+	}
+	return plan
+}
+
+func bridgeProjectionPayloadDigest(kind, digest string) string {
+	value := strings.TrimSpace(digest)
+	if strings.HasPrefix(value, "sha256:") {
+		return value
+	}
+	sum := sha256.Sum256([]byte(strings.TrimSpace(kind) + "\n" + value))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func bridgeCheckpointDriverStateFenceForTest(t *testing.T, ctx context.Context, st *store.Store, sessionID, generationID string) string {
