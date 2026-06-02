@@ -189,14 +189,14 @@ func validateContentSnapshotParams(p StoreContentSnapshotParams) error {
 	if p.ImmutableHostPath == "" {
 		return fmt.Errorf("content snapshot immutable host path is required")
 	}
-	if !filepath.IsAbs(p.ImmutableHostPath) {
-		return fmt.Errorf("content snapshot immutable host path must be absolute")
+	if !filepath.IsAbs(p.ImmutableHostPath) || filepath.Clean(p.ImmutableHostPath) != p.ImmutableHostPath {
+		return fmt.Errorf("content snapshot immutable host path must be canonical absolute")
 	}
 	if p.MountDestination == "" {
 		return fmt.Errorf("content snapshot mount destination is required")
 	}
-	if !filepath.IsAbs(p.MountDestination) {
-		return fmt.Errorf("content snapshot mount destination must be absolute")
+	if !filepath.IsAbs(p.MountDestination) || filepath.Clean(p.MountDestination) != p.MountDestination {
+		return fmt.Errorf("content snapshot mount destination must be canonical absolute")
 	}
 	if p.Kind == ContentSnapshotKindSkills && p.MountDestination != ContentSnapshotSkillsMount {
 		return fmt.Errorf("skills content snapshot mount destination must be %s", ContentSnapshotSkillsMount)

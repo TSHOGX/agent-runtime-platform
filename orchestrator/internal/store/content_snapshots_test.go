@@ -201,8 +201,12 @@ func TestStoreContentSnapshotRejectsInvalidReferences(t *testing.T) {
 	}{
 		{name: "kind", edit: func(p *StoreContentSnapshotParams) { p.Kind = "workspace" }, want: "unsupported content snapshot kind"},
 		{name: "digest", edit: func(p *StoreContentSnapshotParams) { p.Digest = "skills" }, want: "content snapshot digest is required"},
-		{name: "host path", edit: func(p *StoreContentSnapshotParams) { p.ImmutableHostPath = "relative/skills" }, want: "immutable host path must be absolute"},
-		{name: "mount destination", edit: func(p *StoreContentSnapshotParams) { p.MountDestination = "harness-skills" }, want: "mount destination must be absolute"},
+		{name: "relative host path", edit: func(p *StoreContentSnapshotParams) { p.ImmutableHostPath = "relative/skills" }, want: "immutable host path must be canonical absolute"},
+		{name: "unclean host path", edit: func(p *StoreContentSnapshotParams) {
+			p.ImmutableHostPath = "/var/lib/harness/content/skills/../skills-current"
+		}, want: "immutable host path must be canonical absolute"},
+		{name: "relative mount destination", edit: func(p *StoreContentSnapshotParams) { p.MountDestination = "harness-skills" }, want: "mount destination must be canonical absolute"},
+		{name: "unclean mount destination", edit: func(p *StoreContentSnapshotParams) { p.MountDestination = "/harness-skills/.." }, want: "mount destination must be canonical absolute"},
 		{name: "skills mount destination", edit: func(p *StoreContentSnapshotParams) { p.MountDestination = "/other-skills" }, want: "skills content snapshot mount destination must be /harness-skills"},
 		{name: "source evidence", edit: func(p *StoreContentSnapshotParams) { p.SourceEvidenceDigest = "source" }, want: "source evidence digest is required"},
 		{name: "retention class", edit: func(p *StoreContentSnapshotParams) { p.RetentionClass = "" }, want: "retention class is required"},
