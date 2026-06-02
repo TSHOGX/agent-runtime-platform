@@ -197,6 +197,9 @@ func scanContentSnapshot(row scanner) (ContentSnapshotRecord, error) {
 	if record.MountDestination == "" || !filepath.IsAbs(record.MountDestination) {
 		return ContentSnapshotRecord{}, fmt.Errorf("content snapshot mount destination is invalid")
 	}
+	if record.Kind == ContentSnapshotKindSkills && record.MountDestination != ContentSnapshotSkillsMount {
+		return ContentSnapshotRecord{}, fmt.Errorf("skills content snapshot mount destination must be %s", ContentSnapshotSkillsMount)
+	}
 	if record.RetentionClass == "" {
 		return ContentSnapshotRecord{}, fmt.Errorf("content snapshot retention class is invalid")
 	}

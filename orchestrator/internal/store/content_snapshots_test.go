@@ -146,6 +146,36 @@ func TestStoreContentSnapshotRejectsInvalidReferences(t *testing.T) {
 	}
 }
 
+func TestGetContentSnapshotRejectsCorruptSkillsMountDestination(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if _, err := st.StoreContentSnapshot(ctx, StoreContentSnapshotParams{
+		Kind:                 ContentSnapshotKindSkills,
+		Digest:               "sha256:skills",
+		ImmutableHostPath:    "/var/lib/harness/content/skills/sha256-skills",
+		MountDestination:     ContentSnapshotSkillsMount,
+		SourceEvidenceDigest: "sha256:skills-source",
+		RetentionClass:       "generation_plan",
+	}); err != nil {
+		t.Fatalf("store skills snapshot: %v", err)
+	}
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE content_snapshots
+SET mount_destination = '/other-skills'
+WHERE snapshot_kind = ?
+  AND snapshot_digest = ?`, ContentSnapshotKindSkills, "sha256:skills"); err != nil {
+		t.Fatalf("corrupt skills mount destination: %v", err)
+	}
+	if _, err := st.GetContentSnapshot(ctx, ContentSnapshotKindSkills, "sha256:skills"); err == nil ||
+		!strings.Contains(err.Error(), "skills content snapshot mount destination must be /harness-skills") {
+		t.Fatalf("expected corrupt skills mount rejection, got %v", err)
+	}
+}
+
 func TestGetContentSnapshotNoRows(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))

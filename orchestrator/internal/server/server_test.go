@@ -3739,7 +3739,7 @@ WHERE snapshot_kind = ?
 		t.Fatalf("mutate stored content snapshot: %v", err)
 	}
 	if err := srv.verifyGenerationPlanFrozenEvidence(ctx, "gen_frozen_evidence", details, artifacts); err == nil ||
-		!strings.Contains(err.Error(), "content snapshot skills mount_destination mismatch") {
+		!strings.Contains(err.Error(), "skills content snapshot mount destination must be /harness-skills") {
 		t.Fatalf("expected content snapshot metadata mismatch, got %v", err)
 	}
 	if _, err := st.DBForTest().ExecContext(ctx, `
