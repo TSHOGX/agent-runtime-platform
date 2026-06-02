@@ -213,20 +213,53 @@ func TestRenderContentSnapshotsPayloadRejectsInvalidSelection(t *testing.T) {
 }
 
 func TestValidateRejectsMutableContentSnapshotReference(t *testing.T) {
-	payload := validPlanPayload()
-	contentSnapshots := payload["content_snapshots"].(map[string]any)
-	contentSnapshots["skills"] = map[string]any{
-		"kind":                   "skills",
-		"digest":                 "sha256:skills",
-		"immutable_host_path":    "relative/path",
-		"mount_destination":      "/harness-skills",
-		"source_evidence_digest": "sha256:source",
-		"retention_class":        "active",
-	}
+	for _, tc := range []struct {
+		name string
+		edit func(map[string]any)
+		want string
+	}{
+		{
+			name: "relative host path",
+			edit: func(snapshot map[string]any) { snapshot["immutable_host_path"] = "relative/path" },
+			want: "content_snapshots.skills.immutable_host_path must be canonical absolute",
+		},
+		{
+			name: "unclean host path",
+			edit: func(snapshot map[string]any) {
+				snapshot["immutable_host_path"] = "/var/lib/harness/content/skills/../skills-current"
+			},
+			want: "content_snapshots.skills.immutable_host_path must be canonical absolute",
+		},
+		{
+			name: "relative mount destination",
+			edit: func(snapshot map[string]any) { snapshot["mount_destination"] = "harness-skills" },
+			want: "content_snapshots.skills.mount_destination must be canonical absolute",
+		},
+		{
+			name: "unclean mount destination",
+			edit: func(snapshot map[string]any) { snapshot["mount_destination"] = "/harness-skills/.." },
+			want: "content_snapshots.skills.mount_destination must be canonical absolute",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := validPlanPayload()
+			contentSnapshots := payload["content_snapshots"].(map[string]any)
+			snapshot := map[string]any{
+				"kind":                   "skills",
+				"digest":                 "sha256:skills",
+				"immutable_host_path":    "/var/lib/harness/content/skills/sha256-skills",
+				"mount_destination":      "/harness-skills",
+				"source_evidence_digest": "sha256:source",
+				"retention_class":        "active",
+			}
+			tc.edit(snapshot)
+			contentSnapshots["skills"] = snapshot
 
-	err := Validate(ValidateParams{Payload: payload})
-	if err == nil || !strings.Contains(err.Error(), "content_snapshots.skills.immutable_host_path must be absolute") {
-		t.Fatalf("expected content snapshot path error, got %v", err)
+			err := Validate(ValidateParams{Payload: payload})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q, got %v", tc.want, err)
+			}
+		})
 	}
 }
 

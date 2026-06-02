@@ -1219,16 +1219,21 @@ func validateContentSnapshot(name string, snapshot map[string]any) error {
 			return fmt.Errorf("generation plan content_snapshots.%s.%s must be sha256", name, key)
 		}
 	}
-	if !filepath.IsAbs(stringField(snapshot, "immutable_host_path")) {
-		return fmt.Errorf("generation plan content_snapshots.%s.immutable_host_path must be absolute", name)
+	if !isCanonicalAbsolutePath(stringField(snapshot, "immutable_host_path")) {
+		return fmt.Errorf("generation plan content_snapshots.%s.immutable_host_path must be canonical absolute", name)
 	}
-	if !strings.HasPrefix(stringField(snapshot, "mount_destination"), "/") {
-		return fmt.Errorf("generation plan content_snapshots.%s.mount_destination must be absolute", name)
+	if !isCanonicalAbsolutePath(stringField(snapshot, "mount_destination")) {
+		return fmt.Errorf("generation plan content_snapshots.%s.mount_destination must be canonical absolute", name)
 	}
 	if destination, ok := contentSnapshotMountDestination(name); ok && stringField(snapshot, "mount_destination") != destination {
 		return fmt.Errorf("generation plan content_snapshots.%s.mount_destination must be %s", name, destination)
 	}
 	return nil
+}
+
+func isCanonicalAbsolutePath(value string) bool {
+	value = strings.TrimSpace(value)
+	return filepath.IsAbs(value) && filepath.Clean(value) == value
 }
 
 func validateContentSnapshotMountEvidence(object map[string]any, kind string, snapshot map[string]any) error {
