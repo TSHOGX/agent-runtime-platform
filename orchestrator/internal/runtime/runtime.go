@@ -1232,28 +1232,33 @@ func (r *Runtime) writeNetworkHostsProjection(details store.RuntimeGenerationDet
 	return nil
 }
 
-func (r *Runtime) writeDriverConfigProjection(req StartRequest) ([]DriverConfigMaterialization, error) {
+type driverConfigProjection struct {
+	Entries  []DriverConfigMaterialization
+	Payloads map[string][]byte
+}
+
+func (r *Runtime) renderDriverConfigProjection(req StartRequest) (driverConfigProjection, error) {
 	driver := agents.ID(strings.TrimSpace(driverID(req)))
 	specs := agents.DriverConfigMaterializationSpecsFor(driver)
 	renderer, ok := driveradapter.ConfigProjectionRendererFor(driver)
 	if len(specs) == 0 {
 		if ok {
-			return nil, fmt.Errorf("%s driver config materialization specs are missing", driver)
+			return driverConfigProjection{}, fmt.Errorf("%s driver config materialization specs are missing", driver)
 		}
-		return nil, nil
+		return driverConfigProjection{}, nil
 	}
 	if !ok {
-		return nil, fmt.Errorf("%s driver config projection renderer is missing", driver)
+		return driverConfigProjection{}, fmt.Errorf("%s driver config projection renderer is missing", driver)
 	}
 	details := req.Generation
 	payloads, err := renderer(details)
 	if err != nil {
-		return nil, err
+		return driverConfigProjection{}, err
 	}
 	entries := make([]DriverConfigMaterialization, 0, len(specs))
 	for _, spec := range specs {
 		if _, ok := payloads[spec.Name]; !ok {
-			return nil, fmt.Errorf("%s %s config renderer is missing", driver, spec.Name)
+			return driverConfigProjection{}, fmt.Errorf("%s %s config renderer is missing", driver, spec.Name)
 		}
 		entries = append(entries, DriverConfigMaterialization{
 			Name:                        spec.Name,
@@ -1263,17 +1268,30 @@ func (r *Runtime) writeDriverConfigProjection(req StartRequest) ([]DriverConfigM
 			DestinationMutableBySandbox: spec.DestinationMutableBySandbox,
 		})
 	}
+	renderedPayloads := make(map[string][]byte, len(entries))
 	for i := range entries {
 		payload, err := canonicalJSON(payloads[entries[i].Name])
 		if err != nil {
-			return nil, fmt.Errorf("render %s %s config: %w", driver, entries[i].Name, err)
-		}
-		if err := writeFileAtomic(entries[i].HostSourcePath, payload, 0o644); err != nil {
-			return nil, fmt.Errorf("write %s %s config: %w", driver, entries[i].Name, err)
+			return driverConfigProjection{}, fmt.Errorf("render %s %s config: %w", driver, entries[i].Name, err)
 		}
 		entries[i].SourceDigest = prefixedSHA256(payload)
+		renderedPayloads[entries[i].Name] = payload
 	}
-	return entries, nil
+	return driverConfigProjection{Entries: entries, Payloads: renderedPayloads}, nil
+}
+
+func (r *Runtime) writeDriverConfigProjection(req StartRequest) ([]DriverConfigMaterialization, error) {
+	rendered, err := r.renderDriverConfigProjection(req)
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range rendered.Entries {
+		payload := rendered.Payloads[entry.Name]
+		if err := writeFileAtomic(entry.HostSourcePath, payload, 0o644); err != nil {
+			return nil, fmt.Errorf("write %s %s config: %w", driverID(req), entry.Name, err)
+		}
+	}
+	return rendered.Entries, nil
 }
 
 func renderNetworkHostsProjection(details store.RuntimeGenerationDetails) ([]byte, error) {

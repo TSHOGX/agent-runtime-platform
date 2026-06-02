@@ -2068,6 +2068,52 @@ func TestWriteDriverConfigProjectionReturnsNilWithoutSpecsOrRenderer(t *testing.
 	}
 }
 
+func TestRenderDriverConfigProjectionIsPure(t *testing.T) {
+	dir := t.TempDir()
+	rt := New(Config{})
+	details := testGenerationDetails(dir, "gen_pi_render_driver_config")
+	details.DriverID = string(agents.Pi)
+	details.OutputFormat = agents.PiEventSchemaVersion
+
+	req := StartRequest{
+		SessionID:    details.SessionID,
+		GenerationID: details.GenerationID,
+		DriverID:     string(agents.Pi),
+		Generation:   details,
+	}
+	rendered, err := rt.renderDriverConfigProjection(req)
+	if err != nil {
+		t.Fatalf("render pi driver config projection: %v", err)
+	}
+	if len(rendered.Entries) != 2 || len(rendered.Payloads) != 2 {
+		t.Fatalf("unexpected rendered driver config projection: %+v", rendered)
+	}
+	for _, entry := range rendered.Entries {
+		if !strings.HasPrefix(entry.SourceDigest, "sha256:") {
+			t.Fatalf("entry %s missing source digest: %+v", entry.Name, entry)
+		}
+		if len(rendered.Payloads[entry.Name]) == 0 {
+			t.Fatalf("entry %s missing rendered payload", entry.Name)
+		}
+		if _, err := os.Stat(entry.HostSourcePath); !os.IsNotExist(err) {
+			t.Fatalf("render should not write %s, stat err=%v", entry.HostSourcePath, err)
+		}
+	}
+
+	written, err := rt.writeDriverConfigProjection(req)
+	if err != nil {
+		t.Fatalf("write pi driver config projection: %v", err)
+	}
+	if len(written) != len(rendered.Entries) {
+		t.Fatalf("written entries = %d want %d", len(written), len(rendered.Entries))
+	}
+	for _, entry := range written {
+		if _, err := os.Stat(entry.HostSourcePath); err != nil {
+			t.Fatalf("write should materialize %s: %v", entry.HostSourcePath, err)
+		}
+	}
+}
+
 func TestDriverConfigProjectionRenderersMatchMaterializationSpecs(t *testing.T) {
 	driversWithSpecs := map[agents.ID]struct{}{}
 	for _, driver := range agents.AllDriverSpecs() {
