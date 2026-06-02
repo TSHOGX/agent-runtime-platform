@@ -30,6 +30,7 @@ import (
 	"harness-platform/orchestrator/internal/bridge"
 	"harness-platform/orchestrator/internal/config"
 	"harness-platform/orchestrator/internal/events"
+	"harness-platform/orchestrator/internal/generationplan"
 	"harness-platform/orchestrator/internal/runtime"
 	"harness-platform/orchestrator/internal/sessionstate"
 	"harness-platform/orchestrator/internal/store"
@@ -1758,6 +1759,9 @@ func sandboxContractDigestForPayload(value any) (string, error) {
 func (s *Server) storeShadowGenerationPlan(ctx context.Context, session store.Session, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, sandboxContractPayload map[string]any, resourceIdentityDigest string, volumes sessionRuntimeDataVolumes, inputEvidence sandboxContractInputEvidence) error {
 	payload, err := s.shadowGenerationPlanPayload(session, details, artifacts, sandboxContractPayload, resourceIdentityDigest, volumes, inputEvidence)
 	if err != nil {
+		return err
+	}
+	if err := generationplan.Validate(generationplan.ValidateParams{Payload: payload}); err != nil {
 		return err
 	}
 	plan, err := s.store.StoreGenerationPlan(ctx, store.StoreGenerationPlanParams{

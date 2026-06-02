@@ -84,6 +84,17 @@ def _next_stage_checks():
             ),
         },
         {
+            "name": "next_stage_generation_plan_validates_shadow_payloads",
+            "kind": "contains",
+            "path": REPO_ROOT / "orchestrator" / "internal" / "generationplan" / "validate.go",
+            "patterns": (
+                ("generation_plan_validate", "func Validate"),
+                ("feature_policy_validation", "ValidateFeaturePolicy"),
+                ("content_snapshot_validation", "validateContentSnapshots"),
+                ("projection_digest_validation", "validateProjectionDigests"),
+            ),
+        },
+        {
             "name": "next_stage_capability_plane_uses_typed_feature_policy",
             "kind": "contains",
             "path": REPO_ROOT / "orchestrator" / "internal" / "agents" / "agents.go",

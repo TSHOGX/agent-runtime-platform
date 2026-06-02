@@ -29,6 +29,7 @@ import (
 	"harness-platform/orchestrator/internal/bridge"
 	"harness-platform/orchestrator/internal/config"
 	"harness-platform/orchestrator/internal/events"
+	"harness-platform/orchestrator/internal/generationplan"
 	"harness-platform/orchestrator/internal/runtime"
 	"harness-platform/orchestrator/internal/sessionstate"
 	"harness-platform/orchestrator/internal/store"
@@ -1430,6 +1431,9 @@ WHERE g.session_id = ? AND r.resource_state = 'live'`, session.ID).Scan(&resourc
 	plan, err := st.GetGenerationPlan(ctx, generationID)
 	if err != nil {
 		t.Fatalf("fresh start should persist generation plan: %v", err)
+	}
+	if err := generationplan.Validate(generationplan.ValidateParams{Payload: plan.CanonicalPayload}); err != nil {
+		t.Fatalf("fresh start persisted invalid generation plan: %v\n%s", err, plan.CanonicalPayload)
 	}
 	var planPayload map[string]any
 	if err := json.Unmarshal(plan.CanonicalPayload, &planPayload); err != nil {
