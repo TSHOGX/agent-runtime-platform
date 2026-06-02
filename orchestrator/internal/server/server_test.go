@@ -1576,6 +1576,33 @@ WHERE generation_id = ?`, store.GenerationPlanDigest(canonical), allocation.Gene
 	}
 }
 
+func TestFreshStartStoresGenerationPlanBeforeNetworkPrepare(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_plan_before_network", string(sessionstate.Created), time.Now().UTC(), nil)
+	rt := &planOrderRuntime{store: st, t: t}
+	srv := &Server{
+		cfg:     testServerConfig(dir),
+		store:   st,
+		runtime: rt,
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(`{"content":"hello"}`))
+	rec := httptest.NewRecorder()
+	srv.sendMessage(rec, req, session.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status 202, got %d body %s", rec.Code, rec.Body.String())
+	}
+	if !rt.planSeenBeforeNetwork {
+		t.Fatalf("network preparation ran before generation plan rows were stored")
+	}
+}
+
 func TestSendMessageReusesActiveGenerationArtifacts(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -5399,6 +5426,10 @@ func (instantRuntime) PrepareGeneration(context.Context, runtime.StartRequest) (
 	return testGenerationArtifacts(), nil
 }
 
+func (instantRuntime) PrepareGenerationNetwork(context.Context, runtime.StartRequest) error {
+	return nil
+}
+
 func (instantRuntime) Start(ctx context.Context, req runtime.StartRequest, output func(runtime.Output)) runtime.Result {
 	if output != nil {
 		output(runtime.Output{Stream: "stdout", Line: `{"type":"result","subtype":"success","result":"ok"}`})
@@ -5425,6 +5456,7 @@ func (instantRuntime) Checkpoint(context.Context, runtime.CheckpointRequest) err
 type recordingRuntime struct {
 	mu                sync.Mutex
 	prepareRequests   []runtime.StartRequest
+	networkRequests   []runtime.StartRequest
 	startRequests     []runtime.StartRequest
 	destroyRuntimeIDs []string
 	destroyRuntimeErr error
@@ -5432,6 +5464,13 @@ type recordingRuntime struct {
 	destroyErr        error
 	checkpointReqs    []runtime.CheckpointRequest
 	checkpointErr     error
+}
+
+type planOrderRuntime struct {
+	recordingRuntime
+	store                 *store.Store
+	t                     *testing.T
+	planSeenBeforeNetwork bool
 }
 
 type blockingPrepareRuntime struct {
@@ -5513,6 +5552,38 @@ func (r *recordingRuntime) PrepareGeneration(_ context.Context, req runtime.Star
 	r.prepareRequests = append(r.prepareRequests, req)
 	r.mu.Unlock()
 	return testGenerationArtifacts(), nil
+}
+
+func (r *recordingRuntime) PrepareGenerationNetwork(_ context.Context, req runtime.StartRequest) error {
+	r.mu.Lock()
+	r.networkRequests = append(r.networkRequests, req)
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *planOrderRuntime) PrepareGenerationNetwork(ctx context.Context, req runtime.StartRequest) error {
+	r.t.Helper()
+	if err := r.recordingRuntime.PrepareGenerationNetwork(ctx, req); err != nil {
+		return err
+	}
+	plan, err := r.store.GetGenerationPlan(ctx, req.GenerationID)
+	if err != nil {
+		return fmt.Errorf("get generation plan before network prepare: %w", err)
+	}
+	projections, err := r.store.ListGenerationPlanProjections(ctx, req.GenerationID)
+	if err != nil {
+		return fmt.Errorf("list generation plan projections before network prepare: %w", err)
+	}
+	if len(projections) != len(store.GenerationPlanProjectionKinds()) {
+		return fmt.Errorf("generation plan projection count before network prepare = %d want %d", len(projections), len(store.GenerationPlanProjectionKinds()))
+	}
+	for _, projection := range projections {
+		if projection.PlanDigest != plan.PlanDigest {
+			return fmt.Errorf("generation plan projection %s digest before network prepare = %s want %s", projection.ProjectionKind, projection.PlanDigest, plan.PlanDigest)
+		}
+	}
+	r.planSeenBeforeNetwork = true
+	return nil
 }
 
 func (r *recordingRuntime) Start(_ context.Context, req runtime.StartRequest, _ func(runtime.Output)) runtime.Result {
@@ -5601,6 +5672,12 @@ func (r *recordingRuntime) requests() ([]runtime.StartRequest, []runtime.StartRe
 	return prepares, starts
 }
 
+func (r *recordingRuntime) networkPrepareRequests() []runtime.StartRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]runtime.StartRequest(nil), r.networkRequests...)
+}
+
 func (r *recordingRuntime) checkpointRequests() []runtime.CheckpointRequest {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -5658,6 +5735,10 @@ func (r *restoreValidationRuntime) PrepareGeneration(context.Context, runtime.St
 	return testGenerationArtifacts(), nil
 }
 
+func (r *restoreValidationRuntime) PrepareGenerationNetwork(context.Context, runtime.StartRequest) error {
+	return nil
+}
+
 func (r *restoreValidationRuntime) Start(ctx context.Context, req runtime.StartRequest, output func(runtime.Output)) runtime.Result {
 	r.startRequests = append(r.startRequests, req)
 	if req.RestoreFromCheckpoint {
@@ -5709,6 +5790,10 @@ func (f failingRuntime) PrepareGeneration(context.Context, runtime.StartRequest)
 		return runtime.GenerationArtifacts{}, f.prepareErr
 	}
 	return testGenerationArtifacts(), nil
+}
+
+func (f failingRuntime) PrepareGenerationNetwork(context.Context, runtime.StartRequest) error {
+	return nil
 }
 
 func (f failingRuntime) Start(context.Context, runtime.StartRequest, func(runtime.Output)) runtime.Result {

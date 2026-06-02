@@ -296,11 +296,14 @@ func (r *Runtime) PrepareGeneration(ctx context.Context, req StartRequest) (Gene
 	if err != nil {
 		return GenerationArtifacts{}, err
 	}
-	if err := r.ensureSandboxNetwork(ctx, req.Generation); err != nil {
-		return GenerationArtifacts{}, err
-	}
-	artifacts.NetworkPrepared = true
 	return artifacts, nil
+}
+
+func (r *Runtime) PrepareGenerationNetwork(ctx context.Context, req StartRequest) error {
+	if err := r.ensureSandboxNetwork(ctx, req.Generation); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (r *Runtime) generationArtifacts(ctx context.Context, req StartRequest) (GenerationArtifacts, error) {

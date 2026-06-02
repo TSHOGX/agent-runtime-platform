@@ -72,6 +72,7 @@ type Server struct {
 type runtimeDriver interface {
 	Start(context.Context, runtime.StartRequest, func(runtime.Output)) runtime.Result
 	PrepareGeneration(context.Context, runtime.StartRequest) (runtime.GenerationArtifacts, error)
+	PrepareGenerationNetwork(context.Context, runtime.StartRequest) error
 	Destroy(context.Context, string) error
 	DestroyGenerationResources(context.Context, store.RuntimeGenerationDetails) (runtime.GenerationResourceCleanup, error)
 	Interrupt(string) error
@@ -611,7 +612,8 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		}
 	}
 	if ensured.IsNew {
-		preparedArtifacts, err = s.runtime.PrepareGeneration(startCtx, s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, runtime.GenerationArtifacts{}, dataVolumes))
+		renderRequest := s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, runtime.GenerationArtifacts{}, dataVolumes)
+		preparedArtifacts, err = s.runtime.PrepareGeneration(startCtx, renderRequest)
 		if err != nil {
 			if leaseErr := leaseKeeper.err(); leaseErr != nil {
 				return leaseErr
@@ -690,6 +692,17 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 			return err
 		}
+		if err := leaseKeeper.ensureOwned(); err != nil {
+			return err
+		}
+		if err := s.runtime.PrepareGenerationNetwork(startCtx, s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, preparedArtifacts, dataVolumes)); err != nil {
+			if leaseErr := leaseKeeper.err(); leaseErr != nil {
+				return leaseErr
+			}
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+			return err
+		}
+		preparedArtifacts.NetworkPrepared = true
 		if err := leaseKeeper.ensureOwned(); err != nil {
 			return err
 		}
