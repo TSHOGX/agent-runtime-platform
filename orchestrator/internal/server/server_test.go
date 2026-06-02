@@ -4094,12 +4094,14 @@ func TestVerifyGenerationPlanFrozenEvidenceChecksContentSnapshots(t *testing.T) 
 	dir := t.TempDir()
 	st, _ := openServerOwnedStore(t, ctx, dir)
 	srv := &Server{store: st}
+	snapshotPath := filepath.Join(dir, "content", "skills", "sha256-skills")
+	snapshotDigest := writeServerContentSnapshotFixture(t, snapshotPath)
 	planPayload := validServerGenerationPlanPayload()
 	contentSnapshots := planPayload["content_snapshots"].(map[string]any)
 	contentSnapshots["skills"] = map[string]any{
 		"kind":                   "skills",
-		"digest":                 "sha256:skills",
-		"immutable_host_path":    "/var/lib/harness/content/skills/sha256-skills",
+		"digest":                 snapshotDigest,
+		"immutable_host_path":    snapshotPath,
 		"mount_destination":      "/harness-skills",
 		"source_evidence_digest": "sha256:skills-source",
 		"retention_class":        "generation_plan",
@@ -4110,9 +4112,9 @@ func TestVerifyGenerationPlanFrozenEvidenceChecksContentSnapshots(t *testing.T) 
 			"type":        "bind",
 			"mode":        "ro",
 			"exact":       true,
-			"source":      "/var/lib/harness/content/skills/sha256-skills",
+			"source":      snapshotPath,
 			"destination": "/harness-skills",
-			"digest":      "sha256:skills",
+			"digest":      snapshotDigest,
 		},
 	}
 	workspaceVolume := planPayload["data_volumes"].(map[string]any)["workspace"].(map[string]any)
@@ -4120,8 +4122,8 @@ func TestVerifyGenerationPlanFrozenEvidenceChecksContentSnapshots(t *testing.T) 
 	plan := storeServerFrozenEvidencePlan(t, ctx, st, dir, planPayload)
 	if _, err := st.StoreContentSnapshot(ctx, store.StoreContentSnapshotParams{
 		Kind:                 store.ContentSnapshotKindSkills,
-		Digest:               "sha256:skills",
-		ImmutableHostPath:    "/var/lib/harness/content/skills/sha256-skills",
+		Digest:               snapshotDigest,
+		ImmutableHostPath:    snapshotPath,
 		MountDestination:     "/harness-skills",
 		SourceEvidenceDigest: "sha256:skills-source",
 		RetentionClass:       "generation_plan",
@@ -4140,7 +4142,7 @@ func TestVerifyGenerationPlanFrozenEvidenceChecksContentSnapshots(t *testing.T) 
 UPDATE content_snapshots
 SET mount_destination = '/harness-skills-drifted'
 WHERE snapshot_kind = ?
-  AND snapshot_digest = ?`, store.ContentSnapshotKindSkills, "sha256:skills"); err != nil {
+  AND snapshot_digest = ?`, store.ContentSnapshotKindSkills, snapshotDigest); err != nil {
 		t.Fatalf("mutate stored content snapshot: %v", err)
 	}
 	if err := srv.verifyGenerationPlanFrozenEvidence(ctx, "gen_frozen_evidence", details, artifacts); err == nil ||
@@ -4151,14 +4153,22 @@ WHERE snapshot_kind = ?
 UPDATE content_snapshots
 SET mount_destination = '/harness-skills'
 WHERE snapshot_kind = ?
-  AND snapshot_digest = ?`, store.ContentSnapshotKindSkills, "sha256:skills"); err != nil {
+  AND snapshot_digest = ?`, store.ContentSnapshotKindSkills, snapshotDigest); err != nil {
 		t.Fatalf("restore stored content snapshot: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(snapshotPath, "README.md"), []byte("mutated skills"), 0o644); err != nil {
+		t.Fatalf("mutate content snapshot payload: %v", err)
+	}
+	if err := srv.verifyGenerationPlanFrozenEvidence(ctx, "gen_frozen_evidence", details, artifacts); err == nil ||
+		!strings.Contains(err.Error(), "content snapshot skills digest mismatch") {
+		t.Fatalf("expected content snapshot digest mismatch, got %v", err)
 	}
 
 	if _, err := st.DBForTest().ExecContext(ctx, `
 DELETE FROM content_snapshots
 WHERE snapshot_kind = ?
-  AND snapshot_digest = ?`, store.ContentSnapshotKindSkills, "sha256:skills"); err != nil {
+  AND snapshot_digest = ?`, store.ContentSnapshotKindSkills, snapshotDigest); err != nil {
 		t.Fatalf("delete stored content snapshot: %v", err)
 	}
 	if err := srv.verifyGenerationPlanFrozenEvidence(ctx, "gen_frozen_evidence", details, artifacts); err == nil ||
@@ -6834,10 +6844,12 @@ WHERE generation_id = ?`, generationID); err != nil {
 
 func addServerGenerationPlanSkillsSnapshot(t *testing.T, ctx context.Context, st *store.Store, generationID string) store.ContentSnapshotRecord {
 	t.Helper()
+	snapshotPath := filepath.Join(t.TempDir(), "skills", generationID)
+	snapshotDigest := writeServerContentSnapshotFixture(t, snapshotPath)
 	snapshot, err := st.StoreContentSnapshot(ctx, store.StoreContentSnapshotParams{
 		Kind:                 store.ContentSnapshotKindSkills,
-		Digest:               "sha256:skills-" + generationID,
-		ImmutableHostPath:    "/var/lib/harness/content/skills/sha256-" + generationID,
+		Digest:               snapshotDigest,
+		ImmutableHostPath:    snapshotPath,
 		MountDestination:     store.ContentSnapshotSkillsMount,
 		SourceEvidenceDigest: "sha256:skills-source-" + generationID,
 		RetentionClass:       "generation_plan",
@@ -6898,6 +6910,24 @@ WHERE generation_id = ?`, planDigest, generationID); err != nil {
 		t.Fatalf("update projection plan digests for snapshot payload: %v", err)
 	}
 	return snapshot
+}
+
+func writeServerContentSnapshotFixture(t *testing.T, root string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(root, "skill"), 0o755); err != nil {
+		t.Fatalf("create content snapshot fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("skills fixture\n"), 0o644); err != nil {
+		t.Fatalf("write content snapshot readme: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "skill", "SKILL.md"), []byte("# Fixture\n"), 0o644); err != nil {
+		t.Fatalf("write content snapshot skill: %v", err)
+	}
+	digest, err := contentSnapshotPathDigest(root)
+	if err != nil {
+		t.Fatalf("digest content snapshot fixture: %v", err)
+	}
+	return digest
 }
 
 func currentRunscBinaryMetadataForServerTest(t *testing.T) (string, string) {
