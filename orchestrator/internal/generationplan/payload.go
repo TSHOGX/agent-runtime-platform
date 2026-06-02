@@ -51,6 +51,7 @@ type RenderPayloadParams struct {
 	BridgeProbe                  BridgeProbePayload
 	FeaturePolicy                map[string]any
 	ProjectionRows               []store.StoreGenerationPlanProjectionParams
+	ContentSnapshots             []store.ContentSnapshotRecord
 	SourceDigests                SourceDigests
 	SandboxContractCompatibility string
 	SandboxContractID            string
@@ -138,6 +139,10 @@ func RenderPayload(p RenderPayloadParams) (map[string]any, error) {
 			"payload_digest":     projection.PayloadDigest,
 			"materialized_path":  nullablePath(projection.MaterializedPath),
 		}
+	}
+	contentSnapshots, err := RenderContentSnapshotsPayload(p.ContentSnapshots)
+	if err != nil {
+		return nil, err
 	}
 	return map[string]any{
 		"plan_version": store.GenerationPlanVersion,
@@ -274,10 +279,63 @@ func RenderPayload(p RenderPayloadParams) (map[string]any, error) {
 			"sandbox_contract_compatibility_shape": sandboxContractCompatibility,
 		},
 		"feature_policy":      featurePolicy,
-		"content_snapshots":   map[string]any{"skills": nil, "managed_settings": nil},
+		"content_snapshots":   contentSnapshots,
 		"source_digests":      map[string]any{"runtime_config_digest": p.SourceDigests.RuntimeConfigDigest, "agent_manifest_digest": p.SourceDigests.AgentManifestDigest},
 		"projection_digests":  projections,
 		"mutable_state_scope": map[string]any{"leases": mutableLeasesScope, "events": mutableEventsScope, "checkpoint_state": mutableCheckpointStateScope},
+	}, nil
+}
+
+func RenderContentSnapshotsPayload(records []store.ContentSnapshotRecord) (map[string]any, error) {
+	out := map[string]any{
+		store.ContentSnapshotKindSkills:          nil,
+		store.ContentSnapshotKindManagedSettings: nil,
+	}
+	seen := map[string]struct{}{}
+	for _, record := range records {
+		kind := strings.TrimSpace(record.Kind)
+		switch kind {
+		case store.ContentSnapshotKindSkills, store.ContentSnapshotKindManagedSettings:
+		default:
+			return nil, fmt.Errorf("unsupported content snapshot kind %q", record.Kind)
+		}
+		if _, ok := seen[kind]; ok {
+			return nil, fmt.Errorf("duplicate content snapshot kind %q", kind)
+		}
+		seen[kind] = struct{}{}
+		payload, err := contentSnapshotRecordPayload(record)
+		if err != nil {
+			return nil, err
+		}
+		out[kind] = payload
+	}
+	return out, nil
+}
+
+func contentSnapshotRecordPayload(record store.ContentSnapshotRecord) (map[string]any, error) {
+	required := []struct {
+		field string
+		value string
+	}{
+		{"kind", record.Kind},
+		{"digest", record.Digest},
+		{"immutable_host_path", record.ImmutableHostPath},
+		{"mount_destination", record.MountDestination},
+		{"source_evidence_digest", record.SourceEvidenceDigest},
+		{"retention_class", record.RetentionClass},
+	}
+	for _, check := range required {
+		if strings.TrimSpace(check.value) == "" {
+			return nil, fmt.Errorf("content snapshot %s is required", check.field)
+		}
+	}
+	return map[string]any{
+		"kind":                   strings.TrimSpace(record.Kind),
+		"digest":                 strings.TrimSpace(record.Digest),
+		"immutable_host_path":    filepath.Clean(record.ImmutableHostPath),
+		"mount_destination":      filepath.Clean(record.MountDestination),
+		"source_evidence_digest": strings.TrimSpace(record.SourceEvidenceDigest),
+		"retention_class":        strings.TrimSpace(record.RetentionClass),
 	}, nil
 }
 

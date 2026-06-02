@@ -78,6 +78,53 @@ func TestMaterializedDriverConfigPayloadIsPlanEvidence(t *testing.T) {
 	}
 }
 
+func TestRenderContentSnapshotsPayloadFreezesImmutableRefs(t *testing.T) {
+	payload, err := RenderContentSnapshotsPayload([]store.ContentSnapshotRecord{
+		{
+			Kind:                 store.ContentSnapshotKindSkills,
+			Digest:               "sha256:skills",
+			ImmutableHostPath:    "/var/lib/harness/content/skills/sha256-skills",
+			MountDestination:     "/harness-skills",
+			SourceEvidenceDigest: "sha256:skills-source",
+			RetentionClass:       "generation_plan",
+		},
+	})
+	if err != nil {
+		t.Fatalf("render content snapshots: %v", err)
+	}
+	if payload[store.ContentSnapshotKindManagedSettings] != nil {
+		t.Fatalf("managed settings snapshot should remain nil: %+v", payload)
+	}
+	skills := payload[store.ContentSnapshotKindSkills].(map[string]any)
+	if skills["kind"] != store.ContentSnapshotKindSkills ||
+		skills["digest"] != "sha256:skills" ||
+		skills["immutable_host_path"] != "/var/lib/harness/content/skills/sha256-skills" ||
+		skills["mount_destination"] != "/harness-skills" ||
+		skills["source_evidence_digest"] != "sha256:skills-source" ||
+		skills["retention_class"] != "generation_plan" {
+		t.Fatalf("unexpected skills snapshot payload: %+v", skills)
+	}
+	plan := validPlanPayload()
+	plan["content_snapshots"] = payload
+	if err := Validate(ValidateParams{Payload: plan}); err != nil {
+		t.Fatalf("rendered content snapshots should validate: %v", err)
+	}
+}
+
+func TestRenderContentSnapshotsPayloadRejectsInvalidSelection(t *testing.T) {
+	if _, err := RenderContentSnapshotsPayload([]store.ContentSnapshotRecord{
+		{Kind: store.ContentSnapshotKindSkills, Digest: "sha256:skills", ImmutableHostPath: "/var/lib/harness/content/skills/sha256-skills", MountDestination: "/harness-skills", SourceEvidenceDigest: "sha256:skills-source", RetentionClass: "generation_plan"},
+		{Kind: store.ContentSnapshotKindSkills, Digest: "sha256:skills2", ImmutableHostPath: "/var/lib/harness/content/skills/sha256-skills2", MountDestination: "/harness-skills", SourceEvidenceDigest: "sha256:skills-source2", RetentionClass: "generation_plan"},
+	}); err == nil || !strings.Contains(err.Error(), "duplicate content snapshot kind") {
+		t.Fatalf("expected duplicate snapshot rejection, got %v", err)
+	}
+	if _, err := RenderContentSnapshotsPayload([]store.ContentSnapshotRecord{
+		{Kind: "workspace", Digest: "sha256:workspace", ImmutableHostPath: "/var/lib/harness/content/workspace/sha256-workspace", MountDestination: "/workspace-content", SourceEvidenceDigest: "sha256:workspace-source", RetentionClass: "generation_plan"},
+	}); err == nil || !strings.Contains(err.Error(), "unsupported content snapshot kind") {
+		t.Fatalf("expected unsupported snapshot rejection, got %v", err)
+	}
+}
+
 func TestValidateRejectsMutableContentSnapshotReference(t *testing.T) {
 	payload := validPlanPayload()
 	contentSnapshots := payload["content_snapshots"].(map[string]any)
