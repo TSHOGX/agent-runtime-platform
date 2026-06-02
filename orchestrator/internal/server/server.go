@@ -19,6 +19,7 @@ import (
 	"os"
 	pathpkg "path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -582,7 +583,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		}
 		return err
 	}
-	contentSnapshots, err := s.generationContentSnapshots(ctx, session, generationDetails)
+	contentSnapshots, err := s.generationContentSnapshotsForStart(ctx, session, generationDetails, ensured.IsNew)
 	if err != nil {
 		if leaseErr := leaseKeeper.err(); leaseErr != nil {
 			return leaseErr
@@ -1435,6 +1436,17 @@ func (s *Server) generationContentSnapshots(context.Context, store.Session, stor
 	return nil, nil
 }
 
+func (s *Server) generationContentSnapshotsForStart(ctx context.Context, session store.Session, details store.RuntimeGenerationDetails, isNew bool) ([]store.ContentSnapshotRecord, error) {
+	if isNew {
+		return s.generationContentSnapshots(ctx, session, details)
+	}
+	plan, err := s.store.RequireGenerationPlanForLaunch(ctx, strings.TrimSpace(details.GenerationID))
+	if err != nil {
+		return nil, err
+	}
+	return s.generationPlanContentSnapshotRecords(ctx, plan.CanonicalPayload)
+}
+
 func validateDriverStateForRuntimeLaunch(details store.RuntimeGenerationDetails, volumes sessionRuntimeDataVolumes) error {
 	return store.ValidateDriverStatePayloadForRuntimeLaunch(details.DriverID, details.DriverStatePayload, volumes.DriverHome.HostPath)
 }
@@ -1768,9 +1780,27 @@ func (s *Server) storedGenerationPlanProjectionEvidence(ctx context.Context, gen
 }
 
 func (s *Server) generationPlanContentSnapshotDigests(ctx context.Context, payload []byte) (map[string]string, error) {
-	refs := generationplan.ContentSnapshotReferences(payload)
+	records, err := s.generationPlanContentSnapshotRecords(ctx, payload)
+	if err != nil {
+		return nil, err
+	}
 	out := map[string]string{}
-	for kind, ref := range refs {
+	for _, record := range records {
+		out[record.Kind] = record.Digest
+	}
+	return out, nil
+}
+
+func (s *Server) generationPlanContentSnapshotRecords(ctx context.Context, payload []byte) ([]store.ContentSnapshotRecord, error) {
+	refs := generationplan.ContentSnapshotReferences(payload)
+	kinds := make([]string, 0, len(refs))
+	for kind := range refs {
+		kinds = append(kinds, kind)
+	}
+	sort.Strings(kinds)
+	records := make([]store.ContentSnapshotRecord, 0, len(kinds))
+	for _, kind := range kinds {
+		ref := refs[kind]
 		record, err := s.store.GetContentSnapshot(ctx, kind, ref.Digest)
 		if err != nil {
 			return nil, fmt.Errorf("generation plan content snapshot %s: %w", kind, err)
@@ -1778,9 +1808,9 @@ func (s *Server) generationPlanContentSnapshotDigests(ctx context.Context, paylo
 		if err := verifyGenerationPlanContentSnapshotRef(kind, ref, record); err != nil {
 			return nil, err
 		}
-		out[kind] = record.Digest
+		records = append(records, record)
 	}
-	return out, nil
+	return records, nil
 }
 
 func verifyGenerationPlanContentSnapshotRef(kind string, ref generationplan.ContentSnapshotRef, record store.ContentSnapshotRecord) error {

@@ -1862,6 +1862,7 @@ func TestSendMessageRestoresCheckpointedGeneration(t *testing.T) {
 		t.Fatalf("mark checkpointed generation live: %v", err)
 	}
 	recordServerRuntimeArtifacts(t, ctx, st, allocation.GenerationID, "restore_manifest_digest", "runsc restore-test")
+	snapshot := addServerGenerationPlanSkillsSnapshot(t, ctx, st, allocation.GenerationID)
 	markServerGenerationCheckpointed(t, ctx, st, session.ID, allocation.GenerationID, time.Now().UTC())
 	mutateServerRuntimeArtifactDigestMirrors(t, ctx, st, allocation.GenerationID)
 
@@ -1932,6 +1933,13 @@ WHERE session_id = ?
 		start.PreparedArtifacts.RunscBinaryDigest != "sha256:runsc-test" ||
 		start.Generation.NetworkAllocationState != "recreating" {
 		t.Fatalf("unexpected restore start request: %+v", start)
+	}
+	if len(start.ContentSnapshots) != 1 ||
+		start.ContentSnapshots[0].Kind != store.ContentSnapshotKindSkills ||
+		start.ContentSnapshots[0].Digest != snapshot.Digest ||
+		start.ContentSnapshots[0].ImmutableHostPath != snapshot.ImmutableHostPath ||
+		start.ContentSnapshots[0].MountDestination != store.ContentSnapshotSkillsMount {
+		t.Fatalf("restore start content snapshots = %+v want %+v", start.ContentSnapshots, snapshot)
 	}
 }
 
@@ -6290,6 +6298,74 @@ SET control_manifest_digest = 'mutated_manifest_digest',
 WHERE generation_id = ?`, generationID); err != nil {
 		t.Fatalf("mutate runtime artifact digest mirrors: %v", err)
 	}
+}
+
+func addServerGenerationPlanSkillsSnapshot(t *testing.T, ctx context.Context, st *store.Store, generationID string) store.ContentSnapshotRecord {
+	t.Helper()
+	snapshot, err := st.StoreContentSnapshot(ctx, store.StoreContentSnapshotParams{
+		Kind:                 store.ContentSnapshotKindSkills,
+		Digest:               "sha256:skills-" + generationID,
+		ImmutableHostPath:    "/var/lib/harness/content/skills/sha256-" + generationID,
+		MountDestination:     store.ContentSnapshotSkillsMount,
+		SourceEvidenceDigest: "sha256:skills-source-" + generationID,
+		RetentionClass:       "generation_plan",
+	})
+	if err != nil {
+		t.Fatalf("store generation plan skills snapshot: %v", err)
+	}
+	plan, err := st.GetGenerationPlan(ctx, generationID)
+	if err != nil {
+		t.Fatalf("get generation plan for snapshot: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(plan.CanonicalPayload, &payload); err != nil {
+		t.Fatalf("decode generation plan for snapshot: %v", err)
+	}
+	contentSnapshots := payload["content_snapshots"].(map[string]any)
+	contentSnapshots[store.ContentSnapshotKindSkills] = map[string]any{
+		"kind":                   snapshot.Kind,
+		"digest":                 snapshot.Digest,
+		"immutable_host_path":    snapshot.ImmutableHostPath,
+		"mount_destination":      snapshot.MountDestination,
+		"source_evidence_digest": snapshot.SourceEvidenceDigest,
+		"retention_class":        snapshot.RetentionClass,
+	}
+	mounts := payload["mounts"].(map[string]any)
+	snapshotMounts, ok := mounts["content_snapshots"].(map[string]any)
+	if !ok {
+		snapshotMounts = map[string]any{}
+		mounts["content_snapshots"] = snapshotMounts
+	}
+	snapshotMounts[store.ContentSnapshotKindSkills] = map[string]any{
+		"mount_name":  "skills_snapshot",
+		"type":        "bind",
+		"mode":        "ro",
+		"exact":       true,
+		"source":      snapshot.ImmutableHostPath,
+		"destination": snapshot.MountDestination,
+		"digest":      snapshot.Digest,
+	}
+	workspace := payload["data_volumes"].(map[string]any)["workspace"].(map[string]any)
+	workspace["platform_content_mount_scope"] = "immutable_content_snapshots"
+	canonical, err := store.CanonicalGenerationPlanPayload(payload)
+	if err != nil {
+		t.Fatalf("canonical generation plan with snapshot: %v", err)
+	}
+	planDigest := store.GenerationPlanDigest(canonical)
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE generation_plans
+SET canonical_payload = ?,
+    plan_digest = ?
+WHERE generation_id = ?`, string(canonical), planDigest, generationID); err != nil {
+		t.Fatalf("update generation plan snapshot payload: %v", err)
+	}
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE generation_plan_projections
+SET plan_digest = ?
+WHERE generation_id = ?`, planDigest, generationID); err != nil {
+		t.Fatalf("update projection plan digests for snapshot payload: %v", err)
+	}
+	return snapshot
 }
 
 func currentRunscBinaryMetadataForServerTest(t *testing.T) (string, string) {
