@@ -1423,6 +1423,49 @@ WHERE g.session_id = ? AND r.resource_state = 'live'`, session.ID).Scan(&resourc
 	if generations != 1 || networkRows != 1 || resourceRows != 1 || queuedTurns != 1 || userMessages != 1 {
 		t.Fatalf("unexpected bridge enqueue rows: generations=%d network=%d resources=%d queued_turns=%d user_messages=%d", generations, networkRows, resourceRows, queuedTurns, userMessages)
 	}
+	var generationID string
+	if err := st.DBForTest().QueryRowContext(ctx, `SELECT generation_id FROM runtime_generations WHERE session_id = ?`, session.ID).Scan(&generationID); err != nil {
+		t.Fatalf("query generation id: %v", err)
+	}
+	plan, err := st.GetGenerationPlan(ctx, generationID)
+	if err != nil {
+		t.Fatalf("fresh start should persist generation plan: %v", err)
+	}
+	var planPayload map[string]any
+	if err := json.Unmarshal(plan.CanonicalPayload, &planPayload); err != nil {
+		t.Fatalf("decode generation plan: %v", err)
+	}
+	identity := planPayload["identity"].(map[string]any)
+	runscPin := planPayload["runsc_pin"].(map[string]any)
+	if identity["session_id"] != session.ID || identity["generation_id"] != generationID || runscPin["binary_digest"] != "sha256:runsc-test" {
+		t.Fatalf("generation plan did not capture launch identity/runsc pin: %s", plan.CanonicalPayload)
+	}
+	projections, err := st.ListGenerationPlanProjections(ctx, generationID)
+	if err != nil {
+		t.Fatalf("list generation plan projections: %v", err)
+	}
+	if len(projections) != 6 {
+		t.Fatalf("projection count=%d want 6: %+v", len(projections), projections)
+	}
+	projectionKinds := map[string]string{}
+	for _, projection := range projections {
+		if projection.PlanDigest != plan.PlanDigest {
+			t.Fatalf("projection %s plan digest=%s want %s", projection.ProjectionKind, projection.PlanDigest, plan.PlanDigest)
+		}
+		if !strings.HasPrefix(projection.PayloadDigest, "sha256:") {
+			t.Fatalf("projection %s payload digest is not sha256: %s", projection.ProjectionKind, projection.PayloadDigest)
+		}
+		projectionKinds[projection.ProjectionKind] = projection.PayloadDigest
+	}
+	contract, err := st.GetSandboxContractForGeneration(ctx, session.ID, generationID)
+	if err != nil {
+		t.Fatalf("load sandbox contract: %v", err)
+	}
+	if projectionKinds["sandbox_contract"] != contract.SandboxContractDigest ||
+		projectionKinds["control_manifest"] == "" ||
+		projectionKinds["oci_spec"] == "" {
+		t.Fatalf("unexpected projection digests: %+v", projectionKinds)
+	}
 }
 
 func TestSendMessageReusesActiveGenerationArtifacts(t *testing.T) {
