@@ -267,6 +267,46 @@ func TestStoreGenerationPlanProjectionRejectsPlanDigestMismatch(t *testing.T) {
 	}
 }
 
+func TestStoreGenerationPlanProjectionRejectsNonCanonicalMaterializedPath(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	createStoreSession(t, ctx, st, "sess_projection_path")
+	createRuntimeGenerationForPlanTest(t, ctx, st, "sess_projection_path", "gen_projection_path", "allocating")
+	plan, err := st.StoreGenerationPlan(ctx, StoreGenerationPlanParams{
+		GenerationID: "gen_projection_path",
+		Payload:      map[string]any{"generation_id": "gen_projection_path", "plan_version": 1},
+	})
+	if err != nil {
+		t.Fatalf("store plan: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{name: "relative", path: "var/lib/harness/run/control/manifest.json"},
+		{name: "unclean", path: "/var/lib/harness/run/control/../manifest.json"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err = st.StoreGenerationPlanProjection(ctx, StoreGenerationPlanProjectionParams{
+				GenerationID:      plan.GenerationID,
+				PlanDigest:        plan.PlanDigest,
+				ProjectionKind:    GenerationPlanProjectionControlManifest,
+				ProjectionVersion: GenerationPlanProjectionVersion,
+				PayloadDigest:     "sha256:manifest",
+				MaterializedPath:  tc.path,
+			})
+			if err == nil || !strings.Contains(err.Error(), "materialized path must be canonical absolute") {
+				t.Fatalf("expected canonical materialized path error, got %v", err)
+			}
+		})
+	}
+}
+
 func TestStoreGenerationPlanProjectionRejectsUnsupportedKindAndVersion(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))

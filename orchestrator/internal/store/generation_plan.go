@@ -263,8 +263,8 @@ func (s *Store) StoreGenerationPlanProjection(ctx context.Context, p StoreGenera
 	if p.PayloadDigest == "" || !strings.HasPrefix(p.PayloadDigest, "sha256:") {
 		return GenerationPlanProjectionRecord{}, fmt.Errorf("generation plan projection payload digest is required")
 	}
-	if p.MaterializedPath != "" && !filepath.IsAbs(p.MaterializedPath) {
-		return GenerationPlanProjectionRecord{}, fmt.Errorf("generation plan projection materialized path must be absolute")
+	if p.MaterializedPath != "" && (!filepath.IsAbs(p.MaterializedPath) || filepath.Clean(p.MaterializedPath) != p.MaterializedPath) {
+		return GenerationPlanProjectionRecord{}, fmt.Errorf("generation plan projection materialized path must be canonical absolute")
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
