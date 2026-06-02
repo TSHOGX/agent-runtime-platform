@@ -127,6 +127,15 @@ def _next_stage_checks():
                 ("config_projection_renderer_lookup", "ConfigProjectionRendererFor"),
             ),
         },
+        {
+            "name": "next_stage_driver_runtime_layout_uses_adapter",
+            "kind": "contains",
+            "path": REPO_ROOT / "orchestrator" / "internal" / "runtime" / "runtime.go",
+            "patterns": (
+                ("driver_adapter_import", "internal/driveradapter"),
+                ("runtime_layout_adapter_lookup", "RuntimeLayoutSpecFor"),
+            ),
+        },
     ]
 
 

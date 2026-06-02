@@ -1382,7 +1382,7 @@ func (r *Runtime) buildGenerationManifest(req StartRequest, driverSpec agents.Dr
 		ManifestVersion:          1,
 	}
 	applyDriverRuntimeManifestFields(&manifest, details)
-	if layout, ok := agents.DriverRuntimeLayoutSpecFor(agents.ID(selectedDriver)); ok {
+	if layout, ok := driveradapter.RuntimeLayoutSpecFor(agents.ID(selectedDriver)); ok {
 		applyDriverControlManifestSpec(&manifest, layout.ControlManifest)
 	}
 	return manifest, nil
@@ -1396,7 +1396,7 @@ func applyDriverRuntimeManifestFields(manifest *controlManifest, details store.R
 	}
 }
 
-func applyDriverControlManifestSpec(manifest *controlManifest, spec agents.DriverRuntimeControlManifestSpec) {
+func applyDriverControlManifestSpec(manifest *controlManifest, spec driveradapter.RuntimeControlManifestSpec) {
 	if len(spec.Fields) == 0 {
 		return
 	}
@@ -1614,7 +1614,7 @@ func (r *Runtime) renderSandboxIsolatedRuntimeSpec(req StartRequest, driverSpec 
 		"HARNESS_BRIDGE_IDLE_INTERVAL=" + formatSeconds(bridgeProbeConfig.pollInterval),
 		"HARNESS_PROBE_HEALTHZ_STATUSES=" + joinInts(bridgeProbeConfig.healthzStatuses),
 	}
-	if layout, ok := agents.DriverRuntimeLayoutSpecFor(agents.ID(selectedDriver)); ok {
+	if layout, ok := driveradapter.RuntimeLayoutSpecFor(agents.ID(selectedDriver)); ok {
 		spec.Process.Env = append(spec.Process.Env, driverRuntimeEnv(layout.Env)...)
 	}
 	spec.Process.Cwd = "/"
@@ -2049,7 +2049,7 @@ func emptyCapabilities() map[string]any {
 	}
 }
 
-func driverRuntimeEnv(vars []agents.DriverRuntimeEnvVarSpec) []string {
+func driverRuntimeEnv(vars []driveradapter.RuntimeEnvVarSpec) []string {
 	env := make([]string, 0, len(vars))
 	for _, item := range vars {
 		env = append(env, strings.TrimSpace(item.Name)+"="+item.Value)
@@ -2101,7 +2101,7 @@ func (r *Runtime) prepareSandboxIsolationDataDirs(req StartRequest) error {
 			return fmt.Errorf("%s: %w", item.label, err)
 		}
 	}
-	if layout, ok := agents.DriverRuntimeLayoutSpecFor(agents.ID(driverID(req))); ok {
+	if layout, ok := driveradapter.RuntimeLayoutSpecFor(agents.ID(driverID(req))); ok {
 		for _, item := range layout.HomeDirs {
 			hostPath, err := driverAgentHomeDirHostPath(agentHomeHostPath, item.AgentHomeRelativePath)
 			if err != nil {

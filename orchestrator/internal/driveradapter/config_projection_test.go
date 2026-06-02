@@ -60,3 +60,49 @@ func TestConfigProjectionRendererFailsClosed(t *testing.T) {
 		t.Fatalf("expected missing base url error, got %v", err)
 	}
 }
+
+func TestPiRuntimeLayoutSpec(t *testing.T) {
+	layout, ok := RuntimeLayoutSpecFor(agents.Pi)
+	if !ok {
+		t.Fatalf("pi runtime layout spec missing")
+	}
+	env := map[string]string{}
+	for _, item := range layout.Env {
+		env[item.Name] = item.Value
+	}
+	if env["PI_CODING_AGENT_DIR"] != agents.PiCodingAgentDir ||
+		env["PI_CODING_AGENT_SESSION_DIR"] != agents.PiSessionDir ||
+		env["PI_OFFLINE"] != "1" ||
+		env["PI_SKIP_VERSION_CHECK"] != "1" ||
+		env["PI_TELEMETRY"] != "0" {
+		t.Fatalf("unexpected pi env layout: %+v", layout.Env)
+	}
+	if len(layout.HomeDirs) != 3 ||
+		layout.HomeDirs[0].AgentHomeRelativePath != ".pi" ||
+		layout.HomeDirs[1].AgentHomeRelativePath != ".pi/agent" ||
+		layout.HomeDirs[2].AgentHomeRelativePath != ".pi/agent/sessions" {
+		t.Fatalf("unexpected pi home dir layout: %+v", layout.HomeDirs)
+	}
+	if layout.ControlManifest.Fields["pi_coding_agent_dir"] != agents.PiCodingAgentDir ||
+		layout.ControlManifest.Fields["pi_coding_agent_session_dir"] != agents.PiSessionDir ||
+		layout.ControlManifest.Fields["pi_offline"] != true ||
+		layout.ControlManifest.Fields["pi_skip_version_check"] != true ||
+		layout.ControlManifest.Fields["pi_telemetry_disabled"] != true {
+		t.Fatalf("unexpected pi manifest layout: %+v", layout.ControlManifest)
+	}
+
+	layout.Env[0].Value = "mutated"
+	layout.ControlManifest.Fields["pi_coding_agent_dir"] = "mutated"
+	layoutAgain, ok := RuntimeLayoutSpecFor(agents.Pi)
+	if !ok ||
+		layoutAgain.Env[0].Value != agents.PiCodingAgentDir ||
+		layoutAgain.ControlManifest.Fields["pi_coding_agent_dir"] != agents.PiCodingAgentDir {
+		t.Fatalf("runtime layout spec should be cloned, got %+v/%+v/%v", layoutAgain.Env, layoutAgain.ControlManifest, ok)
+	}
+}
+
+func TestRuntimeLayoutSpecForUnsupportedDriver(t *testing.T) {
+	if _, ok := RuntimeLayoutSpecFor(agents.Shell); ok {
+		t.Fatalf("shell should not have a runtime layout spec")
+	}
+}

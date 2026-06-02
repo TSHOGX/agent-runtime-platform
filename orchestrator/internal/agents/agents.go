@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -243,27 +242,6 @@ type DriverConfigMaterializationSpec struct {
 	MountExact                  bool
 }
 
-type DriverRuntimeEnvVarSpec struct {
-	Name  string
-	Value string
-}
-
-type DriverRuntimeHomeDirSpec struct {
-	Label                 string
-	AgentHomeRelativePath string
-	Mode                  fs.FileMode
-}
-
-type DriverRuntimeControlManifestSpec struct {
-	Fields map[string]any
-}
-
-type DriverRuntimeLayoutSpec struct {
-	Env             []DriverRuntimeEnvVarSpec
-	HomeDirs        []DriverRuntimeHomeDirSpec
-	ControlManifest DriverRuntimeControlManifestSpec
-}
-
 func (s DriverConfigMaterializationSpec) HostSourcePath(controlDir string) string {
 	return filepath.Join(strings.TrimSpace(controlDir), filepath.FromSlash(s.ControlRelativePath))
 }
@@ -286,7 +264,6 @@ type DriverSpec struct {
 	BinaryPath                  string
 	PackageFacts                DriverPackageFacts
 	ConfigMaterializationSpecs  []DriverConfigMaterializationSpec
-	RuntimeLayoutSpec           *DriverRuntimeLayoutSpec
 }
 
 func DriverConfigMaterializationSpecsFor(driver ID) []DriverConfigMaterializationSpec {
@@ -446,14 +423,6 @@ func RuntimeProviderCapabilityPayload(spec RuntimeProviderSpec) map[string]any {
 	}
 }
 
-func DriverRuntimeLayoutSpecFor(driver ID) (DriverRuntimeLayoutSpec, bool) {
-	spec, ok := driverSpecs[ID(strings.TrimSpace(string(driver)))]
-	if !ok || spec.RuntimeLayoutSpec == nil {
-		return DriverRuntimeLayoutSpec{}, false
-	}
-	return cloneDriverRuntimeLayoutSpec(*spec.RuntimeLayoutSpec), true
-}
-
 type SnapshotPolicySpec struct {
 	ProviderSupportsSnapshotDisk   bool
 	ProviderSupportsSnapshotMemory bool
@@ -569,29 +538,6 @@ var driverSpecs = map[ID]DriverSpec{
 				MountType:                   "bind",
 				MountMode:                   "ro",
 				MountExact:                  true,
-			},
-		},
-		RuntimeLayoutSpec: &DriverRuntimeLayoutSpec{
-			Env: []DriverRuntimeEnvVarSpec{
-				{Name: "PI_CODING_AGENT_DIR", Value: PiCodingAgentDir},
-				{Name: "PI_CODING_AGENT_SESSION_DIR", Value: PiSessionDir},
-				{Name: "PI_OFFLINE", Value: "1"},
-				{Name: "PI_SKIP_VERSION_CHECK", Value: "1"},
-				{Name: "PI_TELEMETRY", Value: "0"},
-			},
-			HomeDirs: []DriverRuntimeHomeDirSpec{
-				{Label: "pi root dir", AgentHomeRelativePath: ".pi", Mode: 0o750},
-				{Label: "pi agent dir", AgentHomeRelativePath: ".pi/agent", Mode: 0o750},
-				{Label: "pi session dir", AgentHomeRelativePath: ".pi/agent/sessions", Mode: 0o750},
-			},
-			ControlManifest: DriverRuntimeControlManifestSpec{
-				Fields: map[string]any{
-					"pi_coding_agent_dir":         PiCodingAgentDir,
-					"pi_coding_agent_session_dir": PiSessionDir,
-					"pi_offline":                  true,
-					"pi_skip_version_check":       true,
-					"pi_telemetry_disabled":       true,
-				},
 			},
 		},
 	}),
@@ -847,10 +793,6 @@ func cloneDriverSpec(spec DriverSpec) DriverSpec {
 	spec.FeatureSupport = append([]string(nil), spec.FeatureSupport...)
 	spec.Capabilities = cloneDriverCapabilities(spec.Capabilities)
 	spec.ConfigMaterializationSpecs = cloneDriverConfigMaterializationSpecs(spec.ConfigMaterializationSpecs)
-	if spec.RuntimeLayoutSpec != nil {
-		layout := cloneDriverRuntimeLayoutSpec(*spec.RuntimeLayoutSpec)
-		spec.RuntimeLayoutSpec = &layout
-	}
 	return spec
 }
 
@@ -889,39 +831,6 @@ func cloneDriverConfigMaterializationSpecs(specs []DriverConfigMaterializationSp
 	out := make([]DriverConfigMaterializationSpec, len(specs))
 	copy(out, specs)
 	return out
-}
-
-func cloneDriverRuntimeLayoutSpec(spec DriverRuntimeLayoutSpec) DriverRuntimeLayoutSpec {
-	spec.Env = append([]DriverRuntimeEnvVarSpec(nil), spec.Env...)
-	spec.HomeDirs = append([]DriverRuntimeHomeDirSpec(nil), spec.HomeDirs...)
-	spec.ControlManifest.Fields = cloneDriverRuntimeControlManifestFields(spec.ControlManifest.Fields)
-	return spec
-}
-
-func cloneDriverRuntimeControlManifestFields(fields map[string]any) map[string]any {
-	if len(fields) == 0 {
-		return nil
-	}
-	out := make(map[string]any, len(fields))
-	for key, value := range fields {
-		out[key] = cloneDriverRuntimeControlManifestValue(value)
-	}
-	return out
-}
-
-func cloneDriverRuntimeControlManifestValue(value any) any {
-	switch typed := value.(type) {
-	case map[string]any:
-		return cloneDriverRuntimeControlManifestFields(typed)
-	case []any:
-		out := make([]any, len(typed))
-		for i, item := range typed {
-			out[i] = cloneDriverRuntimeControlManifestValue(item)
-		}
-		return out
-	default:
-		return value
-	}
 }
 
 func cloneRuntimeProviderSpec(spec RuntimeProviderSpec) RuntimeProviderSpec {
