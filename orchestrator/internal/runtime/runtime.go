@@ -3338,6 +3338,12 @@ func (r *Runtime) Checkpoint(ctx context.Context, req CheckpointRequest) error {
 	}
 	generationCheckpointPath := strings.TrimSpace(req.Generation.CheckpointPath)
 	checkpointPath := strings.TrimSpace(req.CheckpointPath)
+	if req.Generation.CheckpointPath != "" && req.Generation.CheckpointPath != generationCheckpointPath {
+		return fmt.Errorf("generation checkpoint path %q must be canonical absolute path", req.Generation.CheckpointPath)
+	}
+	if req.CheckpointPath != "" && req.CheckpointPath != checkpointPath {
+		return fmt.Errorf("generation checkpoint path %q must be canonical absolute path", req.CheckpointPath)
+	}
 	if checkpointPath == "" {
 		checkpointPath = generationCheckpointPath
 	}
@@ -3347,7 +3353,10 @@ func (r *Runtime) Checkpoint(ctx context.Context, req CheckpointRequest) error {
 	if !filepath.IsAbs(checkpointPath) || filepath.Clean(checkpointPath) != checkpointPath {
 		return fmt.Errorf("generation checkpoint path %q must be canonical absolute path", checkpointPath)
 	}
-	if generationCheckpointPath != "" && filepath.Clean(generationCheckpointPath) != checkpointPath {
+	if generationCheckpointPath != "" && (!filepath.IsAbs(generationCheckpointPath) || filepath.Clean(generationCheckpointPath) != generationCheckpointPath) {
+		return fmt.Errorf("generation checkpoint path %q must be canonical absolute path", generationCheckpointPath)
+	}
+	if generationCheckpointPath != "" && generationCheckpointPath != checkpointPath {
 		return fmt.Errorf("checkpoint path mismatch: got %q want generation path %q", checkpointPath, generationCheckpointPath)
 	}
 	currentRunsc, err := r.verifyGenerationRunscPin(ctx, "checkpoint", req.Generation)

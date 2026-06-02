@@ -877,6 +877,27 @@ func TestCheckpointRequiresGenerationScopedPath(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "checkpoint path mismatch") {
 		t.Fatalf("expected checkpoint path mismatch error, got %v", err)
 	}
+
+	details.CheckpointPath = filepath.Dir(details.CheckpointPath) + string(filepath.Separator) + "same" + string(filepath.Separator) + ".." + string(filepath.Separator) + filepath.Base(details.CheckpointPath)
+	err = rt.Checkpoint(context.Background(), CheckpointRequest{
+		SessionID:    details.SessionID,
+		GenerationID: details.GenerationID,
+		Generation:   details,
+	})
+	if err == nil || !strings.Contains(err.Error(), "generation checkpoint path") || !strings.Contains(err.Error(), "canonical absolute") {
+		t.Fatalf("expected non-canonical generation checkpoint path error, got %v", err)
+	}
+
+	details.CheckpointPath = filepath.Join(dir, "run", "gen-"+details.GenerationID, "checkpoint")
+	err = rt.Checkpoint(context.Background(), CheckpointRequest{
+		SessionID:      details.SessionID,
+		GenerationID:   details.GenerationID,
+		CheckpointPath: filepath.Dir(details.CheckpointPath) + string(filepath.Separator) + "same" + string(filepath.Separator) + ".." + string(filepath.Separator) + filepath.Base(details.CheckpointPath),
+		Generation:     details,
+	})
+	if err == nil || !strings.Contains(err.Error(), "generation checkpoint path") || !strings.Contains(err.Error(), "canonical absolute") {
+		t.Fatalf("expected non-canonical request checkpoint path error, got %v", err)
+	}
 }
 
 func TestRuntimeStartReusesExistingGenerationWithoutStdinTurn(t *testing.T) {
