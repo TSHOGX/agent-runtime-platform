@@ -3,7 +3,9 @@ package store
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -98,6 +100,15 @@ func GenerationPlanProjectionVersionFor(kind string) (int, bool) {
 	default:
 		return 0, false
 	}
+}
+
+func generationPlanProjectionPayloadDigest(kind string, digest any) string {
+	value := strings.TrimSpace(fmt.Sprint(digest))
+	if strings.HasPrefix(value, "sha256:") {
+		return value
+	}
+	sum := sha256.Sum256([]byte(strings.TrimSpace(kind) + "\n" + value))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func GenerationPlanDigest(canonicalPayload []byte) string {

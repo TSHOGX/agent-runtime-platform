@@ -1979,6 +1979,16 @@ WHERE generation_id = ?
 	if storedPlanDigest != strings.TrimSpace(p.CheckpointPlanDigest) {
 		return fmt.Errorf("checkpoint plan digest mismatch")
 	}
+	plan, err := getGenerationPlanTx(ctx, tx, p.GenerationID)
+	if err != nil {
+		return err
+	}
+	if plan.PlanDigest != storedPlanDigest {
+		return fmt.Errorf("checkpoint stored plan digest mismatch")
+	}
+	if err := verifyCheckpointProjectionDigestsTx(ctx, tx, p); err != nil {
+		return err
+	}
 	res, err := tx.ExecContext(ctx, `
 UPDATE runtime_generations
 SET status = 'checkpointed',
@@ -2068,6 +2078,31 @@ WHERE id = ?
 		return fmt.Errorf("session checkpoint complete CAS failed")
 	}
 	return tx.Commit()
+}
+
+func verifyCheckpointProjectionDigestsTx(ctx context.Context, tx *sql.Tx, p CompleteCheckpointParams) error {
+	checks := []struct {
+		kind   string
+		digest string
+	}{
+		{kind: GenerationPlanProjectionBundle, digest: p.CheckpointBundleDigest},
+		{kind: GenerationPlanProjectionRuntimeConfig, digest: p.CheckpointRuntimeConfigDigest},
+		{kind: GenerationPlanProjectionControlManifestProjected, digest: p.CheckpointControlManifestDigest},
+	}
+	for _, check := range checks {
+		projection, err := getGenerationPlanProjectionTx(ctx, tx, p.GenerationID, check.kind)
+		if err != nil {
+			return fmt.Errorf("checkpoint projection %s: %w", check.kind, err)
+		}
+		if projection.PlanDigest != strings.TrimSpace(p.CheckpointPlanDigest) {
+			return fmt.Errorf("checkpoint projection %s plan digest mismatch", check.kind)
+		}
+		expected := generationPlanProjectionPayloadDigest(check.kind, check.digest)
+		if projection.PayloadDigest != expected {
+			return fmt.Errorf("checkpoint projection %s digest mismatch", check.kind)
+		}
+	}
+	return nil
 }
 
 func (s *Store) GetRuntimeGenerationDetails(ctx context.Context, sessionID, generationID string) (RuntimeGenerationDetails, error) {

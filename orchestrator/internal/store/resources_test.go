@@ -2400,6 +2400,52 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(
 	}
 }
 
+func TestCompleteGenerationCheckpointChecksProjectionDigestFence(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	cfg := testAllocatorConfig(t)
+	now := time.Now().UTC()
+	allocation := createAutoCheckpointGeneration(t, ctx, st, cfg, "sess_auto_projection_fence", GenerationLeaseOwner(owner.UUID), now)
+
+	if err := st.BeginGenerationCheckpoint(ctx, "sess_auto_projection_fence", allocation.GenerationID, allocation.Owner, now.Add(2*time.Minute)); err != nil {
+		t.Fatalf("begin checkpoint: %v", err)
+	}
+	plan, err := st.GetGenerationPlan(ctx, allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get checkpoint generation plan: %v", err)
+	}
+	err = st.CompleteGenerationCheckpoint(ctx, CompleteCheckpointParams{
+		SessionID:                       "sess_auto_projection_fence",
+		GenerationID:                    allocation.GenerationID,
+		Owner:                           allocation.Owner,
+		CheckpointPath:                  filepath.Join(cfg.RunDir, "checkpoint"),
+		RunscPlatform:                   "systrap",
+		RunscVersion:                    "runsc auto",
+		RunscBinaryPath:                 "/usr/local/bin/runsc-auto",
+		RunscBinaryDigest:               "sha256:runsc-auto",
+		CheckpointBundleDigest:          "changed_bundle_digest",
+		CheckpointRuntimeConfigDigest:   "runtime_config_digest",
+		CheckpointControlManifestDigest: "projected_manifest_digest",
+		CheckpointPlanDigest:            plan.PlanDigest,
+		Now:                             now.Add(3 * time.Minute),
+	})
+	if err == nil || !strings.Contains(err.Error(), "checkpoint projection bundle digest mismatch") {
+		t.Fatalf("expected checkpoint projection digest mismatch, got %v", err)
+	}
+
+	var generationStatus, sessionStatus string
+	if err := st.db.QueryRowContext(ctx, `
+SELECT g.status, s.status
+FROM runtime_generations g
+JOIN sessions s ON s.active_generation_id = g.generation_id
+WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &sessionStatus); err != nil {
+		t.Fatalf("query checkpoint state after projection mismatch: %v", err)
+	}
+	if generationStatus != "checkpointing" || sessionStatus != string(sessionstate.Checkpointing) {
+		t.Fatalf("checkpoint projection mismatch should not complete: generation=%s session=%s", generationStatus, sessionStatus)
+	}
+}
+
 func TestCompleteGenerationCheckpointRequiresRunscMetadata(t *testing.T) {
 	ctx := context.Background()
 	st, _ := openOwnedStore(t, ctx)
@@ -3268,6 +3314,54 @@ func storeCheckpointTestGenerationPlan(t *testing.T, ctx context.Context, st *St
 	})
 	if err != nil {
 		t.Fatalf("store generation plan for %s: %v", generationID, err)
+	}
+	for _, projection := range []StoreGenerationPlanProjectionParams{
+		{
+			GenerationID:      generationID,
+			PlanDigest:        plan.PlanDigest,
+			ProjectionKind:    GenerationPlanProjectionSandboxContract,
+			ProjectionVersion: GenerationPlanProjectionVersion,
+			PayloadDigest:     "sha256:sandbox-contract",
+		},
+		{
+			GenerationID:      generationID,
+			PlanDigest:        plan.PlanDigest,
+			ProjectionKind:    GenerationPlanProjectionControlManifest,
+			ProjectionVersion: GenerationPlanProjectionVersion,
+			PayloadDigest:     generationPlanProjectionPayloadDigest(GenerationPlanProjectionControlManifest, "manifest_digest"),
+		},
+		{
+			GenerationID:      generationID,
+			PlanDigest:        plan.PlanDigest,
+			ProjectionKind:    GenerationPlanProjectionControlManifestProjected,
+			ProjectionVersion: GenerationPlanProjectionVersion,
+			PayloadDigest:     generationPlanProjectionPayloadDigest(GenerationPlanProjectionControlManifestProjected, "projected_manifest_digest"),
+		},
+		{
+			GenerationID:      generationID,
+			PlanDigest:        plan.PlanDigest,
+			ProjectionKind:    GenerationPlanProjectionOCISpec,
+			ProjectionVersion: GenerationPlanProjectionVersion,
+			PayloadDigest:     generationPlanProjectionPayloadDigest(GenerationPlanProjectionOCISpec, "spec_digest"),
+		},
+		{
+			GenerationID:      generationID,
+			PlanDigest:        plan.PlanDigest,
+			ProjectionKind:    GenerationPlanProjectionBundle,
+			ProjectionVersion: GenerationPlanProjectionVersion,
+			PayloadDigest:     generationPlanProjectionPayloadDigest(GenerationPlanProjectionBundle, "bundle_digest"),
+		},
+		{
+			GenerationID:      generationID,
+			PlanDigest:        plan.PlanDigest,
+			ProjectionKind:    GenerationPlanProjectionRuntimeConfig,
+			ProjectionVersion: GenerationPlanProjectionVersion,
+			PayloadDigest:     generationPlanProjectionPayloadDigest(GenerationPlanProjectionRuntimeConfig, "runtime_config_digest"),
+		},
+	} {
+		if _, err := st.StoreGenerationPlanProjection(ctx, projection); err != nil {
+			t.Fatalf("store generation plan projection %s for %s: %v", projection.ProjectionKind, generationID, err)
+		}
 	}
 	return plan
 }
