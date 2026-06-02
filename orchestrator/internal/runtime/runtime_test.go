@@ -1912,7 +1912,7 @@ func TestRenderGenerationArtifactProjectionIsPure(t *testing.T) {
 		Generation:   details,
 	})
 
-	projection, err := rt.renderGenerationArtifactProjection(context.Background(), req)
+	projection, err := rt.RenderGenerationArtifacts(context.Background(), req)
 	if err != nil {
 		t.Fatalf("render generation artifact projection: %v", err)
 	}
@@ -1948,7 +1948,7 @@ func TestRenderGenerationArtifactProjectionIsPure(t *testing.T) {
 		}
 	}
 
-	if err := rt.materializeGenerationArtifactProjection(req, projection); err != nil {
+	if err := rt.MaterializeGenerationArtifacts(req, projection); err != nil {
 		t.Fatalf("materialize generation artifact projection: %v", err)
 	}
 	for _, path := range []string{details.SpecPath, details.ControlManifestPath, details.NetworkHostsPath} {

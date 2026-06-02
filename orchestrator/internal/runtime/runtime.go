@@ -1100,11 +1100,11 @@ func (r *Runtime) evictContainerByRunscID(runscContainerID string) {
 }
 
 func (r *Runtime) renderGenerationArtifacts(ctx context.Context, req StartRequest) (GenerationArtifacts, error) {
-	projection, err := r.renderGenerationArtifactProjection(ctx, req)
+	projection, err := r.RenderGenerationArtifacts(ctx, req)
 	if err != nil {
 		return GenerationArtifacts{}, err
 	}
-	if err := r.materializeGenerationArtifactProjection(req, projection); err != nil {
+	if err := r.MaterializeGenerationArtifacts(req, projection); err != nil {
 		return GenerationArtifacts{}, err
 	}
 	return projection.Artifacts, nil
@@ -1115,7 +1115,7 @@ type networkHostsProjection struct {
 	Payload []byte
 }
 
-type generationArtifactProjection struct {
+type GenerationArtifactProjection struct {
 	Artifacts           GenerationArtifacts
 	NetworkHosts        networkHostsProjection
 	DriverConfig        driverConfigProjection
@@ -1123,44 +1123,44 @@ type generationArtifactProjection struct {
 	ControlManifestFile controlManifestFile
 }
 
-func (r *Runtime) renderGenerationArtifactProjection(ctx context.Context, req StartRequest) (generationArtifactProjection, error) {
+func (r *Runtime) RenderGenerationArtifacts(ctx context.Context, req StartRequest) (GenerationArtifactProjection, error) {
 	details := req.Generation
 	if strings.TrimSpace(details.GenerationID) == "" {
-		return generationArtifactProjection{}, fmt.Errorf("generation details are required")
+		return GenerationArtifactProjection{}, fmt.Errorf("generation details are required")
 	}
 	if err := validateGenerationDetails(req); err != nil {
-		return generationArtifactProjection{}, err
+		return GenerationArtifactProjection{}, err
 	}
 	driverSpec, err := runtimeDriverSpec(req)
 	if err != nil {
-		return generationArtifactProjection{}, err
+		return GenerationArtifactProjection{}, err
 	}
 	if strings.TrimSpace(details.SpecPath) == "" || strings.TrimSpace(details.ControlManifestPath) == "" {
-		return generationArtifactProjection{}, fmt.Errorf("generation resource paths are required")
+		return GenerationArtifactProjection{}, fmt.Errorf("generation resource paths are required")
 	}
 	networkHosts, err := renderOptionalNetworkHostsProjection(details)
 	if err != nil {
-		return generationArtifactProjection{}, err
+		return GenerationArtifactProjection{}, err
 	}
 	driverConfig, err := r.renderDriverConfigProjection(req)
 	if err != nil {
-		return generationArtifactProjection{}, err
+		return GenerationArtifactProjection{}, err
 	}
 	spec, specDigest, err := r.renderRuntimeSpecWithDriverSpec(req, driverSpec)
 	if err != nil {
-		return generationArtifactProjection{}, err
+		return GenerationArtifactProjection{}, err
 	}
 	currentRunsc, err := r.currentRunscPin(ctx)
 	if err != nil {
-		return generationArtifactProjection{}, err
+		return GenerationArtifactProjection{}, err
 	}
 	runscNetwork, err := r.runscNetwork(details)
 	if err != nil {
-		return generationArtifactProjection{}, err
+		return GenerationArtifactProjection{}, err
 	}
 	runscOverlay2, err := r.runscOverlay2(details)
 	if err != nil {
-		return generationArtifactProjection{}, err
+		return GenerationArtifactProjection{}, err
 	}
 	bundleDigestPayload, err := canonicalJSON(map[string]any{
 		"bundle_dir":  filepath.Clean(details.BundleDirPath),
@@ -1168,7 +1168,7 @@ func (r *Runtime) renderGenerationArtifactProjection(ctx context.Context, req St
 		"spec_digest": specDigest,
 	})
 	if err != nil {
-		return generationArtifactProjection{}, fmt.Errorf("bundle digest: %w", err)
+		return GenerationArtifactProjection{}, fmt.Errorf("bundle digest: %w", err)
 	}
 	bundleDigest := digestHex(bundleDigestPayload)
 	runtimeConfigDigestPayload, err := canonicalJSON(map[string]any{
@@ -1180,22 +1180,22 @@ func (r *Runtime) renderGenerationArtifactProjection(ctx context.Context, req St
 		"rootfs":              spec.Root.Path,
 	})
 	if err != nil {
-		return generationArtifactProjection{}, fmt.Errorf("runtime config digest: %w", err)
+		return GenerationArtifactProjection{}, fmt.Errorf("runtime config digest: %w", err)
 	}
 	runtimeConfigDigest := digestHex(runtimeConfigDigestPayload)
 	manifest, err := r.buildGenerationManifest(req, driverSpec, currentRunsc.Version, bundleDigest, runtimeConfigDigest, specDigest)
 	if err != nil {
-		return generationArtifactProjection{}, err
+		return GenerationArtifactProjection{}, err
 	}
 	manifestDigest, manifestFile, err := wrapControlManifest(manifest)
 	if err != nil {
-		return generationArtifactProjection{}, err
+		return GenerationArtifactProjection{}, err
 	}
 	projectedManifestDigest, err := projectedControlManifestDigest(manifest)
 	if err != nil {
-		return generationArtifactProjection{}, err
+		return GenerationArtifactProjection{}, err
 	}
-	return generationArtifactProjection{
+	return GenerationArtifactProjection{
 		Artifacts: GenerationArtifacts{
 			BundleDir:                details.BundleDirPath,
 			SpecPath:                 details.SpecPath,
@@ -1217,7 +1217,7 @@ func (r *Runtime) renderGenerationArtifactProjection(ctx context.Context, req St
 	}, nil
 }
 
-func (r *Runtime) materializeGenerationArtifactProjection(req StartRequest, projection generationArtifactProjection) error {
+func (r *Runtime) MaterializeGenerationArtifacts(req StartRequest, projection GenerationArtifactProjection) error {
 	details := req.Generation
 	if err := r.prepareGenerationDirs(req); err != nil {
 		return err
