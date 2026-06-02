@@ -2536,6 +2536,9 @@ func runtimeResourcePostStartProof(instance store.RuntimeResourceInstance, resul
 		return store.RuntimeResourcePostStartProof{}, fmt.Errorf("runtime start did not return post-start proof for generation %s", instance.GenerationID)
 	}
 	proof := *result.PostStartProof
+	if err := validateRuntimeResourcePostStartProof(instance, proof); err != nil {
+		return store.RuntimeResourcePostStartProof{}, err
+	}
 	proof.HostID = instance.HostID
 	proof.ContractID = instance.ContractID
 	proof.SandboxContractVersion = instance.SandboxContractVersion
@@ -2547,6 +2550,39 @@ func runtimeResourcePostStartProof(instance store.RuntimeResourceInstance, resul
 		proof.RunscContainerID = instance.RunscContainerID
 	}
 	return proof, nil
+}
+
+func validateRuntimeResourcePostStartProof(instance store.RuntimeResourceInstance, proof store.RuntimeResourcePostStartProof) error {
+	checks := []struct {
+		label    string
+		got      string
+		want     string
+		required bool
+	}{
+		{"host_id", proof.HostID, instance.HostID, false},
+		{"generation_id", proof.GenerationID, instance.GenerationID, true},
+		{"contract_id", proof.ContractID, instance.ContractID, false},
+		{"sandbox_contract_version", proof.SandboxContractVersion, instance.SandboxContractVersion, false},
+		{"runsc_container_id", proof.RunscContainerID, instance.RunscContainerID, true},
+		{"runsc_platform", proof.RunscPlatform, instance.RunscPlatform, true},
+		{"runsc_version", proof.RunscVersion, instance.RunscVersion, true},
+		{"runsc_binary_path", proof.RunscBinaryPath, instance.RunscBinaryPath, true},
+		{"runsc_binary_digest", proof.RunscBinaryDigest, instance.RunscBinaryDigest, true},
+	}
+	for _, check := range checks {
+		got := strings.TrimSpace(check.got)
+		want := strings.TrimSpace(check.want)
+		if got == "" {
+			if check.required {
+				return fmt.Errorf("runtime post-start proof %s is required", check.label)
+			}
+			continue
+		}
+		if got != want {
+			return fmt.Errorf("runtime post-start proof %s = %q, want %q", check.label, got, want)
+		}
+	}
+	return nil
 }
 
 func runtimeResourceCleanupEvidence(instance store.RuntimeResourceInstance, cleanup runtime.GenerationResourceCleanup) store.ResourceReconciliationEvidence {

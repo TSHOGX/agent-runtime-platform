@@ -283,6 +283,41 @@ func TestRuntimeResourceNftTableNameRequiresIdentifier(t *testing.T) {
 	}
 }
 
+func TestRuntimeResourcePostStartProofValidatesRuntimeIdentity(t *testing.T) {
+	instance := store.RuntimeResourceInstance{
+		GenerationID:           "gen_post_start",
+		HostID:                 "host-post-start",
+		ContractID:             "contract_gen_post_start",
+		SandboxContractVersion: store.SandboxContractVersion,
+		RunscContainerID:       "harness-gen-post-start",
+		RunscPlatform:          "systrap",
+		RunscVersion:           "runsc test",
+		RunscBinaryPath:        "/usr/local/bin/runsc-test",
+		RunscBinaryDigest:      "sha256:runsc-test",
+	}
+	proof := serverPostStartProofForTest(instance)
+	proof.HostID = ""
+	proof.ContractID = ""
+	proof.SandboxContractVersion = ""
+
+	verified, err := runtimeResourcePostStartProof(instance, runtime.Result{PostStartProof: proof}, "bridge_startup_probe:passed; check=test")
+	if err != nil {
+		t.Fatalf("validate post-start proof: %v", err)
+	}
+	if verified.HostID != instance.HostID ||
+		verified.ContractID != instance.ContractID ||
+		verified.SandboxContractVersion != instance.SandboxContractVersion {
+		t.Fatalf("server-owned proof fields were not filled from instance: %+v", verified)
+	}
+
+	mismatch := *serverPostStartProofForTest(instance)
+	mismatch.RunscBinaryDigest = "sha256:changed"
+	if _, err := runtimeResourcePostStartProof(instance, runtime.Result{PostStartProof: &mismatch}, "bridge_startup_probe:passed; check=test"); err == nil ||
+		!strings.Contains(err.Error(), "runtime post-start proof runsc_binary_digest") {
+		t.Fatalf("expected runsc digest mismatch, got %v", err)
+	}
+}
+
 func TestPublicSessionDoesNotInferMissingMode(t *testing.T) {
 	now := time.Now().UTC()
 	got := publicSession(store.Session{
