@@ -3995,7 +3995,7 @@ func TestVerifyGenerationPlanSourceDigestEvidenceChecksStoredInputEvidence(t *te
 	storeServerSyntheticSandboxContractParentForPlan(t, ctx, st, plan)
 	storeServerSandboxContractInputEvidenceFromPlan(t, ctx, st, plan)
 
-	if err := srv.verifyGenerationPlanSourceDigestEvidence(ctx, "gen_frozen_evidence"); err != nil {
+	if err := srv.verifyGenerationPlanSourceDigestEvidence(ctx, "sess_frozen_evidence", "gen_frozen_evidence"); err != nil {
 		t.Fatalf("verify source digest evidence: %v", err)
 	}
 	if _, err := st.DBForTest().ExecContext(ctx, `
@@ -4004,7 +4004,7 @@ SET agent_manifest_digest = 'sha256:changed'
 WHERE contract_id = ?`, sandboxContractID("gen_frozen_evidence")); err != nil {
 		t.Fatalf("mutate sandbox contract input evidence: %v", err)
 	}
-	if err := srv.verifyGenerationPlanSourceDigestEvidence(ctx, "gen_frozen_evidence"); err == nil ||
+	if err := srv.verifyGenerationPlanSourceDigestEvidence(ctx, "sess_frozen_evidence", "gen_frozen_evidence"); err == nil ||
 		!strings.Contains(err.Error(), "source_digests.agent_manifest_digest mismatch") {
 		t.Fatalf("expected agent manifest source digest mismatch, got %v", err)
 	}
@@ -7089,6 +7089,13 @@ func validServerGenerationPlanPayload() map[string]any {
 	featurePolicyPayload["legacy_supports_compaction"] = driver.SupportsCompaction
 	featurePolicyPayload["unsupported_features_fail"] = true
 	featurePolicyPayload["credential_bearing_mcp_scope"] = "out_of_scope"
+	adapterInputDigests := serverAdapterInputDigestPayloadForTest(serverFrozenEvidenceSandboxContractPayloadForTest(
+		"sess_frozen_evidence",
+		"gen_frozen_evidence",
+		"contract_gen_frozen_evidence",
+		"claude_code",
+		"sha256:driver-state",
+	))
 	return map[string]any{
 		"plan_version": store.GenerationPlanVersion,
 		"identity":     map[string]any{"session_id": "sess_frozen_evidence", "generation_id": "gen_frozen_evidence", "product_mode": "agent"},
@@ -7153,10 +7160,94 @@ func validServerGenerationPlanPayload() map[string]any {
 			"sandbox_contract_id": "contract_gen_frozen_evidence", "sandbox_contract_payload_digest": "sha256:sandbox-contract",
 			"sandbox_contract_compatibility_shape": store.SandboxContractVersion,
 		},
-		"feature_policy":      featurePolicyPayload,
-		"content_snapshots":   map[string]any{"skills": nil, "managed_settings": nil},
-		"source_digests":      map[string]any{"runtime_config_digest": "sha256:runtime-config-source", "agent_manifest_digest": "sha256:agent-manifest"},
+		"feature_policy":    featurePolicyPayload,
+		"content_snapshots": map[string]any{"skills": nil, "managed_settings": nil},
+		"source_digests": map[string]any{
+			"runtime_config_digest": "sha256:runtime-config-source",
+			"agent_manifest_digest": "sha256:agent-manifest",
+			"adapter_input_digests": adapterInputDigests,
+		},
 		"mutable_state_scope": map[string]any{"leases": "runtime_generations", "events": "events", "checkpoint_state": "runtime_generations"},
+	}
+}
+
+func serverFrozenEvidenceSandboxContractPayloadForTest(sessionID, generationID, contractID, driverID, driverStateDigest string) map[string]any {
+	modelAccessAllowed := driverID == "claude_code"
+	return map[string]any{
+		"sandbox_contract_version": store.SandboxContractVersion,
+		"contract_schema_version":  store.SandboxContractSchemaVersion,
+		"contract_gate_version":    store.SandboxContractGateDriverManifest,
+		"contract_id":              contractID,
+		"session_id":               sessionID,
+		"generation_id":            generationID,
+		"runtime_profile_id":       "arp_gen_frozen_evidence",
+		"network_profile_id":       "net_gen_frozen_evidence",
+		"driver": map[string]any{
+			"driver_id":                            driverID,
+			"driver_version":                       "test",
+			"bridge_protocol":                      "harness_bridge_v2",
+			"bridge_protocol_version":              2,
+			"turn_input_schema":                    "RunTurn",
+			"output_schema":                        "claude_stream_json_v1",
+			"command_argv_digest":                  "sha256:command",
+			"driver_config_digest":                 "sha256:driver-config",
+			"required_runtime_capabilities_digest": "sha256:driver-capabilities",
+			"supports_interrupt":                   false,
+			"supports_compaction":                  true,
+		},
+		"runtime_provider": map[string]any{
+			"provider_id":              "local_runsc",
+			"provider_profile_id":      "local_runsc_default",
+			"isolation_kind":           "gvisor",
+			"template_ref":             "default",
+			"template_digest":          "sha256:template",
+			"capability_vocab_version": "1",
+			"capability_digest":        "sha256:provider-capabilities",
+		},
+		"identity": map[string]any{
+			"model_access_allowed": modelAccessAllowed,
+		},
+		"network_identity": map[string]any{
+			"runsc_network": "sandbox",
+			"sandbox_ip":    "10.240.0.2",
+		},
+		"credential_policy": serverCredentialPolicyPayloadForTest(driverID),
+		"model_access": map[string]any{
+			"model_access_allowed":         modelAccessAllowed,
+			"sandbox_model_proxy_base_url": "http://harness-model-proxy.internal:8082",
+		},
+		"driver_runtime": map[string]any{
+			"driver_home_mount":             "/agent-home",
+			"generated_driver_config_mount": "/harness-control/driver/" + driverID,
+			"materialized_driver_config":    map[string]any{},
+			"initial_driver_state_digest":   driverStateDigest,
+		},
+		"runtime_adapter": map[string]any{
+			"kind":                "runsc",
+			"runsc_platform":      "systrap",
+			"runsc_version":       "runsc test",
+			"runsc_binary_path":   "/usr/local/bin/runsc-test",
+			"runsc_binary_digest": "sha256:runsc",
+			"runsc_container_id":  "runsc-gen-frozen",
+			"runsc_network":       "sandbox",
+			"runsc_overlay2":      "none",
+		},
+		"input_digests": map[string]any{
+			"runtime_config_digest": "sha256:runtime-config",
+			"rootfs_image_digest":   nil,
+			"agent_manifest_digest": "sha256:agent-manifest",
+		},
+	}
+}
+
+func serverAdapterInputDigestPayloadForTest(contractPayload map[string]any) map[string]any {
+	digests, err := generationplan.AdapterInputDigestsFromSandboxContract(contractPayload)
+	if err != nil {
+		panic(err)
+	}
+	return map[string]any{
+		"driver_adapter":  digests["driver_adapter"],
+		"runtime_adapter": digests["runtime_adapter"],
 	}
 }
 
@@ -7226,15 +7317,13 @@ func storeServerSyntheticSandboxContractParentForPlan(t *testing.T, ctx context.
 	t.Helper()
 	sessionID := serverGenerationPlanSessionID(t, plan.CanonicalPayload)
 	contractID := sandboxContractID(plan.GenerationID)
-	canonicalPayload, err := store.CanonicalSandboxContractPayload(map[string]any{
-		"contract_id":               contractID,
-		"session_id":                sessionID,
-		"generation_id":             plan.GenerationID,
-		"sandbox_contract_version":  store.SandboxContractVersion,
-		"contract_schema_version":   store.SandboxContractSchemaVersion,
-		"contract_gate_version":     store.SandboxContractGateDriverManifest,
-		"synthetic_test_parent_row": true,
-	})
+	canonicalPayload, err := store.CanonicalSandboxContractPayload(serverFrozenEvidenceSandboxContractPayloadForTest(
+		sessionID,
+		plan.GenerationID,
+		contractID,
+		"claude_code",
+		"sha256:driver-state",
+	))
 	if err != nil {
 		t.Fatalf("canonical synthetic sandbox contract parent: %v", err)
 	}
@@ -7250,6 +7339,14 @@ ON CONFLICT(contract_id) DO NOTHING`,
 		string(canonicalPayload), store.SandboxContractDigest(canonicalPayload),
 		time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		t.Fatalf("store synthetic sandbox contract parent: %v", err)
+	}
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE runtime_generations
+SET sandbox_contract_id = ?,
+    sandbox_contract_version = ?
+WHERE generation_id = ?
+  AND session_id = ?`, contractID, store.SandboxContractVersion, plan.GenerationID, sessionID); err != nil {
+		t.Fatalf("store synthetic sandbox contract generation mirror: %v", err)
 	}
 }
 
@@ -7442,6 +7539,8 @@ WHERE id = ?`, sessionID).Scan(&mode); err != nil {
 	runtimeArtifacts["sandbox_contract_id"] = sandboxContractID(generationID)
 	runtimeArtifacts["sandbox_contract_payload_digest"] = sandboxContractDigest
 	runtimeArtifacts["resource_identity_digest"] = serverRuntimeResourceIdentityDigestForPlanFixture(t, details, artifacts)
+	sourceDigests := payload["source_digests"].(map[string]any)
+	sourceDigests["adapter_input_digests"] = serverAdapterInputDigestPayloadForTest(sandboxContractPayload)
 	dataVolumes := payload["data_volumes"].(map[string]any)
 	serverApplyWorkspaceVolumePayload(dataVolumes["workspace"].(map[string]any), workspaceVolume)
 	serverApplyDriverHomeVolumePayload(dataVolumes["agent_home"].(map[string]any), driverHomeVolume)
@@ -7806,6 +7905,16 @@ func serverRuntimeResourceSandboxContractPayloadForTest(t *testing.T, details st
 			"materialized_driver_config":    map[string]any{},
 			"initial_driver_state_digest":   allocation.DriverState.StateDigest,
 		},
+		"runtime_adapter": map[string]any{
+			"kind":                "runsc",
+			"runsc_platform":      details.RunscPlatform,
+			"runsc_version":       details.RunscVersion,
+			"runsc_binary_path":   details.RunscBinaryPath,
+			"runsc_binary_digest": details.RunscBinaryDigest,
+			"runsc_container_id":  details.RunscContainerID,
+			"runsc_network":       details.RunscNetwork,
+			"runsc_overlay2":      details.RunscOverlay2,
+		},
 		"input_digests": map[string]any{
 			"runtime_config_digest": "sha256:runtime-config",
 			"rootfs_image_digest":   nil,
@@ -7825,6 +7934,10 @@ func serverSandboxContractPayloadDigestForTest(t *testing.T, payload map[string]
 
 func serverCredentialPolicyForTest(t *testing.T, driverID string) map[string]any {
 	t.Helper()
+	return serverCredentialPolicyPayloadForTest(driverID)
+}
+
+func serverCredentialPolicyPayloadForTest(driverID string) map[string]any {
 	secretGrants := []map[string]any{}
 	if driverID == "claude_code" {
 		secretGrants = append(secretGrants, map[string]any{
@@ -7845,7 +7958,7 @@ func serverCredentialPolicyForTest(t *testing.T, driverID string) map[string]any
 	}
 	digest, err := store.CredentialPolicyDigest(policy)
 	if err != nil {
-		t.Fatalf("credential digest: %v", err)
+		panic(err)
 	}
 	policy["digest"] = digest
 	return policy

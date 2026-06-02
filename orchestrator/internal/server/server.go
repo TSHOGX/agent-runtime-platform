@@ -960,7 +960,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			return err
 		}
 	}
-	if err := s.verifyGenerationPlanSourceDigestEvidence(ctx, allocation.GenerationID); err != nil {
+	if err := s.verifyGenerationPlanSourceDigestEvidence(ctx, session.ID, allocation.GenerationID); err != nil {
 		retireRuntimeResource()
 		s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 		return err
@@ -1948,7 +1948,7 @@ func (s *Server) verifyGenerationPlanSandboxContractEvidence(ctx context.Context
 	})
 }
 
-func (s *Server) verifyGenerationPlanSourceDigestEvidence(ctx context.Context, generationID string) error {
+func (s *Server) verifyGenerationPlanSourceDigestEvidence(ctx context.Context, sessionID, generationID string) error {
 	generationID = strings.TrimSpace(generationID)
 	plan, err := s.store.RequireGenerationPlanForLaunch(ctx, generationID)
 	if err != nil {
@@ -1961,10 +1961,19 @@ func (s *Server) verifyGenerationPlanSourceDigestEvidence(ctx context.Context, g
 	if err != nil {
 		return err
 	}
+	contract, err := s.store.GetSandboxContractForGeneration(ctx, strings.TrimSpace(sessionID), generationID)
+	if err != nil {
+		return err
+	}
+	adapterInputDigests, err := generationplan.AdapterInputDigestsFromSandboxContract(contract.CanonicalPayload)
+	if err != nil {
+		return err
+	}
 	return generationplan.VerifySourceDigestEvidence(generationplan.VerifySourceDigestEvidenceParams{
 		Payload:             plan.CanonicalPayload,
 		RuntimeConfigDigest: inputEvidence.RuntimeConfigDigest,
 		AgentManifestDigest: inputEvidence.AgentManifestDigest,
+		AdapterInputDigests: adapterInputDigests,
 	})
 }
 

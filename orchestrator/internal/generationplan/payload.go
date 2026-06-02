@@ -32,6 +32,7 @@ type DataVolumes struct {
 type SourceDigests struct {
 	RuntimeConfigDigest string
 	AgentManifestDigest string
+	AdapterInputDigests map[string]string
 }
 
 type RenderPayloadParams struct {
@@ -149,6 +150,13 @@ func RenderPayload(p RenderPayloadParams) (map[string]any, error) {
 	contentSnapshots, err := RenderContentSnapshotsPayload(p.ContentSnapshots)
 	if err != nil {
 		return nil, err
+	}
+	adapterInputDigests := p.SourceDigests.AdapterInputDigests
+	if len(adapterInputDigests) == 0 {
+		adapterInputDigests, err = AdapterInputDigestsFromSandboxContract(p.SandboxContractPayload)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return map[string]any{
 		"plan_version": store.GenerationPlanVersion,
@@ -277,9 +285,13 @@ func RenderPayload(p RenderPayloadParams) (map[string]any, error) {
 			"sandbox_contract_payload_digest":      sandboxContractPayloadDigest,
 			"sandbox_contract_compatibility_shape": sandboxContractCompatibility,
 		},
-		"feature_policy":      featurePolicy,
-		"content_snapshots":   contentSnapshots,
-		"source_digests":      map[string]any{"runtime_config_digest": p.SourceDigests.RuntimeConfigDigest, "agent_manifest_digest": p.SourceDigests.AgentManifestDigest},
+		"feature_policy":    featurePolicy,
+		"content_snapshots": contentSnapshots,
+		"source_digests": map[string]any{
+			"runtime_config_digest": p.SourceDigests.RuntimeConfigDigest,
+			"agent_manifest_digest": p.SourceDigests.AgentManifestDigest,
+			"adapter_input_digests": cloneAdapterInputDigests(adapterInputDigests),
+		},
 		"mutable_state_scope": map[string]any{"leases": mutableLeasesScope, "events": mutableEventsScope, "checkpoint_state": mutableCheckpointStateScope},
 	}, nil
 }

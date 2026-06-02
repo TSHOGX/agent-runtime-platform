@@ -53,6 +53,7 @@ type VerifySourceDigestEvidenceParams struct {
 	Payload             any
 	RuntimeConfigDigest string
 	AgentManifestDigest string
+	AdapterInputDigests map[string]string
 }
 
 type VerifyNetworkEvidenceParams struct {
@@ -538,6 +539,22 @@ func VerifySourceDigestEvidence(p VerifySourceDigestEvidenceParams) error {
 		}
 		if got != want {
 			return fmt.Errorf("generation plan source_digests.%s mismatch", check.field)
+		}
+	}
+	if len(p.AdapterInputDigests) > 0 {
+		adapterInputDigests, err := requireObject(sourceDigests, "adapter_input_digests")
+		if err != nil {
+			return err
+		}
+		for _, kind := range AdapterInputDigestKinds() {
+			got := strings.TrimSpace(p.AdapterInputDigests[kind])
+			want := strings.TrimSpace(stringField(adapterInputDigests, kind))
+			if !isSha256(got) {
+				return fmt.Errorf("generation plan source_digests.adapter_input_digests.%s evidence is required", kind)
+			}
+			if got != want {
+				return fmt.Errorf("generation plan source_digests.adapter_input_digests.%s mismatch", kind)
+			}
 		}
 	}
 	return nil
@@ -1331,6 +1348,15 @@ func validateSourceDigests(object map[string]any) error {
 	for _, key := range []string{"runtime_config_digest", "agent_manifest_digest"} {
 		if !isSha256(stringField(sourceDigests, key)) {
 			return fmt.Errorf("generation plan source_digests.%s is required", key)
+		}
+	}
+	adapterInputDigests, err := requireObject(sourceDigests, "adapter_input_digests")
+	if err != nil {
+		return err
+	}
+	for _, kind := range AdapterInputDigestKinds() {
+		if !isSha256(stringField(adapterInputDigests, kind)) {
+			return fmt.Errorf("generation plan source_digests.adapter_input_digests.%s is required", kind)
 		}
 	}
 	return nil

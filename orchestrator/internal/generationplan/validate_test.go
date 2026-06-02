@@ -895,6 +895,37 @@ func TestVerifySourceDigestEvidenceChecksStoredInputDigests(t *testing.T) {
 	}
 }
 
+func TestVerifySourceDigestEvidenceChecksAdapterInputDigests(t *testing.T) {
+	contractPayload := validSandboxContractPayloadForAdapterInputDigests()
+	adapterInputDigests, err := AdapterInputDigestsFromSandboxContract(contractPayload)
+	if err != nil {
+		t.Fatalf("adapter input digests: %v", err)
+	}
+	payload := validPlanPayload()
+	sourceDigests := payload["source_digests"].(map[string]any)
+	sourceDigests["adapter_input_digests"] = map[string]any{
+		"driver_adapter":  adapterInputDigests["driver_adapter"],
+		"runtime_adapter": adapterInputDigests["runtime_adapter"],
+	}
+	params := VerifySourceDigestEvidenceParams{
+		Payload:             payload,
+		RuntimeConfigDigest: "sha256:runtime-config",
+		AgentManifestDigest: "sha256:agent-manifest",
+		AdapterInputDigests: adapterInputDigests,
+	}
+	if err := VerifySourceDigestEvidence(params); err != nil {
+		t.Fatalf("verify adapter input digests: %v", err)
+	}
+
+	mismatch := cloneStringMap(adapterInputDigests)
+	mismatch["runtime_adapter"] = "sha256:changed"
+	params.AdapterInputDigests = mismatch
+	if err := VerifySourceDigestEvidence(params); err == nil ||
+		!strings.Contains(err.Error(), "source_digests.adapter_input_digests.runtime_adapter mismatch") {
+		t.Fatalf("expected adapter input digest mismatch, got %v", err)
+	}
+}
+
 func TestContentSnapshotRefsExtractsPlanSnapshotDigests(t *testing.T) {
 	payload := validPlanPayload()
 	contentSnapshots := payload["content_snapshots"].(map[string]any)
@@ -935,6 +966,44 @@ func TestOptionalProjectionPayloadDigest(t *testing.T) {
 	}
 	if got := OptionalProjectionPayloadDigest(store.GenerationPlanProjectionBundle, "bundle_digest"); got == "" || !strings.HasPrefix(got, "sha256:") {
 		t.Fatalf("optional projection digest = %q", got)
+	}
+}
+
+func validSandboxContractPayloadForAdapterInputDigests() map[string]any {
+	return map[string]any{
+		"driver": map[string]any{
+			"driver_id":                            "claude_code",
+			"driver_config_digest":                 "sha256:driver-config",
+			"required_runtime_capabilities_digest": "sha256:driver-capabilities",
+			"supports_interrupt":                   false,
+			"supports_compaction":                  true,
+		},
+		"runtime_provider": map[string]any{
+			"provider_id":              "local_runsc",
+			"provider_profile_id":      "local_runsc_default",
+			"isolation_kind":           "gvisor",
+			"template_ref":             "default",
+			"template_digest":          "sha256:template",
+			"capability_vocab_version": "1",
+			"capability_digest":        "sha256:provider-capabilities",
+		},
+		"model_access": map[string]any{
+			"model_access_allowed":         true,
+			"sandbox_model_proxy_base_url": "http://harness-model-proxy.internal:8082",
+		},
+		"driver_runtime": map[string]any{
+			"driver_home_mount":             "/agent-home",
+			"generated_driver_config_mount": "/harness-control/driver/claude_code",
+			"materialized_driver_config":    map[string]any{},
+			"initial_driver_state_digest":   "sha256:driver-state",
+		},
+		"runtime_adapter": map[string]any{
+			"kind":                "runsc",
+			"runsc_platform":      "systrap",
+			"runsc_version":       "runsc test",
+			"runsc_binary_path":   "/usr/local/bin/runsc-test",
+			"runsc_binary_digest": "sha256:runsc",
+		},
 	}
 }
 
@@ -1076,9 +1145,16 @@ func validPlanPayload() map[string]any {
 			"sandbox_contract_payload_digest":      "sha256:sandbox-contract",
 			"sandbox_contract_compatibility_shape": store.SandboxContractVersion,
 		},
-		"feature_policy":      featurePolicyPayload,
-		"content_snapshots":   map[string]any{"skills": nil, "managed_settings": nil},
-		"source_digests":      map[string]any{"runtime_config_digest": "sha256:runtime-config", "agent_manifest_digest": "sha256:agent-manifest"},
+		"feature_policy":    featurePolicyPayload,
+		"content_snapshots": map[string]any{"skills": nil, "managed_settings": nil},
+		"source_digests": map[string]any{
+			"runtime_config_digest": "sha256:runtime-config",
+			"agent_manifest_digest": "sha256:agent-manifest",
+			"adapter_input_digests": map[string]any{
+				"driver_adapter":  "sha256:driver-adapter",
+				"runtime_adapter": "sha256:runtime-adapter",
+			},
+		},
 		"mutable_state_scope": map[string]any{"leases": "runtime_generations", "events": "events", "checkpoint_state": "runtime_generations"},
 	}
 }
