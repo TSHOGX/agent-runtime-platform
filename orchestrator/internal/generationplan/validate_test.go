@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"harness-platform/orchestrator/internal/agents"
+	"harness-platform/orchestrator/internal/planprojection"
 	"harness-platform/orchestrator/internal/runtime"
 	"harness-platform/orchestrator/internal/store"
 )
@@ -75,6 +76,40 @@ func TestMaterializedDriverConfigPayloadIsPlanEvidence(t *testing.T) {
 		payload[0]["destination_mutable_by_sandbox"] != false ||
 		payload[0]["projection_materialization_kind"] != "driver_config" {
 		t.Fatalf("unexpected materialized driver config payload: %+v", payload)
+	}
+}
+
+func TestValidateRejectsUnsupportedDriverConfigMaterialization(t *testing.T) {
+	payload := validPlanPayload()
+	runtimeArtifacts := payload["runtime_artifacts"].(map[string]any)
+	runtimeArtifacts["materialized_driver_config"] = MaterializedDriverConfigPayload([]runtime.DriverConfigMaterialization{
+		{
+			Name:                        "settings",
+			SourceProjectionPath:        "/harness-control/driver/claude_code/settings.json",
+			SourceDigest:                "sha256:settings",
+			SandboxDestination:          "/agent-home/settings.json",
+			DestinationMutableBySandbox: false,
+		},
+	})
+
+	err := Validate(ValidateParams{Payload: payload})
+	if err == nil || !strings.Contains(err.Error(), "driver claude_code does not support driver config materialization") {
+		t.Fatalf("expected unsupported driver config materialization error, got %v", err)
+	}
+}
+
+func TestValidateDriverConfigMaterializationEvidence(t *testing.T) {
+	payload := validPiPlanPayload(t)
+	if err := Validate(ValidateParams{Payload: payload}); err != nil {
+		t.Fatalf("valid pi driver config materialization should validate: %v", err)
+	}
+
+	runtimeArtifacts := payload["runtime_artifacts"].(map[string]any)
+	entries := runtimeArtifacts["materialized_driver_config"].([]map[string]any)
+	entries[0]["source_digest"] = "settings"
+	err := Validate(ValidateParams{Payload: payload})
+	if err == nil || !strings.Contains(err.Error(), "source_digest is required") {
+		t.Fatalf("expected driver config source digest error, got %v", err)
 	}
 }
 
@@ -615,6 +650,69 @@ func validPlanPayload() map[string]any {
 		"source_digests":      map[string]any{"runtime_config_digest": "sha256:runtime-config", "agent_manifest_digest": "sha256:agent-manifest"},
 		"mutable_state_scope": map[string]any{"leases": "runtime_generations", "events": "events", "checkpoint_state": "runtime_generations"},
 	}
+}
+
+func validPiPlanPayload(t *testing.T) map[string]any {
+	t.Helper()
+	payload := validPlanPayload()
+	driver, ok := agents.DriverSpecFor("pi")
+	if !ok {
+		t.Fatalf("pi driver spec missing")
+	}
+	provider, ok := agents.RuntimeProviderSpecFor("local_runsc")
+	if !ok {
+		t.Fatalf("provider spec missing")
+	}
+	featurePolicy, err := agents.FeaturePolicyPayload(agents.DefaultFeaturePolicyForDriver(driver))
+	if err != nil {
+		t.Fatalf("pi feature policy payload: %v", err)
+	}
+	featurePolicyPayload := map[string]any{}
+	for key, value := range featurePolicy {
+		featurePolicyPayload[key] = value
+	}
+	featurePolicyPayload["capability_schema_version"] = agents.DriverCapabilitySchemaVersion
+	featurePolicyPayload["capability_vocab_version"] = provider.CapabilityVocabulary
+	featurePolicyPayload["driver_capabilities"] = agents.DriverCapabilityPayload(driver)
+	featurePolicyPayload["runtime_provider_capabilities"] = agents.RuntimeProviderCapabilityPayload(provider)
+	featurePolicyPayload["legacy_supports_interrupt"] = driver.SupportsInterrupt
+	featurePolicyPayload["legacy_supports_compaction"] = driver.SupportsCompaction
+	featurePolicyPayload["unsupported_features_fail"] = true
+	featurePolicyPayload["credential_bearing_mcp_scope"] = "out_of_scope"
+
+	driverPayload := payload["driver"].(map[string]any)
+	driverPayload["driver_id"] = string(agents.Pi)
+	driverPayload["driver_kind"] = string(driver.Kind)
+	driverPayload["bridge_protocol"] = driver.BridgeProtocol
+	driverPayload["bridge_protocol_version"] = driver.BridgeProtocolVersion
+	driverPayload["turn_input_schema"] = driver.TurnInputSchema
+	driverPayload["output_schema"] = driver.OutputSchema
+	driverPayload["output_format"] = driver.OutputFormat
+	driverPayload["capability_snapshot"] = agents.DriverCapabilityPayload(driver)
+	payload["feature_policy"] = featurePolicyPayload
+
+	agentHome := payload["data_volumes"].(map[string]any)["agent_home"].(map[string]any)
+	agentHome["driver"] = string(agents.Pi)
+
+	entries := []runtime.DriverConfigMaterialization{}
+	for _, spec := range agents.DriverConfigMaterializationSpecsFor(agents.Pi) {
+		entries = append(entries, runtime.DriverConfigMaterialization{
+			Name:                        spec.Name,
+			SourceProjectionPath:        spec.SourceProjectionPath,
+			SourceDigest:                "sha256:" + spec.Name,
+			SandboxDestination:          spec.SandboxDestination,
+			DestinationMutableBySandbox: spec.DestinationMutableBySandbox,
+		})
+	}
+	_, mountPayload, err := planprojection.DriverConfigMaterializationPayload(string(agents.Pi), entries)
+	if err != nil {
+		t.Fatalf("pi driver config mount payload: %v", err)
+	}
+	runtimeArtifacts := payload["runtime_artifacts"].(map[string]any)
+	runtimeArtifacts["materialized_driver_config"] = MaterializedDriverConfigPayload(entries)
+	mounts := payload["mounts"].(map[string]any)
+	mounts["driver_config_materializations"] = mountPayload
+	return payload
 }
 
 func validFrozenEvidenceParams(payload map[string]any) VerifyFrozenEvidenceParams {
