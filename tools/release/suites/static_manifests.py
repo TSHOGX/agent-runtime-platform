@@ -63,6 +63,17 @@ def _next_stage_checks():
             ),
         },
         {
+            "name": "next_stage_projection_kinds_have_store_metadata",
+            "kind": "contains",
+            "path": REPO_ROOT / "orchestrator" / "internal" / "store" / "generation_plan.go",
+            "patterns": (
+                ("projection_version_constant", "const GenerationPlanProjectionVersion = 1"),
+                ("projection_kinds_helper", "func GenerationPlanProjectionKinds"),
+                ("projection_version_helper", "func GenerationPlanProjectionVersionFor"),
+                ("projected_manifest_kind", "GenerationPlanProjectionControlManifestProjected"),
+            ),
+        },
+        {
             "name": "next_stage_content_snapshots_store_persists_immutable_rows",
             "kind": "contains",
             "path": REPO_ROOT / "orchestrator" / "internal" / "store" / "content_snapshots.go",

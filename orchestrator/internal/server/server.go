@@ -1976,48 +1976,48 @@ func generationPlanProjectionDigests(details store.RuntimeGenerationDetails, art
 		{
 			GenerationID:      generationID,
 			PlanDigest:        planDigest,
-			ProjectionKind:    "sandbox_contract",
-			ProjectionVersion: 1,
+			ProjectionKind:    store.GenerationPlanProjectionSandboxContract,
+			ProjectionVersion: store.GenerationPlanProjectionVersion,
 			PayloadDigest:     sandboxContractDigestForPlan(sandboxContractPayload),
 		},
 		{
 			GenerationID:      generationID,
 			PlanDigest:        planDigest,
-			ProjectionKind:    "control_manifest",
-			ProjectionVersion: 1,
-			PayloadDigest:     projectionPayloadDigest("control_manifest", artifacts.ManifestDigest),
+			ProjectionKind:    store.GenerationPlanProjectionControlManifest,
+			ProjectionVersion: store.GenerationPlanProjectionVersion,
+			PayloadDigest:     projectionPayloadDigest(store.GenerationPlanProjectionControlManifest, artifacts.ManifestDigest),
 			MaterializedPath:  details.ControlManifestPath,
 		},
 		{
 			GenerationID:      generationID,
 			PlanDigest:        planDigest,
-			ProjectionKind:    "control_manifest_projected",
-			ProjectionVersion: 1,
-			PayloadDigest:     projectionPayloadDigest("control_manifest_projected", artifacts.ProjectedManifestDigest),
+			ProjectionKind:    store.GenerationPlanProjectionControlManifestProjected,
+			ProjectionVersion: store.GenerationPlanProjectionVersion,
+			PayloadDigest:     projectionPayloadDigest(store.GenerationPlanProjectionControlManifestProjected, artifacts.ProjectedManifestDigest),
 			MaterializedPath:  details.ControlManifestPath,
 		},
 		{
 			GenerationID:      generationID,
 			PlanDigest:        planDigest,
-			ProjectionKind:    "oci_spec",
-			ProjectionVersion: 1,
-			PayloadDigest:     projectionPayloadDigest("oci_spec", artifacts.SpecDigest),
+			ProjectionKind:    store.GenerationPlanProjectionOCISpec,
+			ProjectionVersion: store.GenerationPlanProjectionVersion,
+			PayloadDigest:     projectionPayloadDigest(store.GenerationPlanProjectionOCISpec, artifacts.SpecDigest),
 			MaterializedPath:  details.SpecPath,
 		},
 		{
 			GenerationID:      generationID,
 			PlanDigest:        planDigest,
-			ProjectionKind:    "bundle",
-			ProjectionVersion: 1,
-			PayloadDigest:     projectionPayloadDigest("bundle", artifacts.BundleDigest),
+			ProjectionKind:    store.GenerationPlanProjectionBundle,
+			ProjectionVersion: store.GenerationPlanProjectionVersion,
+			PayloadDigest:     projectionPayloadDigest(store.GenerationPlanProjectionBundle, artifacts.BundleDigest),
 			MaterializedPath:  details.BundleDirPath,
 		},
 		{
 			GenerationID:      generationID,
 			PlanDigest:        planDigest,
-			ProjectionKind:    "runtime_config",
-			ProjectionVersion: 1,
-			PayloadDigest:     projectionPayloadDigest("runtime_config", artifacts.RuntimeConfigDigest),
+			ProjectionKind:    store.GenerationPlanProjectionRuntimeConfig,
+			ProjectionVersion: store.GenerationPlanProjectionVersion,
+			PayloadDigest:     projectionPayloadDigest(store.GenerationPlanProjectionRuntimeConfig, artifacts.RuntimeConfigDigest),
 		},
 	}
 }
@@ -2034,7 +2034,7 @@ func projectionPayloadDigest(kind string, digest any) string {
 func sandboxContractDigestForPlan(payload map[string]any) string {
 	canonical, err := store.CanonicalSandboxContractPayload(payload)
 	if err != nil {
-		return projectionPayloadDigest("sandbox_contract", payload["sandbox_contract_digest"])
+		return projectionPayloadDigest(store.GenerationPlanProjectionSandboxContract, payload["sandbox_contract_digest"])
 	}
 	return store.SandboxContractDigest(canonical)
 }
@@ -2149,9 +2149,9 @@ func (s *Server) verifyGenerationPlanFrozenEvidence(ctx context.Context, generat
 		RunscBinaryDigest:               artifacts.RunscBinaryDigest,
 		ProjectionDigests:               generationPlanProjectionDigestMap(artifacts),
 		ContentSnapshotDigests:          contentSnapshotDigests,
-		CheckpointBundleDigest:          optionalProjectionPayloadDigest("bundle", details.CheckpointBundleDigest),
-		CheckpointRuntimeConfigDigest:   optionalProjectionPayloadDigest("runtime_config", details.CheckpointRuntimeConfigDigest),
-		CheckpointControlManifestDigest: optionalProjectionPayloadDigest("control_manifest_projected", details.CheckpointControlManifestDigest),
+		CheckpointBundleDigest:          optionalProjectionPayloadDigest(store.GenerationPlanProjectionBundle, details.CheckpointBundleDigest),
+		CheckpointRuntimeConfigDigest:   optionalProjectionPayloadDigest(store.GenerationPlanProjectionRuntimeConfig, details.CheckpointRuntimeConfigDigest),
+		CheckpointControlManifestDigest: optionalProjectionPayloadDigest(store.GenerationPlanProjectionControlManifestProjected, details.CheckpointControlManifestDigest),
 	})
 }
 
@@ -2207,11 +2207,11 @@ func generationPlanPayloadObject(payload []byte) (map[string]any, error) {
 
 func generationPlanProjectionExpectations(artifacts runtime.GenerationArtifacts) []store.GenerationPlanProjectionExpectation {
 	return []store.GenerationPlanProjectionExpectation{
-		{ProjectionKind: "control_manifest", PayloadDigest: projectionPayloadDigest("control_manifest", artifacts.ManifestDigest)},
-		{ProjectionKind: "control_manifest_projected", PayloadDigest: projectionPayloadDigest("control_manifest_projected", artifacts.ProjectedManifestDigest)},
-		{ProjectionKind: "oci_spec", PayloadDigest: projectionPayloadDigest("oci_spec", artifacts.SpecDigest)},
-		{ProjectionKind: "bundle", PayloadDigest: projectionPayloadDigest("bundle", artifacts.BundleDigest)},
-		{ProjectionKind: "runtime_config", PayloadDigest: projectionPayloadDigest("runtime_config", artifacts.RuntimeConfigDigest)},
+		{ProjectionKind: store.GenerationPlanProjectionControlManifest, PayloadDigest: projectionPayloadDigest(store.GenerationPlanProjectionControlManifest, artifacts.ManifestDigest)},
+		{ProjectionKind: store.GenerationPlanProjectionControlManifestProjected, PayloadDigest: projectionPayloadDigest(store.GenerationPlanProjectionControlManifestProjected, artifacts.ProjectedManifestDigest)},
+		{ProjectionKind: store.GenerationPlanProjectionOCISpec, PayloadDigest: projectionPayloadDigest(store.GenerationPlanProjectionOCISpec, artifacts.SpecDigest)},
+		{ProjectionKind: store.GenerationPlanProjectionBundle, PayloadDigest: projectionPayloadDigest(store.GenerationPlanProjectionBundle, artifacts.BundleDigest)},
+		{ProjectionKind: store.GenerationPlanProjectionRuntimeConfig, PayloadDigest: projectionPayloadDigest(store.GenerationPlanProjectionRuntimeConfig, artifacts.RuntimeConfigDigest)},
 	}
 }
 

@@ -125,13 +125,13 @@ func VerifyFrozenEvidence(p VerifyFrozenEvidenceParams) error {
 			return fmt.Errorf("generation plan projection %s digest mismatch", kind)
 		}
 	}
-	if p.CheckpointBundleDigest != "" && strings.TrimSpace(p.CheckpointBundleDigest) != projectionDigest(projections, "bundle") {
+	if p.CheckpointBundleDigest != "" && strings.TrimSpace(p.CheckpointBundleDigest) != projectionDigest(projections, store.GenerationPlanProjectionBundle) {
 		return fmt.Errorf("generation plan checkpoint bundle digest mismatch")
 	}
-	if p.CheckpointRuntimeConfigDigest != "" && strings.TrimSpace(p.CheckpointRuntimeConfigDigest) != projectionDigest(projections, "runtime_config") {
+	if p.CheckpointRuntimeConfigDigest != "" && strings.TrimSpace(p.CheckpointRuntimeConfigDigest) != projectionDigest(projections, store.GenerationPlanProjectionRuntimeConfig) {
 		return fmt.Errorf("generation plan checkpoint runtime config digest mismatch")
 	}
-	if p.CheckpointControlManifestDigest != "" && strings.TrimSpace(p.CheckpointControlManifestDigest) != projectionDigest(projections, "control_manifest_projected") {
+	if p.CheckpointControlManifestDigest != "" && strings.TrimSpace(p.CheckpointControlManifestDigest) != projectionDigest(projections, store.GenerationPlanProjectionControlManifestProjected) {
 		return fmt.Errorf("generation plan checkpoint control manifest digest mismatch")
 	}
 	snapshots, err := requireObject(object, "content_snapshots")
@@ -489,13 +489,14 @@ func validateProjectionDigests(object map[string]any) error {
 	if err != nil {
 		return err
 	}
-	for _, kind := range []string{"sandbox_contract", "control_manifest", "control_manifest_projected", "oci_spec", "bundle", "runtime_config"} {
+	for _, kind := range store.GenerationPlanProjectionKinds() {
 		projection, err := requireObject(projections, kind)
 		if err != nil {
 			return err
 		}
-		if numberField(projection, "projection_version") <= 0 {
-			return fmt.Errorf("generation plan projection_digests.%s.projection_version is required", kind)
+		version, _ := store.GenerationPlanProjectionVersionFor(kind)
+		if numberField(projection, "projection_version") != int64(version) {
+			return fmt.Errorf("generation plan projection_digests.%s.projection_version = %d, want %d", kind, numberField(projection, "projection_version"), version)
 		}
 		if !isSha256(stringField(projection, "payload_digest")) {
 			return fmt.Errorf("generation plan projection_digests.%s.payload_digest is required", kind)

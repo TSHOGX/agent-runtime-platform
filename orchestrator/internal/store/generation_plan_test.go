@@ -99,6 +99,38 @@ func TestStoreGenerationPlanRejectsDigestMismatch(t *testing.T) {
 	}
 }
 
+func TestGenerationPlanProjectionKindsAreFixedAndCloned(t *testing.T) {
+	kinds := GenerationPlanProjectionKinds()
+	want := []string{
+		GenerationPlanProjectionSandboxContract,
+		GenerationPlanProjectionControlManifest,
+		GenerationPlanProjectionControlManifestProjected,
+		GenerationPlanProjectionOCISpec,
+		GenerationPlanProjectionBundle,
+		GenerationPlanProjectionRuntimeConfig,
+	}
+	if len(kinds) != len(want) {
+		t.Fatalf("projection kinds=%+v want %+v", kinds, want)
+	}
+	for i := range want {
+		if kinds[i] != want[i] {
+			t.Fatalf("projection kinds=%+v want %+v", kinds, want)
+		}
+		version, ok := GenerationPlanProjectionVersionFor(kinds[i])
+		if !ok || version != GenerationPlanProjectionVersion {
+			t.Fatalf("projection version for %s = %d/%v", kinds[i], version, ok)
+		}
+	}
+	kinds[0] = "mutated"
+	again := GenerationPlanProjectionKinds()
+	if again[0] != GenerationPlanProjectionSandboxContract {
+		t.Fatalf("projection kinds should be cloned, got %+v", again)
+	}
+	if version, ok := GenerationPlanProjectionVersionFor("unknown"); ok || version != 0 {
+		t.Fatalf("unknown projection version = %d/%v", version, ok)
+	}
+}
+
 func TestRequireGenerationPlanForLaunchRejectsNonTerminalWithoutPlan(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
@@ -150,8 +182,8 @@ func TestStoreGenerationPlanProjectionIsImmutableAndListsByKind(t *testing.T) {
 	manifest, err := st.StoreGenerationPlanProjection(ctx, StoreGenerationPlanProjectionParams{
 		GenerationID:      plan.GenerationID,
 		PlanDigest:        plan.PlanDigest,
-		ProjectionKind:    "control_manifest",
-		ProjectionVersion: 1,
+		ProjectionKind:    GenerationPlanProjectionControlManifest,
+		ProjectionVersion: GenerationPlanProjectionVersion,
 		PayloadDigest:     "sha256:manifest",
 		MaterializedPath:  "/var/lib/harness/run/gen_projection/control/manifest.json",
 	})
@@ -161,8 +193,8 @@ func TestStoreGenerationPlanProjectionIsImmutableAndListsByKind(t *testing.T) {
 	contract, err := st.StoreGenerationPlanProjection(ctx, StoreGenerationPlanProjectionParams{
 		GenerationID:      plan.GenerationID,
 		PlanDigest:        plan.PlanDigest,
-		ProjectionKind:    "sandbox_contract",
-		ProjectionVersion: 1,
+		ProjectionKind:    GenerationPlanProjectionSandboxContract,
+		ProjectionVersion: GenerationPlanProjectionVersion,
 		PayloadDigest:     "sha256:contract",
 	})
 	if err != nil {
@@ -171,8 +203,8 @@ func TestStoreGenerationPlanProjectionIsImmutableAndListsByKind(t *testing.T) {
 	replayed, err := st.StoreGenerationPlanProjection(ctx, StoreGenerationPlanProjectionParams{
 		GenerationID:      plan.GenerationID,
 		PlanDigest:        plan.PlanDigest,
-		ProjectionKind:    "control_manifest",
-		ProjectionVersion: 1,
+		ProjectionKind:    GenerationPlanProjectionControlManifest,
+		ProjectionVersion: GenerationPlanProjectionVersion,
 		PayloadDigest:     "sha256:manifest",
 		MaterializedPath:  "/var/lib/harness/run/gen_projection/control/manifest.json",
 	})
@@ -186,8 +218,8 @@ func TestStoreGenerationPlanProjectionIsImmutableAndListsByKind(t *testing.T) {
 	_, err = st.StoreGenerationPlanProjection(ctx, StoreGenerationPlanProjectionParams{
 		GenerationID:      plan.GenerationID,
 		PlanDigest:        plan.PlanDigest,
-		ProjectionKind:    "control_manifest",
-		ProjectionVersion: 1,
+		ProjectionKind:    GenerationPlanProjectionControlManifest,
+		ProjectionVersion: GenerationPlanProjectionVersion,
 		PayloadDigest:     "sha256:changed",
 		MaterializedPath:  "/var/lib/harness/run/gen_projection/control/manifest.json",
 	})
@@ -252,8 +284,8 @@ func TestVerifyGenerationPlanProjectionsMatchesStoredDigests(t *testing.T) {
 		t.Fatalf("store plan: %v", err)
 	}
 	for _, projection := range []StoreGenerationPlanProjectionParams{
-		{GenerationID: plan.GenerationID, PlanDigest: plan.PlanDigest, ProjectionKind: "control_manifest", ProjectionVersion: 1, PayloadDigest: "sha256:manifest"},
-		{GenerationID: plan.GenerationID, PlanDigest: plan.PlanDigest, ProjectionKind: "oci_spec", ProjectionVersion: 1, PayloadDigest: "sha256:spec"},
+		{GenerationID: plan.GenerationID, PlanDigest: plan.PlanDigest, ProjectionKind: GenerationPlanProjectionControlManifest, ProjectionVersion: GenerationPlanProjectionVersion, PayloadDigest: "sha256:manifest"},
+		{GenerationID: plan.GenerationID, PlanDigest: plan.PlanDigest, ProjectionKind: GenerationPlanProjectionOCISpec, ProjectionVersion: GenerationPlanProjectionVersion, PayloadDigest: "sha256:spec"},
 	} {
 		if _, err := st.StoreGenerationPlanProjection(ctx, projection); err != nil {
 			t.Fatalf("store projection %s: %v", projection.ProjectionKind, err)
@@ -264,8 +296,8 @@ func TestVerifyGenerationPlanProjectionsMatchesStoredDigests(t *testing.T) {
 		GenerationID: plan.GenerationID,
 		PlanDigest:   plan.PlanDigest,
 		Expected: []GenerationPlanProjectionExpectation{
-			{ProjectionKind: "control_manifest", PayloadDigest: "sha256:manifest"},
-			{ProjectionKind: "oci_spec", PayloadDigest: "sha256:spec"},
+			{ProjectionKind: GenerationPlanProjectionControlManifest, PayloadDigest: "sha256:manifest"},
+			{ProjectionKind: GenerationPlanProjectionOCISpec, PayloadDigest: "sha256:spec"},
 		},
 	})
 	if err != nil {
@@ -279,7 +311,7 @@ func TestVerifyGenerationPlanProjectionsMatchesStoredDigests(t *testing.T) {
 		GenerationID: plan.GenerationID,
 		PlanDigest:   plan.PlanDigest,
 		Expected: []GenerationPlanProjectionExpectation{
-			{ProjectionKind: "control_manifest", PayloadDigest: "sha256:changed"},
+			{ProjectionKind: GenerationPlanProjectionControlManifest, PayloadDigest: "sha256:changed"},
 		},
 	}); err == nil || !strings.Contains(err.Error(), "control_manifest digest mismatch") {
 		t.Fatalf("expected projection digest mismatch, got %v", err)
@@ -313,7 +345,7 @@ func TestVerifyGenerationPlanProjectionsCanRequirePlan(t *testing.T) {
 
 	verified, err := st.VerifyGenerationPlanProjections(ctx, VerifyGenerationPlanProjectionsParams{
 		GenerationID: "gen_verify_missing_plan",
-		Expected:     []GenerationPlanProjectionExpectation{{ProjectionKind: "control_manifest", PayloadDigest: "sha256:manifest"}},
+		Expected:     []GenerationPlanProjectionExpectation{{ProjectionKind: GenerationPlanProjectionControlManifest, PayloadDigest: "sha256:manifest"}},
 	})
 	if err != nil {
 		t.Fatalf("optional missing plan should not fail: %v", err)

@@ -12,6 +12,25 @@ import (
 )
 
 const GenerationPlanVersion = 1
+const GenerationPlanProjectionVersion = 1
+
+const (
+	GenerationPlanProjectionSandboxContract          = "sandbox_contract"
+	GenerationPlanProjectionControlManifest          = "control_manifest"
+	GenerationPlanProjectionControlManifestProjected = "control_manifest_projected"
+	GenerationPlanProjectionOCISpec                  = "oci_spec"
+	GenerationPlanProjectionBundle                   = "bundle"
+	GenerationPlanProjectionRuntimeConfig            = "runtime_config"
+)
+
+var generationPlanProjectionKinds = []string{
+	GenerationPlanProjectionSandboxContract,
+	GenerationPlanProjectionControlManifest,
+	GenerationPlanProjectionControlManifestProjected,
+	GenerationPlanProjectionOCISpec,
+	GenerationPlanProjectionBundle,
+	GenerationPlanProjectionRuntimeConfig,
+}
 
 type GenerationPlanRecord struct {
 	GenerationID     string
@@ -59,6 +78,24 @@ type VerifyGenerationPlanProjectionsParams struct {
 type GenerationPlanProjectionExpectation struct {
 	ProjectionKind string
 	PayloadDigest  string
+}
+
+func GenerationPlanProjectionKinds() []string {
+	return append([]string(nil), generationPlanProjectionKinds...)
+}
+
+func GenerationPlanProjectionVersionFor(kind string) (int, bool) {
+	switch strings.TrimSpace(kind) {
+	case GenerationPlanProjectionSandboxContract,
+		GenerationPlanProjectionControlManifest,
+		GenerationPlanProjectionControlManifestProjected,
+		GenerationPlanProjectionOCISpec,
+		GenerationPlanProjectionBundle,
+		GenerationPlanProjectionRuntimeConfig:
+		return GenerationPlanProjectionVersion, true
+	default:
+		return 0, false
+	}
 }
 
 func GenerationPlanDigest(canonicalPayload []byte) string {
