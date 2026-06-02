@@ -210,6 +210,56 @@ func TestRenderContentSnapshotsPayloadRejectsInvalidSelection(t *testing.T) {
 	}); err == nil || !strings.Contains(err.Error(), "unsupported content snapshot kind") {
 		t.Fatalf("expected unsupported snapshot rejection, got %v", err)
 	}
+	for _, tt := range []struct {
+		name string
+		edit func(*store.ContentSnapshotRecord)
+		want string
+	}{
+		{
+			name: "unclean host path",
+			edit: func(record *store.ContentSnapshotRecord) {
+				record.ImmutableHostPath = "/var/lib/harness/content/skills/../skills-current"
+			},
+			want: "content snapshot immutable_host_path must be canonical absolute",
+		},
+		{
+			name: "host path whitespace",
+			edit: func(record *store.ContentSnapshotRecord) {
+				record.ImmutableHostPath = "/var/lib/harness/content/skills/sha256-skills "
+			},
+			want: "content snapshot immutable_host_path must be canonical absolute",
+		},
+		{
+			name: "unclean mount destination",
+			edit: func(record *store.ContentSnapshotRecord) {
+				record.MountDestination = "/harness-skills/.."
+			},
+			want: "content snapshot mount_destination must be canonical absolute",
+		},
+		{
+			name: "mount destination whitespace",
+			edit: func(record *store.ContentSnapshotRecord) {
+				record.MountDestination = "/harness-skills "
+			},
+			want: "content snapshot mount_destination must be canonical absolute",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			record := store.ContentSnapshotRecord{
+				Kind:                 store.ContentSnapshotKindSkills,
+				Digest:               "sha256:skills",
+				ImmutableHostPath:    "/var/lib/harness/content/skills/sha256-skills",
+				MountDestination:     "/harness-skills",
+				SourceEvidenceDigest: "sha256:skills-source",
+				RetentionClass:       "generation_plan",
+			}
+			tt.edit(&record)
+			if _, err := RenderContentSnapshotsPayload([]store.ContentSnapshotRecord{record}); err == nil ||
+				!strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %q, got %v", tt.want, err)
+			}
+		})
+	}
 }
 
 func TestValidateRejectsMutableContentSnapshotReference(t *testing.T) {

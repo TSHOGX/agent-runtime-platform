@@ -327,14 +327,27 @@ func contentSnapshotRecordPayload(record store.ContentSnapshotRecord) (map[strin
 			return nil, fmt.Errorf("content snapshot %s is required", check.field)
 		}
 	}
+	if err := validateContentSnapshotRecordPath("immutable_host_path", record.ImmutableHostPath); err != nil {
+		return nil, err
+	}
+	if err := validateContentSnapshotRecordPath("mount_destination", record.MountDestination); err != nil {
+		return nil, err
+	}
 	return map[string]any{
 		"kind":                   strings.TrimSpace(record.Kind),
 		"digest":                 strings.TrimSpace(record.Digest),
-		"immutable_host_path":    filepath.Clean(record.ImmutableHostPath),
-		"mount_destination":      filepath.Clean(record.MountDestination),
+		"immutable_host_path":    record.ImmutableHostPath,
+		"mount_destination":      record.MountDestination,
 		"source_evidence_digest": strings.TrimSpace(record.SourceEvidenceDigest),
 		"retention_class":        strings.TrimSpace(record.RetentionClass),
 	}, nil
+}
+
+func validateContentSnapshotRecordPath(field, path string) error {
+	if strings.TrimSpace(path) != path || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return fmt.Errorf("content snapshot %s must be canonical absolute", field)
+	}
+	return nil
 }
 
 func durationSeconds(duration time.Duration) string {
