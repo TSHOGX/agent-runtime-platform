@@ -3438,17 +3438,14 @@ func TestGenerationPlanProjectionExpectationsIncludesSandboxContractWhenProvided
 	}
 }
 
-func TestVerifyStoredGenerationPlanProjectionsSkipsMissingPlan(t *testing.T) {
+func TestVerifyStoredGenerationPlanProjectionsRequiresPlan(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	st, _ := openServerOwnedStore(t, ctx, dir)
 	srv := &Server{store: st}
-	verified, err := srv.verifyStoredGenerationPlanProjections(ctx, "missing_plan_generation", testGenerationArtifacts(), "")
-	if err != nil {
-		t.Fatalf("optional missing plan should not fail: %v", err)
-	}
-	if verified {
-		t.Fatalf("missing plan should report verified=false")
+	_, err := srv.verifyStoredGenerationPlanProjections(ctx, "missing_plan_generation", testGenerationArtifacts(), "")
+	if err == nil || !strings.Contains(err.Error(), "generation plan is required") {
+		t.Fatalf("expected required missing plan error, got %v", err)
 	}
 }
 
@@ -3552,13 +3549,20 @@ WHERE snapshot_kind = ?
 	}
 }
 
-func TestVerifyGenerationPlanFrozenEvidenceSkipsMissingPlan(t *testing.T) {
+func TestVerifyGenerationPlanFrozenEvidenceRequiresPlan(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	st, _ := openServerOwnedStore(t, ctx, dir)
 	srv := &Server{store: st}
-	if err := srv.verifyGenerationPlanFrozenEvidence(ctx, "missing_plan_generation", serverGenerationPlanFrozenEvidenceDetails(), serverGenerationPlanFrozenEvidenceArtifacts()); err != nil {
-		t.Fatalf("optional missing plan should not fail: %v", err)
+	session := createServerTestSession(t, ctx, st, dir, "sess_missing_plan", string(sessionstate.Created), time.Now().UTC(), nil)
+	if _, err := st.DBForTest().ExecContext(ctx, `
+INSERT INTO runtime_generations (generation_id, session_id, status, lease_owner, lease_expires_at)
+VALUES (?, ?, 'starting', 'owner', ?)`, "gen_missing_plan", session.ID, time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("insert runtime generation: %v", err)
+	}
+	if err := srv.verifyGenerationPlanFrozenEvidence(ctx, "gen_missing_plan", serverGenerationPlanFrozenEvidenceDetails(), serverGenerationPlanFrozenEvidenceArtifacts()); err == nil ||
+		!strings.Contains(err.Error(), "generation plan is required") {
+		t.Fatalf("expected required missing plan error, got %v", err)
 	}
 }
 

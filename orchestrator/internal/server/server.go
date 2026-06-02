@@ -1620,6 +1620,7 @@ func (s *Server) verifyStoredGenerationPlanProjections(ctx context.Context, gene
 	return s.store.VerifyGenerationPlanProjections(ctx, store.VerifyGenerationPlanProjectionsParams{
 		GenerationID: generationID,
 		Expected:     generationPlanProjectionExpectations(artifacts, sandboxContractDigest),
+		RequirePlan:  true,
 	})
 }
 
@@ -1639,10 +1640,7 @@ func generationPlanProjectionExpectations(artifacts runtime.GenerationArtifacts,
 }
 
 func (s *Server) verifyGenerationPlanFrozenEvidence(ctx context.Context, generationID string, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts) error {
-	plan, err := s.store.GetGenerationPlan(ctx, strings.TrimSpace(generationID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
+	plan, err := s.store.RequireGenerationPlanForLaunch(ctx, strings.TrimSpace(generationID))
 	if err != nil {
 		return err
 	}
