@@ -31,6 +31,7 @@ import (
 	"harness-platform/orchestrator/internal/config"
 	"harness-platform/orchestrator/internal/events"
 	"harness-platform/orchestrator/internal/generationplan"
+	"harness-platform/orchestrator/internal/planprojection"
 	"harness-platform/orchestrator/internal/runtime"
 	"harness-platform/orchestrator/internal/sessionstate"
 	"harness-platform/orchestrator/internal/store"
@@ -1780,7 +1781,7 @@ func (s *Server) storeShadowGenerationPlan(ctx context.Context, session store.Se
 	if err != nil {
 		return err
 	}
-	for _, projection := range generationPlanProjectionDigests(details, artifacts, sandboxContractPayload, plan.PlanDigest) {
+	for _, projection := range planprojection.Rows(details, artifacts, sandboxContractPayload, plan.PlanDigest) {
 		if _, err := s.store.StoreGenerationPlanProjection(ctx, projection); err != nil {
 			return err
 		}
@@ -1819,7 +1820,7 @@ func (s *Server) shadowGenerationPlanPayload(session store.Session, details stor
 		return nil, err
 	}
 	projections := map[string]any{}
-	for _, projection := range generationPlanProjectionDigests(details, artifacts, sandboxContractPayload, "") {
+	for _, projection := range planprojection.Rows(details, artifacts, sandboxContractPayload, "") {
 		projections[projection.ProjectionKind] = map[string]any{
 			"projection_version": projection.ProjectionVersion,
 			"payload_digest":     projection.PayloadDigest,
@@ -1959,7 +1960,7 @@ func (s *Server) shadowGenerationPlanPayload(session store.Session, details stor
 			"materialized_driver_config":           materializedDriverConfigPayload(artifacts.MaterializedDriverConfig),
 			"resource_identity_digest":             resourceIdentityDigest,
 			"sandbox_contract_id":                  sandboxContractID(details.GenerationID),
-			"sandbox_contract_payload_digest":      sandboxContractDigestForPlan(sandboxContractPayload),
+			"sandbox_contract_payload_digest":      planprojection.SandboxContractPayloadDigest(sandboxContractPayload),
 			"sandbox_contract_compatibility_shape": store.SandboxContractVersion,
 		},
 		"feature_policy":      featurePolicy,
@@ -1968,75 +1969,6 @@ func (s *Server) shadowGenerationPlanPayload(session store.Session, details stor
 		"projection_digests":  projections,
 		"mutable_state_scope": map[string]any{"leases": "runtime_generations", "events": "events", "checkpoint_state": "runtime_generations"},
 	}, nil
-}
-
-func generationPlanProjectionDigests(details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, sandboxContractPayload map[string]any, planDigest string) []store.StoreGenerationPlanProjectionParams {
-	generationID := strings.TrimSpace(details.GenerationID)
-	return []store.StoreGenerationPlanProjectionParams{
-		{
-			GenerationID:      generationID,
-			PlanDigest:        planDigest,
-			ProjectionKind:    store.GenerationPlanProjectionSandboxContract,
-			ProjectionVersion: store.GenerationPlanProjectionVersion,
-			PayloadDigest:     sandboxContractDigestForPlan(sandboxContractPayload),
-		},
-		{
-			GenerationID:      generationID,
-			PlanDigest:        planDigest,
-			ProjectionKind:    store.GenerationPlanProjectionControlManifest,
-			ProjectionVersion: store.GenerationPlanProjectionVersion,
-			PayloadDigest:     projectionPayloadDigest(store.GenerationPlanProjectionControlManifest, artifacts.ManifestDigest),
-			MaterializedPath:  details.ControlManifestPath,
-		},
-		{
-			GenerationID:      generationID,
-			PlanDigest:        planDigest,
-			ProjectionKind:    store.GenerationPlanProjectionControlManifestProjected,
-			ProjectionVersion: store.GenerationPlanProjectionVersion,
-			PayloadDigest:     projectionPayloadDigest(store.GenerationPlanProjectionControlManifestProjected, artifacts.ProjectedManifestDigest),
-			MaterializedPath:  details.ControlManifestPath,
-		},
-		{
-			GenerationID:      generationID,
-			PlanDigest:        planDigest,
-			ProjectionKind:    store.GenerationPlanProjectionOCISpec,
-			ProjectionVersion: store.GenerationPlanProjectionVersion,
-			PayloadDigest:     projectionPayloadDigest(store.GenerationPlanProjectionOCISpec, artifacts.SpecDigest),
-			MaterializedPath:  details.SpecPath,
-		},
-		{
-			GenerationID:      generationID,
-			PlanDigest:        planDigest,
-			ProjectionKind:    store.GenerationPlanProjectionBundle,
-			ProjectionVersion: store.GenerationPlanProjectionVersion,
-			PayloadDigest:     projectionPayloadDigest(store.GenerationPlanProjectionBundle, artifacts.BundleDigest),
-			MaterializedPath:  details.BundleDirPath,
-		},
-		{
-			GenerationID:      generationID,
-			PlanDigest:        planDigest,
-			ProjectionKind:    store.GenerationPlanProjectionRuntimeConfig,
-			ProjectionVersion: store.GenerationPlanProjectionVersion,
-			PayloadDigest:     projectionPayloadDigest(store.GenerationPlanProjectionRuntimeConfig, artifacts.RuntimeConfigDigest),
-		},
-	}
-}
-
-func projectionPayloadDigest(kind string, digest any) string {
-	value := strings.TrimSpace(fmt.Sprint(digest))
-	if strings.HasPrefix(value, "sha256:") {
-		return value
-	}
-	sum := sha256.Sum256([]byte(strings.TrimSpace(kind) + "\n" + value))
-	return "sha256:" + hex.EncodeToString(sum[:])
-}
-
-func sandboxContractDigestForPlan(payload map[string]any) string {
-	canonical, err := store.CanonicalSandboxContractPayload(payload)
-	if err != nil {
-		return projectionPayloadDigest(store.GenerationPlanProjectionSandboxContract, payload["sandbox_contract_digest"])
-	}
-	return store.SandboxContractDigest(canonical)
 }
 
 func materializedDriverConfigPayload(entries []runtime.DriverConfigMaterialization) []map[string]any {
@@ -2122,7 +2054,7 @@ func runtimeArtifactDigests(artifacts runtime.GenerationArtifacts) store.Generat
 func (s *Server) verifyStoredGenerationPlanProjections(ctx context.Context, generationID string, artifacts runtime.GenerationArtifacts) (bool, error) {
 	return s.store.VerifyGenerationPlanProjections(ctx, store.VerifyGenerationPlanProjectionsParams{
 		GenerationID: generationID,
-		Expected:     generationPlanProjectionExpectations(artifacts),
+		Expected:     planprojection.Expectations(artifacts),
 	})
 }
 
@@ -2147,8 +2079,8 @@ func (s *Server) verifyGenerationPlanFrozenEvidence(ctx context.Context, generat
 		RunscVersion:                    artifacts.RunscVersion,
 		RunscBinaryPath:                 artifacts.RunscBinaryPath,
 		RunscBinaryDigest:               artifacts.RunscBinaryDigest,
-		ProjectionDigests:               generationPlanProjectionDigestMap(artifacts),
-		ProjectionVersions:              generationPlanProjectionVersionMap(artifacts),
+		ProjectionDigests:               planprojection.DigestMap(artifacts),
+		ProjectionVersions:              planprojection.VersionMap(artifacts),
 		ContentSnapshotDigests:          contentSnapshotDigests,
 		CheckpointBundleDigest:          optionalProjectionPayloadDigest(store.GenerationPlanProjectionBundle, details.CheckpointBundleDigest),
 		CheckpointRuntimeConfigDigest:   optionalProjectionPayloadDigest(store.GenerationPlanProjectionRuntimeConfig, details.CheckpointRuntimeConfigDigest),
@@ -2206,37 +2138,11 @@ func generationPlanPayloadObject(payload []byte) (map[string]any, error) {
 	return object, nil
 }
 
-func generationPlanProjectionExpectations(artifacts runtime.GenerationArtifacts) []store.GenerationPlanProjectionExpectation {
-	return []store.GenerationPlanProjectionExpectation{
-		{ProjectionKind: store.GenerationPlanProjectionControlManifest, ProjectionVersion: store.GenerationPlanProjectionVersion, PayloadDigest: projectionPayloadDigest(store.GenerationPlanProjectionControlManifest, artifacts.ManifestDigest)},
-		{ProjectionKind: store.GenerationPlanProjectionControlManifestProjected, ProjectionVersion: store.GenerationPlanProjectionVersion, PayloadDigest: projectionPayloadDigest(store.GenerationPlanProjectionControlManifestProjected, artifacts.ProjectedManifestDigest)},
-		{ProjectionKind: store.GenerationPlanProjectionOCISpec, ProjectionVersion: store.GenerationPlanProjectionVersion, PayloadDigest: projectionPayloadDigest(store.GenerationPlanProjectionOCISpec, artifacts.SpecDigest)},
-		{ProjectionKind: store.GenerationPlanProjectionBundle, ProjectionVersion: store.GenerationPlanProjectionVersion, PayloadDigest: projectionPayloadDigest(store.GenerationPlanProjectionBundle, artifacts.BundleDigest)},
-		{ProjectionKind: store.GenerationPlanProjectionRuntimeConfig, ProjectionVersion: store.GenerationPlanProjectionVersion, PayloadDigest: projectionPayloadDigest(store.GenerationPlanProjectionRuntimeConfig, artifacts.RuntimeConfigDigest)},
-	}
-}
-
-func generationPlanProjectionDigestMap(artifacts runtime.GenerationArtifacts) map[string]string {
-	out := map[string]string{}
-	for _, expectation := range generationPlanProjectionExpectations(artifacts) {
-		out[expectation.ProjectionKind] = expectation.PayloadDigest
-	}
-	return out
-}
-
-func generationPlanProjectionVersionMap(artifacts runtime.GenerationArtifacts) map[string]int {
-	out := map[string]int{}
-	for _, expectation := range generationPlanProjectionExpectations(artifacts) {
-		out[expectation.ProjectionKind] = expectation.ProjectionVersion
-	}
-	return out
-}
-
 func optionalProjectionPayloadDigest(kind, value string) string {
 	if strings.TrimSpace(value) == "" {
 		return ""
 	}
-	return projectionPayloadDigest(kind, value)
+	return planprojection.PayloadDigest(kind, value)
 }
 
 func (s *Server) runtimeResourceInstanceParams(details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, hostID string) (store.RuntimeResourceInstanceParams, error) {

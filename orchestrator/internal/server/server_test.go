@@ -30,6 +30,7 @@ import (
 	"harness-platform/orchestrator/internal/config"
 	"harness-platform/orchestrator/internal/events"
 	"harness-platform/orchestrator/internal/generationplan"
+	"harness-platform/orchestrator/internal/planprojection"
 	"harness-platform/orchestrator/internal/runtime"
 	"harness-platform/orchestrator/internal/sessionstate"
 	"harness-platform/orchestrator/internal/store"
@@ -3207,7 +3208,7 @@ VALUES (?, ?, 'allocating', 'owner', ?)`, generationID, session.ID, time.Now().U
 		t.Fatalf("store generation plan: %v", err)
 	}
 	artifacts := testGenerationArtifacts()
-	for _, expectation := range generationPlanProjectionExpectations(artifacts) {
+	for _, expectation := range planprojection.Expectations(artifacts) {
 		if _, err := st.StoreGenerationPlanProjection(ctx, store.StoreGenerationPlanProjectionParams{
 			GenerationID:      generationID,
 			PlanDigest:        plan.PlanDigest,
@@ -3254,7 +3255,7 @@ VALUES (?, ?, 'allocating', 'owner', ?)`, generationID, session.ID, time.Now().U
 		t.Fatalf("store generation plan: %v", err)
 	}
 	artifacts := testGenerationArtifacts()
-	for _, expectation := range generationPlanProjectionExpectations(artifacts) {
+	for _, expectation := range planprojection.Expectations(artifacts) {
 		version := expectation.ProjectionVersion
 		if expectation.ProjectionKind == store.GenerationPlanProjectionOCISpec {
 			version = 2
@@ -3274,18 +3275,6 @@ VALUES (?, ?, 'allocating', 'owner', ?)`, generationID, session.ID, time.Now().U
 	if _, err := srv.verifyStoredGenerationPlanProjections(ctx, generationID, artifacts); err == nil ||
 		!strings.Contains(err.Error(), "oci_spec version mismatch") {
 		t.Fatalf("expected projection version mismatch, got %v", err)
-	}
-}
-
-func TestGenerationPlanProjectionVersionMapUsesExpectationVersions(t *testing.T) {
-	versions := generationPlanProjectionVersionMap(testGenerationArtifacts())
-	for _, expectation := range generationPlanProjectionExpectations(testGenerationArtifacts()) {
-		if versions[expectation.ProjectionKind] != expectation.ProjectionVersion {
-			t.Fatalf("projection version %s = %d want %d", expectation.ProjectionKind, versions[expectation.ProjectionKind], expectation.ProjectionVersion)
-		}
-	}
-	if versions[store.GenerationPlanProjectionOCISpec] != store.GenerationPlanProjectionVersion {
-		t.Fatalf("oci spec projection version = %d want %d", versions[store.GenerationPlanProjectionOCISpec], store.GenerationPlanProjectionVersion)
 	}
 }
 

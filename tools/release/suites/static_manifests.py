@@ -102,7 +102,7 @@ def _next_stage_checks():
             "path": REPO_ROOT / "orchestrator" / "internal" / "server" / "server.go",
             "patterns": (
                 ("verify_stored_generation_plan_projections", "verifyStoredGenerationPlanProjections"),
-                ("projection_expectations", "generationPlanProjectionExpectations"),
+                ("projection_expectations", "planprojection.Expectations"),
                 ("verify_generation_plan_projections_call", "VerifyGenerationPlanProjections(ctx"),
             ),
         },
