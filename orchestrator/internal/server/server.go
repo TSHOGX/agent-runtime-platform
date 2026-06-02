@@ -2137,6 +2137,10 @@ func (s *Server) verifyGenerationPlanFrozenEvidence(ctx context.Context, generat
 	if err := generationplan.Validate(generationplan.ValidateParams{Payload: plan.CanonicalPayload}); err != nil {
 		return err
 	}
+	contentSnapshotDigests, err := s.generationPlanContentSnapshotDigests(ctx, plan.CanonicalPayload)
+	if err != nil {
+		return err
+	}
 	return generationplan.VerifyFrozenEvidence(generationplan.VerifyFrozenEvidenceParams{
 		Payload:                         plan.CanonicalPayload,
 		RunscPlatform:                   details.RunscPlatform,
@@ -2144,14 +2148,27 @@ func (s *Server) verifyGenerationPlanFrozenEvidence(ctx context.Context, generat
 		RunscBinaryPath:                 artifacts.RunscBinaryPath,
 		RunscBinaryDigest:               artifacts.RunscBinaryDigest,
 		ProjectionDigests:               generationPlanProjectionDigestMap(artifacts),
-		ContentSnapshotDigests:          generationPlanContentSnapshotDigestMap(plan.CanonicalPayload),
+		ContentSnapshotDigests:          contentSnapshotDigests,
 		CheckpointBundleDigest:          optionalProjectionPayloadDigest("bundle", details.CheckpointBundleDigest),
 		CheckpointRuntimeConfigDigest:   optionalProjectionPayloadDigest("runtime_config", details.CheckpointRuntimeConfigDigest),
 		CheckpointControlManifestDigest: optionalProjectionPayloadDigest("control_manifest_projected", details.CheckpointControlManifestDigest),
 	})
 }
 
-func generationPlanContentSnapshotDigestMap(payload []byte) map[string]string {
+func (s *Server) generationPlanContentSnapshotDigests(ctx context.Context, payload []byte) (map[string]string, error) {
+	refs := generationPlanContentSnapshotRefs(payload)
+	out := map[string]string{}
+	for kind, digest := range refs {
+		record, err := s.store.GetContentSnapshot(ctx, kind, digest)
+		if err != nil {
+			return nil, fmt.Errorf("generation plan content snapshot %s: %w", kind, err)
+		}
+		out[kind] = record.Digest
+	}
+	return out, nil
+}
+
+func generationPlanContentSnapshotRefs(payload []byte) map[string]string {
 	object, err := generationPlanPayloadObject(payload)
 	if err != nil {
 		return nil

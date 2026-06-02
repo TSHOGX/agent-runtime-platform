@@ -3298,6 +3298,77 @@ VALUES (?, ?, 'allocating', 'owner', ?)`, "gen_frozen_evidence", session.ID, tim
 	}
 }
 
+func TestVerifyGenerationPlanFrozenEvidenceChecksContentSnapshots(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, _ := openServerOwnedStore(t, ctx, dir)
+	srv := &Server{store: st}
+	planPayload := validServerGenerationPlanPayload()
+	contentSnapshots := planPayload["content_snapshots"].(map[string]any)
+	contentSnapshots["skills"] = map[string]any{
+		"kind":                   "skills",
+		"digest":                 "sha256:skills",
+		"immutable_host_path":    "/var/lib/harness/content/skills/sha256-skills",
+		"mount_destination":      "/harness-skills",
+		"source_evidence_digest": "sha256:skills-source",
+		"retention_class":        "generation_plan",
+	}
+	session := createServerTestSession(t, ctx, st, dir, "sess_frozen_evidence", string(sessionstate.Created), time.Now().UTC(), nil)
+	if _, err := st.DBForTest().ExecContext(ctx, `
+INSERT INTO runtime_generations (generation_id, session_id, status, lease_owner, lease_expires_at)
+VALUES (?, ?, 'allocating', 'owner', ?)`, "gen_frozen_evidence", session.ID, time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("insert runtime generation: %v", err)
+	}
+	if _, err := st.StoreGenerationPlan(ctx, store.StoreGenerationPlanParams{
+		GenerationID: "gen_frozen_evidence",
+		Payload:      planPayload,
+	}); err != nil {
+		t.Fatalf("store generation plan: %v", err)
+	}
+	if _, err := st.StoreContentSnapshot(ctx, store.StoreContentSnapshotParams{
+		Kind:                 store.ContentSnapshotKindSkills,
+		Digest:               "sha256:skills",
+		ImmutableHostPath:    "/var/lib/harness/content/skills/sha256-skills",
+		MountDestination:     "/harness-skills",
+		SourceEvidenceDigest: "sha256:skills-source",
+		RetentionClass:       "generation_plan",
+	}); err != nil {
+		t.Fatalf("store content snapshot: %v", err)
+	}
+
+	details := serverGenerationPlanFrozenEvidenceDetails()
+	artifacts := serverGenerationPlanFrozenEvidenceArtifacts()
+	if err := srv.verifyGenerationPlanFrozenEvidence(ctx, "gen_frozen_evidence", details, artifacts); err != nil {
+		t.Fatalf("verify content snapshot frozen evidence: %v", err)
+	}
+
+	corruptPayload := validServerGenerationPlanPayload()
+	corruptSnapshots := corruptPayload["content_snapshots"].(map[string]any)
+	corruptSnapshots["skills"] = map[string]any{
+		"kind":                   "skills",
+		"digest":                 "sha256:changed",
+		"immutable_host_path":    "/var/lib/harness/content/skills/sha256-skills",
+		"mount_destination":      "/harness-skills",
+		"source_evidence_digest": "sha256:skills-source",
+		"retention_class":        "generation_plan",
+	}
+	canonical, err := store.CanonicalGenerationPlanPayload(corruptPayload)
+	if err != nil {
+		t.Fatalf("canonical corrupt payload: %v", err)
+	}
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE generation_plans
+SET canonical_payload = ?,
+    plan_digest = ?
+WHERE generation_id = ?`, string(canonical), store.GenerationPlanDigest(canonical), "gen_frozen_evidence"); err != nil {
+		t.Fatalf("corrupt stored plan snapshot digest: %v", err)
+	}
+	if err := srv.verifyGenerationPlanFrozenEvidence(ctx, "gen_frozen_evidence", details, artifacts); err == nil ||
+		!strings.Contains(err.Error(), "generation plan content snapshot skills") {
+		t.Fatalf("expected content snapshot mismatch, got %v", err)
+	}
+}
+
 func TestVerifyGenerationPlanFrozenEvidenceSkipsMissingPlan(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -3308,7 +3379,7 @@ func TestVerifyGenerationPlanFrozenEvidenceSkipsMissingPlan(t *testing.T) {
 	}
 }
 
-func TestGenerationPlanContentSnapshotDigestMap(t *testing.T) {
+func TestGenerationPlanContentSnapshotRefs(t *testing.T) {
 	payload := validServerGenerationPlanPayload()
 	contentSnapshots := payload["content_snapshots"].(map[string]any)
 	contentSnapshots["skills"] = map[string]any{
@@ -3323,7 +3394,7 @@ func TestGenerationPlanContentSnapshotDigestMap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("canonical generation plan payload: %v", err)
 	}
-	digests := generationPlanContentSnapshotDigestMap(canonical)
+	digests := generationPlanContentSnapshotRefs(canonical)
 	if len(digests) != 1 || digests["skills"] != "sha256:skills" {
 		t.Fatalf("content snapshot digests = %+v", digests)
 	}
