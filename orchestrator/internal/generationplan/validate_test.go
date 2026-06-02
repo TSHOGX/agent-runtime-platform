@@ -245,9 +245,17 @@ func TestVerifyFrozenEvidenceChecksRunscAndProjections(t *testing.T) {
 	}
 
 	mismatch = params
-	mismatch.ProjectionDigests = map[string]string{"bundle": "sha256:changed"}
+	mismatch.ProjectionDigests = cloneStringMap(params.ProjectionDigests)
+	mismatch.ProjectionDigests["bundle"] = "sha256:changed"
 	if err := VerifyFrozenEvidence(mismatch); err == nil || !strings.Contains(err.Error(), "projection bundle digest mismatch") {
 		t.Fatalf("expected projection mismatch, got %v", err)
+	}
+
+	mismatch = params
+	mismatch.ProjectionDigests = cloneStringMap(params.ProjectionDigests)
+	delete(mismatch.ProjectionDigests, "oci_spec")
+	if err := VerifyFrozenEvidence(mismatch); err == nil || !strings.Contains(err.Error(), "projection oci_spec digest is required") {
+		t.Fatalf("expected missing projection digest, got %v", err)
 	}
 
 	mismatch = params
@@ -518,14 +526,20 @@ func validFrozenEvidenceParams(payload map[string]any) VerifyFrozenEvidenceParam
 		RunscBinaryPath:   "/usr/local/bin/runsc-test",
 		RunscBinaryDigest: "sha256:runsc",
 		ProjectionDigests: map[string]string{
+			"sandbox_contract":           "sha256:sandbox-contract",
+			"control_manifest":           "sha256:control-manifest",
+			"control_manifest_projected": "sha256:control-manifest-projected",
+			"oci_spec":                   "sha256:oci-spec",
 			"bundle":                     "sha256:bundle",
 			"runtime_config":             "sha256:runtime-config",
-			"control_manifest_projected": "sha256:control-manifest-projected",
 		},
 		ProjectionVersions: map[string]int{
+			"sandbox_contract":           store.GenerationPlanProjectionVersion,
+			"control_manifest":           store.GenerationPlanProjectionVersion,
+			"control_manifest_projected": store.GenerationPlanProjectionVersion,
+			"oci_spec":                   store.GenerationPlanProjectionVersion,
 			"bundle":                     store.GenerationPlanProjectionVersion,
 			"runtime_config":             store.GenerationPlanProjectionVersion,
-			"control_manifest_projected": store.GenerationPlanProjectionVersion,
 		},
 		CheckpointBundleDigest:          "sha256:bundle",
 		CheckpointRuntimeConfigDigest:   "sha256:runtime-config",
@@ -533,6 +547,14 @@ func validFrozenEvidenceParams(payload map[string]any) VerifyFrozenEvidenceParam
 		CheckpointDriverStatesDigest:    "sha256:driver-state-fence",
 		CheckpointPlanDigest:            store.GenerationPlanDigest(mustCanonicalPlanPayloadForTest(payload)),
 	}
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	out := map[string]string{}
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
 }
 
 func mustCanonicalPlanPayloadForTest(payload map[string]any) []byte {

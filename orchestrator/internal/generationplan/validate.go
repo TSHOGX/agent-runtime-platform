@@ -121,16 +121,16 @@ func VerifyFrozenEvidence(p VerifyFrozenEvidenceParams) error {
 	if err != nil {
 		return err
 	}
-	for kind, expectedDigest := range p.ProjectionDigests {
-		kind = strings.TrimSpace(kind)
-		if kind == "" {
-			return fmt.Errorf("generation plan projection kind is required")
+	for _, kind := range store.GenerationPlanProjectionKinds() {
+		expectedDigest := strings.TrimSpace(p.ProjectionDigests[kind])
+		if expectedDigest == "" {
+			return fmt.Errorf("generation plan projection %s digest is required", kind)
 		}
 		projection, err := requireObject(projections, kind)
 		if err != nil {
 			return err
 		}
-		if strings.TrimSpace(expectedDigest) != stringField(projection, "payload_digest") {
+		if expectedDigest != stringField(projection, "payload_digest") {
 			return fmt.Errorf("generation plan projection %s digest mismatch", kind)
 		}
 		expectedVersion := p.ProjectionVersions[kind]
