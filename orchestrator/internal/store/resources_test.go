@@ -2512,8 +2512,12 @@ func TestCompleteGenerationCheckpointRequiresRunscMetadata(t *testing.T) {
 		want string
 		edit func(*CompleteCheckpointParams)
 	}{
+		{name: "checkpoint path", want: "checkpoint path is required", edit: func(p *CompleteCheckpointParams) { p.CheckpointPath = "" }},
+		{name: "relative checkpoint path", want: "checkpoint path must be canonical absolute", edit: func(p *CompleteCheckpointParams) { p.CheckpointPath = "checkpoint" }},
 		{name: "runsc version", want: "checkpoint runsc version is required", edit: func(p *CompleteCheckpointParams) { p.RunscVersion = "" }},
 		{name: "runsc platform", want: "checkpoint runsc platform is required", edit: func(p *CompleteCheckpointParams) { p.RunscPlatform = "" }},
+		{name: "relative runsc path", want: "checkpoint runsc binary path must be canonical absolute", edit: func(p *CompleteCheckpointParams) { p.RunscBinaryPath = "runsc" }},
+		{name: "unclean runsc path", want: "checkpoint runsc binary path must be canonical absolute", edit: func(p *CompleteCheckpointParams) { p.RunscBinaryPath = "/usr/local/bin/../bin/runsc-test" }},
 		{name: "plan digest", want: "checkpoint plan digest is required", edit: func(p *CompleteCheckpointParams) { p.CheckpointPlanDigest = "" }},
 	}
 	for _, tt := range tests {

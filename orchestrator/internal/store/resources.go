@@ -1937,6 +1937,11 @@ func (s *Store) CompleteGenerationCheckpoint(ctx context.Context, p CompleteChec
 	if strings.TrimSpace(p.CheckpointPath) == "" {
 		return fmt.Errorf("checkpoint path is required")
 	}
+	if strings.TrimSpace(p.CheckpointPath) != p.CheckpointPath ||
+		!filepath.IsAbs(p.CheckpointPath) ||
+		filepath.Clean(p.CheckpointPath) != p.CheckpointPath {
+		return fmt.Errorf("checkpoint path must be canonical absolute")
+	}
 	if strings.TrimSpace(p.CheckpointBundleDigest) == "" {
 		return fmt.Errorf("checkpoint bundle digest is required")
 	}
@@ -1957,6 +1962,11 @@ func (s *Store) CompleteGenerationCheckpoint(ctx context.Context, p CompleteChec
 	}
 	if strings.TrimSpace(p.RunscBinaryPath) == "" {
 		return fmt.Errorf("checkpoint runsc binary path is required")
+	}
+	if strings.TrimSpace(p.RunscBinaryPath) != p.RunscBinaryPath ||
+		!filepath.IsAbs(p.RunscBinaryPath) ||
+		filepath.Clean(p.RunscBinaryPath) != p.RunscBinaryPath {
+		return fmt.Errorf("checkpoint runsc binary path must be canonical absolute")
 	}
 	if strings.TrimSpace(p.RunscBinaryDigest) == "" {
 		return fmt.Errorf("checkpoint runsc binary digest is required")
