@@ -3451,37 +3451,7 @@ func TestVerifyGenerationPlanFrozenEvidenceChecksExistingPlan(t *testing.T) {
 	dir := t.TempDir()
 	st, _ := openServerOwnedStore(t, ctx, dir)
 	srv := &Server{store: st}
-	planPayload := validServerGenerationPlanPayload()
-	session := createServerTestSession(t, ctx, st, dir, "sess_frozen_evidence", string(sessionstate.Created), time.Now().UTC(), nil)
-	if _, err := st.DBForTest().ExecContext(ctx, `
-INSERT INTO runtime_generations (generation_id, session_id, status, lease_owner, lease_expires_at)
-VALUES (?, ?, 'allocating', 'owner', ?)`, "gen_frozen_evidence", session.ID, time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano)); err != nil {
-		t.Fatalf("insert runtime generation: %v", err)
-	}
-	plan, err := st.StoreGenerationPlan(ctx, store.StoreGenerationPlanParams{
-		GenerationID: "gen_frozen_evidence",
-		Payload:      planPayload,
-	})
-	if err != nil {
-		t.Fatalf("store generation plan: %v", err)
-	}
-	for kind, digest := range map[string]string{
-		"control_manifest":           "sha256:control-manifest",
-		"control_manifest_projected": "sha256:control-manifest-projected",
-		"oci_spec":                   "sha256:oci-spec",
-		"bundle":                     "sha256:bundle",
-		"runtime_config":             "sha256:runtime-config",
-	} {
-		if _, err := st.StoreGenerationPlanProjection(ctx, store.StoreGenerationPlanProjectionParams{
-			GenerationID:      "gen_frozen_evidence",
-			PlanDigest:        plan.PlanDigest,
-			ProjectionKind:    kind,
-			ProjectionVersion: 1,
-			PayloadDigest:     digest,
-		}); err != nil {
-			t.Fatalf("store projection %s: %v", kind, err)
-		}
-	}
+	storeServerFrozenEvidencePlan(t, ctx, st, dir, validServerGenerationPlanPayload())
 
 	details := serverGenerationPlanFrozenEvidenceDetails()
 	artifacts := serverGenerationPlanFrozenEvidenceArtifacts()
@@ -3502,6 +3472,26 @@ VALUES (?, ?, 'allocating', 'owner', ?)`, "gen_frozen_evidence", session.ID, tim
 	}
 }
 
+func TestVerifyGenerationPlanFrozenEvidenceChecksStoredProjectionRows(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, _ := openServerOwnedStore(t, ctx, dir)
+	srv := &Server{store: st}
+	storeServerFrozenEvidencePlan(t, ctx, st, dir, validServerGenerationPlanPayload())
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE generation_plan_projections
+SET payload_digest = 'sha256:changed'
+WHERE generation_id = ?
+  AND projection_kind = ?`, "gen_frozen_evidence", store.GenerationPlanProjectionBundle); err != nil {
+		t.Fatalf("corrupt stored projection row: %v", err)
+	}
+
+	err := srv.verifyGenerationPlanFrozenEvidence(ctx, "gen_frozen_evidence", serverGenerationPlanFrozenEvidenceDetails(), serverGenerationPlanFrozenEvidenceArtifacts())
+	if err == nil || !strings.Contains(err.Error(), "generation plan projection bundle digest mismatch") {
+		t.Fatalf("expected stored projection row mismatch, got %v", err)
+	}
+}
+
 func TestVerifyGenerationPlanFrozenEvidenceChecksContentSnapshots(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -3517,18 +3507,7 @@ func TestVerifyGenerationPlanFrozenEvidenceChecksContentSnapshots(t *testing.T) 
 		"source_evidence_digest": "sha256:skills-source",
 		"retention_class":        "generation_plan",
 	}
-	session := createServerTestSession(t, ctx, st, dir, "sess_frozen_evidence", string(sessionstate.Created), time.Now().UTC(), nil)
-	if _, err := st.DBForTest().ExecContext(ctx, `
-INSERT INTO runtime_generations (generation_id, session_id, status, lease_owner, lease_expires_at)
-VALUES (?, ?, 'allocating', 'owner', ?)`, "gen_frozen_evidence", session.ID, time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano)); err != nil {
-		t.Fatalf("insert runtime generation: %v", err)
-	}
-	if _, err := st.StoreGenerationPlan(ctx, store.StoreGenerationPlanParams{
-		GenerationID: "gen_frozen_evidence",
-		Payload:      planPayload,
-	}); err != nil {
-		t.Fatalf("store generation plan: %v", err)
-	}
+	storeServerFrozenEvidencePlan(t, ctx, st, dir, planPayload)
 	if _, err := st.StoreContentSnapshot(ctx, store.StoreContentSnapshotParams{
 		Kind:                 store.ContentSnapshotKindSkills,
 		Digest:               "sha256:skills",
@@ -3566,6 +3545,12 @@ SET canonical_payload = ?,
     plan_digest = ?
 WHERE generation_id = ?`, string(canonical), store.GenerationPlanDigest(canonical), "gen_frozen_evidence"); err != nil {
 		t.Fatalf("corrupt stored plan snapshot digest: %v", err)
+	}
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE generation_plan_projections
+SET plan_digest = ?
+WHERE generation_id = ?`, store.GenerationPlanDigest(canonical), "gen_frozen_evidence"); err != nil {
+		t.Fatalf("align corrupt plan projection digests: %v", err)
 	}
 	if err := srv.verifyGenerationPlanFrozenEvidence(ctx, "gen_frozen_evidence", details, artifacts); err == nil ||
 		!strings.Contains(err.Error(), "generation plan content snapshot skills") {
@@ -6181,6 +6166,41 @@ func validServerGenerationPlanPayload() map[string]any {
 		"projection_digests":  serverPlanProjectionPayload(),
 		"mutable_state_scope": map[string]any{"leases": "runtime_generations", "events": "events", "checkpoint_state": "runtime_generations"},
 	}
+}
+
+func storeServerFrozenEvidencePlan(t *testing.T, ctx context.Context, st *store.Store, dir string, payload map[string]any) store.GenerationPlanRecord {
+	t.Helper()
+	session := createServerTestSession(t, ctx, st, dir, "sess_frozen_evidence", string(sessionstate.Created), time.Now().UTC(), nil)
+	if _, err := st.DBForTest().ExecContext(ctx, `
+INSERT INTO runtime_generations (generation_id, session_id, status, lease_owner, lease_expires_at)
+VALUES (?, ?, 'allocating', 'owner', ?)`, "gen_frozen_evidence", session.ID, time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("insert runtime generation: %v", err)
+	}
+	plan, err := st.StoreGenerationPlan(ctx, store.StoreGenerationPlanParams{
+		GenerationID: "gen_frozen_evidence",
+		Payload:      payload,
+	})
+	if err != nil {
+		t.Fatalf("store generation plan: %v", err)
+	}
+	for kind, digest := range map[string]string{
+		"control_manifest":           "sha256:control-manifest",
+		"control_manifest_projected": "sha256:control-manifest-projected",
+		"oci_spec":                   "sha256:oci-spec",
+		"bundle":                     "sha256:bundle",
+		"runtime_config":             "sha256:runtime-config",
+	} {
+		if _, err := st.StoreGenerationPlanProjection(ctx, store.StoreGenerationPlanProjectionParams{
+			GenerationID:      "gen_frozen_evidence",
+			PlanDigest:        plan.PlanDigest,
+			ProjectionKind:    kind,
+			ProjectionVersion: 1,
+			PayloadDigest:     digest,
+		}); err != nil {
+			t.Fatalf("store projection %s: %v", kind, err)
+		}
+	}
+	return plan
 }
 
 func serverPlanVolumePayload(hostPath, markerPath, destination string) map[string]any {

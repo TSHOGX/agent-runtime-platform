@@ -1649,6 +1649,14 @@ func (s *Server) verifyGenerationPlanFrozenEvidence(ctx context.Context, generat
 	if err := generationplan.Validate(generationplan.ValidateParams{Payload: plan.CanonicalPayload}); err != nil {
 		return err
 	}
+	if _, err := s.store.VerifyGenerationPlanProjections(ctx, store.VerifyGenerationPlanProjectionsParams{
+		GenerationID: generationID,
+		PlanDigest:   plan.PlanDigest,
+		Expected:     generationPlanProjectionExpectations(artifacts, ""),
+		RequirePlan:  true,
+	}); err != nil {
+		return err
+	}
 	contentSnapshotDigests, err := s.generationPlanContentSnapshotDigests(ctx, plan.CanonicalPayload)
 	if err != nil {
 		return err
