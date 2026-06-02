@@ -26,6 +26,36 @@ func TestValidateRejectsUnsupportedRequiredFeature(t *testing.T) {
 	}
 }
 
+func TestRenderFeaturePolicyPayloadUsesTypedCapabilities(t *testing.T) {
+	driver, ok := agents.DriverSpecFor("claude_code")
+	if !ok {
+		t.Fatalf("driver spec missing")
+	}
+	provider, ok := agents.RuntimeProviderSpecFor("local_runsc")
+	if !ok {
+		t.Fatalf("provider spec missing")
+	}
+	payload, err := RenderFeaturePolicyPayload(driver, provider)
+	if err != nil {
+		t.Fatalf("render feature policy payload: %v", err)
+	}
+	if payload[string(agents.FeatureCompaction)] != string(agents.FeaturePolicyRequired) ||
+		payload[string(agents.FeatureInterrupt)] != string(agents.FeaturePolicyUnsupported) ||
+		payload["capability_schema_version"] != agents.DriverCapabilitySchemaVersion ||
+		payload["capability_vocab_version"] != provider.CapabilityVocabulary ||
+		payload["legacy_supports_compaction"] != driver.SupportsCompaction ||
+		payload["legacy_supports_interrupt"] != driver.SupportsInterrupt ||
+		payload["unsupported_features_fail"] != true ||
+		payload["credential_bearing_mcp_scope"] != "out_of_scope" {
+		t.Fatalf("unexpected rendered feature policy payload: %+v", payload)
+	}
+	plan := validPlanPayload()
+	plan["feature_policy"] = payload
+	if err := Validate(ValidateParams{Payload: plan}); err != nil {
+		t.Fatalf("rendered feature policy should validate: %v", err)
+	}
+}
+
 func TestValidateRejectsMutableContentSnapshotReference(t *testing.T) {
 	payload := validPlanPayload()
 	contentSnapshots := payload["content_snapshots"].(map[string]any)
