@@ -8,12 +8,14 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"harness-platform/orchestrator/internal/events"
 	"harness-platform/orchestrator/internal/generationplan"
 	"harness-platform/orchestrator/internal/sessionstate"
+	"harness-platform/orchestrator/internal/store"
 )
 
 func TestSendMessageAllocatesGenerationAndQueuesBridgeTurn(t *testing.T) {
@@ -127,5 +129,100 @@ WHERE g.session_id = ? AND r.resource_state = 'live'`, session.ID).Scan(&resourc
 		projectionKinds["control_manifest"] == "" ||
 		projectionKinds["oci_spec"] == "" {
 		t.Fatalf("unexpected projection digests: %+v", projectionKinds)
+	}
+}
+
+func TestSendMessageReusesActiveGenerationArtifacts(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_reuse", string(sessionstate.Created), time.Now().UTC(), nil)
+	srv := &Server{
+		cfg:     testServerConfig(dir),
+		store:   st,
+		runtime: instantRuntime{},
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+	atomic.StoreInt64(&instantRuntimePrepareCalls, 0)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(`{"content":"first"}`))
+	rec := httptest.NewRecorder()
+	srv.sendMessage(rec, req, session.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected first status 202, got %d body %s", rec.Code, rec.Body.String())
+	}
+	waitForSessionStatus(t, ctx, st, session.ID, string(sessionstate.RunningActive))
+	if got := atomic.LoadInt64(&instantRuntimePrepareCalls); got != 2 {
+		t.Fatalf("first turn prepare calls=%d want 2", got)
+	}
+	var generationID string
+	var firstTurnID int64
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT g.generation_id, t.id
+FROM runtime_generations g
+JOIN turns t ON t.session_id = g.session_id
+WHERE g.session_id = ?
+  AND t.status = 'queued'
+  AND t.content = 'first'`, session.ID).Scan(&generationID, &firstTurnID); err != nil {
+		t.Fatalf("query first queued turn: %v", err)
+	}
+	leaseOwner := store.GenerationLeaseOwner(owner.UUID)
+	if grant, ok, err := st.ClaimNextTurn(ctx, store.ClaimNextTurnParams{
+		SessionID:    session.ID,
+		GenerationID: generationID,
+		Owner:        leaseOwner,
+		RequestID:    "req_first",
+		LeaseTTL:     time.Minute,
+		Now:          time.Now().UTC(),
+	}); err != nil || !ok || grant.TurnID != firstTurnID {
+		t.Fatalf("claim first turn: ok=%v grant=%+v err=%v", ok, grant, err)
+	}
+	if _, err := st.AckTurnStarted(ctx, store.AckStartedParams{
+		SessionID:       session.ID,
+		GenerationID:    generationID,
+		TurnID:          firstTurnID,
+		Owner:           leaseOwner,
+		SandboxSourceIP: serverSandboxSourceIPForGeneration(t, ctx, st, generationID),
+		LeaseTTL:        time.Minute,
+		Now:             time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("ack first turn started: %v", err)
+	}
+	if _, err := st.CompleteTurn(ctx, store.CompleteTurnParams{
+		SessionID:      session.ID,
+		GenerationID:   generationID,
+		TurnID:         firstTurnID,
+		Owner:          leaseOwner,
+		TerminalStatus: "completed",
+		Now:            time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("complete first turn: %v", err)
+	}
+	if err := st.UpdateSessionStatusAndActivity(ctx, session.ID, string(sessionstate.RunningIdle), nil, time.Now().UTC()); err != nil {
+		t.Fatalf("mark session idle: %v", err)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(`{"content":"second"}`))
+	rec = httptest.NewRecorder()
+	srv.sendMessage(rec, req, session.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected second status 202, got %d body %s", rec.Code, rec.Body.String())
+	}
+	waitForSessionStatus(t, ctx, st, session.ID, string(sessionstate.RunningActive))
+	if got := atomic.LoadInt64(&instantRuntimePrepareCalls); got != 2 {
+		t.Fatalf("active generation should reuse prepared artifacts, prepare calls=%d", got)
+	}
+	var completedTurns, queuedTurns int
+	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM turns WHERE session_id = ? AND status = 'completed'`, session.ID).Scan(&completedTurns); err != nil {
+		t.Fatalf("count turns: %v", err)
+	}
+	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM turns WHERE session_id = ? AND status = 'queued' AND content = 'second'`, session.ID).Scan(&queuedTurns); err != nil {
+		t.Fatalf("count queued turns: %v", err)
+	}
+	if completedTurns != 1 || queuedTurns != 1 {
+		t.Fatalf("unexpected turn statuses after reuse: completed=%d queued=%d", completedTurns, queuedTurns)
 	}
 }
