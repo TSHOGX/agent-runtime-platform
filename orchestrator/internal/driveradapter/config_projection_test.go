@@ -101,6 +101,47 @@ func TestPiRuntimeLayoutSpec(t *testing.T) {
 	}
 }
 
+func TestRuntimeControlManifestFieldsForDrivers(t *testing.T) {
+	claudeFields, err := RuntimeControlManifestFieldsFor(agents.ClaudeCode, store.RuntimeGenerationDetails{
+		DisableNonessentialTraffic: true,
+	})
+	if err != nil {
+		t.Fatalf("render claude runtime manifest fields: %v", err)
+	}
+	if claudeFields["claude_code_disable_nonessential_traffic"] != true {
+		t.Fatalf("unexpected claude manifest fields: %+v", claudeFields)
+	}
+
+	claudeFields["claude_code_disable_nonessential_traffic"] = "mutated"
+	claudeFields, err = RuntimeControlManifestFieldsFor(agents.ClaudeCode, store.RuntimeGenerationDetails{})
+	if err != nil {
+		t.Fatalf("render claude runtime manifest fields: %v", err)
+	}
+	if value, ok := claudeFields["claude_code_disable_nonessential_traffic"]; !ok || value != false {
+		t.Fatalf("claude manifest field should be present and cloned with false value: %+v", claudeFields)
+	}
+
+	piFields, err := RuntimeControlManifestFieldsFor(agents.Pi, store.RuntimeGenerationDetails{})
+	if err != nil {
+		t.Fatalf("render pi runtime manifest fields: %v", err)
+	}
+	if piFields["pi_coding_agent_dir"] != agents.PiCodingAgentDir ||
+		piFields["pi_coding_agent_session_dir"] != agents.PiSessionDir ||
+		piFields["pi_offline"] != true ||
+		piFields["pi_skip_version_check"] != true ||
+		piFields["pi_telemetry_disabled"] != true {
+		t.Fatalf("unexpected pi manifest fields: %+v", piFields)
+	}
+
+	shellFields, err := RuntimeControlManifestFieldsFor(agents.Shell, store.RuntimeGenerationDetails{})
+	if err != nil {
+		t.Fatalf("render shell runtime manifest fields: %v", err)
+	}
+	if shellFields != nil {
+		t.Fatalf("shell should not render runtime manifest fields: %+v", shellFields)
+	}
+}
+
 func TestRuntimeLayoutSpecForUnsupportedDriver(t *testing.T) {
 	if _, ok := RuntimeLayoutSpecFor(agents.Shell); ok {
 		t.Fatalf("shell should not have a runtime layout spec")

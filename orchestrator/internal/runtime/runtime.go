@@ -1385,27 +1385,20 @@ func (r *Runtime) buildGenerationManifest(req StartRequest, driverSpec agents.Dr
 		EgressPolicyDigest:       details.EgressPolicyDigest,
 		ManifestVersion:          1,
 	}
-	applyDriverRuntimeManifestFields(&manifest, details)
-	if layout, ok := driveradapter.RuntimeLayoutSpecFor(agents.ID(selectedDriver)); ok {
-		applyDriverControlManifestSpec(&manifest, layout.ControlManifest)
+	driverRuntimeFields, err := driveradapter.RuntimeControlManifestFieldsFor(agents.ID(selectedDriver), details)
+	if err != nil {
+		return controlManifest{}, err
 	}
+	applyDriverControlManifestFields(&manifest, driverRuntimeFields)
 	return manifest, nil
 }
 
-func applyDriverRuntimeManifestFields(manifest *controlManifest, details store.RuntimeGenerationDetails) {
-	switch agents.ID(strings.TrimSpace(manifest.DriverID)) {
-	case agents.ClaudeCode:
-		ensureDriverRuntimeManifest(manifest)
-		manifest.DriverRuntime["claude_code_disable_nonessential_traffic"] = details.DisableNonessentialTraffic
-	}
-}
-
-func applyDriverControlManifestSpec(manifest *controlManifest, spec driveradapter.RuntimeControlManifestSpec) {
-	if len(spec.Fields) == 0 {
+func applyDriverControlManifestFields(manifest *controlManifest, fields map[string]any) {
+	if len(fields) == 0 {
 		return
 	}
 	ensureDriverRuntimeManifest(manifest)
-	for key, value := range spec.Fields {
+	for key, value := range fields {
 		manifest.DriverRuntime[key] = value
 	}
 }
