@@ -119,6 +119,10 @@ type CheckpointRequest struct {
 	Generation     store.RuntimeGenerationDetails
 }
 
+type CheckpointResult struct {
+	ImageManifestDigest string
+}
+
 type checkpointImageManifest struct {
 	Version int                           `json:"version"`
 	Files   []checkpointImageManifestFile `json:"files"`
@@ -3173,6 +3177,10 @@ func validateCheckpointRestore(details store.RuntimeGenerationDetails, artifacts
 	if err := validateCheckpointImageManifest(checkpointPath); err != nil {
 		return err
 	}
+	imageManifestDigest, err := CheckpointImageManifestDigest(checkpointPath)
+	if err != nil {
+		return err
+	}
 	runscPlatform, err := requiredRunscPlatform(details)
 	if err != nil {
 		return err
@@ -3191,6 +3199,7 @@ func validateCheckpointRestore(details store.RuntimeGenerationDetails, artifacts
 		{"checkpoint_bundle_digest", artifacts.BundleDigest, details.CheckpointBundleDigest},
 		{"checkpoint_runtime_config_digest", artifacts.RuntimeConfigDigest, details.CheckpointRuntimeConfigDigest},
 		{"checkpoint_control_manifest_digest", artifacts.ProjectedManifestDigest, details.CheckpointControlManifestDigest},
+		{"checkpoint_image_manifest_digest", imageManifestDigest, details.CheckpointImageManifestDigest},
 	}
 	for _, check := range checks {
 		if strings.TrimSpace(check.want) == "" {
@@ -3316,72 +3325,80 @@ func fileSHA256(path string) (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-func (r *Runtime) Checkpoint(ctx context.Context, req CheckpointRequest) error {
+func CheckpointImageManifestDigest(checkpointPath string) (string, error) {
+	digest, err := fileSHA256(filepath.Join(checkpointPath, checkpointImageManifestFileName))
+	if err != nil {
+		return "", fmt.Errorf("digest checkpoint image manifest: %w", err)
+	}
+	return "sha256:" + digest, nil
+}
+
+func (r *Runtime) Checkpoint(ctx context.Context, req CheckpointRequest) (CheckpointResult, error) {
 	if strings.TrimSpace(req.SessionID) == "" {
-		return errors.New("session id is required")
+		return CheckpointResult{}, errors.New("session id is required")
 	}
 	if strings.TrimSpace(req.GenerationID) == "" {
-		return errors.New("generation id is required")
+		return CheckpointResult{}, errors.New("generation id is required")
 	}
 	r.mu.RLock()
 	container, exists := r.containers[req.SessionID]
 	r.mu.RUnlock()
 
 	if !exists {
-		return errors.New("container not found")
+		return CheckpointResult{}, errors.New("container not found")
 	}
 	if container.GenerationID != req.GenerationID {
-		return fmt.Errorf("container generation mismatch: got %s want %s", container.GenerationID, req.GenerationID)
+		return CheckpointResult{}, fmt.Errorf("container generation mismatch: got %s want %s", container.GenerationID, req.GenerationID)
 	}
 	if strings.TrimSpace(req.Generation.SessionID) != "" && req.Generation.SessionID != req.SessionID {
-		return fmt.Errorf("checkpoint generation session mismatch")
+		return CheckpointResult{}, fmt.Errorf("checkpoint generation session mismatch")
 	}
 	if strings.TrimSpace(req.Generation.GenerationID) != "" && req.Generation.GenerationID != req.GenerationID {
-		return fmt.Errorf("checkpoint generation id mismatch")
+		return CheckpointResult{}, fmt.Errorf("checkpoint generation id mismatch")
 	}
 	if strings.TrimSpace(req.Generation.RunscContainerID) != "" && req.Generation.RunscContainerID != container.RunscContainerID {
-		return fmt.Errorf("checkpoint runsc container mismatch")
+		return CheckpointResult{}, fmt.Errorf("checkpoint runsc container mismatch")
 	}
 	generationCheckpointPath := strings.TrimSpace(req.Generation.CheckpointPath)
 	checkpointPath := strings.TrimSpace(req.CheckpointPath)
 	if req.Generation.CheckpointPath != "" && req.Generation.CheckpointPath != generationCheckpointPath {
-		return fmt.Errorf("generation checkpoint path %q must be canonical absolute path", req.Generation.CheckpointPath)
+		return CheckpointResult{}, fmt.Errorf("generation checkpoint path %q must be canonical absolute path", req.Generation.CheckpointPath)
 	}
 	if req.CheckpointPath != "" && req.CheckpointPath != checkpointPath {
-		return fmt.Errorf("generation checkpoint path %q must be canonical absolute path", req.CheckpointPath)
+		return CheckpointResult{}, fmt.Errorf("generation checkpoint path %q must be canonical absolute path", req.CheckpointPath)
 	}
 	if checkpointPath == "" {
 		checkpointPath = generationCheckpointPath
 	}
 	if checkpointPath == "" {
-		return errors.New("generation checkpoint path is required")
+		return CheckpointResult{}, errors.New("generation checkpoint path is required")
 	}
 	if !filepath.IsAbs(checkpointPath) || filepath.Clean(checkpointPath) != checkpointPath {
-		return fmt.Errorf("generation checkpoint path %q must be canonical absolute path", checkpointPath)
+		return CheckpointResult{}, fmt.Errorf("generation checkpoint path %q must be canonical absolute path", checkpointPath)
 	}
 	if generationCheckpointPath != "" && (!filepath.IsAbs(generationCheckpointPath) || filepath.Clean(generationCheckpointPath) != generationCheckpointPath) {
-		return fmt.Errorf("generation checkpoint path %q must be canonical absolute path", generationCheckpointPath)
+		return CheckpointResult{}, fmt.Errorf("generation checkpoint path %q must be canonical absolute path", generationCheckpointPath)
 	}
 	if generationCheckpointPath != "" && generationCheckpointPath != checkpointPath {
-		return fmt.Errorf("checkpoint path mismatch: got %q want generation path %q", checkpointPath, generationCheckpointPath)
+		return CheckpointResult{}, fmt.Errorf("checkpoint path mismatch: got %q want generation path %q", checkpointPath, generationCheckpointPath)
 	}
 	currentRunsc, err := r.verifyGenerationRunscPin(ctx, "checkpoint", req.Generation)
 	if err != nil {
-		return err
+		return CheckpointResult{}, err
 	}
 	runscOverlay2, err := r.runscOverlay2(req.Generation)
 	if err != nil {
-		return err
+		return CheckpointResult{}, err
 	}
 
 	if err := os.MkdirAll(filepath.Dir(checkpointPath), 0o755); err != nil {
-		return fmt.Errorf("create checkpoint dir: %w", err)
+		return CheckpointResult{}, fmt.Errorf("create checkpoint dir: %w", err)
 	}
 	if err := os.RemoveAll(checkpointPath); err != nil {
-		return fmt.Errorf("clear checkpoint dir: %w", err)
+		return CheckpointResult{}, fmt.Errorf("clear checkpoint dir: %w", err)
 	}
 	if err := os.MkdirAll(checkpointPath, 0o755); err != nil {
-		return fmt.Errorf("create checkpoint image dir: %w", err)
+		return CheckpointResult{}, fmt.Errorf("create checkpoint image dir: %w", err)
 	}
 
 	// Create checkpoint
@@ -3395,11 +3412,16 @@ func (r *Runtime) Checkpoint(ctx context.Context, req CheckpointRequest) error {
 
 	if output, err := cmd.CombinedOutput(); err != nil {
 		_ = os.RemoveAll(checkpointPath)
-		return fmt.Errorf("runsc checkpoint: %w: %s", err, strings.TrimSpace(string(output)))
+		return CheckpointResult{}, fmt.Errorf("runsc checkpoint: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	if err := writeCheckpointImageManifest(checkpointPath); err != nil {
 		_ = os.RemoveAll(checkpointPath)
-		return err
+		return CheckpointResult{}, err
+	}
+	imageManifestDigest, err := CheckpointImageManifestDigest(checkpointPath)
+	if err != nil {
+		_ = os.RemoveAll(checkpointPath)
+		return CheckpointResult{}, err
 	}
 
 	r.mu.Lock()
@@ -3413,7 +3435,7 @@ func (r *Runtime) Checkpoint(ctx context.Context, req CheckpointRequest) error {
 	// block status finalization and leave the session stuck in checkpointing.
 	container.Cancel()
 
-	return nil
+	return CheckpointResult{ImageManifestDigest: imageManifestDigest}, nil
 }
 
 func (r *Runtime) Interrupt(sessionID string) error {

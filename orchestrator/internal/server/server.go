@@ -79,7 +79,7 @@ type runtimeDriver interface {
 	Destroy(context.Context, string) error
 	DestroyGenerationResources(context.Context, store.RuntimeGenerationDetails) (runtime.GenerationResourceCleanup, error)
 	Interrupt(string) error
-	Checkpoint(context.Context, runtime.CheckpointRequest) error
+	Checkpoint(context.Context, runtime.CheckpointRequest) (runtime.CheckpointResult, error)
 }
 
 type bridgeStore interface {
@@ -3783,7 +3783,7 @@ func (s *Server) checkpointGeneration(ctx context.Context, candidate store.Check
 	}
 	checkpointCtx, cancel := context.WithTimeout(ctx, checkpointTimeout)
 	defer cancel()
-	err = s.runtime.Checkpoint(checkpointCtx, runtime.CheckpointRequest{
+	checkpointResult, err := s.runtime.Checkpoint(checkpointCtx, runtime.CheckpointRequest{
 		SessionID:      candidate.SessionID,
 		GenerationID:   candidate.GenerationID,
 		CheckpointPath: details.CheckpointPath,
@@ -3812,6 +3812,7 @@ func (s *Server) checkpointGeneration(ctx context.Context, candidate store.Check
 		CheckpointRuntimeConfigDigest:   artifacts.RuntimeConfigDigest,
 		CheckpointControlManifestDigest: artifacts.ProjectedManifestDigest,
 		CheckpointPlanDigest:            plan.PlanDigest,
+		CheckpointImageManifestDigest:   checkpointResult.ImageManifestDigest,
 		Now:                             completeNow,
 	}); err != nil {
 		return err

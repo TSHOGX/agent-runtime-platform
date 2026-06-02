@@ -37,6 +37,8 @@ import (
 	"harness-platform/orchestrator/internal/store"
 )
 
+const checkpointImageManifestDigestForTest = "sha256:checkpoint-image-manifest"
+
 func TestCreateSessionRejectsRemovedAgentInput(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -1337,17 +1339,17 @@ func TestMonitorIdleSessionsCheckpointsEligibleGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get checkpointed plan: %v", err)
 	}
-	var generationStatus, networkState, resourceState, checkpointPath, checkpointBundle, checkpointRuntimeConfig, checkpointManifest, checkpointPlan string
+	var generationStatus, networkState, resourceState, checkpointPath, checkpointBundle, checkpointRuntimeConfig, checkpointManifest, checkpointPlan, checkpointImageManifest string
 	if err := st.DBForTest().QueryRowContext(ctx, `
 SELECT g.status, n.allocation_state, r.resource_state, COALESCE(r.checkpoint_path, ''),
        COALESCE(g.checkpoint_bundle_digest, ''), COALESCE(g.checkpoint_runtime_config_digest, ''), COALESCE(g.checkpoint_control_manifest_digest, ''),
-       COALESCE(g.checkpoint_plan_digest, '')
+       COALESCE(g.checkpoint_plan_digest, ''), COALESCE(g.checkpoint_image_manifest_digest, '')
 FROM runtime_generations g
 JOIN network_profiles n ON n.generation_id = g.generation_id
 JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
 WHERE g.generation_id = ?`, allocation.GenerationID).Scan(
 		&generationStatus, &networkState, &resourceState, &checkpointPath,
-		&checkpointBundle, &checkpointRuntimeConfig, &checkpointManifest, &checkpointPlan,
+		&checkpointBundle, &checkpointRuntimeConfig, &checkpointManifest, &checkpointPlan, &checkpointImageManifest,
 	); err != nil {
 		t.Fatalf("query checkpointed generation: %v", err)
 	}
@@ -1358,9 +1360,10 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(
 		checkpointBundle != "bundle_digest" ||
 		checkpointRuntimeConfig != "runtime_config_digest" ||
 		checkpointManifest != "projected_manifest_digest" ||
-		checkpointPlan != plan.PlanDigest {
-		t.Fatalf("unexpected checkpoint metadata: generation=%s network=%s resource=%s path=%s bundle=%s runtime=%s manifest=%s plan=%s want_plan=%s",
-			generationStatus, networkState, resourceState, checkpointPath, checkpointBundle, checkpointRuntimeConfig, checkpointManifest, checkpointPlan, plan.PlanDigest)
+		checkpointPlan != plan.PlanDigest ||
+		checkpointImageManifest != checkpointImageManifestDigestForTest {
+		t.Fatalf("unexpected checkpoint metadata: generation=%s network=%s resource=%s path=%s bundle=%s runtime=%s manifest=%s plan=%s image_manifest=%s want_plan=%s",
+			generationStatus, networkState, resourceState, checkpointPath, checkpointBundle, checkpointRuntimeConfig, checkpointManifest, checkpointPlan, checkpointImageManifest, plan.PlanDigest)
 	}
 }
 
@@ -6116,8 +6119,8 @@ func (instantRuntime) Interrupt(string) error {
 	return nil
 }
 
-func (instantRuntime) Checkpoint(context.Context, runtime.CheckpointRequest) error {
-	return nil
+func (instantRuntime) Checkpoint(context.Context, runtime.CheckpointRequest) (runtime.CheckpointResult, error) {
+	return runtime.CheckpointResult{ImageManifestDigest: checkpointImageManifestDigestForTest}, nil
 }
 
 type recordingRuntime struct {
@@ -6472,12 +6475,15 @@ func (r *recordingRuntime) Interrupt(string) error {
 	return nil
 }
 
-func (r *recordingRuntime) Checkpoint(_ context.Context, req runtime.CheckpointRequest) error {
+func (r *recordingRuntime) Checkpoint(_ context.Context, req runtime.CheckpointRequest) (runtime.CheckpointResult, error) {
 	r.mu.Lock()
 	r.checkpointReqs = append(r.checkpointReqs, req)
 	err := r.checkpointErr
 	r.mu.Unlock()
-	return err
+	if err != nil {
+		return runtime.CheckpointResult{}, err
+	}
+	return runtime.CheckpointResult{ImageManifestDigest: checkpointImageManifestDigestForTest}, nil
 }
 
 func (r *recordingRuntime) requests() ([]runtime.StartRequest, []runtime.StartRequest) {
@@ -6583,8 +6589,8 @@ func (r *restoreValidationRuntime) Interrupt(string) error {
 	return nil
 }
 
-func (r *restoreValidationRuntime) Checkpoint(context.Context, runtime.CheckpointRequest) error {
-	return nil
+func (r *restoreValidationRuntime) Checkpoint(context.Context, runtime.CheckpointRequest) (runtime.CheckpointResult, error) {
+	return runtime.CheckpointResult{ImageManifestDigest: checkpointImageManifestDigestForTest}, nil
 }
 
 type serverCommandRunner struct {
@@ -6647,8 +6653,11 @@ func (f failingRuntime) Interrupt(string) error {
 	return nil
 }
 
-func (f failingRuntime) Checkpoint(context.Context, runtime.CheckpointRequest) error {
-	return f.checkpointErr
+func (f failingRuntime) Checkpoint(context.Context, runtime.CheckpointRequest) (runtime.CheckpointResult, error) {
+	if f.checkpointErr != nil {
+		return runtime.CheckpointResult{}, f.checkpointErr
+	}
+	return runtime.CheckpointResult{ImageManifestDigest: checkpointImageManifestDigestForTest}, nil
 }
 
 func testGenerationArtifacts() runtime.GenerationArtifacts {
@@ -7981,11 +7990,12 @@ SET status = 'checkpointed',
     ),
     checkpoint_driver_states_digest = ?,
     checkpoint_plan_digest = ?,
+    checkpoint_image_manifest_digest = ?,
     lease_owner = NULL,
     lease_expires_at = NULL,
     last_seen_at = ?
 WHERE generation_id = ?
-  AND session_id = ?`, formattedNow, fence, checkpointPlanDigest, formattedNow, generationID, sessionID); err != nil {
+  AND session_id = ?`, formattedNow, fence, checkpointPlanDigest, checkpointImageManifestDigestForTest, formattedNow, generationID, sessionID); err != nil {
 		t.Fatalf("set checkpointed generation: %v", err)
 	}
 	if _, err := st.DBForTest().ExecContext(ctx, `

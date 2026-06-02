@@ -393,7 +393,7 @@ func TestCanonicalManifestDigestMatchesSandboxProjectionFixture(t *testing.T) {
 func TestValidateCheckpointRestoreRejectsMetadataMismatch(t *testing.T) {
 	dir := t.TempDir()
 	checkpointPath := filepath.Join(dir, "checkpoint")
-	writeCheckpointFiles(t, checkpointPath)
+	imageManifestDigest := writeCheckpointFiles(t, checkpointPath)
 	details := testGenerationDetails(dir, "gen_restore")
 	details.CheckpointNetworkProfileID = details.NetworkProfileID
 	details.CheckpointAgentRuntimeProfileID = details.AgentRuntimeProfileID
@@ -404,6 +404,7 @@ func TestValidateCheckpointRestoreRejectsMetadataMismatch(t *testing.T) {
 	details.CheckpointBundleDigest = "bundle_digest"
 	details.CheckpointRuntimeConfigDigest = "runtime_config_digest"
 	details.CheckpointControlManifestDigest = "control_manifest_digest"
+	details.CheckpointImageManifestDigest = imageManifestDigest
 	artifacts := GenerationArtifacts{
 		RunscVersion:            "runsc test",
 		RunscBinaryPath:         "/usr/local/bin/runsc-test",
@@ -419,6 +420,39 @@ func TestValidateCheckpointRestoreRejectsMetadataMismatch(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "checkpoint_control_manifest_digest") {
 		t.Fatalf("expected manifest digest mismatch, got %v", err)
+	}
+}
+
+func TestValidateCheckpointRestoreRejectsImageManifestDigestMismatch(t *testing.T) {
+	dir := t.TempDir()
+	checkpointPath := filepath.Join(dir, "checkpoint")
+	writeCheckpointFiles(t, checkpointPath)
+	details := testGenerationDetails(dir, "gen_restore_image_manifest")
+	details.CheckpointNetworkProfileID = details.NetworkProfileID
+	details.CheckpointAgentRuntimeProfileID = details.AgentRuntimeProfileID
+	details.CheckpointRunscPlatform = details.RunscPlatform
+	details.CheckpointRunscVersion = "runsc test"
+	details.CheckpointRunscBinaryPath = "/usr/local/bin/runsc-test"
+	details.CheckpointRunscBinaryDigest = "sha256:runsc-test"
+	details.CheckpointBundleDigest = "bundle_digest"
+	details.CheckpointRuntimeConfigDigest = "runtime_config_digest"
+	details.CheckpointControlManifestDigest = "control_manifest_digest"
+	details.CheckpointImageManifestDigest = "sha256:stale-checkpoint-image-manifest"
+	artifacts := GenerationArtifacts{
+		RunscVersion:            "runsc test",
+		RunscBinaryPath:         "/usr/local/bin/runsc-test",
+		RunscBinaryDigest:       "sha256:runsc-test",
+		BundleDigest:            "bundle_digest",
+		RuntimeConfigDigest:     "runtime_config_digest",
+		ProjectedManifestDigest: "control_manifest_digest",
+	}
+
+	err := validateCheckpointRestore(details, artifacts, checkpointPath)
+	if err == nil {
+		t.Fatal("expected checkpoint image manifest digest mismatch")
+	}
+	if !strings.Contains(err.Error(), "checkpoint_image_manifest_digest") {
+		t.Fatalf("expected image manifest digest mismatch, got %v", err)
 	}
 }
 
@@ -490,7 +524,7 @@ func TestRuntimeStartRestoreRejectsMetadataBeforeRunscRestore(t *testing.T) {
 	dir := t.TempDir()
 	currentRunscPath, currentRunscDigest := installFakeRunsc(t, dir, "current")
 	checkpointPath := filepath.Join(dir, "checkpoint")
-	writeCheckpointFiles(t, checkpointPath)
+	imageManifestDigest := writeCheckpointFiles(t, checkpointPath)
 	runner := &recordingCommandRunner{
 		outputs: map[string][]byte{
 			"runsc --version": []byte("runsc current"),
@@ -524,6 +558,7 @@ func TestRuntimeStartRestoreRejectsMetadataBeforeRunscRestore(t *testing.T) {
 	details.CheckpointBundleDigest = "bundle_digest"
 	details.CheckpointRuntimeConfigDigest = "runtime_config_digest"
 	details.CheckpointControlManifestDigest = "control_manifest_digest"
+	details.CheckpointImageManifestDigest = imageManifestDigest
 	details.RunscVersion = "runsc current"
 	details.RunscBinaryPath = currentRunscPath
 	details.RunscBinaryDigest = currentRunscDigest
@@ -623,7 +658,7 @@ func TestRuntimeStartRestoreRejectsRunscBinaryMismatchBeforeRunscRestore(t *test
 	dir := t.TempDir()
 	runscPath, digest := installFakeRunsc(t, dir, "current")
 	checkpointPath := filepath.Join(dir, "checkpoint")
-	writeCheckpointFiles(t, checkpointPath)
+	imageManifestDigest := writeCheckpointFiles(t, checkpointPath)
 	runner := &recordingCommandRunner{
 		outputs: map[string][]byte{
 			"runsc --version": []byte("runsc current"),
@@ -649,6 +684,7 @@ func TestRuntimeStartRestoreRejectsRunscBinaryMismatchBeforeRunscRestore(t *test
 	details.CheckpointBundleDigest = "bundle_digest"
 	details.CheckpointRuntimeConfigDigest = "runtime_config_digest"
 	details.CheckpointControlManifestDigest = "control_manifest_digest"
+	details.CheckpointImageManifestDigest = imageManifestDigest
 	details.RunscVersion = "runsc current"
 	details.RunscBinaryPath = runscPath
 	details.RunscBinaryDigest = digest
@@ -706,7 +742,7 @@ func TestCheckpointRejectsRunscPinMismatchBeforeFilesystemMutation(t *testing.T)
 	}
 	details.CheckpointPath = checkpointPath
 
-	err := rt.Checkpoint(context.Background(), CheckpointRequest{
+	_, err := rt.Checkpoint(context.Background(), CheckpointRequest{
 		SessionID:      details.SessionID,
 		GenerationID:   details.GenerationID,
 		CheckpointPath: checkpointPath,
@@ -809,15 +845,15 @@ func TestCheckpointRequiresGenerationIdentity(t *testing.T) {
 	rt := New(Config{})
 	rt.containers["sess_1"] = &Container{SessionID: "sess_1", GenerationID: "gen_a", RunscContainerID: "harness-gen-gen_a"}
 
-	err := rt.Checkpoint(context.Background(), CheckpointRequest{SessionID: "sess_1"})
+	_, err := rt.Checkpoint(context.Background(), CheckpointRequest{SessionID: "sess_1"})
 	if err == nil || !strings.Contains(err.Error(), "generation id is required") {
 		t.Fatalf("expected missing generation id error, got %v", err)
 	}
-	err = rt.Checkpoint(context.Background(), CheckpointRequest{SessionID: "sess_1", GenerationID: "gen_b"})
+	_, err = rt.Checkpoint(context.Background(), CheckpointRequest{SessionID: "sess_1", GenerationID: "gen_b"})
 	if err == nil || !strings.Contains(err.Error(), "container generation mismatch") {
 		t.Fatalf("expected generation mismatch error, got %v", err)
 	}
-	err = rt.Checkpoint(context.Background(), CheckpointRequest{
+	_, err = rt.Checkpoint(context.Background(), CheckpointRequest{
 		SessionID:    "sess_1",
 		GenerationID: "gen_a",
 		Generation:   store.RuntimeGenerationDetails{SessionID: "sess_other", GenerationID: "gen_a"},
@@ -825,7 +861,7 @@ func TestCheckpointRequiresGenerationIdentity(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "checkpoint generation session mismatch") {
 		t.Fatalf("expected generation session mismatch error, got %v", err)
 	}
-	err = rt.Checkpoint(context.Background(), CheckpointRequest{
+	_, err = rt.Checkpoint(context.Background(), CheckpointRequest{
 		SessionID:    "sess_1",
 		GenerationID: "gen_a",
 		Generation:   store.RuntimeGenerationDetails{SessionID: "sess_1", GenerationID: "gen_a", RunscContainerID: "harness-gen-other"},
@@ -858,7 +894,7 @@ func TestCheckpointRequiresGenerationScopedPath(t *testing.T) {
 		Cancel:           func() {},
 	}
 
-	err := rt.Checkpoint(context.Background(), CheckpointRequest{
+	_, err := rt.Checkpoint(context.Background(), CheckpointRequest{
 		SessionID:    details.SessionID,
 		GenerationID: details.GenerationID,
 		Generation:   details,
@@ -868,7 +904,7 @@ func TestCheckpointRequiresGenerationScopedPath(t *testing.T) {
 	}
 
 	details.CheckpointPath = filepath.Join(dir, "run", "gen-"+details.GenerationID, "checkpoint")
-	err = rt.Checkpoint(context.Background(), CheckpointRequest{
+	_, err = rt.Checkpoint(context.Background(), CheckpointRequest{
 		SessionID:      details.SessionID,
 		GenerationID:   details.GenerationID,
 		CheckpointPath: filepath.Join(dir, "run", "gen-"+details.GenerationID, "checkpoint-other"),
@@ -879,7 +915,7 @@ func TestCheckpointRequiresGenerationScopedPath(t *testing.T) {
 	}
 
 	details.CheckpointPath = filepath.Dir(details.CheckpointPath) + string(filepath.Separator) + "same" + string(filepath.Separator) + ".." + string(filepath.Separator) + filepath.Base(details.CheckpointPath)
-	err = rt.Checkpoint(context.Background(), CheckpointRequest{
+	_, err = rt.Checkpoint(context.Background(), CheckpointRequest{
 		SessionID:    details.SessionID,
 		GenerationID: details.GenerationID,
 		Generation:   details,
@@ -889,7 +925,7 @@ func TestCheckpointRequiresGenerationScopedPath(t *testing.T) {
 	}
 
 	details.CheckpointPath = filepath.Join(dir, "run", "gen-"+details.GenerationID, "checkpoint")
-	err = rt.Checkpoint(context.Background(), CheckpointRequest{
+	_, err = rt.Checkpoint(context.Background(), CheckpointRequest{
 		SessionID:      details.SessionID,
 		GenerationID:   details.GenerationID,
 		CheckpointPath: filepath.Dir(details.CheckpointPath) + string(filepath.Separator) + "same" + string(filepath.Separator) + ".." + string(filepath.Separator) + filepath.Base(details.CheckpointPath),
@@ -2950,12 +2986,17 @@ func testControlManifest() controlManifest {
 	}
 }
 
-func writeCheckpointFiles(t *testing.T, checkpointPath string) {
+func writeCheckpointFiles(t *testing.T, checkpointPath string) string {
 	t.Helper()
 	writeCheckpointFilesWithoutManifest(t, checkpointPath)
 	if err := writeCheckpointImageManifest(checkpointPath); err != nil {
 		t.Fatalf("write checkpoint image manifest: %v", err)
 	}
+	digest, err := CheckpointImageManifestDigest(checkpointPath)
+	if err != nil {
+		t.Fatalf("digest checkpoint image manifest: %v", err)
+	}
+	return digest
 }
 
 func writeCheckpointFilesWithoutManifest(t *testing.T, checkpointPath string) {

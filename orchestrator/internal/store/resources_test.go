@@ -15,6 +15,8 @@ import (
 	"harness-platform/orchestrator/internal/sessionstate"
 )
 
+const checkpointImageManifestDigestForTest = "sha256:checkpoint-image-manifest"
+
 func TestAllocateGenerationRequiresExplicitAllocatorConfigFields(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1066,7 +1068,8 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ge
 		details.CheckpointBundleDigest != "bundle_digest" ||
 		details.CheckpointRuntimeConfigDigest != "runtime_config_digest" ||
 		details.CheckpointControlManifestDigest != "projected_manifest_digest" ||
-		details.CheckpointPlanDigest != plan.PlanDigest {
+		details.CheckpointPlanDigest != plan.PlanDigest ||
+		details.CheckpointImageManifestDigest != checkpointImageManifestDigestForTest {
 		t.Fatalf("checkpoint metadata not loaded into restore details: %+v", details)
 	}
 
@@ -1176,6 +1179,47 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &le
 	}
 	if generationStatus != "checkpointed" || leaseOwnerAfter != "" || networkState != "reserved_checkpointed" || resourceState != "reserved_checkpointed" {
 		t.Fatalf("restore projection mismatch mutated state: generation=%s owner=%q network=%s resource=%s",
+			generationStatus, leaseOwnerAfter, networkState, resourceState)
+	}
+}
+
+func TestClaimCheckpointedGenerationForRestoreRejectsMissingImageManifestDigest(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	cfg := testAllocatorConfig(t)
+	now := time.Now().UTC()
+	leaseOwner := GenerationLeaseOwner(owner.UUID)
+	allocation := createAutoCheckpointGeneration(t, ctx, st, cfg, "sess_restore_image_manifest_missing", leaseOwner, now)
+	checkpointedGeneration(t, ctx, st, "sess_restore_image_manifest_missing", allocation.GenerationID, now.Add(2*time.Second))
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_generations
+SET checkpoint_image_manifest_digest = NULL
+WHERE generation_id = ?`, allocation.GenerationID); err != nil {
+		t.Fatalf("clear checkpoint image manifest digest: %v", err)
+	}
+
+	_, err := st.ClaimCheckpointedGenerationForRestore(ctx, ClaimCheckpointedGenerationParams{
+		SessionID:    "sess_restore_image_manifest_missing",
+		GenerationID: allocation.GenerationID,
+		Owner:        leaseOwner,
+		LeaseTTL:     2 * time.Minute,
+		Now:          now.Add(3 * time.Second),
+	})
+	if !errors.Is(err, ErrStaleCheckpointRestore) || !strings.Contains(err.Error(), "checkpoint image manifest digest is missing") {
+		t.Fatalf("expected checkpoint image manifest stale restore error, got %v", err)
+	}
+
+	var generationStatus, leaseOwnerAfter, networkState, resourceState string
+	if err := st.db.QueryRowContext(ctx, `
+SELECT g.status, COALESCE(g.lease_owner, ''), n.allocation_state, r.resource_state
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &leaseOwnerAfter, &networkState, &resourceState); err != nil {
+		t.Fatalf("query rejected restore state: %v", err)
+	}
+	if generationStatus != "checkpointed" || leaseOwnerAfter != "" || networkState != "reserved_checkpointed" || resourceState != "reserved_checkpointed" {
+		t.Fatalf("restore image manifest missing mutated state: generation=%s owner=%q network=%s resource=%s",
 			generationStatus, leaseOwnerAfter, networkState, resourceState)
 	}
 }
@@ -2522,21 +2566,22 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &se
 		CheckpointRuntimeConfigDigest:   "runtime_config_digest",
 		CheckpointControlManifestDigest: "projected_manifest_digest",
 		CheckpointPlanDigest:            plan.PlanDigest,
+		CheckpointImageManifestDigest:   checkpointImageManifestDigestForTest,
 		Now:                             now.Add(3 * time.Minute),
 	}); err != nil {
 		t.Fatalf("complete checkpoint: %v", err)
 	}
-	var networkState, resourceState, checkpointPath, checkpointBundle, checkpointManifest string
+	var networkState, resourceState, checkpointPath, checkpointBundle, checkpointManifest, checkpointImageManifest string
 	if err := st.db.QueryRowContext(ctx, `
 SELECT g.status, s.status, n.allocation_state, r.resource_state, COALESCE(r.checkpoint_path, ''),
        COALESCE(g.checkpoint_bundle_digest, ''), COALESCE(g.checkpoint_control_manifest_digest, ''),
-       COALESCE(g.checkpoint_plan_digest, '')
+       COALESCE(g.checkpoint_plan_digest, ''), COALESCE(g.checkpoint_image_manifest_digest, '')
 FROM runtime_generations g
 JOIN sessions s ON s.active_generation_id = g.generation_id
 JOIN network_profiles n ON n.generation_id = g.generation_id
 JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
 WHERE g.generation_id = ?`, allocation.GenerationID).Scan(
-		&generationStatus, &sessionStatus, &networkState, &resourceState, &checkpointPath, &checkpointBundle, &checkpointManifest, &checkpointPlan,
+		&generationStatus, &sessionStatus, &networkState, &resourceState, &checkpointPath, &checkpointBundle, &checkpointManifest, &checkpointPlan, &checkpointImageManifest,
 	); err != nil {
 		t.Fatalf("query checkpoint complete state: %v", err)
 	}
@@ -2547,9 +2592,10 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(
 		checkpointPath == "" ||
 		checkpointBundle != "bundle_digest" ||
 		checkpointManifest != "projected_manifest_digest" ||
-		checkpointPlan != plan.PlanDigest {
-		t.Fatalf("unexpected completed checkpoint state: generation=%s session=%s network=%s resource=%s path=%s bundle=%s manifest=%s plan=%s want_plan=%s",
-			generationStatus, sessionStatus, networkState, resourceState, checkpointPath, checkpointBundle, checkpointManifest, checkpointPlan, plan.PlanDigest)
+		checkpointPlan != plan.PlanDigest ||
+		checkpointImageManifest != checkpointImageManifestDigestForTest {
+		t.Fatalf("unexpected completed checkpoint state: generation=%s session=%s network=%s resource=%s path=%s bundle=%s manifest=%s plan=%s image_manifest=%s want_plan=%s",
+			generationStatus, sessionStatus, networkState, resourceState, checkpointPath, checkpointBundle, checkpointManifest, checkpointPlan, checkpointImageManifest, plan.PlanDigest)
 	}
 }
 
@@ -2580,6 +2626,7 @@ func TestCompleteGenerationCheckpointChecksProjectionDigestFence(t *testing.T) {
 		CheckpointRuntimeConfigDigest:   "runtime_config_digest",
 		CheckpointControlManifestDigest: "projected_manifest_digest",
 		CheckpointPlanDigest:            plan.PlanDigest,
+		CheckpointImageManifestDigest:   checkpointImageManifestDigestForTest,
 		Now:                             now.Add(3 * time.Minute),
 	})
 	if err == nil || !strings.Contains(err.Error(), "checkpoint projection bundle digest mismatch") {
@@ -2615,6 +2662,7 @@ func TestCompleteGenerationCheckpointRequiresRunscMetadata(t *testing.T) {
 		CheckpointRuntimeConfigDigest:   "runtime_config_digest",
 		CheckpointControlManifestDigest: "manifest_digest",
 		CheckpointPlanDigest:            "sha256:plan",
+		CheckpointImageManifestDigest:   checkpointImageManifestDigestForTest,
 		Now:                             time.Now().UTC(),
 	}
 	tests := []struct {
@@ -2629,6 +2677,8 @@ func TestCompleteGenerationCheckpointRequiresRunscMetadata(t *testing.T) {
 		{name: "relative runsc path", want: "checkpoint runsc binary path must be canonical absolute", edit: func(p *CompleteCheckpointParams) { p.RunscBinaryPath = "runsc" }},
 		{name: "unclean runsc path", want: "checkpoint runsc binary path must be canonical absolute", edit: func(p *CompleteCheckpointParams) { p.RunscBinaryPath = "/usr/local/bin/../bin/runsc-test" }},
 		{name: "plan digest", want: "checkpoint plan digest is required", edit: func(p *CompleteCheckpointParams) { p.CheckpointPlanDigest = "" }},
+		{name: "image manifest digest", want: "checkpoint image manifest digest is required", edit: func(p *CompleteCheckpointParams) { p.CheckpointImageManifestDigest = "" }},
+		{name: "invalid image manifest digest", want: "checkpoint image manifest digest is invalid", edit: func(p *CompleteCheckpointParams) { p.CheckpointImageManifestDigest = "checkpoint-image-manifest" }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -3325,11 +3375,12 @@ SET status = 'checkpointed',
     checkpoint_control_manifest_digest = 'projected_manifest_digest',
     checkpoint_driver_states_digest = ?,
     checkpoint_plan_digest = ?,
+    checkpoint_image_manifest_digest = ?,
     lease_owner = NULL,
     lease_expires_at = NULL,
     last_seen_at = ?
 WHERE generation_id = ?
-  AND session_id = ?`, formatTime(now), fence, checkpointPlanDigest, formatTime(now), generationID, sessionID); err != nil {
+  AND session_id = ?`, formatTime(now), fence, checkpointPlanDigest, checkpointImageManifestDigestForTest, formatTime(now), generationID, sessionID); err != nil {
 		t.Fatalf("set checkpointed generation: %v", err)
 	}
 	if _, err := st.db.ExecContext(ctx, `

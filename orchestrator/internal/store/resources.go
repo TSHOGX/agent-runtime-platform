@@ -108,6 +108,7 @@ type RuntimeGenerationDetails struct {
 	CheckpointControlManifestDigest string
 	CheckpointDriverStatesDigest    string
 	CheckpointPlanDigest            string
+	CheckpointImageManifestDigest   string
 	RunscNetwork                    string
 	RunscOverlay2                   string
 	HostProxyBindURL                string
@@ -174,6 +175,7 @@ type CompleteCheckpointParams struct {
 	CheckpointRuntimeConfigDigest   string
 	CheckpointControlManifestDigest string
 	CheckpointPlanDigest            string
+	CheckpointImageManifestDigest   string
 	Now                             time.Time
 }
 
@@ -640,6 +642,21 @@ WHERE generation_id = ?
 		checkpointControlManifestDigest,
 	)); err != nil {
 		return GenerationAllocation{}, fmt.Errorf("%w: %w", ErrStaleCheckpointRestore, err)
+	}
+	var checkpointImageManifestDigest string
+	if err := tx.QueryRowContext(ctx, `
+SELECT COALESCE(checkpoint_image_manifest_digest, '')
+FROM runtime_generations
+WHERE generation_id = ?
+  AND session_id = ?`, p.GenerationID, p.SessionID).Scan(&checkpointImageManifestDigest); err != nil {
+		return GenerationAllocation{}, err
+	}
+	if checkpointImageManifestDigest == "" {
+		return GenerationAllocation{}, fmt.Errorf("%w: checkpoint image manifest digest is missing", ErrStaleCheckpointRestore)
+	}
+	if strings.TrimSpace(checkpointImageManifestDigest) != checkpointImageManifestDigest ||
+		!strings.HasPrefix(checkpointImageManifestDigest, "sha256:") {
+		return GenerationAllocation{}, fmt.Errorf("%w: checkpoint image manifest digest is invalid", ErrStaleCheckpointRestore)
 	}
 
 	expiresAt := p.Now.Add(p.LeaseTTL)
@@ -1954,6 +1971,13 @@ func (s *Store) CompleteGenerationCheckpoint(ctx context.Context, p CompleteChec
 	if strings.TrimSpace(p.CheckpointPlanDigest) == "" {
 		return fmt.Errorf("checkpoint plan digest is required")
 	}
+	if strings.TrimSpace(p.CheckpointImageManifestDigest) == "" {
+		return fmt.Errorf("checkpoint image manifest digest is required")
+	}
+	if strings.TrimSpace(p.CheckpointImageManifestDigest) != p.CheckpointImageManifestDigest ||
+		!strings.HasPrefix(p.CheckpointImageManifestDigest, "sha256:") {
+		return fmt.Errorf("checkpoint image manifest digest is invalid")
+	}
 	if strings.TrimSpace(p.RunscVersion) == "" {
 		return fmt.Errorf("checkpoint runsc version is required")
 	}
@@ -2032,6 +2056,7 @@ SET status = 'checkpointed',
     checkpoint_runtime_config_digest = ?,
     checkpoint_control_manifest_digest = ?,
     checkpoint_plan_digest = ?,
+    checkpoint_image_manifest_digest = ?,
     lease_owner = NULL,
     lease_expires_at = NULL,
     last_seen_at = ?
@@ -2047,7 +2072,7 @@ WHERE generation_id = ?
       AND status = 'checkpointing'
   )`, formatTime(p.Now), p.RunscVersion, p.RunscPlatform, p.RunscBinaryPath, p.RunscBinaryDigest,
 		p.CheckpointBundleDigest, p.CheckpointRuntimeConfigDigest, p.CheckpointControlManifestDigest,
-		p.CheckpointPlanDigest, formatTime(p.Now), p.GenerationID, p.SessionID, p.Owner, formatTime(p.Now), p.SessionID, p.GenerationID)
+		p.CheckpointPlanDigest, p.CheckpointImageManifestDigest, formatTime(p.Now), p.GenerationID, p.SessionID, p.Owner, formatTime(p.Now), p.SessionID, p.GenerationID)
 	if err != nil {
 		return err
 	}
@@ -2188,6 +2213,7 @@ SELECT
   COALESCE(g.checkpoint_control_manifest_digest, ''),
   COALESCE(g.checkpoint_driver_states_digest, ''),
   COALESCE(g.checkpoint_plan_digest, ''),
+  COALESCE(g.checkpoint_image_manifest_digest, ''),
   n.runsc_network,
   n.runsc_overlay2,
   n.host_proxy_bind_url,
@@ -2274,6 +2300,7 @@ WHERE g.session_id = ?
 		&details.CheckpointControlManifestDigest,
 		&details.CheckpointDriverStatesDigest,
 		&details.CheckpointPlanDigest,
+		&details.CheckpointImageManifestDigest,
 		&details.RunscNetwork,
 		&details.RunscOverlay2,
 		&details.HostProxyBindURL,
@@ -2327,7 +2354,19 @@ WHERE g.session_id = ?
 	if err := validateRuntimeGenerationDetailsPaths(details); err != nil {
 		return RuntimeGenerationDetails{}, err
 	}
+	if err := validateRuntimeGenerationDetailsDigests(details); err != nil {
+		return RuntimeGenerationDetails{}, err
+	}
 	return details, nil
+}
+
+func validateRuntimeGenerationDetailsDigests(details RuntimeGenerationDetails) error {
+	if details.CheckpointImageManifestDigest != "" &&
+		(strings.TrimSpace(details.CheckpointImageManifestDigest) != details.CheckpointImageManifestDigest ||
+			!strings.HasPrefix(details.CheckpointImageManifestDigest, "sha256:")) {
+		return fmt.Errorf("runtime generation checkpoint image manifest digest is invalid")
+	}
+	return nil
 }
 
 func validateRuntimeGenerationDetailsPaths(details RuntimeGenerationDetails) error {

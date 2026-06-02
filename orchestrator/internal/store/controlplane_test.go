@@ -50,7 +50,7 @@ func TestFreshSchemaCreatesCurrentRuntimeTables(t *testing.T) {
 	for _, column := range []string{"model_access_allowed"} {
 		assertColumnExists(t, st.db, "active_model_request_contexts", column)
 	}
-	for _, column := range []string{"sandbox_contract_id", "sandbox_contract_version", "checkpoint_runsc_binary_path", "checkpoint_runsc_binary_digest"} {
+	for _, column := range []string{"sandbox_contract_id", "sandbox_contract_version", "checkpoint_runsc_binary_path", "checkpoint_runsc_binary_digest", "checkpoint_image_manifest_digest"} {
 		assertColumnExists(t, st.db, "runtime_generations", column)
 	}
 	for _, column := range []string{"projected_control_manifest_digest", "bundle_digest", "runtime_config_digest", "spec_digest"} {
