@@ -2003,6 +2003,44 @@ func TestMaterializeGenerationArtifactsRejectsProjectionDigestMismatch(t *testin
 	assertGenerationFilesystemMissing(t, generationFilesystemPaths(details))
 }
 
+func TestMaterializeGenerationArtifactsRejectsNonCanonicalExpectedPath(t *testing.T) {
+	dir := t.TempDir()
+	installFakeRunsc(t, dir, "render-generation-artifacts")
+	runner := &recordingCommandRunner{
+		outputs: map[string][]byte{"runsc --version": []byte("runsc render")},
+	}
+	rt := New(Config{
+		SessionsRoot:         filepath.Join(dir, "sessions"),
+		AgentHomesRoot:       filepath.Join(dir, "agent-homes"),
+		BundleRoot:           filepath.Join(dir, "bundle", "out"),
+		RootFSPath:           filepath.Join(dir, "rootfs"),
+		BridgeMode:           "claim-loop",
+		BridgeHeartbeat:      20 * time.Second,
+		BridgePollInterval:   5 * time.Millisecond,
+		ProbeHealthzStatuses: []int{200},
+		CommandRunner:        runner,
+	})
+	details := testGenerationDetails(dir, "gen_render_projection_path")
+	req := withDataVolumePathsForTest(dir, StartRequest{
+		SessionID:    details.SessionID,
+		GenerationID: details.GenerationID,
+		DriverID:     details.DriverID,
+		Generation:   details,
+	})
+	projection, err := rt.RenderGenerationArtifacts(context.Background(), req)
+	if err != nil {
+		t.Fatalf("render generation artifact projection: %v", err)
+	}
+	req.PreparedArtifacts = projection.Artifacts
+	req.PreparedArtifacts.SpecPath = filepath.Dir(details.SpecPath) + string(filepath.Separator) + "same" + string(filepath.Separator) + ".." + string(filepath.Separator) + filepath.Base(details.SpecPath)
+
+	err = rt.MaterializeGenerationArtifacts(req, projection)
+	if err == nil || !strings.Contains(err.Error(), "materialization projection expected spec path must be canonical absolute") {
+		t.Fatalf("expected materialization projection path rejection, got %v", err)
+	}
+	assertGenerationFilesystemMissing(t, generationFilesystemPaths(details))
+}
+
 func TestPreparePiGenerationMaterializesReadOnlyConfig(t *testing.T) {
 	dir := t.TempDir()
 	rt := New(Config{

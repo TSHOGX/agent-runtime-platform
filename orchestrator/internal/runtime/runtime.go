@@ -1276,11 +1276,18 @@ func (r *Runtime) verifyMaterializationProjection(req StartRequest, projection G
 		{"runsc binary digest", actual.RunscBinaryDigest, expected.RunscBinaryDigest, false},
 	}
 	for _, check := range checks {
-		got, want := strings.TrimSpace(check.got), strings.TrimSpace(check.want)
-		if check.path && got != "" && want != "" {
-			got, want = filepath.Clean(got), filepath.Clean(want)
+		got, want := check.got, check.want
+		if check.path {
+			if err := validateMaterializationProjectionPath("actual", check.field, got); err != nil {
+				return err
+			}
+			if err := validateMaterializationProjectionPath("expected", check.field, want); err != nil {
+				return err
+			}
+		} else {
+			got, want = strings.TrimSpace(got), strings.TrimSpace(want)
 		}
-		if want == "" {
+		if strings.TrimSpace(want) == "" {
 			return fmt.Errorf("materialization projection expected %s is required", check.field)
 		}
 		if got != want {
@@ -1289,6 +1296,16 @@ func (r *Runtime) verifyMaterializationProjection(req StartRequest, projection G
 	}
 	if !driverConfigMaterializationsEqual(actual.MaterializedDriverConfig, expected.MaterializedDriverConfig) {
 		return fmt.Errorf("materialization projection driver config mismatch")
+	}
+	return nil
+}
+
+func validateMaterializationProjectionPath(role, field, value string) error {
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("materialization projection %s %s is required", role, field)
+	}
+	if strings.TrimSpace(value) != value || !filepath.IsAbs(value) || filepath.Clean(value) != value {
+		return fmt.Errorf("materialization projection %s %s must be canonical absolute", role, field)
 	}
 	return nil
 }
