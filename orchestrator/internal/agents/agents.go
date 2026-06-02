@@ -55,6 +55,164 @@ const (
 	DriverKindShell DriverKind = "shell"
 )
 
+const DriverCapabilitySchemaVersion = 1
+
+type FeatureID string
+
+const (
+	FeatureOperatorPolicyPrompt  FeatureID = "operator_policy_prompt"
+	FeatureContextUsageReporting FeatureID = "context_usage_reporting"
+	FeatureHardContextBudget     FeatureID = "hard_context_budget"
+	FeatureCompaction            FeatureID = "compaction"
+	FeatureSkillsSnapshot        FeatureID = "skills_snapshot"
+	FeatureManagedSettings       FeatureID = "managed_settings"
+	FeatureHooks                 FeatureID = "hooks"
+	FeatureRemoteMCPRegistration FeatureID = "remote_mcp_registration"
+	FeatureInterrupt             FeatureID = "interrupt"
+)
+
+type SubCapabilityID string
+
+const (
+	SubCapabilityOperatorPolicyPromptAdapter  SubCapabilityID = "operator_policy_prompt_adapter"
+	SubCapabilityContextUsageReporter         SubCapabilityID = "context_usage_reporter"
+	SubCapabilityHardContextBudgetEnforcer    SubCapabilityID = "hard_context_budget_enforcer"
+	SubCapabilityCompactionAdapter            SubCapabilityID = "compaction_adapter"
+	SubCapabilitySkillsSnapshotAdapter        SubCapabilityID = "skills_snapshot_adapter"
+	SubCapabilityManagedSettingsRenderer      SubCapabilityID = "managed_settings_renderer"
+	SubCapabilityHooksRenderer                SubCapabilityID = "hooks_renderer"
+	SubCapabilityRemoteMCPRegistrationAdapter SubCapabilityID = "remote_mcp_registration_adapter"
+	SubCapabilityInterruptAdapter             SubCapabilityID = "interrupt_adapter"
+)
+
+type CapabilitySupportState string
+
+const (
+	CapabilitySupported     CapabilitySupportState = "supported"
+	CapabilityUnsupported   CapabilitySupportState = "unsupported"
+	CapabilityNotApplicable CapabilitySupportState = "not_applicable"
+)
+
+type FeaturePolicyState string
+
+const (
+	FeaturePolicyRequired    FeaturePolicyState = "required"
+	FeaturePolicyDisabled    FeaturePolicyState = "disabled"
+	FeaturePolicyUnsupported FeaturePolicyState = "unsupported"
+)
+
+type FeatureDefinition struct {
+	ID                            FeatureID         `json:"id"`
+	DriverRequirements            []SubCapabilityID `json:"driver_requirements"`
+	ProviderRequirements          []string          `json:"provider_requirements"`
+	AdapterRenderer               string            `json:"adapter_renderer"`
+	ProducedArtifacts             []string          `json:"produced_artifacts"`
+	CredentialBearingMCPSupported bool              `json:"credential_bearing_mcp_supported"`
+}
+
+type DriverCapabilities struct {
+	SchemaVersion   int                                        `json:"schema_version"`
+	Features        map[FeatureID]CapabilitySupportState       `json:"features"`
+	SubCapabilities map[SubCapabilityID]CapabilitySupportState `json:"sub_capabilities"`
+}
+
+type RuntimeProviderCapabilities struct {
+	VocabularyVersion string   `json:"vocabulary_version"`
+	Capabilities      []string `json:"capabilities"`
+}
+
+type FeaturePolicy map[FeatureID]FeaturePolicyState
+
+var allFeatureIDs = []FeatureID{
+	FeatureOperatorPolicyPrompt,
+	FeatureContextUsageReporting,
+	FeatureHardContextBudget,
+	FeatureCompaction,
+	FeatureSkillsSnapshot,
+	FeatureManagedSettings,
+	FeatureHooks,
+	FeatureRemoteMCPRegistration,
+	FeatureInterrupt,
+}
+
+var allSubCapabilityIDs = []SubCapabilityID{
+	SubCapabilityOperatorPolicyPromptAdapter,
+	SubCapabilityContextUsageReporter,
+	SubCapabilityHardContextBudgetEnforcer,
+	SubCapabilityCompactionAdapter,
+	SubCapabilitySkillsSnapshotAdapter,
+	SubCapabilityManagedSettingsRenderer,
+	SubCapabilityHooksRenderer,
+	SubCapabilityRemoteMCPRegistrationAdapter,
+	SubCapabilityInterruptAdapter,
+}
+
+var featureDefinitions = map[FeatureID]FeatureDefinition{
+	FeatureOperatorPolicyPrompt: {
+		ID:                   FeatureOperatorPolicyPrompt,
+		DriverRequirements:   []SubCapabilityID{SubCapabilityOperatorPolicyPromptAdapter},
+		ProviderRequirements: []string{"filesystem_rw"},
+		AdapterRenderer:      "DriverOperatorPolicyPromptAdapter",
+		ProducedArtifacts:    []string{"control_manifest", "operator_policy_prompt_sidecar"},
+	},
+	FeatureContextUsageReporting: {
+		ID:                   FeatureContextUsageReporting,
+		DriverRequirements:   []SubCapabilityID{SubCapabilityContextUsageReporter},
+		ProviderRequirements: []string{"logs"},
+		AdapterRenderer:      "DriverContextUsageAdapter",
+		ProducedArtifacts:    []string{"events"},
+	},
+	FeatureHardContextBudget: {
+		ID:                   FeatureHardContextBudget,
+		DriverRequirements:   []SubCapabilityID{SubCapabilityHardContextBudgetEnforcer},
+		ProviderRequirements: []string{"kill"},
+		AdapterRenderer:      "DriverContextBudgetAdapter",
+		ProducedArtifacts:    []string{"control_manifest", "driver_policy"},
+	},
+	FeatureCompaction: {
+		ID:                   FeatureCompaction,
+		DriverRequirements:   []SubCapabilityID{SubCapabilityCompactionAdapter},
+		ProviderRequirements: []string{"stdin"},
+		AdapterRenderer:      "DriverCompactionAdapter",
+		ProducedArtifacts:    []string{"bridge_command", "driver_state"},
+	},
+	FeatureSkillsSnapshot: {
+		ID:                   FeatureSkillsSnapshot,
+		DriverRequirements:   []SubCapabilityID{SubCapabilitySkillsSnapshotAdapter},
+		ProviderRequirements: []string{"filesystem_rw"},
+		AdapterRenderer:      "DriverSkillsAdapter",
+		ProducedArtifacts:    []string{"content_snapshot_mount", "control_manifest"},
+	},
+	FeatureManagedSettings: {
+		ID:                   FeatureManagedSettings,
+		DriverRequirements:   []SubCapabilityID{SubCapabilityManagedSettingsRenderer},
+		ProviderRequirements: []string{"filesystem_rw"},
+		AdapterRenderer:      "DriverManagedSettingsAdapter",
+		ProducedArtifacts:    []string{"driver_config", "content_snapshot_mount"},
+	},
+	FeatureHooks: {
+		ID:                   FeatureHooks,
+		DriverRequirements:   []SubCapabilityID{SubCapabilityHooksRenderer},
+		ProviderRequirements: []string{"exec_stream"},
+		AdapterRenderer:      "DriverPolicyHookAdapter",
+		ProducedArtifacts:    []string{"driver_config"},
+	},
+	FeatureRemoteMCPRegistration: {
+		ID:                   FeatureRemoteMCPRegistration,
+		DriverRequirements:   []SubCapabilityID{SubCapabilityRemoteMCPRegistrationAdapter},
+		ProviderRequirements: []string{"network_policy"},
+		AdapterRenderer:      "DriverRemoteMCPAdapter",
+		ProducedArtifacts:    []string{"driver_config"},
+	},
+	FeatureInterrupt: {
+		ID:                   FeatureInterrupt,
+		DriverRequirements:   []SubCapabilityID{SubCapabilityInterruptAdapter},
+		ProviderRequirements: []string{"stdin"},
+		AdapterRenderer:      "DriverInterruptAdapter",
+		ProducedArtifacts:    []string{"bridge_command"},
+	},
+}
+
 type Definition struct {
 	ID       ID
 	Label    string
@@ -124,6 +282,7 @@ type DriverSpec struct {
 	SupportsInterrupt           bool
 	SupportsCompaction          bool
 	FeatureSupport              []string
+	Capabilities                DriverCapabilities
 	BinaryPath                  string
 	PackageFacts                DriverPackageFacts
 	ConfigMaterializationSpecs  []DriverConfigMaterializationSpec
@@ -154,6 +313,139 @@ func AllDriverConfigMaterializationSpecs() []DriverConfigMaterializationSpec {
 	return out
 }
 
+func AllFeatureIDs() []FeatureID {
+	return append([]FeatureID(nil), allFeatureIDs...)
+}
+
+func AllSubCapabilityIDs() []SubCapabilityID {
+	return append([]SubCapabilityID(nil), allSubCapabilityIDs...)
+}
+
+func FeatureDefinitionFor(feature FeatureID) (FeatureDefinition, bool) {
+	definition, ok := featureDefinitions[feature]
+	if !ok {
+		return FeatureDefinition{}, false
+	}
+	return cloneFeatureDefinition(definition), true
+}
+
+func AllFeatureDefinitions() []FeatureDefinition {
+	definitions := make([]FeatureDefinition, 0, len(allFeatureIDs))
+	for _, feature := range allFeatureIDs {
+		definition, ok := FeatureDefinitionFor(feature)
+		if ok {
+			definitions = append(definitions, definition)
+		}
+	}
+	return definitions
+}
+
+func DriverSupportsFeature(spec DriverSpec, feature FeatureID) bool {
+	state, ok := spec.Capabilities.Features[feature]
+	return ok && state == CapabilitySupported
+}
+
+func DriverSupportsSubCapability(spec DriverSpec, capability SubCapabilityID) bool {
+	state, ok := spec.Capabilities.SubCapabilities[capability]
+	return ok && state == CapabilitySupported
+}
+
+func DefaultFeaturePolicyForDriver(spec DriverSpec) FeaturePolicy {
+	policy := disabledFeaturePolicy()
+	for _, feature := range []FeatureID{FeatureCompaction, FeatureInterrupt} {
+		if DriverSupportsFeature(spec, feature) {
+			policy[feature] = FeaturePolicyRequired
+		} else {
+			policy[feature] = FeaturePolicyUnsupported
+		}
+	}
+	return policy
+}
+
+func NormalizeFeaturePolicy(policy FeaturePolicy) (FeaturePolicy, error) {
+	normalized := disabledFeaturePolicy()
+	for feature, state := range policy {
+		if !knownFeatureID(feature) {
+			return nil, fmt.Errorf("unknown feature %q", feature)
+		}
+		if !knownFeaturePolicyState(state) {
+			return nil, fmt.Errorf("feature %s has invalid policy state %q", feature, state)
+		}
+		normalized[feature] = state
+	}
+	return normalized, nil
+}
+
+func ValidateFeaturePolicy(policy FeaturePolicy, driver DriverSpec, provider RuntimeProviderSpec) error {
+	normalized, err := NormalizeFeaturePolicy(policy)
+	if err != nil {
+		return err
+	}
+	providerCapabilities := map[string]struct{}{}
+	for _, capability := range provider.Capabilities {
+		providerCapabilities[capability] = struct{}{}
+	}
+	for _, feature := range allFeatureIDs {
+		state := normalized[feature]
+		if state != FeaturePolicyRequired {
+			continue
+		}
+		definition, ok := featureDefinitions[feature]
+		if !ok {
+			return fmt.Errorf("feature %s has no registered definition", feature)
+		}
+		if driver.Capabilities.Features[feature] != CapabilitySupported {
+			return fmt.Errorf("feature %s requires driver %s support, got %s", feature, driver.ID, driver.Capabilities.Features[feature])
+		}
+		for _, required := range definition.DriverRequirements {
+			if driver.Capabilities.SubCapabilities[required] != CapabilitySupported {
+				return fmt.Errorf("feature %s requires driver %s sub-capability %s, got %s", feature, driver.ID, required, driver.Capabilities.SubCapabilities[required])
+			}
+		}
+		for _, required := range definition.ProviderRequirements {
+			if _, ok := providerCapabilities[required]; !ok {
+				return fmt.Errorf("feature %s requires runtime provider %s capability %s", feature, provider.ID, required)
+			}
+		}
+	}
+	return nil
+}
+
+func FeaturePolicyPayload(policy FeaturePolicy) (map[string]string, error) {
+	normalized, err := NormalizeFeaturePolicy(policy)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for _, feature := range allFeatureIDs {
+		out[string(feature)] = string(normalized[feature])
+	}
+	return out, nil
+}
+
+func DriverCapabilityPayload(spec DriverSpec) map[string]any {
+	features := map[string]string{}
+	for _, feature := range allFeatureIDs {
+		features[string(feature)] = string(spec.Capabilities.Features[feature])
+	}
+	subCapabilities := map[string]string{}
+	for _, capability := range allSubCapabilityIDs {
+		subCapabilities[string(capability)] = string(spec.Capabilities.SubCapabilities[capability])
+	}
+	return map[string]any{
+		"schema_version":   spec.Capabilities.SchemaVersion,
+		"features":         features,
+		"sub_capabilities": subCapabilities,
+	}
+}
+
+func RuntimeProviderCapabilityPayload(spec RuntimeProviderSpec) map[string]any {
+	return map[string]any{
+		"vocabulary_version": spec.CapabilitySnapshot.VocabularyVersion,
+		"capabilities":       append([]string(nil), spec.CapabilitySnapshot.Capabilities...),
+	}
+}
+
 func DriverRuntimeLayoutSpecFor(driver ID) (DriverRuntimeLayoutSpec, bool) {
 	spec, ok := driverSpecs[ID(strings.TrimSpace(string(driver)))]
 	if !ok || spec.RuntimeLayoutSpec == nil {
@@ -180,6 +472,7 @@ type RuntimeProviderSpec struct {
 	TemplateRef          string
 	CapabilityVocabulary string
 	Capabilities         []string
+	CapabilitySnapshot   RuntimeProviderCapabilities
 	SnapshotPolicy       SnapshotPolicySpec
 }
 
@@ -209,12 +502,11 @@ var driverSpecs = map[ID]DriverSpec{
 			"snapshot_disk",
 			"stdin",
 		},
-		ModelAccess:        true,
-		OutputFormat:       "stream-json",
-		SupportsInterrupt:  false,
-		SupportsCompaction: true,
-		FeatureSupport:     []string{"single_driver_turns"},
-		BinaryPath:         ClaudeCodeBinaryPath,
+		ModelAccess:    true,
+		OutputFormat:   "stream-json",
+		FeatureSupport: []string{"single_driver_turns"},
+		Capabilities:   claudeCodeCapabilities(),
+		BinaryPath:     ClaudeCodeBinaryPath,
 		PackageFacts: DriverPackageFacts{
 			Name: ClaudeCodePackageName,
 		},
@@ -236,10 +528,8 @@ var driverSpecs = map[ID]DriverSpec{
 			"snapshot_disk",
 			"stdin",
 		},
-		ModelAccess:        true,
-		OutputFormat:       PiEventSchemaVersion,
-		SupportsInterrupt:  false,
-		SupportsCompaction: false,
+		ModelAccess:  true,
+		OutputFormat: PiEventSchemaVersion,
 		FeatureSupport: []string{
 			"single_driver_turns",
 			"system_prompt:unsupported",
@@ -248,7 +538,8 @@ var driverSpecs = map[ID]DriverSpec{
 			"hooks_mcp:unsupported",
 			"interrupt:unsupported",
 		},
-		BinaryPath: PiBinaryPath,
+		Capabilities: piCapabilities(),
+		BinaryPath:   PiBinaryPath,
 		PackageFacts: DriverPackageFacts{
 			Name:               PiPackageName,
 			Version:            PiPackageVersion,
@@ -321,12 +612,11 @@ var driverSpecs = map[ID]DriverSpec{
 			"snapshot_disk",
 			"stdin",
 		},
-		ModelAccess:        false,
-		OutputFormat:       "shell_pty",
-		SupportsInterrupt:  true,
-		SupportsCompaction: false,
-		FeatureSupport:     []string{"single_driver_turns"},
-		BinaryPath:         ShellBinaryPath,
+		ModelAccess:    false,
+		OutputFormat:   "shell_pty",
+		FeatureSupport: []string{"single_driver_turns"},
+		Capabilities:   shellCapabilities(),
+		BinaryPath:     ShellBinaryPath,
 	}),
 }
 
@@ -367,6 +657,39 @@ var secretGrantSpecs = map[string]SecretGrantSpec{
 		ExposureMode:  "proxy_only",
 		TTLMaxSeconds: 86400,
 	},
+}
+
+func claudeCodeCapabilities() DriverCapabilities {
+	capabilities := agentDriverCapabilities(CapabilityUnsupported)
+	capabilities.Features[FeatureCompaction] = CapabilitySupported
+	capabilities.SubCapabilities[SubCapabilityCompactionAdapter] = CapabilitySupported
+	return capabilities
+}
+
+func piCapabilities() DriverCapabilities {
+	return agentDriverCapabilities(CapabilityUnsupported)
+}
+
+func shellCapabilities() DriverCapabilities {
+	capabilities := agentDriverCapabilities(CapabilityNotApplicable)
+	capabilities.Features[FeatureInterrupt] = CapabilitySupported
+	capabilities.SubCapabilities[SubCapabilityInterruptAdapter] = CapabilitySupported
+	return capabilities
+}
+
+func agentDriverCapabilities(defaultState CapabilitySupportState) DriverCapabilities {
+	capabilities := DriverCapabilities{
+		SchemaVersion:   DriverCapabilitySchemaVersion,
+		Features:        map[FeatureID]CapabilitySupportState{},
+		SubCapabilities: map[SubCapabilityID]CapabilitySupportState{},
+	}
+	for _, feature := range allFeatureIDs {
+		capabilities.Features[feature] = defaultState
+	}
+	for _, capability := range allSubCapabilityIDs {
+		capabilities.SubCapabilities[capability] = defaultState
+	}
+	return capabilities
 }
 
 func Lookup(value string) (Definition, bool) {
@@ -439,14 +762,17 @@ func EnsureDriverSupportedByProvider(driverID, providerID string) error {
 			return fmt.Errorf("runtime provider %s missing capability %s for driver %s", provider.ID, required, driver.ID)
 		}
 	}
+	if err := ValidateFeaturePolicy(DefaultFeaturePolicyForDriver(driver), driver, provider); err != nil {
+		return fmt.Errorf("default feature policy unsupported: %w", err)
+	}
 	return nil
 }
 
 func CapabilityDigest(provider RuntimeProviderSpec) string {
 	payload := map[string]any{
 		"provider_id":        provider.ID,
-		"capabilities":       append([]string(nil), provider.Capabilities...),
-		"vocabulary_version": provider.CapabilityVocabulary,
+		"capabilities":       append([]string(nil), provider.CapabilitySnapshot.Capabilities...),
+		"vocabulary_version": provider.CapabilitySnapshot.VocabularyVersion,
 	}
 	data, _ := json.Marshal(payload)
 	sum := sha256.Sum256(data)
@@ -464,6 +790,9 @@ func CanonicalDriverID(value string) (ID, error) {
 }
 
 func normalizeDriverSpec(spec DriverSpec) DriverSpec {
+	spec.Capabilities = normalizeDriverCapabilities(spec.Capabilities, spec.Kind)
+	spec.SupportsInterrupt = DriverSupportsFeature(spec, FeatureInterrupt)
+	spec.SupportsCompaction = DriverSupportsFeature(spec, FeatureCompaction)
 	sort.Strings(spec.RequiredRuntimeCapabilities)
 	sort.Strings(spec.FeatureSupport)
 	return spec
@@ -471,7 +800,42 @@ func normalizeDriverSpec(spec DriverSpec) DriverSpec {
 
 func normalizeRuntimeProviderSpec(spec RuntimeProviderSpec) RuntimeProviderSpec {
 	sort.Strings(spec.Capabilities)
+	spec.CapabilitySnapshot = RuntimeProviderCapabilities{
+		VocabularyVersion: spec.CapabilityVocabulary,
+		Capabilities:      append([]string(nil), spec.Capabilities...),
+	}
 	return spec
+}
+
+func normalizeDriverCapabilities(capabilities DriverCapabilities, kind DriverKind) DriverCapabilities {
+	if capabilities.SchemaVersion == 0 {
+		capabilities.SchemaVersion = DriverCapabilitySchemaVersion
+	}
+	if capabilities.Features == nil {
+		capabilities.Features = map[FeatureID]CapabilitySupportState{}
+	}
+	if capabilities.SubCapabilities == nil {
+		capabilities.SubCapabilities = map[SubCapabilityID]CapabilitySupportState{}
+	}
+	defaultState := CapabilityUnsupported
+	if kind == DriverKindShell {
+		defaultState = CapabilityNotApplicable
+	}
+	for _, feature := range allFeatureIDs {
+		state := capabilities.Features[feature]
+		if !knownCapabilitySupportState(state) {
+			state = defaultState
+		}
+		capabilities.Features[feature] = state
+	}
+	for _, capability := range allSubCapabilityIDs {
+		state := capabilities.SubCapabilities[capability]
+		if !knownCapabilitySupportState(state) {
+			state = defaultState
+		}
+		capabilities.SubCapabilities[capability] = state
+	}
+	return capabilities
 }
 
 func secretGrantSpecKey(domain, scope string) string {
@@ -481,12 +845,41 @@ func secretGrantSpecKey(domain, scope string) string {
 func cloneDriverSpec(spec DriverSpec) DriverSpec {
 	spec.RequiredRuntimeCapabilities = append([]string(nil), spec.RequiredRuntimeCapabilities...)
 	spec.FeatureSupport = append([]string(nil), spec.FeatureSupport...)
+	spec.Capabilities = cloneDriverCapabilities(spec.Capabilities)
 	spec.ConfigMaterializationSpecs = cloneDriverConfigMaterializationSpecs(spec.ConfigMaterializationSpecs)
 	if spec.RuntimeLayoutSpec != nil {
 		layout := cloneDriverRuntimeLayoutSpec(*spec.RuntimeLayoutSpec)
 		spec.RuntimeLayoutSpec = &layout
 	}
 	return spec
+}
+
+func cloneDriverCapabilities(capabilities DriverCapabilities) DriverCapabilities {
+	capabilities.Features = cloneFeatureSupportStates(capabilities.Features)
+	capabilities.SubCapabilities = cloneSubCapabilitySupportStates(capabilities.SubCapabilities)
+	return capabilities
+}
+
+func cloneFeatureSupportStates(values map[FeatureID]CapabilitySupportState) map[FeatureID]CapabilitySupportState {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[FeatureID]CapabilitySupportState, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneSubCapabilitySupportStates(values map[SubCapabilityID]CapabilitySupportState) map[SubCapabilityID]CapabilitySupportState {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[SubCapabilityID]CapabilitySupportState, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
 }
 
 func cloneDriverConfigMaterializationSpecs(specs []DriverConfigMaterializationSpec) []DriverConfigMaterializationSpec {
@@ -533,5 +926,48 @@ func cloneDriverRuntimeControlManifestValue(value any) any {
 
 func cloneRuntimeProviderSpec(spec RuntimeProviderSpec) RuntimeProviderSpec {
 	spec.Capabilities = append([]string(nil), spec.Capabilities...)
+	spec.CapabilitySnapshot.Capabilities = append([]string(nil), spec.CapabilitySnapshot.Capabilities...)
 	return spec
+}
+
+func cloneFeatureDefinition(definition FeatureDefinition) FeatureDefinition {
+	definition.DriverRequirements = append([]SubCapabilityID(nil), definition.DriverRequirements...)
+	definition.ProviderRequirements = append([]string(nil), definition.ProviderRequirements...)
+	definition.ProducedArtifacts = append([]string(nil), definition.ProducedArtifacts...)
+	return definition
+}
+
+func disabledFeaturePolicy() FeaturePolicy {
+	policy := FeaturePolicy{}
+	for _, feature := range allFeatureIDs {
+		policy[feature] = FeaturePolicyDisabled
+	}
+	return policy
+}
+
+func knownFeatureID(feature FeatureID) bool {
+	for _, known := range allFeatureIDs {
+		if feature == known {
+			return true
+		}
+	}
+	return false
+}
+
+func knownCapabilitySupportState(state CapabilitySupportState) bool {
+	switch state {
+	case CapabilitySupported, CapabilityUnsupported, CapabilityNotApplicable:
+		return true
+	default:
+		return false
+	}
+}
+
+func knownFeaturePolicyState(state FeaturePolicyState) bool {
+	switch state {
+	case FeaturePolicyRequired, FeaturePolicyDisabled, FeaturePolicyUnsupported:
+		return true
+	default:
+		return false
+	}
 }

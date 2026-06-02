@@ -83,6 +83,19 @@ def _next_stage_checks():
                 ("verify_generation_plan_projections_call", "VerifyGenerationPlanProjections(ctx"),
             ),
         },
+        {
+            "name": "next_stage_capability_plane_uses_typed_feature_policy",
+            "kind": "contains",
+            "path": REPO_ROOT / "orchestrator" / "internal" / "agents" / "agents.go",
+            "patterns": (
+                ("feature_id_type", "type FeatureID string"),
+                ("sub_capability_id_type", "type SubCapabilityID string"),
+                ("driver_capabilities_type", "type DriverCapabilities struct"),
+                ("runtime_provider_capabilities_type", "type RuntimeProviderCapabilities struct"),
+                ("feature_policy_type", "type FeaturePolicy map[FeatureID]FeaturePolicyState"),
+                ("validate_feature_policy", "func ValidateFeaturePolicy"),
+            ),
+        },
     ]
 
 

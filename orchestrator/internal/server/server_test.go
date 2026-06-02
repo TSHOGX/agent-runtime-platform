@@ -1440,6 +1440,21 @@ WHERE g.session_id = ? AND r.resource_state = 'live'`, session.ID).Scan(&resourc
 	if identity["session_id"] != session.ID || identity["generation_id"] != generationID || runscPin["binary_digest"] != "sha256:runsc-test" {
 		t.Fatalf("generation plan did not capture launch identity/runsc pin: %s", plan.CanonicalPayload)
 	}
+	driverPlan := planPayload["driver"].(map[string]any)
+	driverCapabilities := driverPlan["capability_snapshot"].(map[string]any)
+	driverFeatures := driverCapabilities["features"].(map[string]any)
+	featurePolicy := planPayload["feature_policy"].(map[string]any)
+	providerPlan := planPayload["runtime_provider"].(map[string]any)
+	providerCapabilities := providerPlan["capability_snapshot"].(map[string]any)
+	if driverFeatures["compaction"] != "supported" ||
+		driverFeatures["interrupt"] != "unsupported" ||
+		featurePolicy["compaction"] != "required" ||
+		featurePolicy["interrupt"] != "unsupported" ||
+		featurePolicy["legacy_supports_compaction"] != true ||
+		featurePolicy["legacy_supports_interrupt"] != false ||
+		providerCapabilities["vocabulary_version"] != "1" {
+		t.Fatalf("generation plan did not freeze typed capability policy: %s", plan.CanonicalPayload)
+	}
 	projections, err := st.ListGenerationPlanProjections(ctx, generationID)
 	if err != nil {
 		t.Fatalf("list generation plan projections: %v", err)

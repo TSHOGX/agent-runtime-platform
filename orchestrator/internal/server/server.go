@@ -152,15 +152,16 @@ func (s *Server) ProxyCorrelationRoutes() http.Handler {
 
 func (s *Server) operatorAgentsCatalog(w http.ResponseWriter, r *http.Request) {
 	type driverDTO struct {
-		DriverID                    string   `json:"driver_id"`
-		Label                       string   `json:"label"`
-		Kind                        string   `json:"kind"`
-		BridgeProtocol              string   `json:"bridge_protocol"`
-		OutputSchema                string   `json:"output_schema"`
-		RequiredRuntimeCapabilities []string `json:"required_runtime_capabilities"`
-		ModelAccess                 bool     `json:"model_access"`
-		SupportsInterrupt           bool     `json:"supports_interrupt"`
-		SupportsCompaction          bool     `json:"supports_compaction"`
+		DriverID                    string         `json:"driver_id"`
+		Label                       string         `json:"label"`
+		Kind                        string         `json:"kind"`
+		BridgeProtocol              string         `json:"bridge_protocol"`
+		OutputSchema                string         `json:"output_schema"`
+		RequiredRuntimeCapabilities []string       `json:"required_runtime_capabilities"`
+		ModelAccess                 bool           `json:"model_access"`
+		SupportsInterrupt           bool           `json:"supports_interrupt"`
+		SupportsCompaction          bool           `json:"supports_compaction"`
+		Capabilities                map[string]any `json:"capabilities"`
 	}
 	drivers := []driverDTO{}
 	for _, spec := range agents.AllDriverSpecs() {
@@ -174,6 +175,7 @@ func (s *Server) operatorAgentsCatalog(w http.ResponseWriter, r *http.Request) {
 			ModelAccess:                 spec.ModelAccess,
 			SupportsInterrupt:           spec.SupportsInterrupt,
 			SupportsCompaction:          spec.SupportsCompaction,
+			Capabilities:                agents.DriverCapabilityPayload(spec),
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -1801,21 +1803,9 @@ func (s *Server) shadowGenerationPlanPayload(session store.Session, details stor
 	if err != nil {
 		return nil, err
 	}
-	featurePolicy := map[string]any{
-		"operator_policy_prompt":       "disabled",
-		"context_usage_reporting":      "disabled",
-		"hard_context_budget":          "disabled",
-		"compaction":                   featurePolicyState(driverSpec.SupportsCompaction),
-		"skills_snapshot":              "disabled",
-		"managed_settings":             "disabled",
-		"hooks":                        "disabled",
-		"remote_mcp_registration":      "disabled",
-		"interrupt":                    featurePolicyState(driverSpec.SupportsInterrupt),
-		"capability_vocab_version":     providerSpec.CapabilityVocabulary,
-		"legacy_supports_interrupt":    driverSpec.SupportsInterrupt,
-		"legacy_supports_compaction":   driverSpec.SupportsCompaction,
-		"unsupported_features_fail":    true,
-		"credential_bearing_mcp_scope": "out_of_scope",
+	featurePolicy, err := generationPlanFeaturePolicy(driverSpec, providerSpec)
+	if err != nil {
+		return nil, err
 	}
 	projections := map[string]any{}
 	for _, projection := range generationPlanProjectionDigests(details, artifacts, sandboxContractPayload, "") {
@@ -1843,6 +1833,7 @@ func (s *Server) shadowGenerationPlanPayload(session store.Session, details stor
 			"model":                   nullableProjectionPath(details.Model),
 			"initial_state_digest":    details.DriverStateDigest,
 			"initial_state_version":   details.DriverStateVersion,
+			"capability_snapshot":     agents.DriverCapabilityPayload(driverSpec),
 		},
 		"runtime_provider": map[string]any{
 			"provider_id":                  providerSpec.ID,
@@ -1852,6 +1843,7 @@ func (s *Server) shadowGenerationPlanPayload(session store.Session, details stor
 			"template_ref":                 providerSpec.TemplateRef,
 			"capability_vocab_version":     providerSpec.CapabilityVocabulary,
 			"capability_digest":            agents.CapabilityDigest(providerSpec),
+			"capability_snapshot":          agents.RuntimeProviderCapabilityPayload(providerSpec),
 			"snapshot_policy":              providerSpec.SnapshotPolicy,
 			"agent_runtime_profile_id":     details.AgentRuntimeProfileID,
 			"runtime_profile_provider_ref": details.RunscPlatform,
@@ -2051,11 +2043,28 @@ func materializedDriverConfigPayload(entries []runtime.DriverConfigMaterializati
 	return payload
 }
 
-func featurePolicyState(supported bool) string {
-	if supported {
-		return "required"
+func generationPlanFeaturePolicy(driverSpec agents.DriverSpec, providerSpec agents.RuntimeProviderSpec) (map[string]any, error) {
+	policy := agents.DefaultFeaturePolicyForDriver(driverSpec)
+	if err := agents.ValidateFeaturePolicy(policy, driverSpec, providerSpec); err != nil {
+		return nil, fmt.Errorf("feature policy validation: %w", err)
 	}
-	return "unsupported"
+	policyPayload, err := agents.FeaturePolicyPayload(policy)
+	if err != nil {
+		return nil, fmt.Errorf("feature policy payload: %w", err)
+	}
+	payload := map[string]any{}
+	for key, value := range policyPayload {
+		payload[key] = value
+	}
+	payload["capability_schema_version"] = agents.DriverCapabilitySchemaVersion
+	payload["capability_vocab_version"] = providerSpec.CapabilityVocabulary
+	payload["driver_capabilities"] = agents.DriverCapabilityPayload(driverSpec)
+	payload["runtime_provider_capabilities"] = agents.RuntimeProviderCapabilityPayload(providerSpec)
+	payload["legacy_supports_interrupt"] = driverSpec.SupportsInterrupt
+	payload["legacy_supports_compaction"] = driverSpec.SupportsCompaction
+	payload["unsupported_features_fail"] = true
+	payload["credential_bearing_mcp_scope"] = "out_of_scope"
+	return payload, nil
 }
 
 func durationSeconds(duration time.Duration) string {
