@@ -553,6 +553,46 @@ func TestVerifyDataVolumeEvidenceChecksFrozenVolumeRefs(t *testing.T) {
 	}
 }
 
+func TestVerifyNetworkEvidenceChecksFrozenNetworkIdentity(t *testing.T) {
+	payload := validPlanPayload()
+	params := VerifyNetworkEvidenceParams{
+		Payload:            payload,
+		NetworkProfileID:   "net_gen_plan",
+		RunscNetwork:       "sandbox",
+		RunscOverlay2:      "none",
+		SandboxIP:          "10.240.0.2",
+		SandboxIPCIDR:      "10.240.0.2/30",
+		HostGatewayIP:      "10.240.0.1",
+		SandboxBaseURL:     "http://10.240.0.1:8080",
+		HostProxyBindURL:   "http://127.0.0.1:8080",
+		ProxyPort:          8080,
+		NetnsName:          "harness-gen-plan",
+		NetnsPath:          "/var/run/netns/harness-gen-plan",
+		HostVeth:           "vh-gen-plan",
+		SandboxVeth:        "vs-gen-plan",
+		HostSideCIDR:       "10.240.0.1/30",
+		NftTableName:       "harness-gen-plan",
+		EgressPolicyID:     "egress_gen_plan",
+		EgressPolicyDigest: "sha256:egress",
+		DNSPolicy:          "off",
+	}
+	if err := VerifyNetworkEvidence(params); err != nil {
+		t.Fatalf("verify network evidence: %v", err)
+	}
+
+	mismatch := params
+	mismatch.NftTableName = "changed-table"
+	if err := VerifyNetworkEvidence(mismatch); err == nil || !strings.Contains(err.Error(), "network.nft_table_name mismatch") {
+		t.Fatalf("expected nft table mismatch, got %v", err)
+	}
+
+	mismatch = params
+	mismatch.ProxyPort = 8081
+	if err := VerifyNetworkEvidence(mismatch); err == nil || !strings.Contains(err.Error(), "network.proxy_port mismatch") {
+		t.Fatalf("expected proxy port mismatch, got %v", err)
+	}
+}
+
 func TestContentSnapshotRefsExtractsPlanSnapshotDigests(t *testing.T) {
 	payload := validPlanPayload()
 	contentSnapshots := payload["content_snapshots"].(map[string]any)

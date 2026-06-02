@@ -3739,6 +3739,47 @@ func TestVerifyGenerationPlanDataVolumesChecksStoredPlan(t *testing.T) {
 	}
 }
 
+func TestVerifyGenerationPlanNetworkEvidenceChecksStoredPlan(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, _ := openServerOwnedStore(t, ctx, dir)
+	srv := &Server{store: st}
+	payload := validServerGenerationPlanPayload()
+	network := payload["network"].(map[string]any)
+	network["proxy_port"] = 8080
+	network["nft_table_name"] = mustRuntimeResourceNftTableName(t, "gen_frozen_evidence")
+	storeServerFrozenEvidencePlan(t, ctx, st, dir, payload)
+
+	details := store.RuntimeGenerationDetails{
+		GenerationID:       "gen_frozen_evidence",
+		NetworkProfileID:   "net_gen_frozen_evidence",
+		RunscNetwork:       "sandbox",
+		RunscOverlay2:      "none",
+		HostProxyBindURL:   "http://127.0.0.1:8080",
+		ProxyPort:          8080,
+		HostGatewayIP:      "10.240.0.1",
+		SandboxBaseURL:     "http://10.240.0.1:8080",
+		NetnsName:          "harness-gen-frozen",
+		NetnsPath:          "/var/run/netns/harness-gen-frozen",
+		HostVeth:           "vh-frozen",
+		SandboxVeth:        "vs-frozen",
+		SandboxIPCIDR:      "10.240.0.2/30",
+		HostSideCIDR:       "10.240.0.1/30",
+		EgressPolicyID:     "egress_frozen",
+		EgressPolicyDigest: "egress_digest",
+		DNSPolicy:          "off",
+	}
+	if err := srv.verifyGenerationPlanNetworkEvidence(ctx, "gen_frozen_evidence", details); err != nil {
+		t.Fatalf("verify network evidence: %v", err)
+	}
+
+	details.HostVeth = "changed-veth"
+	if err := srv.verifyGenerationPlanNetworkEvidence(ctx, "gen_frozen_evidence", details); err == nil ||
+		!strings.Contains(err.Error(), "network.host_veth mismatch") {
+		t.Fatalf("expected host veth mismatch, got %v", err)
+	}
+}
+
 func TestVerifyGenerationPlanFrozenEvidenceChecksStoredProjectionRows(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -6849,6 +6890,31 @@ WHERE id = ?`, sessionID).Scan(&mode); err != nil {
 	runtimeProvider["runtime_profile_provider_ref"] = details.RunscPlatform
 	networkPlan := payload["network"].(map[string]any)
 	networkPlan["network_profile_id"] = details.NetworkProfileID
+	networkPlan["runsc_network"] = details.RunscNetwork
+	networkPlan["runsc_overlay2"] = details.RunscOverlay2
+	sandboxIP, err := runtimeResourceSandboxIP(details.SandboxIPCIDR)
+	if err != nil {
+		t.Fatalf("render sandbox ip for plan %s: %v", generationID, err)
+	}
+	networkPlan["sandbox_ip"] = sandboxIP
+	networkPlan["sandbox_ip_cidr"] = details.SandboxIPCIDR
+	networkPlan["host_gateway_ip"] = details.HostGatewayIP
+	networkPlan["sandbox_base_url"] = details.SandboxBaseURL
+	networkPlan["host_proxy_bind_url"] = details.HostProxyBindURL
+	networkPlan["proxy_port"] = details.ProxyPort
+	networkPlan["netns_name"] = details.NetnsName
+	networkPlan["netns_path"] = details.NetnsPath
+	networkPlan["host_veth"] = details.HostVeth
+	networkPlan["sandbox_veth"] = details.SandboxVeth
+	networkPlan["host_side_cidr"] = details.HostSideCIDR
+	nftTableName, err := runtimeResourceNftTableName(details.GenerationID)
+	if err != nil {
+		t.Fatalf("render nft table for plan %s: %v", generationID, err)
+	}
+	networkPlan["nft_table_name"] = nftTableName
+	networkPlan["egress_policy_id"] = details.EgressPolicyID
+	networkPlan["egress_policy_digest"] = details.EgressPolicyDigest
+	networkPlan["dns_policy"] = details.DNSPolicy
 	runscPin := payload["runsc_pin"].(map[string]any)
 	runscPin["version"] = artifacts.RunscVersion
 	runscPin["binary_path"] = artifacts.RunscBinaryPath

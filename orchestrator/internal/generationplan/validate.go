@@ -47,6 +47,28 @@ type VerifyDataVolumeEvidenceParams struct {
 	DriverHomeRuntimeIdentityDigest string
 }
 
+type VerifyNetworkEvidenceParams struct {
+	Payload            any
+	NetworkProfileID   string
+	RunscNetwork       string
+	RunscOverlay2      string
+	SandboxIP          string
+	SandboxIPCIDR      string
+	HostGatewayIP      string
+	SandboxBaseURL     string
+	HostProxyBindURL   string
+	ProxyPort          int
+	NetnsName          string
+	NetnsPath          string
+	HostVeth           string
+	SandboxVeth        string
+	HostSideCIDR       string
+	NftTableName       string
+	EgressPolicyID     string
+	EgressPolicyDigest string
+	DNSPolicy          string
+}
+
 func Validate(p ValidateParams) error {
 	object, err := decodePlanObject(p.Payload)
 	if err != nil {
@@ -111,6 +133,53 @@ func Validate(p ValidateParams) error {
 	}
 	if err := validateProjectionDigests(object); err != nil {
 		return err
+	}
+	return nil
+}
+
+func VerifyNetworkEvidence(p VerifyNetworkEvidenceParams) error {
+	object, err := decodePlanObject(p.Payload)
+	if err != nil {
+		return err
+	}
+	network, err := requireObject(object, "network")
+	if err != nil {
+		return err
+	}
+	checks := []struct {
+		label string
+		got   string
+		want  string
+	}{
+		{"network.network_profile_id", stringField(network, "network_profile_id"), p.NetworkProfileID},
+		{"network.runsc_network", stringField(network, "runsc_network"), p.RunscNetwork},
+		{"network.runsc_overlay2", stringField(network, "runsc_overlay2"), p.RunscOverlay2},
+		{"network.sandbox_ip", stringField(network, "sandbox_ip"), p.SandboxIP},
+		{"network.sandbox_ip_cidr", stringField(network, "sandbox_ip_cidr"), p.SandboxIPCIDR},
+		{"network.host_gateway_ip", stringField(network, "host_gateway_ip"), p.HostGatewayIP},
+		{"network.sandbox_base_url", stringField(network, "sandbox_base_url"), p.SandboxBaseURL},
+		{"network.host_proxy_bind_url", stringField(network, "host_proxy_bind_url"), p.HostProxyBindURL},
+		{"network.netns_name", stringField(network, "netns_name"), p.NetnsName},
+		{"network.netns_path", stringField(network, "netns_path"), p.NetnsPath},
+		{"network.host_veth", stringField(network, "host_veth"), p.HostVeth},
+		{"network.sandbox_veth", stringField(network, "sandbox_veth"), p.SandboxVeth},
+		{"network.host_side_cidr", stringField(network, "host_side_cidr"), p.HostSideCIDR},
+		{"network.nft_table_name", stringField(network, "nft_table_name"), p.NftTableName},
+		{"network.egress_policy_id", stringField(network, "egress_policy_id"), p.EgressPolicyID},
+		{"network.egress_policy_digest", stringField(network, "egress_policy_digest"), p.EgressPolicyDigest},
+		{"network.dns_policy", stringField(network, "dns_policy"), p.DNSPolicy},
+	}
+	for _, check := range checks {
+		want := strings.TrimSpace(check.want)
+		if want == "" {
+			continue
+		}
+		if strings.TrimSpace(check.got) != want {
+			return fmt.Errorf("generation plan %s mismatch", check.label)
+		}
+	}
+	if p.ProxyPort > 0 && numberField(network, "proxy_port") != int64(p.ProxyPort) {
+		return fmt.Errorf("generation plan network.proxy_port mismatch")
 	}
 	return nil
 }

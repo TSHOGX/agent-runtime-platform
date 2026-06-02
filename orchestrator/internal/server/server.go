@@ -880,6 +880,11 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			return err
 		}
 	}
+	if err := s.verifyGenerationPlanNetworkEvidence(ctx, allocation.GenerationID, generationDetails); err != nil {
+		retireRuntimeResource()
+		s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+		return err
+	}
 	if err := s.verifyGenerationPlanDataVolumes(ctx, allocation.GenerationID, dataVolumes); err != nil {
 		retireRuntimeResource()
 		s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
@@ -1719,6 +1724,45 @@ func (s *Server) generationPlanRuntimeArtifacts(ctx context.Context, generationI
 		return runtime.GenerationArtifacts{}, err
 	}
 	return generationplan.RuntimeArtifacts(plan.CanonicalPayload)
+}
+
+func (s *Server) verifyGenerationPlanNetworkEvidence(ctx context.Context, generationID string, details store.RuntimeGenerationDetails) error {
+	plan, err := s.store.RequireGenerationPlanForLaunch(ctx, strings.TrimSpace(generationID))
+	if err != nil {
+		return err
+	}
+	if err := generationplan.Validate(generationplan.ValidateParams{Payload: plan.CanonicalPayload}); err != nil {
+		return err
+	}
+	sandboxIP, err := runtimeResourceSandboxIP(details.SandboxIPCIDR)
+	if err != nil {
+		return err
+	}
+	nftTableName, err := runtimeResourceNftTableName(details.GenerationID)
+	if err != nil {
+		return err
+	}
+	return generationplan.VerifyNetworkEvidence(generationplan.VerifyNetworkEvidenceParams{
+		Payload:            plan.CanonicalPayload,
+		NetworkProfileID:   details.NetworkProfileID,
+		RunscNetwork:       details.RunscNetwork,
+		RunscOverlay2:      details.RunscOverlay2,
+		SandboxIP:          sandboxIP,
+		SandboxIPCIDR:      details.SandboxIPCIDR,
+		HostGatewayIP:      details.HostGatewayIP,
+		SandboxBaseURL:     details.SandboxBaseURL,
+		HostProxyBindURL:   details.HostProxyBindURL,
+		ProxyPort:          details.ProxyPort,
+		NetnsName:          details.NetnsName,
+		NetnsPath:          details.NetnsPath,
+		HostVeth:           details.HostVeth,
+		SandboxVeth:        details.SandboxVeth,
+		HostSideCIDR:       details.HostSideCIDR,
+		NftTableName:       nftTableName,
+		EgressPolicyID:     details.EgressPolicyID,
+		EgressPolicyDigest: details.EgressPolicyDigest,
+		DNSPolicy:          details.DNSPolicy,
+	})
 }
 
 func (s *Server) verifyGenerationPlanDataVolumes(ctx context.Context, generationID string, volumes sessionRuntimeDataVolumes) error {
