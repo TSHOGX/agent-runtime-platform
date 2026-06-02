@@ -135,6 +135,33 @@ func TestRuntimeArtifactsHydratesFromPlanPayload(t *testing.T) {
 		artifacts.RunscBinaryDigest != "sha256:runsc" {
 		t.Fatalf("unexpected runtime artifacts: %+v", artifacts)
 	}
+	if len(artifacts.MaterializedDriverConfig) != 0 {
+		t.Fatalf("unexpected driver config materialization: %+v", artifacts.MaterializedDriverConfig)
+	}
+}
+
+func TestRuntimeArtifactsHydratesDriverConfigMaterializationFromPlan(t *testing.T) {
+	canonical, err := store.CanonicalGenerationPlanPayload(validPiPlanPayload(t))
+	if err != nil {
+		t.Fatalf("canonical pi plan payload: %v", err)
+	}
+	artifacts, err := RuntimeArtifacts(canonical)
+	if err != nil {
+		t.Fatalf("runtime artifacts: %v", err)
+	}
+	entries := map[string]runtime.DriverConfigMaterialization{}
+	for _, entry := range artifacts.MaterializedDriverConfig {
+		entries[entry.Name] = entry
+	}
+	models := entries["models"]
+	if len(entries) != 2 ||
+		models.SourceProjectionPath != agents.PiModelsConfigPath ||
+		models.HostSourcePath != "/var/lib/harness/run/control/gen_plan/driver/pi/models.json" ||
+		models.SourceDigest != "sha256:models" ||
+		models.SandboxDestination != agents.PiModelsSandboxPath ||
+		models.DestinationMutableBySandbox {
+		t.Fatalf("unexpected hydrated driver config materialization: %+v", artifacts.MaterializedDriverConfig)
+	}
 }
 
 func TestRenderContentSnapshotsPayloadFreezesImmutableRefs(t *testing.T) {

@@ -2,6 +2,7 @@ package generationplan
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"harness-platform/orchestrator/internal/runtime"
@@ -86,17 +87,67 @@ func RuntimeArtifacts(payload []byte) (runtime.GenerationArtifacts, error) {
 	if err != nil {
 		return runtime.GenerationArtifacts{}, err
 	}
+	materializedDriverConfig, err := materializedDriverConfigArtifacts(artifacts, strings.TrimSpace(stringField(artifacts, "control_dir_path")))
+	if err != nil {
+		return runtime.GenerationArtifacts{}, err
+	}
 	return runtime.GenerationArtifacts{
-		BundleDir:               bundleDir,
-		SpecPath:                specPath,
-		ManifestPath:            manifestPath,
-		ManifestDigest:          manifestDigest,
-		ProjectedManifestDigest: projectedManifestDigest,
-		BundleDigest:            bundleDigest,
-		RuntimeConfigDigest:     runtimeConfigDigest,
-		SpecDigest:              specDigest,
-		RunscVersion:            runscVersion,
-		RunscBinaryPath:         runscBinaryPath,
-		RunscBinaryDigest:       runscBinaryDigest,
+		BundleDir:                bundleDir,
+		SpecPath:                 specPath,
+		ManifestPath:             manifestPath,
+		ManifestDigest:           manifestDigest,
+		ProjectedManifestDigest:  projectedManifestDigest,
+		BundleDigest:             bundleDigest,
+		RuntimeConfigDigest:      runtimeConfigDigest,
+		SpecDigest:               specDigest,
+		RunscVersion:             runscVersion,
+		RunscBinaryPath:          runscBinaryPath,
+		RunscBinaryDigest:        runscBinaryDigest,
+		MaterializedDriverConfig: materializedDriverConfig,
 	}, nil
+}
+
+func materializedDriverConfigArtifacts(artifacts map[string]any, controlDir string) ([]runtime.DriverConfigMaterialization, error) {
+	values, ok := artifacts["materialized_driver_config"].([]any)
+	if !ok {
+		return nil, fmt.Errorf("generation plan runtime_artifacts.materialized_driver_config must be an array")
+	}
+	out := make([]runtime.DriverConfigMaterialization, 0, len(values))
+	for _, value := range values {
+		entry, ok := value.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("generation plan runtime_artifacts.materialized_driver_config entries must be objects")
+		}
+		sourceProjectionPath := stringField(entry, "source_projection_path")
+		hostSourcePath, err := materializedDriverConfigHostSourcePath(controlDir, sourceProjectionPath)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, runtime.DriverConfigMaterialization{
+			Name:                        stringField(entry, "name"),
+			SourceProjectionPath:        sourceProjectionPath,
+			HostSourcePath:              hostSourcePath,
+			SourceDigest:                stringField(entry, "source_digest"),
+			SandboxDestination:          stringField(entry, "sandbox_destination"),
+			DestinationMutableBySandbox: boolField(entry, "destination_mutable_by_sandbox"),
+		})
+	}
+	return out, nil
+}
+
+func materializedDriverConfigHostSourcePath(controlDir, sourceProjectionPath string) (string, error) {
+	controlDir = strings.TrimSpace(controlDir)
+	if controlDir == "" {
+		return "", fmt.Errorf("generation plan runtime_artifacts.control_dir_path is required")
+	}
+	const controlPrefix = "/harness-control/"
+	sourceProjectionPath = strings.TrimSpace(sourceProjectionPath)
+	if !strings.HasPrefix(sourceProjectionPath, controlPrefix) {
+		return "", fmt.Errorf("generation plan runtime_artifacts.materialized_driver_config source_projection_path must be under /harness-control")
+	}
+	relative := filepath.Clean(filepath.FromSlash(strings.TrimPrefix(sourceProjectionPath, controlPrefix)))
+	if relative == "." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || relative == ".." {
+		return "", fmt.Errorf("generation plan runtime_artifacts.materialized_driver_config source_projection_path escapes control dir")
+	}
+	return filepath.Join(controlDir, relative), nil
 }
