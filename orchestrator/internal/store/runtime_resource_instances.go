@@ -579,7 +579,44 @@ func validateRuntimeResourceInstanceParams(p RuntimeResourceInstanceParams) erro
 	if p.SandboxContractVersion != SandboxContractVersion {
 		return fmt.Errorf("unsupported runtime resource sandbox contract version %q", p.SandboxContractVersion)
 	}
+	requiredPaths := []struct {
+		label string
+		path  string
+	}{
+		{"runsc binary path", p.RunscBinaryPath},
+		{"netns path", p.NetnsPath},
+		{"control dir path", p.ControlDirPath},
+		{"control manifest path", p.ControlManifestPath},
+		{"bundle dir path", p.BundleDirPath},
+		{"spec path", p.SpecPath},
+		{"bridge dir path", p.BridgeDirPath},
+		{"log dir path", p.LogDirPath},
+	}
+	for _, field := range requiredPaths {
+		if !runtimeResourceInstancePathIsCanonical(field.path) {
+			return fmt.Errorf("runtime resource %s must be canonical absolute", field.label)
+		}
+	}
+	optionalPaths := []struct {
+		label string
+		path  string
+	}{
+		{"checkpoint path", p.CheckpointPath},
+		{"network hosts path", p.NetworkHostsPath},
+	}
+	for _, field := range optionalPaths {
+		if field.path == "" {
+			continue
+		}
+		if !runtimeResourceInstancePathIsCanonical(field.path) {
+			return fmt.Errorf("runtime resource %s must be canonical absolute", field.label)
+		}
+	}
 	return nil
+}
+
+func runtimeResourceInstancePathIsCanonical(path string) bool {
+	return strings.TrimSpace(path) == path && filepath.IsAbs(path) && filepath.Clean(path) == path
 }
 
 func runtimeResourceIdentity(p RuntimeResourceInstanceParams) ([]byte, string, error) {

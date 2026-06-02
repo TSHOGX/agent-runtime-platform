@@ -529,6 +529,86 @@ func TestRuntimeResourceIdentityForParamsRequiresExplicitSandboxContractVersion(
 	}
 }
 
+func TestRuntimeResourceIdentityForParamsRejectsNonCanonicalPaths(t *testing.T) {
+	tests := []struct {
+		name string
+		edit func(*RuntimeResourceInstanceParams)
+		want string
+	}{
+		{
+			name: "relative runsc binary path",
+			edit: func(p *RuntimeResourceInstanceParams) { p.RunscBinaryPath = "runsc" },
+			want: "runtime resource runsc binary path must be canonical absolute",
+		},
+		{
+			name: "unclean netns path",
+			edit: func(p *RuntimeResourceInstanceParams) { p.NetnsPath = "/var/run/netns/../netns/harness-gen-1" },
+			want: "runtime resource netns path must be canonical absolute",
+		},
+		{
+			name: "relative control dir",
+			edit: func(p *RuntimeResourceInstanceParams) { p.ControlDirPath = "control/gen-1" },
+			want: "runtime resource control dir path must be canonical absolute",
+		},
+		{
+			name: "unclean control manifest",
+			edit: func(p *RuntimeResourceInstanceParams) {
+				p.ControlManifestPath = "/var/lib/harness/run/control/gen-1/../gen-1/session.json"
+			},
+			want: "runtime resource control manifest path must be canonical absolute",
+		},
+		{
+			name: "relative bundle dir",
+			edit: func(p *RuntimeResourceInstanceParams) { p.BundleDirPath = "runtime/gen-1" },
+			want: "runtime resource bundle dir path must be canonical absolute",
+		},
+		{
+			name: "unclean spec path",
+			edit: func(p *RuntimeResourceInstanceParams) {
+				p.SpecPath = "/var/lib/harness/run/runtime/gen-1/../gen-1/config.json"
+			},
+			want: "runtime resource spec path must be canonical absolute",
+		},
+		{
+			name: "relative checkpoint path",
+			edit: func(p *RuntimeResourceInstanceParams) { p.CheckpointPath = "checkpoint" },
+			want: "runtime resource checkpoint path must be canonical absolute",
+		},
+		{
+			name: "relative bridge dir",
+			edit: func(p *RuntimeResourceInstanceParams) { p.BridgeDirPath = "bridge/gen-1" },
+			want: "runtime resource bridge dir path must be canonical absolute",
+		},
+		{
+			name: "whitespace network hosts path",
+			edit: func(p *RuntimeResourceInstanceParams) {
+				p.NetworkHostsPath = " /var/lib/harness/run/network/gen-1/hosts"
+			},
+			want: "runtime resource network hosts path must be canonical absolute",
+		},
+		{
+			name: "unclean log dir",
+			edit: func(p *RuntimeResourceInstanceParams) { p.LogDirPath = "/var/lib/harness/run/logs/../logs/gen-1" },
+			want: "runtime resource log dir path must be canonical absolute",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			st, owner := openOwnedStore(t, ctx)
+			now := time.Now().UTC()
+			sessionID := "sess_resource_paths_" + strings.ReplaceAll(tt.name, " ", "_")
+			params := runtimeResourceInstanceParamsForTest(t, ctx, st, owner.UUID, sessionID, "host-1", now)
+			tt.edit(&params)
+
+			_, _, err := RuntimeResourceIdentityForParams(params)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("RuntimeResourceIdentityForParams err=%v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func createRuntimeResourceInstanceForTest(t *testing.T, ctx context.Context, st *Store, ownerUUID, sessionID, hostID string, now time.Time) RuntimeResourceInstance {
 	t.Helper()
 	params := runtimeResourceInstanceParamsForTest(t, ctx, st, ownerUUID, sessionID, hostID, now)
