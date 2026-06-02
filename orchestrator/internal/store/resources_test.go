@@ -894,6 +894,7 @@ func TestClaimCheckpointedGenerationForRestoreMovesReservedResources(t *testing.
 	}); err != nil {
 		t.Fatalf("record artifacts: %v", err)
 	}
+	plan := storeCheckpointTestGenerationPlan(t, ctx, st, allocation.GenerationID)
 	checkpointedGeneration(t, ctx, st, "sess_restore_claim", allocation.GenerationID, now.Add(2*time.Second))
 
 	claimed, err := st.ClaimCheckpointedGenerationForRestore(ctx, ClaimCheckpointedGenerationParams{
@@ -952,7 +953,8 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ge
 		details.CheckpointRunscBinaryDigest != "sha256:runsc-test" ||
 		details.CheckpointBundleDigest != "bundle_digest" ||
 		details.CheckpointRuntimeConfigDigest != "runtime_config_digest" ||
-		details.CheckpointControlManifestDigest != "manifest_digest" {
+		details.CheckpointControlManifestDigest != "manifest_digest" ||
+		details.CheckpointPlanDigest != plan.PlanDigest {
 		t.Fatalf("checkpoint metadata not loaded into restore details: %+v", details)
 	}
 
@@ -969,6 +971,59 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ne
 	}
 	if generationStatus != "idle" || networkState != "live" || resourceState != "live" {
 		t.Fatalf("restored generation not live idle: generation=%s network=%s resource=%s", generationStatus, networkState, resourceState)
+	}
+}
+
+func TestClaimCheckpointedGenerationForRestoreRejectsPlanDigestMismatch(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	createStoreSession(t, ctx, st, "sess_restore_plan_mismatch")
+	cfg := testAllocatorConfig(t)
+	now := time.Now().UTC()
+	leaseOwner := GenerationLeaseOwner(owner.UUID)
+	allocation, err := st.AllocateGeneration(ctx, AllocateGenerationParams{
+		SessionID: "sess_restore_plan_mismatch",
+		Owner:     leaseOwner,
+		LeaseTTL:  time.Minute,
+		Now:       now,
+		Config:    cfg,
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	if err := st.RecordGenerationRuntimeArtifactDigests(ctx, allocation.GenerationID, GenerationRuntimeArtifactDigests{
+		ControlManifestDigest:          "manifest_digest",
+		ProjectedControlManifestDigest: "manifest_digest",
+		BundleDigest:                   "bundle_digest",
+		RuntimeConfigDigest:            "runtime_config_digest",
+		SpecDigest:                     "spec_digest",
+		RunscVersion:                   "runsc test",
+		RunscBinaryPath:                "/usr/local/bin/runsc-test",
+		RunscBinaryDigest:              "sha256:runsc-test",
+	}); err != nil {
+		t.Fatalf("record artifacts: %v", err)
+	}
+	storeCheckpointTestGenerationPlan(t, ctx, st, allocation.GenerationID)
+	if err := st.MarkGenerationResourcesLive(ctx, "sess_restore_plan_mismatch", allocation.GenerationID, allocation.Owner, now.Add(time.Second)); err != nil {
+		t.Fatalf("mark generation live: %v", err)
+	}
+	checkpointedGeneration(t, ctx, st, "sess_restore_plan_mismatch", allocation.GenerationID, now.Add(2*time.Second))
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_generations
+SET checkpoint_plan_digest = 'sha256:changed'
+WHERE generation_id = ?`, allocation.GenerationID); err != nil {
+		t.Fatalf("corrupt checkpoint plan digest: %v", err)
+	}
+
+	_, err = st.ClaimCheckpointedGenerationForRestore(ctx, ClaimCheckpointedGenerationParams{
+		SessionID:    "sess_restore_plan_mismatch",
+		GenerationID: allocation.GenerationID,
+		Owner:        leaseOwner,
+		LeaseTTL:     2 * time.Minute,
+		Now:          now.Add(3 * time.Second),
+	})
+	if !errors.Is(err, ErrStaleCheckpointRestore) || !strings.Contains(err.Error(), "checkpoint plan digest mismatch") {
+		t.Fatalf("expected checkpoint plan digest stale restore error, got %v", err)
 	}
 }
 
@@ -993,6 +1048,7 @@ func TestClaimCheckpointedGenerationForRestoreRollsBackOnResourceMismatch(t *tes
 	if err := st.MarkGenerationResourcesLive(ctx, "sess_restore_mismatch", allocation.GenerationID, allocation.Owner, now.Add(time.Second)); err != nil {
 		t.Fatalf("mark generation live: %v", err)
 	}
+	storeCheckpointTestGenerationPlan(t, ctx, st, allocation.GenerationID)
 	checkpointedGeneration(t, ctx, st, "sess_restore_mismatch", allocation.GenerationID, now.Add(2*time.Second))
 	if _, err := st.db.ExecContext(ctx, `
 UPDATE runtime_generation_resources
@@ -1047,6 +1103,7 @@ func TestClaimCheckpointedGenerationForRestoreRequiresCheckpointedSession(t *tes
 	if err := st.MarkGenerationResourcesLive(ctx, "sess_restore_session_state", allocation.GenerationID, allocation.Owner, now.Add(time.Second)); err != nil {
 		t.Fatalf("mark generation live: %v", err)
 	}
+	storeCheckpointTestGenerationPlan(t, ctx, st, allocation.GenerationID)
 	checkpointedGeneration(t, ctx, st, "sess_restore_session_state", allocation.GenerationID, now.Add(2*time.Second))
 	if err := st.UpdateSessionStatus(ctx, "sess_restore_session_state", string(sessionstate.RunningIdle), nil); err != nil {
 		t.Fatalf("set non-checkpointed session state: %v", err)
@@ -2284,16 +2341,20 @@ WHERE generation_id = ?`, allocation.GenerationID); err != nil {
 	if err := st.BeginGenerationCheckpoint(ctx, "sess_auto_complete", allocation.GenerationID, allocation.Owner, now.Add(2*time.Minute)); err != nil {
 		t.Fatalf("begin checkpoint: %v", err)
 	}
-	var generationStatus, sessionStatus string
+	plan, err := st.GetGenerationPlan(ctx, allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get checkpoint generation plan: %v", err)
+	}
+	var generationStatus, sessionStatus, checkpointPlan string
 	if err := st.db.QueryRowContext(ctx, `
-SELECT g.status, s.status
+SELECT g.status, s.status, COALESCE(g.checkpoint_plan_digest, '')
 FROM runtime_generations g
 JOIN sessions s ON s.active_generation_id = g.generation_id
-WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &sessionStatus); err != nil {
+WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &sessionStatus, &checkpointPlan); err != nil {
 		t.Fatalf("query checkpointing state: %v", err)
 	}
-	if generationStatus != "checkpointing" || sessionStatus != string(sessionstate.Checkpointing) {
-		t.Fatalf("unexpected checkpointing state: generation=%s session=%s", generationStatus, sessionStatus)
+	if generationStatus != "checkpointing" || sessionStatus != string(sessionstate.Checkpointing) || checkpointPlan != plan.PlanDigest {
+		t.Fatalf("unexpected checkpointing state: generation=%s session=%s plan=%s want_plan=%s", generationStatus, sessionStatus, checkpointPlan, plan.PlanDigest)
 	}
 	if err := st.CompleteGenerationCheckpoint(ctx, CompleteCheckpointParams{
 		SessionID:                       "sess_auto_complete",
@@ -2307,6 +2368,7 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &se
 		CheckpointBundleDigest:          "bundle_digest",
 		CheckpointRuntimeConfigDigest:   "runtime_config_digest",
 		CheckpointControlManifestDigest: "projected_manifest_digest",
+		CheckpointPlanDigest:            plan.PlanDigest,
 		Now:                             now.Add(3 * time.Minute),
 	}); err != nil {
 		t.Fatalf("complete checkpoint: %v", err)
@@ -2314,13 +2376,14 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &se
 	var networkState, resourceState, checkpointPath, checkpointBundle, checkpointManifest string
 	if err := st.db.QueryRowContext(ctx, `
 SELECT g.status, s.status, n.allocation_state, r.resource_state, COALESCE(r.checkpoint_path, ''),
-       COALESCE(g.checkpoint_bundle_digest, ''), COALESCE(g.checkpoint_control_manifest_digest, '')
+       COALESCE(g.checkpoint_bundle_digest, ''), COALESCE(g.checkpoint_control_manifest_digest, ''),
+       COALESCE(g.checkpoint_plan_digest, '')
 FROM runtime_generations g
 JOIN sessions s ON s.active_generation_id = g.generation_id
 JOIN network_profiles n ON n.generation_id = g.generation_id
 JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
 WHERE g.generation_id = ?`, allocation.GenerationID).Scan(
-		&generationStatus, &sessionStatus, &networkState, &resourceState, &checkpointPath, &checkpointBundle, &checkpointManifest,
+		&generationStatus, &sessionStatus, &networkState, &resourceState, &checkpointPath, &checkpointBundle, &checkpointManifest, &checkpointPlan,
 	); err != nil {
 		t.Fatalf("query checkpoint complete state: %v", err)
 	}
@@ -2330,9 +2393,10 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(
 		resourceState != "reserved_checkpointed" ||
 		checkpointPath == "" ||
 		checkpointBundle != "bundle_digest" ||
-		checkpointManifest != "projected_manifest_digest" {
-		t.Fatalf("unexpected completed checkpoint state: generation=%s session=%s network=%s resource=%s path=%s bundle=%s manifest=%s",
-			generationStatus, sessionStatus, networkState, resourceState, checkpointPath, checkpointBundle, checkpointManifest)
+		checkpointManifest != "projected_manifest_digest" ||
+		checkpointPlan != plan.PlanDigest {
+		t.Fatalf("unexpected completed checkpoint state: generation=%s session=%s network=%s resource=%s path=%s bundle=%s manifest=%s plan=%s want_plan=%s",
+			generationStatus, sessionStatus, networkState, resourceState, checkpointPath, checkpointBundle, checkpointManifest, checkpointPlan, plan.PlanDigest)
 	}
 }
 
@@ -2351,6 +2415,7 @@ func TestCompleteGenerationCheckpointRequiresRunscMetadata(t *testing.T) {
 		CheckpointBundleDigest:          "bundle_digest",
 		CheckpointRuntimeConfigDigest:   "runtime_config_digest",
 		CheckpointControlManifestDigest: "manifest_digest",
+		CheckpointPlanDigest:            "sha256:plan",
 		Now:                             time.Now().UTC(),
 	}
 	tests := []struct {
@@ -2360,6 +2425,7 @@ func TestCompleteGenerationCheckpointRequiresRunscMetadata(t *testing.T) {
 	}{
 		{name: "runsc version", want: "checkpoint runsc version is required", edit: func(p *CompleteCheckpointParams) { p.RunscVersion = "" }},
 		{name: "runsc platform", want: "checkpoint runsc platform is required", edit: func(p *CompleteCheckpointParams) { p.RunscPlatform = "" }},
+		{name: "plan digest", want: "checkpoint plan digest is required", edit: func(p *CompleteCheckpointParams) { p.CheckpointPlanDigest = "" }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2386,21 +2452,25 @@ func TestGenerationCheckpointAbortRestoresIdleState(t *testing.T) {
 	if err := st.AbortGenerationCheckpoint(ctx, "sess_auto_abort", allocation.GenerationID, allocation.Owner, now.Add(3*time.Minute)); err != nil {
 		t.Fatalf("abort checkpoint: %v", err)
 	}
-	var generationStatus, sessionStatus, networkState, resourceState string
+	var generationStatus, sessionStatus, networkState, resourceState, checkpointDriverFence, checkpointPlan string
 	if err := st.db.QueryRowContext(ctx, `
-SELECT g.status, s.status, n.allocation_state, r.resource_state
+SELECT g.status, s.status, n.allocation_state, r.resource_state,
+       COALESCE(g.checkpoint_driver_states_digest, ''), COALESCE(g.checkpoint_plan_digest, '')
 FROM runtime_generations g
 JOIN sessions s ON s.active_generation_id = g.generation_id
 JOIN network_profiles n ON n.generation_id = g.generation_id
 JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
-WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &sessionStatus, &networkState, &resourceState); err != nil {
+WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &sessionStatus, &networkState, &resourceState, &checkpointDriverFence, &checkpointPlan); err != nil {
 		t.Fatalf("query aborted checkpoint state: %v", err)
 	}
 	if generationStatus != "idle" ||
 		sessionStatus != string(sessionstate.RunningIdle) ||
 		networkState != "live" ||
-		resourceState != "live" {
-		t.Fatalf("unexpected aborted checkpoint state: generation=%s session=%s network=%s resource=%s", generationStatus, sessionStatus, networkState, resourceState)
+		resourceState != "live" ||
+		checkpointDriverFence != "" ||
+		checkpointPlan != "" {
+		t.Fatalf("unexpected aborted checkpoint state: generation=%s session=%s network=%s resource=%s driver_fence=%s plan=%s",
+			generationStatus, sessionStatus, networkState, resourceState, checkpointDriverFence, checkpointPlan)
 	}
 }
 
@@ -3023,6 +3093,12 @@ WHERE id = ?`, enqueued.TurnID).Scan(&status, &errorClass, &errText); err != nil
 func checkpointedGeneration(t *testing.T, ctx context.Context, st *Store, sessionID, generationID string, now time.Time) {
 	t.Helper()
 	fence := checkpointDriverStateFenceForTest(t, ctx, st, sessionID, generationID)
+	checkpointPlanDigest := "sha256:plan"
+	if plan, err := st.GetGenerationPlan(ctx, generationID); err == nil {
+		checkpointPlanDigest = plan.PlanDigest
+	} else if err != sql.ErrNoRows {
+		t.Fatalf("get checkpoint generation plan: %v", err)
+	}
 	if _, err := st.db.ExecContext(ctx, `
 UPDATE runtime_generations
 SET status = 'checkpointed',
@@ -3049,11 +3125,12 @@ SET status = 'checkpointed',
       WHERE runtime_generation_resources.generation_id = runtime_generations.generation_id
     ),
     checkpoint_driver_states_digest = ?,
+    checkpoint_plan_digest = ?,
     lease_owner = NULL,
     lease_expires_at = NULL,
     last_seen_at = ?
 WHERE generation_id = ?
-  AND session_id = ?`, formatTime(now), fence, formatTime(now), generationID, sessionID); err != nil {
+  AND session_id = ?`, formatTime(now), fence, checkpointPlanDigest, formatTime(now), generationID, sessionID); err != nil {
 		t.Fatalf("set checkpointed generation: %v", err)
 	}
 	if _, err := st.db.ExecContext(ctx, `
@@ -3172,6 +3249,7 @@ func createAutoCheckpointGeneration(t *testing.T, ctx context.Context, st *Store
 	}); err != nil {
 		t.Fatalf("record artifacts for %s: %v", sessionID, err)
 	}
+	storeCheckpointTestGenerationPlan(t, ctx, st, allocation.GenerationID)
 	if err := st.MarkGenerationResourcesLive(ctx, sessionID, allocation.GenerationID, allocation.Owner, now.Add(-time.Minute)); err != nil {
 		t.Fatalf("mark generation live for %s: %v", sessionID, err)
 	}
@@ -3180,6 +3258,18 @@ func createAutoCheckpointGeneration(t *testing.T, ctx context.Context, st *Store
 		t.Fatalf("mark session idle for %s: %v", sessionID, err)
 	}
 	return allocation
+}
+
+func storeCheckpointTestGenerationPlan(t *testing.T, ctx context.Context, st *Store, generationID string) GenerationPlanRecord {
+	t.Helper()
+	plan, err := st.StoreGenerationPlan(ctx, StoreGenerationPlanParams{
+		GenerationID: generationID,
+		Payload:      map[string]any{"generation_id": generationID, "plan_version": GenerationPlanVersion},
+	})
+	if err != nil {
+		t.Fatalf("store generation plan for %s: %v", generationID, err)
+	}
+	return plan
 }
 
 func createExpiredAckStartedTurn(t *testing.T, ctx context.Context, st *Store, ownerUUID string, cfg ResourceAllocatorConfig, sessionID string, now time.Time, expiredFor time.Duration) (GenerationAllocation, int64) {

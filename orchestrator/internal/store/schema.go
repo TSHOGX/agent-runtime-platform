@@ -142,6 +142,7 @@ CREATE TABLE IF NOT EXISTS runtime_generations (
   checkpoint_runtime_config_digest TEXT,
   checkpoint_control_manifest_digest TEXT,
   checkpoint_driver_states_digest TEXT,
+  checkpoint_plan_digest TEXT,
   network_profile_id TEXT,
   agent_runtime_profile_id TEXT,
   runsc_platform TEXT DEFAULT 'systrap',

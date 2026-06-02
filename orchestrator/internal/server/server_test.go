@@ -1296,16 +1296,21 @@ func TestMonitorIdleSessionsCheckpointsEligibleGeneration(t *testing.T) {
 		checkpoints[0].Generation.RunscOverlay2 != details.RunscOverlay2 {
 		t.Fatalf("unexpected checkpoint request: %+v details=%+v", checkpoints[0], details)
 	}
-	var generationStatus, networkState, resourceState, checkpointPath, checkpointBundle, checkpointRuntimeConfig, checkpointManifest string
+	plan, err := st.GetGenerationPlan(ctx, allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get checkpointed plan: %v", err)
+	}
+	var generationStatus, networkState, resourceState, checkpointPath, checkpointBundle, checkpointRuntimeConfig, checkpointManifest, checkpointPlan string
 	if err := st.DBForTest().QueryRowContext(ctx, `
 SELECT g.status, n.allocation_state, r.resource_state, COALESCE(r.checkpoint_path, ''),
-       COALESCE(g.checkpoint_bundle_digest, ''), COALESCE(g.checkpoint_runtime_config_digest, ''), COALESCE(g.checkpoint_control_manifest_digest, '')
+       COALESCE(g.checkpoint_bundle_digest, ''), COALESCE(g.checkpoint_runtime_config_digest, ''), COALESCE(g.checkpoint_control_manifest_digest, ''),
+       COALESCE(g.checkpoint_plan_digest, '')
 FROM runtime_generations g
 JOIN network_profiles n ON n.generation_id = g.generation_id
 JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
 WHERE g.generation_id = ?`, allocation.GenerationID).Scan(
 		&generationStatus, &networkState, &resourceState, &checkpointPath,
-		&checkpointBundle, &checkpointRuntimeConfig, &checkpointManifest,
+		&checkpointBundle, &checkpointRuntimeConfig, &checkpointManifest, &checkpointPlan,
 	); err != nil {
 		t.Fatalf("query checkpointed generation: %v", err)
 	}
@@ -1315,9 +1320,10 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(
 		checkpointPath != details.CheckpointPath ||
 		checkpointBundle != "bundle_digest" ||
 		checkpointRuntimeConfig != "runtime_config_digest" ||
-		checkpointManifest != "projected_manifest_digest" {
-		t.Fatalf("unexpected checkpoint metadata: generation=%s network=%s resource=%s path=%s bundle=%s runtime=%s manifest=%s",
-			generationStatus, networkState, resourceState, checkpointPath, checkpointBundle, checkpointRuntimeConfig, checkpointManifest)
+		checkpointManifest != "projected_manifest_digest" ||
+		checkpointPlan != plan.PlanDigest {
+		t.Fatalf("unexpected checkpoint metadata: generation=%s network=%s resource=%s path=%s bundle=%s runtime=%s manifest=%s plan=%s want_plan=%s",
+			generationStatus, networkState, resourceState, checkpointPath, checkpointBundle, checkpointRuntimeConfig, checkpointManifest, checkpointPlan, plan.PlanDigest)
 	}
 }
 
@@ -3464,7 +3470,15 @@ func TestVerifyGenerationPlanFrozenEvidenceChecksExistingPlan(t *testing.T) {
 		t.Fatalf("expected runsc mismatch, got %v", err)
 	}
 	details = serverGenerationPlanFrozenEvidenceDetails()
+	details.CheckpointPlanDigest = "sha256:changed"
+	artifacts = serverGenerationPlanFrozenEvidenceArtifacts()
+	if err := srv.verifyGenerationPlanFrozenEvidence(ctx, "gen_frozen_evidence", details, artifacts); err == nil ||
+		!strings.Contains(err.Error(), "checkpoint plan digest mismatch") {
+		t.Fatalf("expected checkpoint plan digest mismatch, got %v", err)
+	}
+	details = serverGenerationPlanFrozenEvidenceDetails()
 	details.CheckpointDriverStatesDigest = ""
+	details.CheckpointPlanDigest = store.GenerationPlanDigest(storeServerFrozenEvidenceCanonicalPayload(t))
 	artifacts = serverGenerationPlanFrozenEvidenceArtifacts()
 	if err := srv.verifyGenerationPlanFrozenEvidence(ctx, "gen_frozen_evidence", details, artifacts); err == nil ||
 		!strings.Contains(err.Error(), "checkpoint driver-state digest is required") {
@@ -3507,7 +3521,7 @@ func TestVerifyGenerationPlanFrozenEvidenceChecksContentSnapshots(t *testing.T) 
 		"source_evidence_digest": "sha256:skills-source",
 		"retention_class":        "generation_plan",
 	}
-	storeServerFrozenEvidencePlan(t, ctx, st, dir, planPayload)
+	plan := storeServerFrozenEvidencePlan(t, ctx, st, dir, planPayload)
 	if _, err := st.StoreContentSnapshot(ctx, store.StoreContentSnapshotParams{
 		Kind:                 store.ContentSnapshotKindSkills,
 		Digest:               "sha256:skills",
@@ -3520,37 +3534,17 @@ func TestVerifyGenerationPlanFrozenEvidenceChecksContentSnapshots(t *testing.T) 
 	}
 
 	details := serverGenerationPlanFrozenEvidenceDetails()
+	details.CheckpointPlanDigest = plan.PlanDigest
 	artifacts := serverGenerationPlanFrozenEvidenceArtifacts()
 	if err := srv.verifyGenerationPlanFrozenEvidence(ctx, "gen_frozen_evidence", details, artifacts); err != nil {
 		t.Fatalf("verify content snapshot frozen evidence: %v", err)
 	}
 
-	corruptPayload := validServerGenerationPlanPayload()
-	corruptSnapshots := corruptPayload["content_snapshots"].(map[string]any)
-	corruptSnapshots["skills"] = map[string]any{
-		"kind":                   "skills",
-		"digest":                 "sha256:changed",
-		"immutable_host_path":    "/var/lib/harness/content/skills/sha256-skills",
-		"mount_destination":      "/harness-skills",
-		"source_evidence_digest": "sha256:skills-source",
-		"retention_class":        "generation_plan",
-	}
-	canonical, err := store.CanonicalGenerationPlanPayload(corruptPayload)
-	if err != nil {
-		t.Fatalf("canonical corrupt payload: %v", err)
-	}
 	if _, err := st.DBForTest().ExecContext(ctx, `
-UPDATE generation_plans
-SET canonical_payload = ?,
-    plan_digest = ?
-WHERE generation_id = ?`, string(canonical), store.GenerationPlanDigest(canonical), "gen_frozen_evidence"); err != nil {
-		t.Fatalf("corrupt stored plan snapshot digest: %v", err)
-	}
-	if _, err := st.DBForTest().ExecContext(ctx, `
-UPDATE generation_plan_projections
-SET plan_digest = ?
-WHERE generation_id = ?`, store.GenerationPlanDigest(canonical), "gen_frozen_evidence"); err != nil {
-		t.Fatalf("align corrupt plan projection digests: %v", err)
+DELETE FROM content_snapshots
+WHERE snapshot_kind = ?
+  AND snapshot_digest = ?`, store.ContentSnapshotKindSkills, "sha256:skills"); err != nil {
+		t.Fatalf("delete stored content snapshot: %v", err)
 	}
 	if err := srv.verifyGenerationPlanFrozenEvidence(ctx, "gen_frozen_evidence", details, artifacts); err == nil ||
 		!strings.Contains(err.Error(), "generation plan content snapshot skills") {
@@ -5985,6 +5979,14 @@ func recordServerRuntimeArtifactsWithRunsc(t *testing.T, ctx context.Context, st
 	}); err != nil {
 		t.Fatalf("record runtime artifacts: %v", err)
 	}
+	var sessionID string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT session_id
+FROM runtime_generations
+WHERE generation_id = ?`, generationID).Scan(&sessionID); err != nil {
+		t.Fatalf("query generation session: %v", err)
+	}
+	storeServerGenerationPlanForArtifacts(t, ctx, st, sessionID, generationID, artifacts)
 }
 
 func currentRunscBinaryMetadataForServerTest(t *testing.T) (string, string) {
@@ -6168,6 +6170,27 @@ func validServerGenerationPlanPayload() map[string]any {
 	}
 }
 
+func storeServerFrozenEvidenceCanonicalPayload(t *testing.T) []byte {
+	t.Helper()
+	canonical, err := serverFrozenEvidenceCanonicalPayload()
+	if err != nil {
+		t.Fatalf("canonical frozen evidence payload: %v", err)
+	}
+	return canonical
+}
+
+func serverFrozenEvidenceCanonicalPayload() ([]byte, error) {
+	return store.CanonicalGenerationPlanPayload(validServerGenerationPlanPayload())
+}
+
+func mustServerFrozenEvidenceCanonicalPayload() []byte {
+	canonical, err := serverFrozenEvidenceCanonicalPayload()
+	if err != nil {
+		panic(err)
+	}
+	return canonical
+}
+
 func storeServerFrozenEvidencePlan(t *testing.T, ctx context.Context, st *store.Store, dir string, payload map[string]any) store.GenerationPlanRecord {
 	t.Helper()
 	session := createServerTestSession(t, ctx, st, dir, "sess_frozen_evidence", string(sessionstate.Created), time.Now().UTC(), nil)
@@ -6203,6 +6226,57 @@ VALUES (?, ?, 'allocating', 'owner', ?)`, "gen_frozen_evidence", session.ID, tim
 	return plan
 }
 
+func storeServerGenerationPlanForArtifacts(t *testing.T, ctx context.Context, st *store.Store, sessionID, generationID string, artifacts runtime.GenerationArtifacts) store.GenerationPlanRecord {
+	t.Helper()
+	payload := validServerGenerationPlanPayload()
+	payload["identity"] = map[string]any{"session_id": sessionID, "generation_id": generationID, "product_mode": "agent"}
+	runscPin := payload["runsc_pin"].(map[string]any)
+	runscPin["version"] = artifacts.RunscVersion
+	runscPin["binary_path"] = artifacts.RunscBinaryPath
+	runscPin["binary_digest"] = artifacts.RunscBinaryDigest
+	runtimeArtifacts := payload["runtime_artifacts"].(map[string]any)
+	runtimeArtifacts["control_manifest_digest"] = artifacts.ManifestDigest
+	runtimeArtifacts["projected_control_manifest_digest"] = artifacts.ProjectedManifestDigest
+	runtimeArtifacts["bundle_digest"] = artifacts.BundleDigest
+	runtimeArtifacts["runtime_config_digest"] = artifacts.RuntimeConfigDigest
+	runtimeArtifacts["spec_digest"] = artifacts.SpecDigest
+	projections := payload["projection_digests"].(map[string]any)
+	projections["control_manifest"].(map[string]any)["payload_digest"] = planprojection.PayloadDigest(store.GenerationPlanProjectionControlManifest, artifacts.ManifestDigest)
+	projections["control_manifest_projected"].(map[string]any)["payload_digest"] = planprojection.PayloadDigest(store.GenerationPlanProjectionControlManifestProjected, artifacts.ProjectedManifestDigest)
+	projections["oci_spec"].(map[string]any)["payload_digest"] = planprojection.PayloadDigest(store.GenerationPlanProjectionOCISpec, artifacts.SpecDigest)
+	projections["bundle"].(map[string]any)["payload_digest"] = planprojection.PayloadDigest(store.GenerationPlanProjectionBundle, artifacts.BundleDigest)
+	projections["runtime_config"].(map[string]any)["payload_digest"] = planprojection.PayloadDigest(store.GenerationPlanProjectionRuntimeConfig, artifacts.RuntimeConfigDigest)
+	plan, err := st.StoreGenerationPlan(ctx, store.StoreGenerationPlanParams{
+		GenerationID: generationID,
+		Payload:      payload,
+	})
+	if err != nil {
+		t.Fatalf("store generation plan for %s: %v", generationID, err)
+	}
+	for _, projection := range []struct {
+		kind   string
+		digest string
+	}{
+		{store.GenerationPlanProjectionSandboxContract, "sha256:sandbox-contract"},
+		{store.GenerationPlanProjectionControlManifest, planprojection.PayloadDigest(store.GenerationPlanProjectionControlManifest, artifacts.ManifestDigest)},
+		{store.GenerationPlanProjectionControlManifestProjected, planprojection.PayloadDigest(store.GenerationPlanProjectionControlManifestProjected, artifacts.ProjectedManifestDigest)},
+		{store.GenerationPlanProjectionOCISpec, planprojection.PayloadDigest(store.GenerationPlanProjectionOCISpec, artifacts.SpecDigest)},
+		{store.GenerationPlanProjectionBundle, planprojection.PayloadDigest(store.GenerationPlanProjectionBundle, artifacts.BundleDigest)},
+		{store.GenerationPlanProjectionRuntimeConfig, planprojection.PayloadDigest(store.GenerationPlanProjectionRuntimeConfig, artifacts.RuntimeConfigDigest)},
+	} {
+		if _, err := st.StoreGenerationPlanProjection(ctx, store.StoreGenerationPlanProjectionParams{
+			GenerationID:      generationID,
+			PlanDigest:        plan.PlanDigest,
+			ProjectionKind:    projection.kind,
+			ProjectionVersion: store.GenerationPlanProjectionVersion,
+			PayloadDigest:     projection.digest,
+		}); err != nil {
+			t.Fatalf("store generation plan projection %s for %s: %v", projection.kind, generationID, err)
+		}
+	}
+	return plan
+}
+
 func serverPlanVolumePayload(hostPath, markerPath, destination string) map[string]any {
 	return map[string]any{
 		"session_id": "sess_frozen_evidence", "host_path": hostPath, "layout_version": 1,
@@ -6232,6 +6306,7 @@ func serverGenerationPlanFrozenEvidenceDetails() store.RuntimeGenerationDetails 
 		CheckpointRuntimeConfigDigest:   "sha256:runtime-config",
 		CheckpointControlManifestDigest: "sha256:control-manifest-projected",
 		CheckpointDriverStatesDigest:    "sha256:driver-state-fence",
+		CheckpointPlanDigest:            store.GenerationPlanDigest(mustServerFrozenEvidenceCanonicalPayload()),
 	}
 }
 
@@ -6607,6 +6682,7 @@ func prepareServerIdleGeneration(t *testing.T, ctx context.Context, st *store.St
 	}); err != nil {
 		t.Fatalf("record runtime artifacts: %v", err)
 	}
+	storeServerGenerationPlanForArtifacts(t, ctx, st, sessionID, allocation.GenerationID, artifacts)
 	if err := st.MarkGenerationResourcesLive(ctx, sessionID, allocation.GenerationID, allocation.Owner, now.Add(time.Second)); err != nil {
 		t.Fatalf("mark generation live: %v", err)
 	}
@@ -6622,6 +6698,12 @@ func markServerGenerationCheckpointed(t *testing.T, ctx context.Context, st *sto
 	ensureServerRuntimeResourceLiveForCheckpoint(t, ctx, st, sessionID, generationID, now.Add(-time.Millisecond))
 	formattedNow := now.UTC().Format(time.RFC3339Nano)
 	fence := serverCheckpointDriverStateFenceForTest(t, ctx, st, sessionID, generationID)
+	checkpointPlanDigest := "sha256:plan"
+	if plan, err := st.GetGenerationPlan(ctx, generationID); err == nil {
+		checkpointPlanDigest = plan.PlanDigest
+	} else if err != sql.ErrNoRows {
+		t.Fatalf("get checkpoint generation plan: %v", err)
+	}
 	if _, err := st.DBForTest().ExecContext(ctx, `
 UPDATE runtime_generations
 SET status = 'checkpointed',
@@ -6648,11 +6730,12 @@ SET status = 'checkpointed',
       WHERE runtime_generation_resources.generation_id = runtime_generations.generation_id
     ),
     checkpoint_driver_states_digest = ?,
+    checkpoint_plan_digest = ?,
     lease_owner = NULL,
     lease_expires_at = NULL,
     last_seen_at = ?
 WHERE generation_id = ?
-  AND session_id = ?`, formattedNow, fence, formattedNow, generationID, sessionID); err != nil {
+  AND session_id = ?`, formattedNow, fence, checkpointPlanDigest, formattedNow, generationID, sessionID); err != nil {
 		t.Fatalf("set checkpointed generation: %v", err)
 	}
 	if _, err := st.DBForTest().ExecContext(ctx, `

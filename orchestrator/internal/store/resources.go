@@ -107,6 +107,7 @@ type RuntimeGenerationDetails struct {
 	CheckpointRuntimeConfigDigest   string
 	CheckpointControlManifestDigest string
 	CheckpointDriverStatesDigest    string
+	CheckpointPlanDigest            string
 	RunscNetwork                    string
 	RunscOverlay2                   string
 	HostProxyBindURL                string
@@ -172,6 +173,7 @@ type CompleteCheckpointParams struct {
 	CheckpointBundleDigest          string
 	CheckpointRuntimeConfigDigest   string
 	CheckpointControlManifestDigest string
+	CheckpointPlanDigest            string
 	Now                             time.Time
 }
 
@@ -601,6 +603,24 @@ WHERE generation_id = ?
 	}
 	if storedFence != currentFence {
 		return GenerationAllocation{}, fmt.Errorf("%w: checkpoint driver state fence mismatch", ErrStaleCheckpointRestore)
+	}
+	plan, err := getGenerationPlanTx(ctx, tx, p.GenerationID)
+	if err != nil {
+		return GenerationAllocation{}, err
+	}
+	var checkpointPlanDigest string
+	if err := tx.QueryRowContext(ctx, `
+SELECT COALESCE(checkpoint_plan_digest, '')
+FROM runtime_generations
+WHERE generation_id = ?
+  AND session_id = ?`, p.GenerationID, p.SessionID).Scan(&checkpointPlanDigest); err != nil {
+		return GenerationAllocation{}, err
+	}
+	if checkpointPlanDigest == "" {
+		return GenerationAllocation{}, fmt.Errorf("%w: checkpoint plan digest is missing", ErrStaleCheckpointRestore)
+	}
+	if checkpointPlanDigest != plan.PlanDigest {
+		return GenerationAllocation{}, fmt.Errorf("%w: checkpoint plan digest mismatch", ErrStaleCheckpointRestore)
 	}
 
 	expiresAt := p.Now.Add(p.LeaseTTL)
@@ -1775,11 +1795,16 @@ func (s *Store) BeginGenerationCheckpoint(ctx context.Context, sessionID, genera
 	if err != nil {
 		return err
 	}
+	plan, err := getGenerationPlanTx(ctx, tx, generationID)
+	if err != nil {
+		return err
+	}
 	res, err := tx.ExecContext(ctx, `
 UPDATE runtime_generations
 SET status = 'checkpointing',
     last_seen_at = ?,
-    checkpoint_driver_states_digest = ?
+    checkpoint_driver_states_digest = ?,
+    checkpoint_plan_digest = ?
 WHERE generation_id = ?
   AND session_id = ?
   AND status = 'idle'
@@ -1812,7 +1837,7 @@ WHERE generation_id = ?
     SELECT 1 FROM turns
     WHERE session_id = ?
       AND status IN ('queued', 'leased', 'running')
-  )`, formatTime(now), checkpointDriverStatesDigest, generationID, sessionID, owner, formatTime(now), sessionID, generationID, sessionID)
+  )`, formatTime(now), checkpointDriverStatesDigest, plan.PlanDigest, generationID, sessionID, owner, formatTime(now), sessionID, generationID, sessionID)
 	if err != nil {
 		return err
 	}
@@ -1853,7 +1878,8 @@ func (s *Store) AbortGenerationCheckpoint(ctx context.Context, sessionID, genera
 UPDATE runtime_generations
 SET status = 'idle',
     last_seen_at = ?,
-    checkpoint_driver_states_digest = NULL
+    checkpoint_driver_states_digest = NULL,
+    checkpoint_plan_digest = NULL
 WHERE generation_id = ?
   AND session_id = ?
   AND status = 'checkpointing'
@@ -1901,6 +1927,9 @@ func (s *Store) CompleteGenerationCheckpoint(ctx context.Context, p CompleteChec
 	if strings.TrimSpace(p.CheckpointControlManifestDigest) == "" {
 		return fmt.Errorf("checkpoint control manifest digest is required")
 	}
+	if strings.TrimSpace(p.CheckpointPlanDigest) == "" {
+		return fmt.Errorf("checkpoint plan digest is required")
+	}
 	if strings.TrimSpace(p.RunscVersion) == "" {
 		return fmt.Errorf("checkpoint runsc version is required")
 	}
@@ -1936,6 +1965,20 @@ WHERE generation_id = ?
 	if storedFence != currentFence {
 		return fmt.Errorf("checkpoint driver state fence mismatch")
 	}
+	var storedPlanDigest string
+	if err := tx.QueryRowContext(ctx, `
+SELECT COALESCE(checkpoint_plan_digest, '')
+FROM runtime_generations
+WHERE generation_id = ?
+  AND session_id = ?`, p.GenerationID, p.SessionID).Scan(&storedPlanDigest); err != nil {
+		return err
+	}
+	if storedPlanDigest == "" {
+		return fmt.Errorf("checkpoint plan digest is missing")
+	}
+	if storedPlanDigest != strings.TrimSpace(p.CheckpointPlanDigest) {
+		return fmt.Errorf("checkpoint plan digest mismatch")
+	}
 	res, err := tx.ExecContext(ctx, `
 UPDATE runtime_generations
 SET status = 'checkpointed',
@@ -1949,6 +1992,7 @@ SET status = 'checkpointed',
     checkpoint_bundle_digest = ?,
     checkpoint_runtime_config_digest = ?,
     checkpoint_control_manifest_digest = ?,
+    checkpoint_plan_digest = ?,
     lease_owner = NULL,
     lease_expires_at = NULL,
     last_seen_at = ?
@@ -1964,7 +2008,7 @@ WHERE generation_id = ?
       AND status = 'checkpointing'
   )`, formatTime(p.Now), p.RunscVersion, p.RunscPlatform, p.RunscBinaryPath, p.RunscBinaryDigest,
 		p.CheckpointBundleDigest, p.CheckpointRuntimeConfigDigest, p.CheckpointControlManifestDigest,
-		formatTime(p.Now), p.GenerationID, p.SessionID, p.Owner, formatTime(p.Now), p.SessionID, p.GenerationID)
+		p.CheckpointPlanDigest, formatTime(p.Now), p.GenerationID, p.SessionID, p.Owner, formatTime(p.Now), p.SessionID, p.GenerationID)
 	if err != nil {
 		return err
 	}
@@ -2063,6 +2107,7 @@ SELECT
   COALESCE(g.checkpoint_runtime_config_digest, ''),
   COALESCE(g.checkpoint_control_manifest_digest, ''),
   COALESCE(g.checkpoint_driver_states_digest, ''),
+  COALESCE(g.checkpoint_plan_digest, ''),
   n.runsc_network,
   n.runsc_overlay2,
   n.host_proxy_bind_url,
@@ -2148,6 +2193,7 @@ WHERE g.session_id = ?
 		&details.CheckpointRuntimeConfigDigest,
 		&details.CheckpointControlManifestDigest,
 		&details.CheckpointDriverStatesDigest,
+		&details.CheckpointPlanDigest,
 		&details.RunscNetwork,
 		&details.RunscOverlay2,
 		&details.HostProxyBindURL,

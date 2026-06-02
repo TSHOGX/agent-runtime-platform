@@ -177,10 +177,17 @@ func TestVerifyFrozenEvidenceRequiresCheckpointDriverStateFence(t *testing.T) {
 	}
 
 	params = validFrozenEvidenceParams(payload)
+	params.CheckpointPlanDigest = "sha256:changed"
+	if err := VerifyFrozenEvidence(params); err == nil || !strings.Contains(err.Error(), "checkpoint plan digest mismatch") {
+		t.Fatalf("expected checkpoint plan digest mismatch, got %v", err)
+	}
+
+	params = validFrozenEvidenceParams(payload)
 	params.CheckpointBundleDigest = ""
 	params.CheckpointRuntimeConfigDigest = ""
 	params.CheckpointControlManifestDigest = ""
 	params.CheckpointDriverStatesDigest = ""
+	params.CheckpointPlanDigest = ""
 	if err := VerifyFrozenEvidence(params); err != nil {
 		t.Fatalf("non-checkpoint evidence should not require driver-state fence: %v", err)
 	}
@@ -416,7 +423,16 @@ func validFrozenEvidenceParams(payload map[string]any) VerifyFrozenEvidenceParam
 		CheckpointRuntimeConfigDigest:   "sha256:runtime-config",
 		CheckpointControlManifestDigest: "sha256:control-manifest-projected",
 		CheckpointDriverStatesDigest:    "sha256:driver-state-fence",
+		CheckpointPlanDigest:            store.GenerationPlanDigest(mustCanonicalPlanPayloadForTest(payload)),
 	}
+}
+
+func mustCanonicalPlanPayloadForTest(payload map[string]any) []byte {
+	canonical, err := store.CanonicalGenerationPlanPayload(payload)
+	if err != nil {
+		panic(err)
+	}
+	return canonical
 }
 
 func validVolumePayload(hostPath, markerPath, destination string) map[string]any {

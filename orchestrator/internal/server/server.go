@@ -1674,6 +1674,7 @@ func (s *Server) verifyGenerationPlanFrozenEvidence(ctx context.Context, generat
 		CheckpointRuntimeConfigDigest:   generationplan.OptionalProjectionPayloadDigest(store.GenerationPlanProjectionRuntimeConfig, details.CheckpointRuntimeConfigDigest),
 		CheckpointControlManifestDigest: generationplan.OptionalProjectionPayloadDigest(store.GenerationPlanProjectionControlManifestProjected, details.CheckpointControlManifestDigest),
 		CheckpointDriverStatesDigest:    details.CheckpointDriverStatesDigest,
+		CheckpointPlanDigest:            details.CheckpointPlanDigest,
 	})
 }
 
@@ -3269,6 +3270,14 @@ func (s *Server) checkpointGeneration(ctx context.Context, candidate store.Check
 		}
 		return err
 	}
+	plan, err := s.store.GetGenerationPlan(ctx, candidate.GenerationID)
+	if err != nil {
+		abortNow := time.Now().UTC()
+		if abortErr := s.store.AbortGenerationCheckpoint(ctx, candidate.SessionID, candidate.GenerationID, owner, abortNow); abortErr != nil {
+			s.log.Warn("failed to abort generation checkpoint after plan load failure", "session_id", candidate.SessionID, "generation_id", candidate.GenerationID, "error", abortErr)
+		}
+		return err
+	}
 	checkpointCtx, cancel := context.WithTimeout(ctx, checkpointTimeout)
 	defer cancel()
 	err = s.runtime.Checkpoint(checkpointCtx, runtime.CheckpointRequest{
@@ -3299,6 +3308,7 @@ func (s *Server) checkpointGeneration(ctx context.Context, candidate store.Check
 		CheckpointBundleDigest:          details.BundleDigest,
 		CheckpointRuntimeConfigDigest:   details.RuntimeConfigDigest,
 		CheckpointControlManifestDigest: details.ProjectedControlManifestDigest,
+		CheckpointPlanDigest:            plan.PlanDigest,
 		Now:                             completeNow,
 	}); err != nil {
 		return err

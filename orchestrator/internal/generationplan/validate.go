@@ -28,6 +28,7 @@ type VerifyFrozenEvidenceParams struct {
 	CheckpointRuntimeConfigDigest   string
 	CheckpointControlManifestDigest string
 	CheckpointDriverStatesDigest    string
+	CheckpointPlanDigest            string
 }
 
 func Validate(p ValidateParams) error {
@@ -149,6 +150,16 @@ func VerifyFrozenEvidence(p VerifyFrozenEvidenceParams) error {
 		return fmt.Errorf("generation plan checkpoint control manifest digest mismatch")
 	}
 	if checkpointEvidencePresent(p) {
+		if !isSha256(p.CheckpointPlanDigest) {
+			return fmt.Errorf("generation plan checkpoint plan digest is required")
+		}
+		canonical, err := store.CanonicalGenerationPlanPayload(p.Payload)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(p.CheckpointPlanDigest) != store.GenerationPlanDigest(canonical) {
+			return fmt.Errorf("generation plan checkpoint plan digest mismatch")
+		}
 		if !isSha256(p.CheckpointDriverStatesDigest) {
 			return fmt.Errorf("generation plan checkpoint driver-state digest is required")
 		}
