@@ -132,6 +132,18 @@ func TestBuildSandboxMountPlanRejectsContentSnapshotMountDestinationDrift(t *tes
 			},
 			want: "content snapshot managed_settings mount destination must be /harness-managed-settings",
 		},
+		{
+			name: "skills whitespace",
+			snapshot: store.ContentSnapshotRecord{
+				Kind:                 store.ContentSnapshotKindSkills,
+				Digest:               "sha256:skills",
+				ImmutableHostPath:    filepath.Join(dir, "content", "skills", "sha256-skills"),
+				MountDestination:     store.ContentSnapshotSkillsMount + " ",
+				SourceEvidenceDigest: "sha256:skills-source",
+				RetentionClass:       "generation_plan",
+			},
+			want: "content snapshot skills mount destination must be /harness-skills",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := BuildSandboxMountPlan(SandboxMountPlanInputs{
@@ -216,6 +228,30 @@ func TestMountPlanRejectsForbiddenAndRecursiveBinds(t *testing.T) {
 				Options:     []string{"nosuid", "nodev"},
 			}}},
 			error: "allow-list",
+		},
+		{
+			name: "destination whitespace",
+			plan: MountPlan{Content: []MountPlanMount{{
+				Name:        "workspace",
+				Destination: "/workspace ",
+				Type:        "bind",
+				Source:      filepath.Join(dir, "sessions", "sess-1"),
+				Mode:        "rw",
+				Options:     []string{"bind", "rw"},
+			}}},
+			error: "canonical absolute",
+		},
+		{
+			name: "source whitespace",
+			plan: MountPlan{Content: []MountPlanMount{{
+				Name:        "workspace",
+				Destination: "/workspace",
+				Type:        "bind",
+				Source:      filepath.Join(dir, "sessions", "sess-1") + " ",
+				Mode:        "rw",
+				Options:     []string{"bind", "rw"},
+			}}},
+			error: "canonical absolute",
 		},
 		{
 			name: "duplicate destination",

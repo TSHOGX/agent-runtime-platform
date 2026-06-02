@@ -124,7 +124,7 @@ func contentSnapshotMountSurface(snapshot store.ContentSnapshotRecord) (string, 
 	default:
 		return "", "", fmt.Errorf("unsupported content snapshot kind %q for sandbox mount plan", snapshot.Kind)
 	}
-	if strings.TrimSpace(snapshot.MountDestination) != destination {
+	if snapshot.MountDestination != destination {
 		return "", "", fmt.Errorf("content snapshot %s mount destination must be %s", kind, destination)
 	}
 	return mountName, destination, nil
@@ -174,7 +174,9 @@ func validateMountPlanMount(mount MountPlanMount, seenDestinations map[string]st
 	if strings.TrimSpace(mount.Name) == "" {
 		return fmt.Errorf("mount plan mount name is required")
 	}
-	if !filepath.IsAbs(mount.Destination) || filepath.Clean(mount.Destination) != mount.Destination {
+	if strings.TrimSpace(mount.Destination) != mount.Destination ||
+		!filepath.IsAbs(mount.Destination) ||
+		filepath.Clean(mount.Destination) != mount.Destination {
 		return fmt.Errorf("mount plan destination %q must be canonical absolute path", mount.Destination)
 	}
 	if forbiddenMountPlanDestination(mount.Destination) {
@@ -186,7 +188,10 @@ func validateMountPlanMount(mount MountPlanMount, seenDestinations map[string]st
 	seenDestinations[mount.Destination] = mount.Name
 	switch mount.Type {
 	case "bind":
-		if strings.TrimSpace(mount.Source) == "" || !filepath.IsAbs(mount.Source) || filepath.Clean(mount.Source) != mount.Source {
+		if strings.TrimSpace(mount.Source) != mount.Source ||
+			mount.Source == "" ||
+			!filepath.IsAbs(mount.Source) ||
+			filepath.Clean(mount.Source) != mount.Source {
 			return fmt.Errorf("mount plan bind source for %s must be canonical absolute path", mount.Name)
 		}
 		if mount.Source == string(filepath.Separator) {
