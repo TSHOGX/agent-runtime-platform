@@ -622,6 +622,25 @@ WHERE generation_id = ?
 	if checkpointPlanDigest != plan.PlanDigest {
 		return GenerationAllocation{}, fmt.Errorf("%w: checkpoint plan digest mismatch", ErrStaleCheckpointRestore)
 	}
+	var checkpointBundleDigest, checkpointRuntimeConfigDigest, checkpointControlManifestDigest string
+	if err := tx.QueryRowContext(ctx, `
+SELECT COALESCE(checkpoint_bundle_digest, ''),
+       COALESCE(checkpoint_runtime_config_digest, ''),
+       COALESCE(checkpoint_control_manifest_digest, '')
+FROM runtime_generations
+WHERE generation_id = ?
+  AND session_id = ?`, p.GenerationID, p.SessionID).Scan(
+		&checkpointBundleDigest, &checkpointRuntimeConfigDigest, &checkpointControlManifestDigest,
+	); err != nil {
+		return GenerationAllocation{}, err
+	}
+	if err := verifyCheckpointProjectionDigestChecksTx(ctx, tx, p.GenerationID, checkpointPlanDigest, checkpointProjectionDigestChecks(
+		checkpointBundleDigest,
+		checkpointRuntimeConfigDigest,
+		checkpointControlManifestDigest,
+	)); err != nil {
+		return GenerationAllocation{}, fmt.Errorf("%w: %w", ErrStaleCheckpointRestore, err)
+	}
 
 	expiresAt := p.Now.Add(p.LeaseTTL)
 	res, err := tx.ExecContext(ctx, `
@@ -2080,21 +2099,37 @@ WHERE id = ?
 	return tx.Commit()
 }
 
-func verifyCheckpointProjectionDigestsTx(ctx context.Context, tx *sql.Tx, p CompleteCheckpointParams) error {
-	checks := []struct {
-		kind   string
-		digest string
-	}{
-		{kind: GenerationPlanProjectionBundle, digest: p.CheckpointBundleDigest},
-		{kind: GenerationPlanProjectionRuntimeConfig, digest: p.CheckpointRuntimeConfigDigest},
-		{kind: GenerationPlanProjectionControlManifestProjected, digest: p.CheckpointControlManifestDigest},
+type checkpointProjectionDigestCheck struct {
+	kind   string
+	digest string
+}
+
+func checkpointProjectionDigestChecks(bundleDigest, runtimeConfigDigest, controlManifestDigest string) []checkpointProjectionDigestCheck {
+	return []checkpointProjectionDigestCheck{
+		{kind: GenerationPlanProjectionBundle, digest: bundleDigest},
+		{kind: GenerationPlanProjectionRuntimeConfig, digest: runtimeConfigDigest},
+		{kind: GenerationPlanProjectionControlManifestProjected, digest: controlManifestDigest},
 	}
+}
+
+func verifyCheckpointProjectionDigestsTx(ctx context.Context, tx *sql.Tx, p CompleteCheckpointParams) error {
+	return verifyCheckpointProjectionDigestChecksTx(ctx, tx, p.GenerationID, p.CheckpointPlanDigest, checkpointProjectionDigestChecks(
+		p.CheckpointBundleDigest,
+		p.CheckpointRuntimeConfigDigest,
+		p.CheckpointControlManifestDigest,
+	))
+}
+
+func verifyCheckpointProjectionDigestChecksTx(ctx context.Context, tx *sql.Tx, generationID, planDigest string, checks []checkpointProjectionDigestCheck) error {
 	for _, check := range checks {
-		projection, err := getGenerationPlanProjectionTx(ctx, tx, p.GenerationID, check.kind)
+		if strings.TrimSpace(check.digest) == "" {
+			return fmt.Errorf("checkpoint projection %s digest is missing", check.kind)
+		}
+		projection, err := getGenerationPlanProjectionTx(ctx, tx, generationID, check.kind)
 		if err != nil {
 			return fmt.Errorf("checkpoint projection %s: %w", check.kind, err)
 		}
-		if projection.PlanDigest != strings.TrimSpace(p.CheckpointPlanDigest) {
+		if projection.PlanDigest != strings.TrimSpace(planDigest) {
 			return fmt.Errorf("checkpoint projection %s plan digest mismatch", check.kind)
 		}
 		expected := generationPlanProjectionPayloadDigest(check.kind, check.digest)

@@ -884,7 +884,7 @@ func TestClaimCheckpointedGenerationForRestoreMovesReservedResources(t *testing.
 	}
 	if err := st.RecordGenerationRuntimeArtifactDigests(ctx, allocation.GenerationID, GenerationRuntimeArtifactDigests{
 		ControlManifestDigest:          "manifest_digest",
-		ProjectedControlManifestDigest: "manifest_digest",
+		ProjectedControlManifestDigest: "projected_manifest_digest",
 		BundleDigest:                   "bundle_digest",
 		RuntimeConfigDigest:            "runtime_config_digest",
 		SpecDigest:                     "spec_digest",
@@ -953,7 +953,7 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ge
 		details.CheckpointRunscBinaryDigest != "sha256:runsc-test" ||
 		details.CheckpointBundleDigest != "bundle_digest" ||
 		details.CheckpointRuntimeConfigDigest != "runtime_config_digest" ||
-		details.CheckpointControlManifestDigest != "manifest_digest" ||
+		details.CheckpointControlManifestDigest != "projected_manifest_digest" ||
 		details.CheckpointPlanDigest != plan.PlanDigest {
 		t.Fatalf("checkpoint metadata not loaded into restore details: %+v", details)
 	}
@@ -993,7 +993,7 @@ func TestClaimCheckpointedGenerationForRestoreRejectsPlanDigestMismatch(t *testi
 	}
 	if err := st.RecordGenerationRuntimeArtifactDigests(ctx, allocation.GenerationID, GenerationRuntimeArtifactDigests{
 		ControlManifestDigest:          "manifest_digest",
-		ProjectedControlManifestDigest: "manifest_digest",
+		ProjectedControlManifestDigest: "projected_manifest_digest",
 		BundleDigest:                   "bundle_digest",
 		RuntimeConfigDigest:            "runtime_config_digest",
 		SpecDigest:                     "spec_digest",
@@ -1024,6 +1024,47 @@ WHERE generation_id = ?`, allocation.GenerationID); err != nil {
 	})
 	if !errors.Is(err, ErrStaleCheckpointRestore) || !strings.Contains(err.Error(), "checkpoint plan digest mismatch") {
 		t.Fatalf("expected checkpoint plan digest stale restore error, got %v", err)
+	}
+}
+
+func TestClaimCheckpointedGenerationForRestoreRejectsProjectionDigestMismatch(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	cfg := testAllocatorConfig(t)
+	now := time.Now().UTC()
+	leaseOwner := GenerationLeaseOwner(owner.UUID)
+	allocation := createAutoCheckpointGeneration(t, ctx, st, cfg, "sess_restore_projection_mismatch", leaseOwner, now)
+	checkpointedGeneration(t, ctx, st, "sess_restore_projection_mismatch", allocation.GenerationID, now.Add(2*time.Second))
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_generations
+SET checkpoint_bundle_digest = 'changed_bundle_digest'
+WHERE generation_id = ?`, allocation.GenerationID); err != nil {
+		t.Fatalf("corrupt checkpoint bundle digest: %v", err)
+	}
+
+	_, err := st.ClaimCheckpointedGenerationForRestore(ctx, ClaimCheckpointedGenerationParams{
+		SessionID:    "sess_restore_projection_mismatch",
+		GenerationID: allocation.GenerationID,
+		Owner:        leaseOwner,
+		LeaseTTL:     2 * time.Minute,
+		Now:          now.Add(3 * time.Second),
+	})
+	if !errors.Is(err, ErrStaleCheckpointRestore) || !strings.Contains(err.Error(), "checkpoint projection bundle digest mismatch") {
+		t.Fatalf("expected checkpoint projection stale restore error, got %v", err)
+	}
+
+	var generationStatus, leaseOwnerAfter, networkState, resourceState string
+	if err := st.db.QueryRowContext(ctx, `
+SELECT g.status, COALESCE(g.lease_owner, ''), n.allocation_state, r.resource_state
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &leaseOwnerAfter, &networkState, &resourceState); err != nil {
+		t.Fatalf("query rejected restore state: %v", err)
+	}
+	if generationStatus != "checkpointed" || leaseOwnerAfter != "" || networkState != "reserved_checkpointed" || resourceState != "reserved_checkpointed" {
+		t.Fatalf("restore projection mismatch mutated state: generation=%s owner=%q network=%s resource=%s",
+			generationStatus, leaseOwnerAfter, networkState, resourceState)
 	}
 }
 
@@ -3165,11 +3206,7 @@ SET status = 'checkpointed',
     ),
     checkpoint_bundle_digest = 'bundle_digest',
     checkpoint_runtime_config_digest = 'runtime_config_digest',
-    checkpoint_control_manifest_digest = (
-      SELECT control_manifest_digest
-      FROM runtime_generation_resources
-      WHERE runtime_generation_resources.generation_id = runtime_generations.generation_id
-    ),
+    checkpoint_control_manifest_digest = 'projected_manifest_digest',
     checkpoint_driver_states_digest = ?,
     checkpoint_plan_digest = ?,
     lease_owner = NULL,
