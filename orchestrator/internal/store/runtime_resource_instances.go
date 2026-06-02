@@ -673,7 +673,47 @@ func verifyRuntimeResourceIdentityPayload(instance RuntimeResourceInstance) (run
 	if err := json.Unmarshal(instance.ResourceIdentityPayload, &payload); err != nil {
 		return runtimeResourceIdentityPayload{}, err
 	}
+	if err := validateRuntimeResourceIdentityPayloadPaths(payload); err != nil {
+		return runtimeResourceIdentityPayload{}, err
+	}
 	return payload, nil
+}
+
+func validateRuntimeResourceIdentityPayloadPaths(payload runtimeResourceIdentityPayload) error {
+	requiredPaths := []struct {
+		label string
+		path  string
+	}{
+		{"runsc binary path", payload.RunscBinaryPath},
+		{"netns path", payload.NetnsPath},
+		{"control dir path", payload.ControlDirPath},
+		{"control manifest path", payload.ControlManifestPath},
+		{"bundle dir path", payload.BundleDirPath},
+		{"spec path", payload.SpecPath},
+		{"bridge dir path", payload.BridgeDirPath},
+		{"log dir path", payload.LogDirPath},
+	}
+	for _, field := range requiredPaths {
+		if !runtimeResourceInstancePathIsCanonical(field.path) {
+			return fmt.Errorf("runtime resource identity %s must be canonical absolute", field.label)
+		}
+	}
+	optionalPaths := []struct {
+		label string
+		path  string
+	}{
+		{"checkpoint path", payload.CheckpointPath},
+		{"network hosts path", payload.NetworkHostsPath},
+	}
+	for _, field := range optionalPaths {
+		if field.path == "" {
+			continue
+		}
+		if !runtimeResourceInstancePathIsCanonical(field.path) {
+			return fmt.Errorf("runtime resource identity %s must be canonical absolute", field.label)
+		}
+	}
+	return nil
 }
 
 func verifyRuntimeResourceIdentity(instance RuntimeResourceInstance) error {
