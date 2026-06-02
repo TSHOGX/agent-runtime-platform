@@ -1432,8 +1432,33 @@ func (s *Server) runtimeStartRequest(session store.Session, generationID string,
 	}
 }
 
-func (s *Server) generationContentSnapshots(context.Context, store.Session, store.RuntimeGenerationDetails) ([]store.ContentSnapshotRecord, error) {
+func (s *Server) generationContentSnapshots(_ context.Context, session store.Session, details store.RuntimeGenerationDetails) ([]store.ContentSnapshotRecord, error) {
+	driverID, err := agents.CanonicalDriverID(details.DriverID)
+	if err != nil {
+		return nil, err
+	}
+	mode := strings.TrimSpace(session.Mode)
+	if mode == "" {
+		return nil, fmt.Errorf("session mode is required")
+	}
+	deployment, capabilityErr := s.resolveDriverDeployment(mode, driverID)
+	if capabilityErr != nil {
+		return nil, capabilityErr
+	}
+	policy := agents.DefaultFeaturePolicyForDriver(deployment.DriverSpec)
+	if feature, ok := requiredContentSnapshotFeatureWithoutSelection(policy); ok {
+		return nil, fmt.Errorf("content snapshot selection for required feature %s is not configured", feature)
+	}
 	return nil, nil
+}
+
+func requiredContentSnapshotFeatureWithoutSelection(policy agents.FeaturePolicy) (agents.FeatureID, bool) {
+	for _, feature := range []agents.FeatureID{agents.FeatureSkillsSnapshot, agents.FeatureManagedSettings} {
+		if policy[feature] == agents.FeaturePolicyRequired {
+			return feature, true
+		}
+	}
+	return "", false
 }
 
 func (s *Server) generationContentSnapshotsForStart(ctx context.Context, session store.Session, details store.RuntimeGenerationDetails, isNew bool) ([]store.ContentSnapshotRecord, error) {

@@ -3393,6 +3393,29 @@ func TestServerRenderersThreadContentSnapshots(t *testing.T) {
 	}
 }
 
+func TestRequiredContentSnapshotFeatureWithoutSelectionFailsClosed(t *testing.T) {
+	policy := agents.FeaturePolicy{
+		agents.FeatureSkillsSnapshot:  agents.FeaturePolicyRequired,
+		agents.FeatureManagedSettings: agents.FeaturePolicyDisabled,
+	}
+	feature, required := requiredContentSnapshotFeatureWithoutSelection(policy)
+	if !required || feature != agents.FeatureSkillsSnapshot {
+		t.Fatalf("required snapshot feature = %s/%v", feature, required)
+	}
+
+	policy[agents.FeatureSkillsSnapshot] = agents.FeaturePolicyDisabled
+	policy[agents.FeatureManagedSettings] = agents.FeaturePolicyRequired
+	feature, required = requiredContentSnapshotFeatureWithoutSelection(policy)
+	if !required || feature != agents.FeatureManagedSettings {
+		t.Fatalf("required managed settings feature = %s/%v", feature, required)
+	}
+
+	policy[agents.FeatureManagedSettings] = agents.FeaturePolicyUnsupported
+	if feature, required := requiredContentSnapshotFeatureWithoutSelection(policy); required || feature != "" {
+		t.Fatalf("unexpected required snapshot feature = %s/%v", feature, required)
+	}
+}
+
 func TestStartEnsuredGenerationLeavesBridgeClaimsUntilLivePoll(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
