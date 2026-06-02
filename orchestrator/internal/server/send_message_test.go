@@ -346,3 +346,105 @@ WHERE session_id = ?
 		t.Fatalf("replacement start did not use driver home volume: start=%+v home=%+v", startRequests[0], driverHome)
 	}
 }
+
+func TestSendMessageRestoresCheckpointedGeneration(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_restore", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
+	cfg := testServerConfig(dir)
+	leaseOwner := store.GenerationLeaseOwner(owner.UUID)
+	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     leaseOwner,
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    serverTestAllocatorConfig(cfg, "claude_code"),
+	})
+	if err != nil {
+		t.Fatalf("allocate checkpointed generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, session.ID, allocation.GenerationID, allocation.Owner, time.Now().UTC()); err != nil {
+		t.Fatalf("mark checkpointed generation live: %v", err)
+	}
+	recordServerRuntimeArtifacts(t, ctx, st, allocation.GenerationID, "restore_manifest_digest", "runsc restore-test")
+	snapshot := addServerGenerationPlanSkillsSnapshot(t, ctx, st, allocation.GenerationID)
+	markServerGenerationCheckpointed(t, ctx, st, session.ID, allocation.GenerationID, time.Now().UTC())
+	mutateServerRuntimeArtifactDigestMirrors(t, ctx, st, allocation.GenerationID)
+
+	rt := &recordingRuntime{}
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: rt,
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(`{"content":"after restore"}`))
+	rec := httptest.NewRecorder()
+	srv.sendMessage(rec, req, session.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status 202, got %d body %s", rec.Code, rec.Body.String())
+	}
+
+	gotSession, err := st.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("get restored session: %v", err)
+	}
+	if gotSession.ActiveGenerationID != allocation.GenerationID || gotSession.Status != string(sessionstate.RunningActive) {
+		t.Fatalf("unexpected restored session: %+v allocation=%+v", gotSession, allocation)
+	}
+	var generationStatus, networkState, resourceState string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT g.status, n.allocation_state, r.resource_state
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &networkState, &resourceState); err != nil {
+		t.Fatalf("query restored generation: %v", err)
+	}
+	if generationStatus != "idle" || networkState != "live" || resourceState != "live" {
+		t.Fatalf("restored generation not live idle: status=%s network=%s resources=%s", generationStatus, networkState, resourceState)
+	}
+	var queuedTurns int
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM turns
+WHERE session_id = ?
+  AND status = 'queued'
+  AND generation_id IS NULL
+  AND content = 'after restore'`, session.ID).Scan(&queuedTurns); err != nil {
+		t.Fatalf("count restored queued turns: %v", err)
+	}
+	if queuedTurns != 1 {
+		t.Fatalf("queued restored turn count=%d want 1", queuedTurns)
+	}
+	prepareRequests, startRequests := rt.requests()
+	if len(prepareRequests) != 0 || len(startRequests) != 1 {
+		t.Fatalf("restore should skip prepare and start once: prepare=%d start=%d", len(prepareRequests), len(startRequests))
+	}
+	start := startRequests[0]
+	if start.GenerationID != allocation.GenerationID ||
+		!start.RestoreFromCheckpoint ||
+		start.PreparedArtifacts.ManifestDigest != "restore_manifest_digest" ||
+		start.PreparedArtifacts.ProjectedManifestDigest != "restore_manifest_digest" ||
+		start.PreparedArtifacts.BundleDigest != "bundle_digest" ||
+		start.PreparedArtifacts.RuntimeConfigDigest != "runtime_config_digest" ||
+		start.PreparedArtifacts.SpecDigest != "spec_digest" ||
+		start.PreparedArtifacts.RunscVersion != "runsc restore-test" ||
+		start.PreparedArtifacts.RunscBinaryPath != "/usr/local/bin/runsc-test" ||
+		start.PreparedArtifacts.RunscBinaryDigest != "sha256:runsc-test" ||
+		start.Generation.NetworkAllocationState != "recreating" {
+		t.Fatalf("unexpected restore start request: %+v", start)
+	}
+	if len(start.ContentSnapshots) != 1 ||
+		start.ContentSnapshots[0].Kind != store.ContentSnapshotKindSkills ||
+		start.ContentSnapshots[0].Digest != snapshot.Digest ||
+		start.ContentSnapshots[0].ImmutableHostPath != snapshot.ImmutableHostPath ||
+		start.ContentSnapshots[0].MountDestination != store.ContentSnapshotSkillsMount {
+		t.Fatalf("restore start content snapshots = %+v want %+v", start.ContentSnapshots, snapshot)
+	}
+}
