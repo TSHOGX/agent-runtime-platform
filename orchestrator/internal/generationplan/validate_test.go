@@ -429,6 +429,18 @@ func TestVerifyFrozenEvidenceChecksRunscAndProjections(t *testing.T) {
 	}
 
 	mismatch = params
+	mismatch.DriverStateDigest = "sha256:changed"
+	if err := VerifyFrozenEvidence(mismatch); err == nil || !strings.Contains(err.Error(), "driver.initial_state_digest mismatch") {
+		t.Fatalf("expected driver-state digest mismatch, got %v", err)
+	}
+
+	mismatch = params
+	mismatch.DriverStateVersion = 2
+	if err := VerifyFrozenEvidence(mismatch); err == nil || !strings.Contains(err.Error(), "driver.initial_state_version mismatch") {
+		t.Fatalf("expected driver-state version mismatch, got %v", err)
+	}
+
+	mismatch = params
 	mismatch.NetworkProfileID = "net_changed"
 	if err := VerifyFrozenEvidence(mismatch); err == nil || !strings.Contains(err.Error(), "network.network_profile_id mismatch") {
 		t.Fatalf("expected network profile mismatch, got %v", err)
@@ -773,6 +785,8 @@ func validFrozenEvidenceParams(payload map[string]any) VerifyFrozenEvidenceParam
 		GenerationID:          "gen_plan",
 		DriverID:              "claude_code",
 		OutputFormat:          "stream-json",
+		DriverStateDigest:     "sha256:driver-state",
+		DriverStateVersion:    1,
 		NetworkProfileID:      "net_gen_plan",
 		AgentRuntimeProfileID: "arp_gen_plan",
 		RunscPlatform:         "systrap",

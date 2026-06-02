@@ -880,7 +880,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			return err
 		}
 	}
-	if err := s.verifyGenerationPlanFrozenEvidence(ctx, allocation.GenerationID, generationDetails, preparedArtifacts); err != nil {
+	if err := s.verifyGenerationPlanFrozenEvidenceForLaunch(ctx, allocation.GenerationID, generationDetails, preparedArtifacts, ensured.IsNew); err != nil {
 		retireRuntimeResource()
 		s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 		return err
@@ -1760,6 +1760,10 @@ func generationPlanProjectionExpectationsForDetails(details store.RuntimeGenerat
 }
 
 func (s *Server) verifyGenerationPlanFrozenEvidence(ctx context.Context, generationID string, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts) error {
+	return s.verifyGenerationPlanFrozenEvidenceForLaunch(ctx, generationID, details, artifacts, false)
+}
+
+func (s *Server) verifyGenerationPlanFrozenEvidenceForLaunch(ctx context.Context, generationID string, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, verifyBootstrapDriverState bool) error {
 	plan, err := s.store.RequireGenerationPlanForLaunch(ctx, strings.TrimSpace(generationID))
 	if err != nil {
 		return err
@@ -1776,7 +1780,7 @@ func (s *Server) verifyGenerationPlanFrozenEvidence(ctx context.Context, generat
 		return err
 	}
 	runscVersion, runscBinaryPath, runscBinaryDigest := generationPlanRunscEvidence(details, artifacts)
-	return generationplan.VerifyFrozenEvidence(generationplan.VerifyFrozenEvidenceParams{
+	params := generationplan.VerifyFrozenEvidenceParams{
 		Payload:                         plan.CanonicalPayload,
 		SessionID:                       details.SessionID,
 		GenerationID:                    details.GenerationID,
@@ -1796,7 +1800,12 @@ func (s *Server) verifyGenerationPlanFrozenEvidence(ctx context.Context, generat
 		CheckpointControlManifestDigest: generationplan.OptionalProjectionPayloadDigest(store.GenerationPlanProjectionControlManifestProjected, details.CheckpointControlManifestDigest),
 		CheckpointDriverStatesDigest:    details.CheckpointDriverStatesDigest,
 		CheckpointPlanDigest:            details.CheckpointPlanDigest,
-	})
+	}
+	if verifyBootstrapDriverState {
+		params.DriverStateDigest = details.DriverStateDigest
+		params.DriverStateVersion = details.DriverStateVersion
+	}
+	return generationplan.VerifyFrozenEvidence(params)
 }
 
 func generationPlanRunscEvidence(details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts) (string, string, string) {

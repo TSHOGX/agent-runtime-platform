@@ -21,6 +21,8 @@ type VerifyFrozenEvidenceParams struct {
 	GenerationID                    string
 	DriverID                        string
 	OutputFormat                    string
+	DriverStateDigest               string
+	DriverStateVersion              int
 	NetworkProfileID                string
 	AgentRuntimeProfileID           string
 	RunscPlatform                   string
@@ -215,6 +217,7 @@ func verifyFrozenIdentityEvidence(object map[string]any, p VerifyFrozenEvidenceP
 		{"identity.generation_id", stringField(identity, "generation_id"), p.GenerationID},
 		{"driver.driver_id", stringField(driver, "driver_id"), p.DriverID},
 		{"driver.output_format", stringField(driver, "output_format"), p.OutputFormat},
+		{"driver.initial_state_digest", stringField(driver, "initial_state_digest"), p.DriverStateDigest},
 		{"runtime_provider.agent_runtime_profile_id", stringField(provider, "agent_runtime_profile_id"), p.AgentRuntimeProfileID},
 		{"network.network_profile_id", stringField(network, "network_profile_id"), p.NetworkProfileID},
 	}
@@ -226,6 +229,9 @@ func verifyFrozenIdentityEvidence(object map[string]any, p VerifyFrozenEvidenceP
 		if strings.TrimSpace(check.got) != want {
 			return fmt.Errorf("generation plan %s mismatch", check.label)
 		}
+	}
+	if p.DriverStateVersion > 0 && numberField(driver, "initial_state_version") != int64(p.DriverStateVersion) {
+		return fmt.Errorf("generation plan driver.initial_state_version mismatch")
 	}
 	return nil
 }
