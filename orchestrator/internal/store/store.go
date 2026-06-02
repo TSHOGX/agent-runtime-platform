@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -484,6 +485,12 @@ FROM messages WHERE session_id = ? ORDER BY id ASC`, sessionID)
 }
 
 func (s *Store) UpsertArtifact(ctx context.Context, artifact Artifact) error {
+	if strings.TrimSpace(artifact.SessionID) == "" {
+		return fmt.Errorf("artifact session id is required")
+	}
+	if err := validateArtifactPath(artifact.Path); err != nil {
+		return err
+	}
 	now := time.Now().UTC()
 	if artifact.CreatedAt.IsZero() {
 		artifact.CreatedAt = now
@@ -520,6 +527,9 @@ FROM artifacts WHERE session_id = ? ORDER BY path`, sessionID)
 		if err := rows.Scan(&artifact.SessionID, &artifact.Path, &artifact.Size, &modTime, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
+		if err := validateArtifactPath(artifact.Path); err != nil {
+			return nil, fmt.Errorf("stored artifact path is invalid")
+		}
 		artifact.ModTime = parseTime(modTime)
 		artifact.CreatedAt = parseTime(createdAt)
 		artifact.UpdatedAt = parseTime(updatedAt)
@@ -529,6 +539,12 @@ FROM artifacts WHERE session_id = ? ORDER BY path`, sessionID)
 }
 
 func (s *Store) DeleteArtifactPath(ctx context.Context, sessionID, artifactPath string) error {
+	if strings.TrimSpace(sessionID) == "" {
+		return fmt.Errorf("artifact session id is required")
+	}
+	if err := validateArtifactPath(artifactPath); err != nil {
+		return err
+	}
 	_, err := s.db.ExecContext(ctx, `
 DELETE FROM artifacts
 WHERE session_id = ?
@@ -536,6 +552,21 @@ WHERE session_id = ?
 		sessionID, artifactPath, escapeLike(artifactPath)+"/%",
 	)
 	return err
+}
+
+func validateArtifactPath(artifactPath string) error {
+	if artifactPath == "" || strings.Contains(artifactPath, `\`) {
+		return fmt.Errorf("artifact path is invalid")
+	}
+	if strings.HasPrefix(artifactPath, "/") || pathpkg.Clean(artifactPath) != artifactPath {
+		return fmt.Errorf("artifact path is invalid")
+	}
+	for _, segment := range strings.Split(artifactPath, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return fmt.Errorf("artifact path is invalid")
+		}
+	}
+	return nil
 }
 
 type scanner interface {

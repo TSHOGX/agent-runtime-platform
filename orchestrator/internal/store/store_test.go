@@ -620,3 +620,98 @@ func TestDeleteArtifactPathDeletesFileAndDescendants(t *testing.T) {
 		t.Fatalf("unexpected artifacts after file delete: %+v", got)
 	}
 }
+
+func TestArtifactPathsRejectNonWorkspaceMetadata(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	ctx := context.Background()
+	st, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	now := time.Now().UTC()
+	session := Session{
+		ID:        "sess_artifact_paths",
+		UserID:    "lab",
+		Status:    string(sessionstate.Created),
+		DriverID:  "claude_code",
+		Mode:      "agent",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := st.CreateSession(ctx, session); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	invalidPaths := []string{
+		"",
+		".",
+		"../secret.txt",
+		"dir/../../secret.txt",
+		"/harness-skills/README.md",
+		"dir\\secret.txt",
+		"dir//secret.txt",
+		"dir/./secret.txt",
+	}
+	for _, artifactPath := range invalidPaths {
+		if err := st.UpsertArtifact(ctx, Artifact{
+			SessionID: session.ID,
+			Path:      artifactPath,
+			Size:      int64(len(artifactPath)),
+			ModTime:   now,
+		}); err == nil {
+			t.Fatalf("expected upsert to reject artifact path %q", artifactPath)
+		}
+		if err := st.DeleteArtifactPath(ctx, session.ID, artifactPath); err == nil {
+			t.Fatalf("expected delete to reject artifact path %q", artifactPath)
+		}
+	}
+
+	if err := st.UpsertArtifact(ctx, Artifact{
+		SessionID: session.ID,
+		Path:      "reports/final summary.txt",
+		Size:      12,
+		ModTime:   now,
+	}); err != nil {
+		t.Fatalf("valid artifact path should insert: %v", err)
+	}
+}
+
+func TestListArtifactsRejectsCorruptStoredPath(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	ctx := context.Background()
+	st, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	now := time.Now().UTC()
+	session := Session{
+		ID:        "sess_corrupt_artifact",
+		UserID:    "lab",
+		Status:    string(sessionstate.Created),
+		DriverID:  "claude_code",
+		Mode:      "agent",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := st.CreateSession(ctx, session); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+INSERT INTO artifacts (session_id, path, size, mod_time, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?)`,
+		session.ID, "/harness-skills/README.md", 12, formatTime(now), formatTime(now), formatTime(now)); err != nil {
+		t.Fatalf("insert corrupt artifact: %v", err)
+	}
+	if _, err := st.ListArtifacts(ctx, session.ID); err == nil ||
+		!strings.Contains(err.Error(), "stored artifact path is invalid") {
+		t.Fatalf("expected corrupt artifact path error, got %v", err)
+	}
+}
