@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,14 +10,12 @@ import (
 	"sync"
 	"time"
 
-	"harness-platform/orchestrator/internal/agents"
 	"harness-platform/orchestrator/internal/artifacts"
 	"harness-platform/orchestrator/internal/bridge"
 	"harness-platform/orchestrator/internal/config"
 	"harness-platform/orchestrator/internal/events"
 	"harness-platform/orchestrator/internal/planprojection"
 	"harness-platform/orchestrator/internal/runtime"
-	"harness-platform/orchestrator/internal/sessionstate"
 	"harness-platform/orchestrator/internal/store"
 )
 
@@ -806,34 +803,4 @@ func (s *Server) runtimeGenerationDetails(ctx context.Context, sessionID, genera
 		return store.RuntimeGenerationDetails{}, err
 	}
 	return details, nil
-}
-
-func (s *Server) interruptSession(w http.ResponseWriter, r *http.Request, sessionID string) {
-	session, err := s.store.GetSession(r.Context(), sessionID)
-	if errors.Is(err, sql.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if session.Status != string(sessionstate.RunningActive) {
-		writeError(w, http.StatusConflict, "session is not running")
-		return
-	}
-	interruptRequired, err := s.generationPlanFeatureRequired(r.Context(), session.ActiveGenerationID, agents.FeatureInterrupt)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if !interruptRequired {
-		writeError(w, http.StatusConflict, "interrupt is not supported for this session")
-		return
-	}
-	if err := s.runtime.Interrupt(sessionID); err != nil {
-		writeError(w, http.StatusConflict, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "interrupting"})
 }
