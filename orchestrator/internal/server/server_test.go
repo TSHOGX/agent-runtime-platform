@@ -3372,6 +3372,13 @@ VALUES (?, ?, 'allocating', 'owner', ?)`, "gen_frozen_evidence", session.ID, tim
 		!strings.Contains(err.Error(), "runsc pin mismatch") {
 		t.Fatalf("expected runsc mismatch, got %v", err)
 	}
+	details = serverGenerationPlanFrozenEvidenceDetails()
+	details.CheckpointDriverStatesDigest = ""
+	artifacts = serverGenerationPlanFrozenEvidenceArtifacts()
+	if err := srv.verifyGenerationPlanFrozenEvidence(ctx, "gen_frozen_evidence", details, artifacts); err == nil ||
+		!strings.Contains(err.Error(), "checkpoint driver-state digest is required") {
+		t.Fatalf("expected checkpoint driver-state fence error, got %v", err)
+	}
 }
 
 func TestVerifyGenerationPlanFrozenEvidenceChecksContentSnapshots(t *testing.T) {
@@ -5995,6 +6002,7 @@ func serverGenerationPlanFrozenEvidenceDetails() store.RuntimeGenerationDetails 
 		CheckpointBundleDigest:          "sha256:bundle",
 		CheckpointRuntimeConfigDigest:   "sha256:runtime-config",
 		CheckpointControlManifestDigest: "sha256:control-manifest-projected",
+		CheckpointDriverStatesDigest:    "sha256:driver-state-fence",
 	}
 }
 

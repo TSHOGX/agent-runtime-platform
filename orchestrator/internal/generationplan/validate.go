@@ -27,6 +27,7 @@ type VerifyFrozenEvidenceParams struct {
 	CheckpointBundleDigest          string
 	CheckpointRuntimeConfigDigest   string
 	CheckpointControlManifestDigest string
+	CheckpointDriverStatesDigest    string
 }
 
 func Validate(p ValidateParams) error {
@@ -147,6 +148,11 @@ func VerifyFrozenEvidence(p VerifyFrozenEvidenceParams) error {
 	if p.CheckpointControlManifestDigest != "" && strings.TrimSpace(p.CheckpointControlManifestDigest) != projectionDigest(projections, store.GenerationPlanProjectionControlManifestProjected) {
 		return fmt.Errorf("generation plan checkpoint control manifest digest mismatch")
 	}
+	if checkpointEvidencePresent(p) {
+		if !isSha256(p.CheckpointDriverStatesDigest) {
+			return fmt.Errorf("generation plan checkpoint driver-state digest is required")
+		}
+	}
 	snapshots, err := requireObject(object, "content_snapshots")
 	if err != nil {
 		return err
@@ -165,6 +171,12 @@ func VerifyFrozenEvidence(p VerifyFrozenEvidenceParams) error {
 		}
 	}
 	return nil
+}
+
+func checkpointEvidencePresent(p VerifyFrozenEvidenceParams) bool {
+	return strings.TrimSpace(p.CheckpointBundleDigest) != "" ||
+		strings.TrimSpace(p.CheckpointRuntimeConfigDigest) != "" ||
+		strings.TrimSpace(p.CheckpointControlManifestDigest) != ""
 }
 
 func decodePlanObject(payload any) (map[string]any, error) {

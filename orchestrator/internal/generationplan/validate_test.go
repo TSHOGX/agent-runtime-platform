@@ -110,6 +110,30 @@ func TestVerifyFrozenEvidenceChecksRunscAndProjections(t *testing.T) {
 	}
 }
 
+func TestVerifyFrozenEvidenceRequiresCheckpointDriverStateFence(t *testing.T) {
+	payload := validPlanPayload()
+	params := validFrozenEvidenceParams(payload)
+	params.CheckpointDriverStatesDigest = ""
+	if err := VerifyFrozenEvidence(params); err == nil || !strings.Contains(err.Error(), "checkpoint driver-state digest is required") {
+		t.Fatalf("expected missing checkpoint driver-state fence, got %v", err)
+	}
+
+	params = validFrozenEvidenceParams(payload)
+	params.CheckpointDriverStatesDigest = "driver-state-fence"
+	if err := VerifyFrozenEvidence(params); err == nil || !strings.Contains(err.Error(), "checkpoint driver-state digest is required") {
+		t.Fatalf("expected malformed checkpoint driver-state fence, got %v", err)
+	}
+
+	params = validFrozenEvidenceParams(payload)
+	params.CheckpointBundleDigest = ""
+	params.CheckpointRuntimeConfigDigest = ""
+	params.CheckpointControlManifestDigest = ""
+	params.CheckpointDriverStatesDigest = ""
+	if err := VerifyFrozenEvidence(params); err != nil {
+		t.Fatalf("non-checkpoint evidence should not require driver-state fence: %v", err)
+	}
+}
+
 func TestVerifyFrozenEvidenceChecksContentSnapshotDigests(t *testing.T) {
 	payload := validPlanPayload()
 	contentSnapshots := payload["content_snapshots"].(map[string]any)
@@ -306,6 +330,7 @@ func validFrozenEvidenceParams(payload map[string]any) VerifyFrozenEvidenceParam
 		CheckpointBundleDigest:          "sha256:bundle",
 		CheckpointRuntimeConfigDigest:   "sha256:runtime-config",
 		CheckpointControlManifestDigest: "sha256:control-manifest-projected",
+		CheckpointDriverStatesDigest:    "sha256:driver-state-fence",
 	}
 }
 

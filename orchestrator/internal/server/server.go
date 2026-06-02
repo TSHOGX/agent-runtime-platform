@@ -2102,6 +2102,7 @@ func (s *Server) verifyGenerationPlanFrozenEvidence(ctx context.Context, generat
 		CheckpointBundleDigest:          optionalProjectionPayloadDigest(store.GenerationPlanProjectionBundle, details.CheckpointBundleDigest),
 		CheckpointRuntimeConfigDigest:   optionalProjectionPayloadDigest(store.GenerationPlanProjectionRuntimeConfig, details.CheckpointRuntimeConfigDigest),
 		CheckpointControlManifestDigest: optionalProjectionPayloadDigest(store.GenerationPlanProjectionControlManifestProjected, details.CheckpointControlManifestDigest),
+		CheckpointDriverStatesDigest:    details.CheckpointDriverStatesDigest,
 	})
 }
 

@@ -125,6 +125,7 @@ def _next_stage_checks():
                 ("verify_frozen_evidence_hook", "verifyGenerationPlanFrozenEvidence"),
                 ("verify_frozen_evidence_call", "VerifyFrozenEvidence"),
                 ("checkpoint_bundle_digest", "CheckpointBundleDigest"),
+                ("checkpoint_driver_states_digest", "CheckpointDriverStatesDigest"),
                 ("restore_from_checkpoint", "RestoreFromCheckpoint"),
             ),
         },
