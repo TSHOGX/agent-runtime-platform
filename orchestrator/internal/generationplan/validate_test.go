@@ -102,6 +102,12 @@ func TestVerifyFrozenEvidenceChecksRunscAndProjections(t *testing.T) {
 	if err := VerifyFrozenEvidence(mismatch); err == nil || !strings.Contains(err.Error(), "projection bundle digest mismatch") {
 		t.Fatalf("expected projection mismatch, got %v", err)
 	}
+
+	mismatch = params
+	mismatch.ProjectionVersions = map[string]int{"bundle": 2}
+	if err := VerifyFrozenEvidence(mismatch); err == nil || !strings.Contains(err.Error(), "projection bundle version mismatch") {
+		t.Fatalf("expected projection version mismatch, got %v", err)
+	}
 }
 
 func TestVerifyFrozenEvidenceChecksContentSnapshotDigests(t *testing.T) {
@@ -291,6 +297,11 @@ func validFrozenEvidenceParams(payload map[string]any) VerifyFrozenEvidenceParam
 			"bundle":                     "sha256:bundle",
 			"runtime_config":             "sha256:runtime-config",
 			"control_manifest_projected": "sha256:control-manifest-projected",
+		},
+		ProjectionVersions: map[string]int{
+			"bundle":                     store.GenerationPlanProjectionVersion,
+			"runtime_config":             store.GenerationPlanProjectionVersion,
+			"control_manifest_projected": store.GenerationPlanProjectionVersion,
 		},
 		CheckpointBundleDigest:          "sha256:bundle",
 		CheckpointRuntimeConfigDigest:   "sha256:runtime-config",

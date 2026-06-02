@@ -3277,6 +3277,18 @@ VALUES (?, ?, 'allocating', 'owner', ?)`, generationID, session.ID, time.Now().U
 	}
 }
 
+func TestGenerationPlanProjectionVersionMapUsesExpectationVersions(t *testing.T) {
+	versions := generationPlanProjectionVersionMap(testGenerationArtifacts())
+	for _, expectation := range generationPlanProjectionExpectations(testGenerationArtifacts()) {
+		if versions[expectation.ProjectionKind] != expectation.ProjectionVersion {
+			t.Fatalf("projection version %s = %d want %d", expectation.ProjectionKind, versions[expectation.ProjectionKind], expectation.ProjectionVersion)
+		}
+	}
+	if versions[store.GenerationPlanProjectionOCISpec] != store.GenerationPlanProjectionVersion {
+		t.Fatalf("oci spec projection version = %d want %d", versions[store.GenerationPlanProjectionOCISpec], store.GenerationPlanProjectionVersion)
+	}
+}
+
 func TestVerifyStoredGenerationPlanProjectionsSkipsMissingPlan(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

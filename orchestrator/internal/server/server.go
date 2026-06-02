@@ -2148,6 +2148,7 @@ func (s *Server) verifyGenerationPlanFrozenEvidence(ctx context.Context, generat
 		RunscBinaryPath:                 artifacts.RunscBinaryPath,
 		RunscBinaryDigest:               artifacts.RunscBinaryDigest,
 		ProjectionDigests:               generationPlanProjectionDigestMap(artifacts),
+		ProjectionVersions:              generationPlanProjectionVersionMap(artifacts),
 		ContentSnapshotDigests:          contentSnapshotDigests,
 		CheckpointBundleDigest:          optionalProjectionPayloadDigest(store.GenerationPlanProjectionBundle, details.CheckpointBundleDigest),
 		CheckpointRuntimeConfigDigest:   optionalProjectionPayloadDigest(store.GenerationPlanProjectionRuntimeConfig, details.CheckpointRuntimeConfigDigest),
@@ -2219,6 +2220,14 @@ func generationPlanProjectionDigestMap(artifacts runtime.GenerationArtifacts) ma
 	out := map[string]string{}
 	for _, expectation := range generationPlanProjectionExpectations(artifacts) {
 		out[expectation.ProjectionKind] = expectation.PayloadDigest
+	}
+	return out
+}
+
+func generationPlanProjectionVersionMap(artifacts runtime.GenerationArtifacts) map[string]int {
+	out := map[string]int{}
+	for _, expectation := range generationPlanProjectionExpectations(artifacts) {
+		out[expectation.ProjectionKind] = expectation.ProjectionVersion
 	}
 	return out
 }

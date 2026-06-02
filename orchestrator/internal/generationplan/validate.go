@@ -22,6 +22,7 @@ type VerifyFrozenEvidenceParams struct {
 	RunscBinaryPath                 string
 	RunscBinaryDigest               string
 	ProjectionDigests               map[string]string
+	ProjectionVersions              map[string]int
 	ContentSnapshotDigests          map[string]string
 	CheckpointBundleDigest          string
 	CheckpointRuntimeConfigDigest   string
@@ -123,6 +124,18 @@ func VerifyFrozenEvidence(p VerifyFrozenEvidenceParams) error {
 		}
 		if strings.TrimSpace(expectedDigest) != stringField(projection, "payload_digest") {
 			return fmt.Errorf("generation plan projection %s digest mismatch", kind)
+		}
+		expectedVersion := p.ProjectionVersions[kind]
+		if expectedVersion <= 0 {
+			if version, ok := store.GenerationPlanProjectionVersionFor(kind); ok {
+				expectedVersion = version
+			}
+		}
+		if expectedVersion <= 0 {
+			return fmt.Errorf("generation plan projection %s version is required", kind)
+		}
+		if numberField(projection, "projection_version") != int64(expectedVersion) {
+			return fmt.Errorf("generation plan projection %s version mismatch", kind)
 		}
 	}
 	if p.CheckpointBundleDigest != "" && strings.TrimSpace(p.CheckpointBundleDigest) != projectionDigest(projections, store.GenerationPlanProjectionBundle) {
