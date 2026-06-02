@@ -130,6 +130,7 @@ func TestRenderContentSnapshotsPayloadFreezesImmutableRefs(t *testing.T) {
 	}
 	plan := validPlanPayload()
 	plan["content_snapshots"] = payload
+	addSkillsSnapshotMount(plan, skills)
 	if err := Validate(ValidateParams{Payload: plan}); err != nil {
 		t.Fatalf("rendered content snapshots should validate: %v", err)
 	}
@@ -211,6 +212,27 @@ func TestValidateRejectsUnsupportedContentSnapshotKey(t *testing.T) {
 	err := Validate(ValidateParams{Payload: payload})
 	if err == nil || !strings.Contains(err.Error(), "content_snapshots.workspace is unsupported") {
 		t.Fatalf("expected content snapshot key error, got %v", err)
+	}
+}
+
+func TestValidateRequiresSkillsSnapshotMountEvidence(t *testing.T) {
+	payload := validPlanPayload()
+	contentSnapshots := payload["content_snapshots"].(map[string]any)
+	skills := validSkillsSnapshotPayload()
+	contentSnapshots["skills"] = skills
+
+	err := Validate(ValidateParams{Payload: payload})
+	if err == nil || !strings.Contains(err.Error(), "mounts.content_snapshots is required for skills content snapshot") {
+		t.Fatalf("expected missing skills mount evidence error, got %v", err)
+	}
+
+	addSkillsSnapshotMount(payload, skills)
+	mounts := payload["mounts"].(map[string]any)
+	snapshotMounts := mounts["content_snapshots"].(map[string]any)
+	snapshotMounts["skills"].(map[string]any)["digest"] = "sha256:changed"
+	err = Validate(ValidateParams{Payload: payload})
+	if err == nil || !strings.Contains(err.Error(), "mounts.content_snapshots.skills.digest mismatch") {
+		t.Fatalf("expected skills mount digest mismatch, got %v", err)
 	}
 }
 
@@ -565,6 +587,32 @@ func mustCanonicalPlanPayloadForTest(payload map[string]any) []byte {
 		panic(err)
 	}
 	return canonical
+}
+
+func validSkillsSnapshotPayload() map[string]any {
+	return map[string]any{
+		"kind":                   "skills",
+		"digest":                 "sha256:skills",
+		"immutable_host_path":    "/var/lib/harness/content/skills/sha256-skills",
+		"mount_destination":      "/harness-skills",
+		"source_evidence_digest": "sha256:source",
+		"retention_class":        "active",
+	}
+}
+
+func addSkillsSnapshotMount(payload map[string]any, snapshot map[string]any) {
+	mounts := payload["mounts"].(map[string]any)
+	mounts["content_snapshots"] = map[string]any{
+		"skills": map[string]any{
+			"mount_name":  "skills_snapshot",
+			"type":        "bind",
+			"mode":        "ro",
+			"exact":       true,
+			"source":      snapshot["immutable_host_path"],
+			"destination": snapshot["mount_destination"],
+			"digest":      snapshot["digest"],
+		},
+	}
 }
 
 func validVolumePayload(hostPath, markerPath, destination string) map[string]any {

@@ -515,6 +515,11 @@ func validateContentSnapshots(object map[string]any) error {
 		if err := validateContentSnapshot(key, snapshot); err != nil {
 			return err
 		}
+		if key == store.ContentSnapshotKindSkills {
+			if err := validateSkillsSnapshotMountEvidence(object, snapshot); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -541,6 +546,42 @@ func validateContentSnapshot(name string, snapshot map[string]any) error {
 	}
 	if name == store.ContentSnapshotKindSkills && stringField(snapshot, "mount_destination") != store.ContentSnapshotSkillsMount {
 		return fmt.Errorf("generation plan content_snapshots.%s.mount_destination must be %s", name, store.ContentSnapshotSkillsMount)
+	}
+	return nil
+}
+
+func validateSkillsSnapshotMountEvidence(object map[string]any, snapshot map[string]any) error {
+	mounts, ok := object["mounts"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("generation plan mounts object is required for skills content snapshot")
+	}
+	contentSnapshots, ok := mounts["content_snapshots"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("generation plan mounts.content_snapshots is required for skills content snapshot")
+	}
+	mount, ok := contentSnapshots[store.ContentSnapshotKindSkills].(map[string]any)
+	if !ok {
+		return fmt.Errorf("generation plan mounts.content_snapshots.skills is required")
+	}
+	checks := []struct {
+		field string
+		got   string
+		want  string
+	}{
+		{"mount_name", stringField(mount, "mount_name"), "skills_snapshot"},
+		{"type", stringField(mount, "type"), "bind"},
+		{"mode", stringField(mount, "mode"), "ro"},
+		{"source", stringField(mount, "source"), stringField(snapshot, "immutable_host_path")},
+		{"destination", stringField(mount, "destination"), stringField(snapshot, "mount_destination")},
+		{"digest", stringField(mount, "digest"), stringField(snapshot, "digest")},
+	}
+	for _, check := range checks {
+		if strings.TrimSpace(check.got) != strings.TrimSpace(check.want) {
+			return fmt.Errorf("generation plan mounts.content_snapshots.skills.%s mismatch", check.field)
+		}
+	}
+	if boolField(mount, "exact") != true {
+		return fmt.Errorf("generation plan mounts.content_snapshots.skills.exact must be true")
 	}
 	return nil
 }

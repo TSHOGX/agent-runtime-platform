@@ -3589,6 +3589,17 @@ func TestVerifyGenerationPlanFrozenEvidenceChecksContentSnapshots(t *testing.T) 
 		"source_evidence_digest": "sha256:skills-source",
 		"retention_class":        "generation_plan",
 	}
+	planPayload["mounts"].(map[string]any)["content_snapshots"] = map[string]any{
+		"skills": map[string]any{
+			"mount_name":  "skills_snapshot",
+			"type":        "bind",
+			"mode":        "ro",
+			"exact":       true,
+			"source":      "/var/lib/harness/content/skills/sha256-skills",
+			"destination": "/harness-skills",
+			"digest":      "sha256:skills",
+		},
+	}
 	plan := storeServerFrozenEvidencePlan(t, ctx, st, dir, planPayload)
 	if _, err := st.StoreContentSnapshot(ctx, store.StoreContentSnapshotParams{
 		Kind:                 store.ContentSnapshotKindSkills,
