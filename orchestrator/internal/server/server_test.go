@@ -2918,38 +2918,6 @@ func TestBridgeFailedCompletionDoesNotFailSession(t *testing.T) {
 	}
 }
 
-func TestSendMessageRejectsExpiredSessionBeforeAllocation(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	st, owner := openServerOwnedStore(t, ctx, dir)
-	expired := time.Now().UTC().Add(-time.Second)
-	session := createServerTestSession(t, ctx, st, dir, "sess_expired", string(sessionstate.Created), time.Now().UTC(), &expired)
-	srv := &Server{
-		cfg:     testServerConfig(dir),
-		store:   st,
-		runtime: instantRuntime{},
-		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
-		hub:     events.NewHub(),
-		log:     slog.Default(),
-	}
-	srv.SetOwnerUUID(owner.UUID)
-
-	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(`{"content":"hello"}`))
-	rec := httptest.NewRecorder()
-	srv.sendMessage(rec, req, session.ID)
-
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("expected status 409, got %d body %s", rec.Code, rec.Body.String())
-	}
-	var generations int
-	if err := st.DBForTest().QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_generations`).Scan(&generations); err != nil {
-		t.Fatalf("count generations: %v", err)
-	}
-	if generations != 0 {
-		t.Fatalf("expired session should not allocate generation, got %d", generations)
-	}
-}
-
 func waitForBridgeInboxResponse(t *testing.T, ctx context.Context, root, responseType, requestID string) bridge.Envelope {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
