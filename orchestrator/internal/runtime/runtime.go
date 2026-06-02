@@ -354,7 +354,13 @@ func restoreGenerationArtifacts(req StartRequest) (GenerationArtifacts, error) {
 		{"control manifest path", artifacts.ManifestPath, req.Generation.ControlManifestPath},
 	}
 	for _, check := range checks {
-		if filepath.Clean(check.got) != filepath.Clean(check.want) {
+		if err := validateRuntimeArtifactPathEvidence("restore artifact", check.label, check.got); err != nil {
+			return GenerationArtifacts{}, err
+		}
+		if err := validateRuntimeArtifactPathEvidence("restore generation", check.label, check.want); err != nil {
+			return GenerationArtifacts{}, err
+		}
+		if check.got != check.want {
 			return GenerationArtifacts{}, fmt.Errorf("restore artifact %s %q does not match generation path %q", check.label, check.got, check.want)
 		}
 	}
@@ -1278,10 +1284,10 @@ func (r *Runtime) verifyMaterializationProjection(req StartRequest, projection G
 	for _, check := range checks {
 		got, want := check.got, check.want
 		if check.path {
-			if err := validateMaterializationProjectionPath("actual", check.field, got); err != nil {
+			if err := validateRuntimeArtifactPathEvidence("materialization projection actual", check.field, got); err != nil {
 				return err
 			}
-			if err := validateMaterializationProjectionPath("expected", check.field, want); err != nil {
+			if err := validateRuntimeArtifactPathEvidence("materialization projection expected", check.field, want); err != nil {
 				return err
 			}
 		} else {
@@ -1300,12 +1306,12 @@ func (r *Runtime) verifyMaterializationProjection(req StartRequest, projection G
 	return nil
 }
 
-func validateMaterializationProjectionPath(role, field, value string) error {
+func validateRuntimeArtifactPathEvidence(scope, field, value string) error {
 	if strings.TrimSpace(value) == "" {
-		return fmt.Errorf("materialization projection %s %s is required", role, field)
+		return fmt.Errorf("%s %s is required", scope, field)
 	}
 	if strings.TrimSpace(value) != value || !filepath.IsAbs(value) || filepath.Clean(value) != value {
-		return fmt.Errorf("materialization projection %s %s must be canonical absolute", role, field)
+		return fmt.Errorf("%s %s must be canonical absolute", scope, field)
 	}
 	return nil
 }

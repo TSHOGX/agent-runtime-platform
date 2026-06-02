@@ -531,6 +531,26 @@ func TestRuntimeStartRestoreRejectsMetadataBeforeRunscRestore(t *testing.T) {
 	}
 }
 
+func TestRestoreGenerationArtifactsRejectsNonCanonicalArtifactPath(t *testing.T) {
+	dir := t.TempDir()
+	runscPath, runscDigest := installFakeRunsc(t, dir, "current")
+	details := testGenerationDetails(dir, "gen_restore_artifact_path")
+	artifacts := restorePreparedArtifacts(details, "runsc current", runscPath, runscDigest)
+	artifacts.SpecPath = filepath.Dir(details.SpecPath) + string(filepath.Separator) + "same" + string(filepath.Separator) + ".." + string(filepath.Separator) + filepath.Base(details.SpecPath)
+
+	_, err := restoreGenerationArtifacts(StartRequest{
+		SessionID:             details.SessionID,
+		GenerationID:          details.GenerationID,
+		DriverID:              details.DriverID,
+		RestoreFromCheckpoint: true,
+		Generation:            details,
+		PreparedArtifacts:     artifacts,
+	})
+	if err == nil || !strings.Contains(err.Error(), "restore artifact spec path must be canonical absolute") {
+		t.Fatalf("expected restore artifact path rejection, got %v", err)
+	}
+}
+
 func TestRuntimeStartRejectsRunscPinMismatchBeforeRunscRun(t *testing.T) {
 	dir := t.TempDir()
 	runscPath, runscDigest := installFakeRunsc(t, dir, "current")
