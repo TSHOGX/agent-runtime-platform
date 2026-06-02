@@ -612,6 +612,9 @@ func validateRuntimeResourceInstanceParams(p RuntimeResourceInstanceParams) erro
 			return fmt.Errorf("runtime resource %s must be canonical absolute", field.label)
 		}
 	}
+	if err := validateRuntimeResourceRootPrefixes(p.RootPrefixes, "runtime resource"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -711,6 +714,30 @@ func validateRuntimeResourceIdentityPayloadPaths(payload runtimeResourceIdentity
 		}
 		if !runtimeResourceInstancePathIsCanonical(field.path) {
 			return fmt.Errorf("runtime resource identity %s must be canonical absolute", field.label)
+		}
+	}
+	if err := validateRuntimeResourceRootPrefixes(payload.RootPrefixes, "runtime resource identity"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateRuntimeResourceRootPrefixes(prefixes map[string]string, scope string) error {
+	seen := map[string]struct{}{}
+	for key, path := range prefixes {
+		name := strings.TrimSpace(key)
+		if name == "" {
+			return fmt.Errorf("%s root prefix key is required", scope)
+		}
+		if name != key {
+			return fmt.Errorf("%s root prefix %q key must not contain surrounding whitespace", scope, name)
+		}
+		if _, ok := seen[name]; ok {
+			return fmt.Errorf("%s root prefix %q is duplicated", scope, name)
+		}
+		seen[name] = struct{}{}
+		if !runtimeResourceInstancePathIsCanonical(path) {
+			return fmt.Errorf("%s root prefix %s must be canonical absolute", scope, name)
 		}
 	}
 	return nil

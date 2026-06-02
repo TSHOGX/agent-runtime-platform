@@ -417,6 +417,33 @@ WHERE generation_id = ?`, string(corruptPayload), SandboxContractDigest(corruptP
 	}
 }
 
+func TestRuntimeResourceCleanupIdentityRejectsNonCanonicalRootPrefixes(t *testing.T) {
+	ctx := context.Background()
+	st, owner := openOwnedStore(t, ctx)
+	now := time.Now().UTC()
+	instance := createRuntimeResourceInstanceForTest(t, ctx, st, owner.UUID, "sess_resource_cleanup_corrupt_root_prefix", "host-1", now)
+	payload, err := verifyRuntimeResourceIdentityPayload(instance)
+	if err != nil {
+		t.Fatalf("load identity payload: %v", err)
+	}
+	payload.RootPrefixes["run_dir"] = "run"
+	corruptPayload, err := canonicalDataVolumeJSON(payload)
+	if err != nil {
+		t.Fatalf("canonical corrupt payload: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE runtime_resource_instances
+SET resource_identity_payload = ?,
+    resource_identity_digest = ?
+WHERE generation_id = ?`, string(corruptPayload), SandboxContractDigest(corruptPayload), instance.GenerationID); err != nil {
+		t.Fatalf("store corrupt identity payload root prefix: %v", err)
+	}
+	_, err = st.GetRuntimeResourceCleanupIdentity(ctx, instance.GenerationID)
+	if err == nil || !strings.Contains(err.Error(), "runtime resource identity root prefix run_dir must be canonical absolute") {
+		t.Fatalf("expected non-canonical identity root prefix rejection, got %v", err)
+	}
+}
+
 func TestRuntimeResourceAbsentVerifiedRequiresHostEvidence(t *testing.T) {
 	ctx := context.Background()
 	st, owner := openOwnedStore(t, ctx)
@@ -617,6 +644,11 @@ func TestRuntimeResourceIdentityForParamsRejectsNonCanonicalPaths(t *testing.T) 
 			name: "unclean log dir",
 			edit: func(p *RuntimeResourceInstanceParams) { p.LogDirPath = "/var/lib/harness/run/logs/../logs/gen-1" },
 			want: "runtime resource log dir path must be canonical absolute",
+		},
+		{
+			name: "relative root prefix",
+			edit: func(p *RuntimeResourceInstanceParams) { p.RootPrefixes["run_dir"] = "run" },
+			want: "runtime resource root prefix run_dir must be canonical absolute",
 		},
 	}
 	for _, tt := range tests {
