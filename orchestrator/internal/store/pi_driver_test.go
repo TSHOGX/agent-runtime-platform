@@ -89,6 +89,15 @@ func TestPiDriverStateValidation(t *testing.T) {
 	if err := ValidatePiDriverStatePayloadForHost(payload, "", ""); err == nil || !strings.Contains(err.Error(), "host path is required") {
 		t.Fatalf("expected missing pi host path rejection, got %v", err)
 	}
+	for _, hostPath := range []string{
+		"agent-home",
+		filepath.Join(t.TempDir(), "agent-home") + "/../agent-home",
+		" " + filepath.Join(t.TempDir(), "agent-home"),
+	} {
+		if err := ValidatePiDriverStatePayloadForHost(payload, hostPath, ""); err == nil || !strings.Contains(err.Error(), "host path must be canonical absolute") {
+			t.Fatalf("expected non-canonical pi host path rejection for %q, got %v", hostPath, err)
+		}
+	}
 	initialized := map[string]any{
 		"schema_version":           1,
 		"driver_id":                "pi",
@@ -155,6 +164,33 @@ func TestPiDriverStateValidation(t *testing.T) {
 	}
 	if err := ValidatePiDriverStatePayloadForHost(canonical, symlinkHome, "42"); err == nil || !strings.Contains(err.Error(), "session root realpath escapes") {
 		t.Fatalf("expected symlink session root rejection, got %v", err)
+	}
+}
+
+func TestPiAgentHomeHostPathFromContractRequiresCanonicalHostPath(t *testing.T) {
+	agentHome := map[string]any{
+		"driver":              "pi",
+		"driver_home_key":     "pi",
+		"sandbox_destination": "/agent-home",
+		"host_path":           filepath.Join(t.TempDir(), "agent-home"),
+	}
+	contract := map[string]any{
+		"data_volumes": map[string]any{
+			"agent_home": agentHome,
+		},
+	}
+	if path, err := piAgentHomeHostPathFromContract(contract); err != nil || path != agentHome["host_path"].(string) {
+		t.Fatalf("valid pi agent_home path=%q err=%v", path, err)
+	}
+	for _, hostPath := range []string{
+		"agent-home",
+		filepath.Join(t.TempDir(), "agent-home") + "/../agent-home",
+		" " + filepath.Join(t.TempDir(), "agent-home"),
+	} {
+		agentHome["host_path"] = hostPath
+		if _, err := piAgentHomeHostPathFromContract(contract); err == nil || !strings.Contains(err.Error(), "host_path must be canonical absolute") {
+			t.Fatalf("expected non-canonical pi contract host_path rejection for %q, got %v", hostPath, err)
+		}
 	}
 }
 

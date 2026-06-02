@@ -101,9 +101,12 @@ func piAgentHomeHostPathFromContract(contract map[string]any) (string, error) {
 	if destination, _ := agentHome["sandbox_destination"].(string); destination != "/agent-home" {
 		return "", fmt.Errorf("pi agent_home sandbox destination = %q", destination)
 	}
-	hostPath := strings.TrimSpace(stringValue(agentHome["host_path"]))
-	if hostPath == "" || !filepath.IsAbs(hostPath) {
+	hostPath := stringValue(agentHome["host_path"])
+	if strings.TrimSpace(hostPath) == "" {
 		return "", fmt.Errorf("pi agent_home host_path is required")
+	}
+	if !piAgentHomeHostPathIsCanonical(hostPath) {
+		return "", fmt.Errorf("pi agent_home host_path must be canonical absolute")
 	}
 	return hostPath, nil
 }
@@ -125,9 +128,11 @@ func validatePiDriverStatePayloadForHost(canonicalPayload []byte, agentHomeHostP
 		return err
 	}
 	stateKind, _ := object["state_kind"].(string)
-	agentHomeHostPath = strings.TrimSpace(agentHomeHostPath)
-	if agentHomeHostPath == "" || !filepath.IsAbs(agentHomeHostPath) {
+	if strings.TrimSpace(agentHomeHostPath) == "" {
 		return fmt.Errorf("pi agent_home host path is required")
+	}
+	if !piAgentHomeHostPathIsCanonical(agentHomeHostPath) {
+		return fmt.Errorf("pi agent_home host path must be canonical absolute")
 	}
 	switch stateKind {
 	case piDriverStateKindUninitialized:
@@ -143,6 +148,10 @@ func validatePiDriverStatePayloadForHost(canonicalPayload []byte, agentHomeHostP
 	default:
 		return fmt.Errorf("pi driver state_kind = %q", stateKind)
 	}
+}
+
+func piAgentHomeHostPathIsCanonical(hostPath string) bool {
+	return strings.TrimSpace(hostPath) == hostPath && filepath.IsAbs(hostPath) && filepath.Clean(hostPath) == hostPath
 }
 
 func validatePiSessionFileAgainstHost(agentHomeHostPath string, object map[string]any) error {
