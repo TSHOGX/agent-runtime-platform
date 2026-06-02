@@ -153,6 +153,50 @@ func TestMonitorIdleSessionsRequiresPositiveTimingConfig(t *testing.T) {
 	}
 }
 
+func TestRunMaintenanceRequiresPositiveBridgeIntervals(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+
+	tests := []struct {
+		name string
+		edit func(*config.Config)
+		want string
+	}{
+		{
+			name: "heartbeat",
+			edit: func(cfg *config.Config) {
+				cfg.Harness.Bridge.HeartbeatInterval = config.Duration{}
+			},
+			want: "bridge heartbeat interval must be > 0",
+		},
+		{
+			name: "poll",
+			edit: func(cfg *config.Config) {
+				cfg.Harness.Bridge.PollInterval = config.Duration{}
+			},
+			want: "bridge poll interval must be > 0",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testServerConfig(filepath.Join(dir, tc.name))
+			tc.edit(&cfg)
+			srv := &Server{
+				cfg:   cfg,
+				store: st,
+				hub:   events.NewHub(),
+				log:   slog.Default(),
+			}
+			srv.SetOwnerUUID(owner.UUID)
+			err := srv.RunMaintenance(ctx)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("maintenance err=%v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestMonitorIdleSessionsCheckpointsEligibleGeneration(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -293,5 +337,69 @@ WHERE g.generation_id = ?`, allocation.GenerationID).Scan(&generationStatus, &ne
 	}
 	if generationStatus != "idle" || networkState != "live" || resourceState != "live" {
 		t.Fatalf("checkpoint failure should return generation live idle, got generation=%s network=%s resource=%s", generationStatus, networkState, resourceState)
+	}
+}
+
+func TestRunMaintenancePrunesRetainedEvents(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	now := time.Now().UTC()
+	createServerTestSession(t, ctx, st, dir, "sess_events_a", string(sessionstate.Created), now, nil)
+	createServerTestSession(t, ctx, st, dir, "sess_events_b", string(sessionstate.Created), now, nil)
+	firstID, err := st.AppendEvent(ctx, store.AppendEventParams{
+		SessionID: "sess_events_a",
+		Type:      "test.event",
+		Payload:   map[string]string{"name": "first"},
+		Now:       now.Add(-3 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("append first event: %v", err)
+	}
+	secondID, err := st.AppendEvent(ctx, store.AppendEventParams{
+		SessionID: "sess_events_b",
+		Type:      "test.event",
+		Payload:   map[string]string{"name": "second"},
+		Now:       now.Add(-2 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("append second event: %v", err)
+	}
+	thirdID, err := st.AppendEvent(ctx, store.AppendEventParams{
+		SessionID: "sess_events_a",
+		Type:      "test.event",
+		Payload:   map[string]string{"name": "third"},
+		Now:       now.Add(-time.Second),
+	})
+	if err != nil {
+		t.Fatalf("append third event: %v", err)
+	}
+
+	cfg := testServerConfig(dir)
+	cfg.Harness.Events.RetentionWindow = config.Duration{Duration: time.Hour}
+	cfg.Harness.Events.RetentionRows = 2
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: instantRuntime{},
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+	done := make(chan error, 1)
+	go func() {
+		done <- srv.RunMaintenance(runCtx)
+	}()
+	waitForEventIDs(t, runCtx, st, []int64{secondID, thirdID})
+	cancel()
+	err = <-done
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("maintenance exit err=%v, want context canceled", err)
+	}
+	if _, ok, err := st.GetEvent(ctx, firstID); err != nil || ok {
+		t.Fatalf("first event retained ok=%v err=%v", ok, err)
 	}
 }
