@@ -3154,6 +3154,9 @@ func (r *Runtime) resolveCheckpointPath(req StartRequest) (string, error) {
 	if path == "" {
 		return "", errors.New("checkpoint path is required")
 	}
+	if req.Generation.CheckpointPath != path || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return "", fmt.Errorf("checkpoint path %q must be canonical absolute path", req.Generation.CheckpointPath)
+	}
 	if _, err := os.Stat(path); err == nil {
 		return path, nil
 	}

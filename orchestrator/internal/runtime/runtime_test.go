@@ -213,6 +213,25 @@ func TestResolveCheckpointPathRequiresGenerationPath(t *testing.T) {
 	}
 }
 
+func TestResolveCheckpointPathRejectsNonCanonicalGenerationPath(t *testing.T) {
+	dir := t.TempDir()
+	generationPath := filepath.Join(dir, "run", "gen_a", "checkpoint")
+	if err := os.MkdirAll(generationPath, 0o755); err != nil {
+		t.Fatalf("create generation checkpoint: %v", err)
+	}
+	rt := New(Config{})
+
+	_, err := rt.resolveCheckpointPath(StartRequest{
+		SessionID: "sess_1",
+		Generation: store.RuntimeGenerationDetails{
+			CheckpointPath: filepath.Dir(generationPath) + string(filepath.Separator) + "same" + string(filepath.Separator) + ".." + string(filepath.Separator) + filepath.Base(generationPath),
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "checkpoint path") || !strings.Contains(err.Error(), "canonical absolute") {
+		t.Fatalf("expected non-canonical checkpoint path error, got %v", err)
+	}
+}
+
 func TestRuntimeStartRestoreRequiresCheckpointPath(t *testing.T) {
 	rt := New(Config{})
 	res := rt.Start(context.Background(), StartRequest{
