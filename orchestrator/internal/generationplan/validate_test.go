@@ -55,6 +55,40 @@ func TestValidateRejectsProjectionDigestShape(t *testing.T) {
 	}
 }
 
+func TestVerifyFrozenEvidenceChecksRunscAndProjections(t *testing.T) {
+	payload := validPlanPayload()
+	params := VerifyFrozenEvidenceParams{
+		Payload:           payload,
+		RunscPlatform:     "systrap",
+		RunscVersion:      "runsc test",
+		RunscBinaryPath:   "/usr/local/bin/runsc-test",
+		RunscBinaryDigest: "sha256:runsc",
+		ProjectionDigests: map[string]string{
+			"bundle":                     "sha256:bundle",
+			"runtime_config":             "sha256:runtime-config",
+			"control_manifest_projected": "sha256:control-manifest-projected",
+		},
+		CheckpointBundleDigest:          "sha256:bundle",
+		CheckpointRuntimeConfigDigest:   "sha256:runtime-config",
+		CheckpointControlManifestDigest: "sha256:control-manifest-projected",
+	}
+	if err := VerifyFrozenEvidence(params); err != nil {
+		t.Fatalf("verify frozen evidence: %v", err)
+	}
+
+	mismatch := params
+	mismatch.RunscBinaryDigest = "sha256:changed"
+	if err := VerifyFrozenEvidence(mismatch); err == nil || !strings.Contains(err.Error(), "runsc pin mismatch") {
+		t.Fatalf("expected runsc mismatch, got %v", err)
+	}
+
+	mismatch = params
+	mismatch.ProjectionDigests = map[string]string{"bundle": "sha256:changed"}
+	if err := VerifyFrozenEvidence(mismatch); err == nil || !strings.Contains(err.Error(), "projection bundle digest mismatch") {
+		t.Fatalf("expected projection mismatch, got %v", err)
+	}
+}
+
 func validPlanPayload() map[string]any {
 	driver, _ := agents.DriverSpecFor("claude_code")
 	provider, _ := agents.RuntimeProviderSpecFor("local_runsc")

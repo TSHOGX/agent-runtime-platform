@@ -15,16 +15,22 @@ type ValidateParams struct {
 	Payload any
 }
 
+type VerifyFrozenEvidenceParams struct {
+	Payload                         any
+	RunscPlatform                   string
+	RunscVersion                    string
+	RunscBinaryPath                 string
+	RunscBinaryDigest               string
+	ProjectionDigests               map[string]string
+	CheckpointBundleDigest          string
+	CheckpointRuntimeConfigDigest   string
+	CheckpointControlManifestDigest string
+}
+
 func Validate(p ValidateParams) error {
-	canonical, err := store.CanonicalGenerationPlanPayload(p.Payload)
+	object, err := decodePlanObject(p.Payload)
 	if err != nil {
 		return err
-	}
-	var object map[string]any
-	decoder := json.NewDecoder(strings.NewReader(string(canonical)))
-	decoder.UseNumber()
-	if err := decoder.Decode(&object); err != nil {
-		return fmt.Errorf("decode generation plan payload: %w", err)
 	}
 	if err := validatePlanVersion(object); err != nil {
 		return err
@@ -84,6 +90,72 @@ func Validate(p ValidateParams) error {
 		return err
 	}
 	return nil
+}
+
+func VerifyFrozenEvidence(p VerifyFrozenEvidenceParams) error {
+	object, err := decodePlanObject(p.Payload)
+	if err != nil {
+		return err
+	}
+	runsc, err := requireObject(object, "runsc_pin")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(p.RunscPlatform) != stringField(runsc, "platform") ||
+		strings.TrimSpace(p.RunscVersion) != stringField(runsc, "version") ||
+		strings.TrimSpace(p.RunscBinaryPath) != stringField(runsc, "binary_path") ||
+		strings.TrimSpace(p.RunscBinaryDigest) != stringField(runsc, "binary_digest") {
+		return fmt.Errorf("generation plan runsc pin mismatch")
+	}
+	projections, err := requireObject(object, "projection_digests")
+	if err != nil {
+		return err
+	}
+	for kind, expectedDigest := range p.ProjectionDigests {
+		kind = strings.TrimSpace(kind)
+		if kind == "" {
+			return fmt.Errorf("generation plan projection kind is required")
+		}
+		projection, err := requireObject(projections, kind)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(expectedDigest) != stringField(projection, "payload_digest") {
+			return fmt.Errorf("generation plan projection %s digest mismatch", kind)
+		}
+	}
+	if p.CheckpointBundleDigest != "" && strings.TrimSpace(p.CheckpointBundleDigest) != projectionDigest(projections, "bundle") {
+		return fmt.Errorf("generation plan checkpoint bundle digest mismatch")
+	}
+	if p.CheckpointRuntimeConfigDigest != "" && strings.TrimSpace(p.CheckpointRuntimeConfigDigest) != projectionDigest(projections, "runtime_config") {
+		return fmt.Errorf("generation plan checkpoint runtime config digest mismatch")
+	}
+	if p.CheckpointControlManifestDigest != "" && strings.TrimSpace(p.CheckpointControlManifestDigest) != projectionDigest(projections, "control_manifest_projected") {
+		return fmt.Errorf("generation plan checkpoint control manifest digest mismatch")
+	}
+	return nil
+}
+
+func decodePlanObject(payload any) (map[string]any, error) {
+	canonical, err := store.CanonicalGenerationPlanPayload(payload)
+	if err != nil {
+		return nil, err
+	}
+	var object map[string]any
+	decoder := json.NewDecoder(strings.NewReader(string(canonical)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&object); err != nil {
+		return nil, fmt.Errorf("decode generation plan payload: %w", err)
+	}
+	return object, nil
+}
+
+func projectionDigest(projections map[string]any, kind string) string {
+	projection, ok := projections[kind].(map[string]any)
+	if !ok {
+		return ""
+	}
+	return stringField(projection, "payload_digest")
 }
 
 func validatePlanVersion(object map[string]any) error {

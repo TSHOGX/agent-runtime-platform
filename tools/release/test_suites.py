@@ -77,14 +77,14 @@ class SandboxIsolationSuiteTest(unittest.TestCase):
         payload = sandbox_isolation.static_checks()
         names = [c["name"] for c in payload["checks"]]
         self.assertEqual(names, [c["name"] for c in static_manifests.sandbox_isolation_checks()])
-        self.assertEqual(len(names), 13)
+        self.assertEqual(len(names), 14)
 
 
 class ReservedSuiteTest(unittest.TestCase):
     def test_agent_capability_is_next_stage_subset(self):
         names = [c["name"] for c in static_manifests.agent_capability_checks()]
         full = [c["name"] for c in static_manifests.sandbox_isolation_checks()]
-        self.assertEqual(len(names), 9)
+        self.assertEqual(len(names), 10)
         self.assertTrue(set(names).issubset(set(full)))
         self.assertEqual(agent_capability.static_checks()["checks"][0]["name"], names[0])
 

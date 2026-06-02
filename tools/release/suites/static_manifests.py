@@ -95,6 +95,17 @@ def _next_stage_checks():
             ),
         },
         {
+            "name": "next_stage_generation_plan_verifies_frozen_evidence",
+            "kind": "contains",
+            "path": REPO_ROOT / "orchestrator" / "internal" / "server" / "server.go",
+            "patterns": (
+                ("verify_frozen_evidence_hook", "verifyGenerationPlanFrozenEvidence"),
+                ("verify_frozen_evidence_call", "VerifyFrozenEvidence"),
+                ("checkpoint_bundle_digest", "CheckpointBundleDigest"),
+                ("restore_from_checkpoint", "RestoreFromCheckpoint"),
+            ),
+        },
+        {
             "name": "next_stage_capability_plane_uses_typed_feature_policy",
             "kind": "contains",
             "path": REPO_ROOT / "orchestrator" / "internal" / "agents" / "agents.go",
