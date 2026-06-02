@@ -430,6 +430,13 @@ func scanGenerationPlanProjection(row scanner) (GenerationPlanProjectionRecord, 
 	if record.PayloadDigest == "" || !strings.HasPrefix(record.PayloadDigest, "sha256:") {
 		return GenerationPlanProjectionRecord{}, fmt.Errorf("generation plan projection payload digest is invalid")
 	}
+	projectionVersion, ok := GenerationPlanProjectionVersionFor(record.ProjectionKind)
+	if !ok {
+		return GenerationPlanProjectionRecord{}, fmt.Errorf("unsupported generation plan projection kind %q", record.ProjectionKind)
+	}
+	if record.ProjectionVersion != projectionVersion {
+		return GenerationPlanProjectionRecord{}, fmt.Errorf("generation plan projection %s version = %d, want %d", record.ProjectionKind, record.ProjectionVersion, projectionVersion)
+	}
 	return record, nil
 }
 

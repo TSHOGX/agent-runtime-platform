@@ -3425,7 +3425,7 @@ WHERE generation_id = ?
 
 	srv := &Server{store: st}
 	if _, err := srv.verifyStoredGenerationPlanProjections(ctx, generationID, artifacts, ""); err == nil ||
-		!strings.Contains(err.Error(), "oci_spec version mismatch") {
+		!strings.Contains(err.Error(), "generation plan projection oci_spec version = 2, want 1") {
 		t.Fatalf("expected projection version mismatch, got %v", err)
 	}
 }

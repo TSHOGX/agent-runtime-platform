@@ -307,6 +307,78 @@ func TestStoreGenerationPlanProjectionRejectsUnsupportedKindAndVersion(t *testin
 	}
 }
 
+func TestListGenerationPlanProjectionsRejectsUnsupportedKindAndVersion(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		corrupt   func(context.Context, *Store, GenerationPlanRecord) error
+		wantError string
+	}{
+		{
+			name: "unsupported kind",
+			corrupt: func(ctx context.Context, st *Store, plan GenerationPlanRecord) error {
+				if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE generation_plan_projections
+SET projection_kind = 'driver_config'
+WHERE generation_id = ?
+  AND projection_kind = ?`, plan.GenerationID, GenerationPlanProjectionControlManifest); err != nil {
+					return err
+				}
+				return nil
+			},
+			wantError: `unsupported generation plan projection kind "driver_config"`,
+		},
+		{
+			name: "version drift",
+			corrupt: func(ctx context.Context, st *Store, plan GenerationPlanRecord) error {
+				if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE generation_plan_projections
+SET projection_version = 2
+WHERE generation_id = ?
+  AND projection_kind = ?`, plan.GenerationID, GenerationPlanProjectionControlManifest); err != nil {
+					return err
+				}
+				return nil
+			},
+			wantError: "generation plan projection control_manifest version = 2, want 1",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+			if err != nil {
+				t.Fatalf("open: %v", err)
+			}
+			t.Cleanup(func() { _ = st.Close() })
+			createStoreSession(t, ctx, st, "sess_projection_read_schema")
+			createRuntimeGenerationForPlanTest(t, ctx, st, "sess_projection_read_schema", "gen_projection_read_schema", "allocating")
+			plan, err := st.StoreGenerationPlan(ctx, StoreGenerationPlanParams{
+				GenerationID: "gen_projection_read_schema",
+				Payload:      map[string]any{"generation_id": "gen_projection_read_schema", "plan_version": 1},
+			})
+			if err != nil {
+				t.Fatalf("store plan: %v", err)
+			}
+			if _, err := st.StoreGenerationPlanProjection(ctx, StoreGenerationPlanProjectionParams{
+				GenerationID:      plan.GenerationID,
+				PlanDigest:        plan.PlanDigest,
+				ProjectionKind:    GenerationPlanProjectionControlManifest,
+				ProjectionVersion: GenerationPlanProjectionVersion,
+				PayloadDigest:     "sha256:manifest",
+			}); err != nil {
+				t.Fatalf("store projection: %v", err)
+			}
+
+			if err := tt.corrupt(ctx, st, plan); err != nil {
+				t.Fatalf("corrupt projection row: %v", err)
+			}
+			if _, err := st.ListGenerationPlanProjections(ctx, plan.GenerationID); err == nil ||
+				!strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("expected %q, got %v", tt.wantError, err)
+			}
+		})
+	}
+}
+
 func TestVerifyGenerationPlanProjectionsMatchesStoredDigests(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
