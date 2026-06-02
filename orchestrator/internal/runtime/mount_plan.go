@@ -32,6 +32,7 @@ type SandboxMountPlanInputs struct {
 	AgentHomeHostPath string
 	NetworkHostsPath  string
 	SchemaPackPath    string
+	ContentSnapshots  []store.ContentSnapshotRecord
 }
 
 type allowedMountPlanSurface struct {
@@ -56,6 +57,7 @@ func contentMountPlanSurfaces() map[string]allowedMountPlanSurface {
 		"bridge_inbox":    {Destination: filepath.Join(bridge.BridgeMountDestination, bridge.InboxDir), Type: "bind", Mode: "ro"},
 		"bridge_host_tmp": {Destination: filepath.Join(bridge.BridgeMountDestination, bridge.HostTmpDir), Type: "bind", Mode: "ro"},
 		"network_hosts":   {Destination: "/etc/hosts", Type: "bind", Mode: "ro"},
+		"skills_snapshot": {Destination: store.ContentSnapshotSkillsMount, Type: "bind", Mode: "ro"},
 	}
 	for _, spec := range agents.AllDriverConfigMaterializationSpecs() {
 		allow[spec.MountName] = allowedMountPlanSurface{
@@ -91,6 +93,16 @@ func BuildSandboxMountPlan(input SandboxMountPlanInputs) (MountPlan, error) {
 	}
 	for _, spec := range agents.DriverConfigMaterializationSpecsFor(agents.ID(strings.TrimSpace(details.DriverID))) {
 		plan.Content = append(plan.Content, exactBindMount(spec.MountName, spec.HostSourcePath(details.ControlDirPath), spec.SandboxDestination, spec.MountMode, driverConfigMaterializationMountOptions(spec), nil))
+	}
+	for _, snapshot := range input.ContentSnapshots {
+		switch strings.TrimSpace(snapshot.Kind) {
+		case store.ContentSnapshotKindSkills:
+			plan.Content = append(plan.Content, exactBindMount("skills_snapshot", snapshot.ImmutableHostPath, store.ContentSnapshotSkillsMount, "ro", []string{"bind", "ro", "nosuid", "nodev", "noexec"}, nil))
+		case "":
+			return MountPlan{}, fmt.Errorf("content snapshot kind is required")
+		default:
+			return MountPlan{}, fmt.Errorf("unsupported content snapshot kind %q for sandbox mount plan", snapshot.Kind)
+		}
 	}
 	if err := plan.Validate(); err != nil {
 		return MountPlan{}, err

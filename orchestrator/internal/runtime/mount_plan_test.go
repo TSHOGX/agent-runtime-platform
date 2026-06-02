@@ -20,6 +20,16 @@ func TestBuildSandboxMountPlanUsesExactSandboxSurface(t *testing.T) {
 		WorkspaceHostPath: filepath.Join(dir, "sessions", "sess-1"),
 		AgentHomeHostPath: filepath.Join(dir, "agent-homes", "sess-1", "sh"),
 		NetworkHostsPath:  filepath.Join(dir, "run", "network", "gen-1", "hosts"),
+		ContentSnapshots: []store.ContentSnapshotRecord{
+			{
+				Kind:                 store.ContentSnapshotKindSkills,
+				Digest:               "sha256:skills",
+				ImmutableHostPath:    filepath.Join(dir, "content", "skills", "sha256-skills"),
+				MountDestination:     store.ContentSnapshotSkillsMount,
+				SourceEvidenceDigest: "sha256:skills-source",
+				RetentionClass:       "generation_plan",
+			},
+		},
 	})
 	if err != nil {
 		t.Fatalf("build mount plan: %v", err)
@@ -29,6 +39,7 @@ func TestBuildSandboxMountPlanUsesExactSandboxSurface(t *testing.T) {
 	assertMount(t, mounts, "/workspace", filepath.Join(dir, "sessions", "sess-1"), "rw", false)
 	assertMount(t, mounts, "/agent-home", filepath.Join(dir, "agent-homes", "sess-1", "sh"), "rw", false)
 	assertMount(t, mounts, "/harness-control", filepath.Join(dir, "run", "control", "gen-1"), "ro", true)
+	assertMount(t, mounts, store.ContentSnapshotSkillsMount, filepath.Join(dir, "content", "skills", "sha256-skills"), "ro", true)
 	bridgeMount := assertMount(t, mounts, bridge.BridgeMountDestination, filepath.Join(dir, "run", "bridge", "gen-1"), "rw", true)
 	if bridgeMount.Annotations["dev.gvisor.spec.mount./harness-control/bridge.share"] != "exclusive" {
 		t.Fatalf("bridge mount missing exclusive annotation: %+v", bridgeMount.Annotations)
@@ -53,6 +64,31 @@ func TestBuildSandboxMountPlanUsesExactSandboxSurface(t *testing.T) {
 		if mount.Type == "bind" && slices.Contains(mount.Options, "rbind") {
 			t.Fatalf("mount plan bind must be exact, got recursive options for %+v", mount)
 		}
+	}
+}
+
+func TestBuildSandboxMountPlanRejectsUnsupportedContentSnapshotKind(t *testing.T) {
+	dir := t.TempDir()
+	_, err := BuildSandboxMountPlan(SandboxMountPlanInputs{
+		Generation: store.RuntimeGenerationDetails{
+			ControlDirPath: filepath.Join(dir, "run", "control", "gen-1"),
+			BridgeDirPath:  filepath.Join(dir, "run", "bridge", "gen-1"),
+		},
+		WorkspaceHostPath: filepath.Join(dir, "sessions", "sess-1"),
+		AgentHomeHostPath: filepath.Join(dir, "agent-homes", "sess-1", "sh"),
+		ContentSnapshots: []store.ContentSnapshotRecord{
+			{
+				Kind:                 store.ContentSnapshotKindManagedSettings,
+				Digest:               "sha256:settings",
+				ImmutableHostPath:    filepath.Join(dir, "content", "managed-settings", "sha256-settings"),
+				MountDestination:     "/harness-managed-settings",
+				SourceEvidenceDigest: "sha256:settings-source",
+				RetentionClass:       "generation_plan",
+			},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsupported content snapshot kind") {
+		t.Fatalf("expected unsupported content snapshot kind error, got %v", err)
 	}
 }
 

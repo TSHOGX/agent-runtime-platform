@@ -96,6 +96,7 @@ type StartRequest struct {
 	PreparedArtifacts     GenerationArtifacts
 	WorkspaceHostPath     string
 	AgentHomeHostPath     string
+	ContentSnapshots      []store.ContentSnapshotRecord
 }
 
 type Output struct {
@@ -1578,6 +1579,7 @@ func (r *Runtime) renderSandboxIsolatedRuntimeSpec(req StartRequest, driverSpec 
 		WorkspaceHostPath: workspaceHostPath,
 		AgentHomeHostPath: agentHomeHostPath,
 		NetworkHostsPath:  details.NetworkHostsPath,
+		ContentSnapshots:  req.ContentSnapshots,
 	})
 	if err != nil {
 		return runtimeSpec{}, "", err
