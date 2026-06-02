@@ -90,7 +90,7 @@ func Validate(p ValidateParams) error {
 	if err := validateFeaturePolicy(featurePolicy, driverSpec, providerSpec); err != nil {
 		return err
 	}
-	if err := validateContentSnapshots(object); err != nil {
+	if err := validateContentSnapshots(object, featurePolicy); err != nil {
 		return err
 	}
 	if err := validateSourceDigests(object); err != nil {
@@ -489,7 +489,7 @@ func validateFeaturePolicy(policy map[string]any, driver agents.DriverSpec, prov
 	return nil
 }
 
-func validateContentSnapshots(object map[string]any) error {
+func validateContentSnapshots(object map[string]any, featurePolicy map[string]any) error {
 	snapshots, err := requireObject(object, "content_snapshots")
 	if err != nil {
 		return err
@@ -521,7 +521,33 @@ func validateContentSnapshots(object map[string]any) error {
 			}
 		}
 	}
+	if err := validateRequiredContentSnapshotSelections(featurePolicy, snapshots); err != nil {
+		return err
+	}
 	return validateContentSnapshotMountScope(object, snapshots)
+}
+
+func validateRequiredContentSnapshotSelections(featurePolicy map[string]any, snapshots map[string]any) error {
+	requirements := []struct {
+		feature      agents.FeatureID
+		snapshotKind string
+	}{
+		{feature: agents.FeatureSkillsSnapshot, snapshotKind: store.ContentSnapshotKindSkills},
+		{feature: agents.FeatureManagedSettings, snapshotKind: store.ContentSnapshotKindManagedSettings},
+	}
+	for _, requirement := range requirements {
+		if agents.FeaturePolicyState(stringField(featurePolicy, string(requirement.feature))) != agents.FeaturePolicyRequired {
+			continue
+		}
+		value, ok := snapshots[requirement.snapshotKind]
+		if !ok || value == nil {
+			return fmt.Errorf("generation plan content_snapshots.%s is required by feature_policy.%s", requirement.snapshotKind, requirement.feature)
+		}
+		if _, ok := value.(map[string]any); !ok {
+			return fmt.Errorf("generation plan content_snapshots.%s must be an object when feature_policy.%s is required", requirement.snapshotKind, requirement.feature)
+		}
+	}
+	return nil
 }
 
 func validateContentSnapshot(name string, snapshot map[string]any) error {

@@ -251,6 +251,33 @@ func TestValidateRequiresContentSnapshotMountScope(t *testing.T) {
 	}
 }
 
+func TestValidateRequiredContentSnapshotSelections(t *testing.T) {
+	policy := map[string]any{
+		string(agents.FeatureSkillsSnapshot):  string(agents.FeaturePolicyRequired),
+		string(agents.FeatureManagedSettings): string(agents.FeaturePolicyDisabled),
+	}
+	snapshots := map[string]any{
+		store.ContentSnapshotKindSkills:          nil,
+		store.ContentSnapshotKindManagedSettings: nil,
+	}
+
+	err := validateRequiredContentSnapshotSelections(policy, snapshots)
+	if err == nil || !strings.Contains(err.Error(), "content_snapshots.skills is required by feature_policy.skills_snapshot") {
+		t.Fatalf("expected required skills snapshot error, got %v", err)
+	}
+
+	snapshots[store.ContentSnapshotKindSkills] = validSkillsSnapshotPayload()
+	if err := validateRequiredContentSnapshotSelections(policy, snapshots); err != nil {
+		t.Fatalf("required skills snapshot should validate: %v", err)
+	}
+
+	policy[string(agents.FeatureManagedSettings)] = string(agents.FeaturePolicyRequired)
+	err = validateRequiredContentSnapshotSelections(policy, snapshots)
+	if err == nil || !strings.Contains(err.Error(), "content_snapshots.managed_settings is required by feature_policy.managed_settings") {
+		t.Fatalf("expected required managed settings snapshot error, got %v", err)
+	}
+}
+
 func TestValidateRejectsMalformedLegacyProjectionDigestShape(t *testing.T) {
 	payload := validPlanPayload()
 	payload["projection_digests"] = validProjectionPayload()
