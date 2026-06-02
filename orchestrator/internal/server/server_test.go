@@ -3473,6 +3473,12 @@ func TestServerRenderersThreadContentSnapshots(t *testing.T) {
 	if len(req.ContentSnapshots) != 1 || req.ContentSnapshots[0].Digest != "sha256:skills" {
 		t.Fatalf("runtime start request content snapshots = %+v", req.ContentSnapshots)
 	}
+	driftedSession := session
+	driftedSession.DriverID = string(agents.Shell)
+	req = srv.runtimeStartRequest(driftedSession, allocation.GenerationID, details, artifacts, volumes, snapshots)
+	if req.DriverID != details.DriverID {
+		t.Fatalf("runtime start request driver id = %q want generation driver %q", req.DriverID, details.DriverID)
+	}
 
 	contractPayload, err := srv.sandboxContractPayload(session, details, artifacts, "sha256:resource-identity", volumes, snapshots)
 	if err != nil {

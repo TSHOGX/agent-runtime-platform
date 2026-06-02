@@ -1505,10 +1505,14 @@ type sessionRuntimeDataVolumes struct {
 }
 
 func (s *Server) runtimeStartRequest(session store.Session, generationID string, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, volumes sessionRuntimeDataVolumes, contentSnapshots []store.ContentSnapshotRecord) runtime.StartRequest {
+	driverID := strings.TrimSpace(details.DriverID)
+	if driverID == "" {
+		driverID = strings.TrimSpace(session.DriverID)
+	}
 	return runtime.StartRequest{
 		SessionID:         session.ID,
 		GenerationID:      generationID,
-		DriverID:          session.DriverID,
+		DriverID:          driverID,
 		Generation:        details,
 		PreparedArtifacts: artifacts,
 		WorkspaceHostPath: volumes.Workspace.HostPath,
