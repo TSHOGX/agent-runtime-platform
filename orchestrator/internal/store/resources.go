@@ -2376,6 +2376,11 @@ func validateGenerationRuntimeArtifactDigests(digests GenerationRuntimeArtifactD
 			return fmt.Errorf("runtime artifact %s is required", field.name)
 		}
 	}
+	if strings.TrimSpace(digests.RunscBinaryPath) != digests.RunscBinaryPath ||
+		!filepath.IsAbs(digests.RunscBinaryPath) ||
+		filepath.Clean(digests.RunscBinaryPath) != digests.RunscBinaryPath {
+		return fmt.Errorf("runtime artifact runsc binary path must be canonical absolute")
+	}
 	return nil
 }
 

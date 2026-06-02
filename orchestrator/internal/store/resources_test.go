@@ -468,6 +468,8 @@ func TestRecordGenerationRuntimeArtifactDigestsRequiresCompleteMetadata(t *testi
 		{name: "spec", want: "spec digest", edit: func(d *GenerationRuntimeArtifactDigests) { d.SpecDigest = "" }},
 		{name: "runsc version", want: "runsc version", edit: func(d *GenerationRuntimeArtifactDigests) { d.RunscVersion = "" }},
 		{name: "runsc binary path", want: "runsc binary path", edit: func(d *GenerationRuntimeArtifactDigests) { d.RunscBinaryPath = "" }},
+		{name: "relative runsc binary path", want: "runsc binary path must be canonical absolute", edit: func(d *GenerationRuntimeArtifactDigests) { d.RunscBinaryPath = "runsc" }},
+		{name: "unclean runsc binary path", want: "runsc binary path must be canonical absolute", edit: func(d *GenerationRuntimeArtifactDigests) { d.RunscBinaryPath = "/usr/local/bin/../bin/runsc-test" }},
 		{name: "runsc binary digest", want: "runsc binary digest", edit: func(d *GenerationRuntimeArtifactDigests) { d.RunscBinaryDigest = "" }},
 	}
 	for _, tt := range tests {
