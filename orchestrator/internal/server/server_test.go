@@ -1601,6 +1601,9 @@ func TestFreshStartStoresGenerationPlanBeforeNetworkPrepare(t *testing.T) {
 	if !rt.planSeenBeforeNetwork {
 		t.Fatalf("network preparation ran before generation plan rows were stored")
 	}
+	if !rt.projectionVerificationObserved {
+		t.Fatalf("network preparation ran before generation plan projections were verified")
+	}
 }
 
 func TestSendMessageReusesActiveGenerationArtifacts(t *testing.T) {
@@ -5468,9 +5471,10 @@ type recordingRuntime struct {
 
 type planOrderRuntime struct {
 	recordingRuntime
-	store                 *store.Store
-	t                     *testing.T
-	planSeenBeforeNetwork bool
+	store                          *store.Store
+	t                              *testing.T
+	planSeenBeforeNetwork          bool
+	projectionVerificationObserved bool
 }
 
 type blockingPrepareRuntime struct {
@@ -5577,12 +5581,23 @@ func (r *planOrderRuntime) PrepareGenerationNetwork(ctx context.Context, req run
 	if len(projections) != len(store.GenerationPlanProjectionKinds()) {
 		return fmt.Errorf("generation plan projection count before network prepare = %d want %d", len(projections), len(store.GenerationPlanProjectionKinds()))
 	}
+	verified, err := r.store.VerifyGenerationPlanProjections(ctx, store.VerifyGenerationPlanProjectionsParams{
+		GenerationID: req.GenerationID,
+		Expected:     generationPlanProjectionExpectations(req.PreparedArtifacts, ""),
+	})
+	if err != nil {
+		return fmt.Errorf("verify generation plan projections before network prepare: %w", err)
+	}
+	if !verified {
+		return fmt.Errorf("generation plan projections were missing before network prepare")
+	}
 	for _, projection := range projections {
 		if projection.PlanDigest != plan.PlanDigest {
 			return fmt.Errorf("generation plan projection %s digest before network prepare = %s want %s", projection.ProjectionKind, projection.PlanDigest, plan.PlanDigest)
 		}
 	}
 	r.planSeenBeforeNetwork = true
+	r.projectionVerificationObserved = true
 	return nil
 }
 

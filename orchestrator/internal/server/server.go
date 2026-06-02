@@ -695,6 +695,16 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		if err := leaseKeeper.ensureOwned(); err != nil {
 			return err
 		}
+		if _, err := s.verifyStoredGenerationPlanProjections(ctx, allocation.GenerationID, preparedArtifacts, sandboxContractDigest); err != nil {
+			if leaseErr := leaseKeeper.err(); leaseErr != nil {
+				return leaseErr
+			}
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+			return err
+		}
+		if err := leaseKeeper.ensureOwned(); err != nil {
+			return err
+		}
 		if err := s.runtime.PrepareGenerationNetwork(startCtx, s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, preparedArtifacts, dataVolumes)); err != nil {
 			if leaseErr := leaseKeeper.err(); leaseErr != nil {
 				return leaseErr
@@ -814,15 +824,17 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 		return err
 	}
-	if _, err := s.verifyStoredGenerationPlanProjections(ctx, allocation.GenerationID, preparedArtifacts, sandboxContractDigest); err != nil {
-		if ensured.RestoreFromCheckpoint {
+	if !ensured.IsNew {
+		if _, err := s.verifyStoredGenerationPlanProjections(ctx, allocation.GenerationID, preparedArtifacts, sandboxContractDigest); err != nil {
+			if ensured.RestoreFromCheckpoint {
+				retireRuntimeResource()
+				s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+				return err
+			}
 			retireRuntimeResource()
 			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 			return err
 		}
-		retireRuntimeResource()
-		s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
-		return err
 	}
 	if err := s.verifyGenerationPlanFrozenEvidence(ctx, allocation.GenerationID, generationDetails, preparedArtifacts); err != nil {
 		retireRuntimeResource()
