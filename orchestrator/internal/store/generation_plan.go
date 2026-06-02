@@ -238,8 +238,15 @@ func (s *Store) StoreGenerationPlanProjection(ctx context.Context, p StoreGenera
 	if p.ProjectionKind == "" {
 		return GenerationPlanProjectionRecord{}, fmt.Errorf("generation plan projection kind is required")
 	}
+	projectionVersion, ok := GenerationPlanProjectionVersionFor(p.ProjectionKind)
+	if !ok {
+		return GenerationPlanProjectionRecord{}, fmt.Errorf("unsupported generation plan projection kind %q", p.ProjectionKind)
+	}
 	if p.ProjectionVersion <= 0 {
 		return GenerationPlanProjectionRecord{}, fmt.Errorf("generation plan projection version is required")
+	}
+	if p.ProjectionVersion != projectionVersion {
+		return GenerationPlanProjectionRecord{}, fmt.Errorf("generation plan projection %s version = %d, want %d", p.ProjectionKind, p.ProjectionVersion, projectionVersion)
 	}
 	if p.PayloadDigest == "" || !strings.HasPrefix(p.PayloadDigest, "sha256:") {
 		return GenerationPlanProjectionRecord{}, fmt.Errorf("generation plan projection payload digest is required")

@@ -267,6 +267,46 @@ func TestStoreGenerationPlanProjectionRejectsPlanDigestMismatch(t *testing.T) {
 	}
 }
 
+func TestStoreGenerationPlanProjectionRejectsUnsupportedKindAndVersion(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	createStoreSession(t, ctx, st, "sess_projection_schema")
+	createRuntimeGenerationForPlanTest(t, ctx, st, "sess_projection_schema", "gen_projection_schema", "allocating")
+	plan, err := st.StoreGenerationPlan(ctx, StoreGenerationPlanParams{
+		GenerationID: "gen_projection_schema",
+		Payload:      map[string]any{"generation_id": "gen_projection_schema", "plan_version": 1},
+	})
+	if err != nil {
+		t.Fatalf("store plan: %v", err)
+	}
+
+	_, err = st.StoreGenerationPlanProjection(ctx, StoreGenerationPlanProjectionParams{
+		GenerationID:      plan.GenerationID,
+		PlanDigest:        plan.PlanDigest,
+		ProjectionKind:    "driver_config",
+		ProjectionVersion: GenerationPlanProjectionVersion,
+		PayloadDigest:     "sha256:driver-config",
+	})
+	if err == nil || !strings.Contains(err.Error(), `unsupported generation plan projection kind "driver_config"`) {
+		t.Fatalf("expected unsupported projection kind error, got %v", err)
+	}
+
+	_, err = st.StoreGenerationPlanProjection(ctx, StoreGenerationPlanProjectionParams{
+		GenerationID:      plan.GenerationID,
+		PlanDigest:        plan.PlanDigest,
+		ProjectionKind:    GenerationPlanProjectionControlManifest,
+		ProjectionVersion: GenerationPlanProjectionVersion + 1,
+		PayloadDigest:     "sha256:manifest",
+	})
+	if err == nil || !strings.Contains(err.Error(), "generation plan projection control_manifest version = 2, want 1") {
+		t.Fatalf("expected projection version error, got %v", err)
+	}
+}
+
 func TestVerifyGenerationPlanProjectionsMatchesStoredDigests(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))

@@ -3402,19 +3402,22 @@ VALUES (?, ?, 'allocating', 'owner', ?)`, generationID, session.ID, time.Now().U
 	}
 	artifacts := testGenerationArtifacts()
 	for _, expectation := range planprojection.Expectations(artifacts) {
-		version := expectation.ProjectionVersion
-		if expectation.ProjectionKind == store.GenerationPlanProjectionOCISpec {
-			version = 2
-		}
 		if _, err := st.StoreGenerationPlanProjection(ctx, store.StoreGenerationPlanProjectionParams{
 			GenerationID:      generationID,
 			PlanDigest:        plan.PlanDigest,
 			ProjectionKind:    expectation.ProjectionKind,
-			ProjectionVersion: version,
+			ProjectionVersion: expectation.ProjectionVersion,
 			PayloadDigest:     expectation.PayloadDigest,
 		}); err != nil {
 			t.Fatalf("store projection %s: %v", expectation.ProjectionKind, err)
 		}
+	}
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE generation_plan_projections
+SET projection_version = 2
+WHERE generation_id = ?
+  AND projection_kind = ?`, generationID, store.GenerationPlanProjectionOCISpec); err != nil {
+		t.Fatalf("corrupt stored projection version: %v", err)
 	}
 
 	srv := &Server{store: st}
