@@ -174,6 +174,27 @@ CREATE UNIQUE INDEX IF NOT EXISTS runtime_generations_sandbox_contract_id_uq
   ON runtime_generations (sandbox_contract_id)
   WHERE sandbox_contract_id IS NOT NULL;
 
+CREATE TABLE IF NOT EXISTS generation_plans (
+  generation_id TEXT PRIMARY KEY
+    REFERENCES runtime_generations(generation_id) ON DELETE CASCADE,
+  plan_version INTEGER NOT NULL CHECK(plan_version = 1),
+  canonical_payload TEXT NOT NULL,
+  plan_digest TEXT NOT NULL CHECK(plan_digest LIKE 'sha256:%'),
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS generation_plan_projections (
+  generation_id TEXT NOT NULL
+    REFERENCES generation_plans(generation_id) ON DELETE CASCADE,
+  plan_digest TEXT NOT NULL CHECK(plan_digest LIKE 'sha256:%'),
+  projection_kind TEXT NOT NULL CHECK(projection_kind <> ''),
+  projection_version INTEGER NOT NULL CHECK(projection_version > 0),
+  payload_digest TEXT NOT NULL CHECK(payload_digest LIKE 'sha256:%'),
+  materialized_path TEXT,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (generation_id, projection_kind)
+);
+
 CREATE TABLE IF NOT EXISTS network_profiles (
   network_profile_id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
