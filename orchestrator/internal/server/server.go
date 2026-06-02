@@ -705,43 +705,6 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		if err := leaseKeeper.ensureOwned(); err != nil {
 			return err
 		}
-		if err := s.runtime.PrepareGenerationNetwork(startCtx, s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, preparedArtifacts, dataVolumes)); err != nil {
-			if leaseErr := leaseKeeper.err(); leaseErr != nil {
-				return leaseErr
-			}
-			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
-			return err
-		}
-		preparedArtifacts.NetworkPrepared = true
-		if err := leaseKeeper.ensureOwned(); err != nil {
-			return err
-		}
-		if err := s.store.RecordGenerationRuntimeArtifactDigests(ctx, allocation.GenerationID, runtimeArtifactDigests(preparedArtifacts)); err != nil {
-			if leaseErr := leaseKeeper.err(); leaseErr != nil {
-				return leaseErr
-			}
-			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
-			return err
-		}
-		if err := leaseKeeper.ensureOwned(); err != nil {
-			return err
-		}
-		if _, err := s.store.RecordSandboxContractArtifacts(ctx, store.RecordSandboxContractArtifactsParams{
-			ContractID:            sandboxContractID(allocation.GenerationID),
-			ControlManifestDigest: preparedArtifacts.ManifestDigest,
-			OCISpecDigest:         preparedArtifacts.SpecDigest,
-			BundleDigest:          preparedArtifacts.BundleDigest,
-			Now:                   time.Now().UTC(),
-		}); err != nil {
-			if leaseErr := leaseKeeper.err(); leaseErr != nil {
-				return leaseErr
-			}
-			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
-			return err
-		}
-		if err := leaseKeeper.ensureOwned(); err != nil {
-			return err
-		}
 		instance, err := s.createRuntimeResourceInstance(ctx, runtimeResourceParams)
 		if err != nil {
 			if leaseErr := leaseKeeper.err(); leaseErr != nil {
@@ -760,6 +723,50 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			LeaseExpiresAt:   materializeNow.Add(s.cfg.Harness.Bridge.LeaseTTL.Duration),
 			IdempotencyToken: "start:" + allocation.GenerationID,
 			Now:              materializeNow,
+		}); err != nil {
+			if leaseErr := leaseKeeper.err(); leaseErr != nil {
+				return leaseErr
+			}
+			retireRuntimeResource()
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+			return err
+		}
+		if err := leaseKeeper.ensureOwned(); err != nil {
+			retireRuntimeResource()
+			return err
+		}
+		networkDetails := runtimeDetailsWithResourceInstance(generationDetails, runtimeResourceInstance)
+		if err := s.runtime.PrepareGenerationNetwork(startCtx, s.runtimeStartRequest(session, allocation.GenerationID, networkDetails, preparedArtifacts, dataVolumes)); err != nil {
+			if leaseErr := leaseKeeper.err(); leaseErr != nil {
+				return leaseErr
+			}
+			retireRuntimeResource()
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+			return err
+		}
+		preparedArtifacts.NetworkPrepared = true
+		if err := leaseKeeper.ensureOwned(); err != nil {
+			retireRuntimeResource()
+			return err
+		}
+		if err := s.store.RecordGenerationRuntimeArtifactDigests(ctx, allocation.GenerationID, runtimeArtifactDigests(preparedArtifacts)); err != nil {
+			if leaseErr := leaseKeeper.err(); leaseErr != nil {
+				return leaseErr
+			}
+			retireRuntimeResource()
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+			return err
+		}
+		if err := leaseKeeper.ensureOwned(); err != nil {
+			retireRuntimeResource()
+			return err
+		}
+		if _, err := s.store.RecordSandboxContractArtifacts(ctx, store.RecordSandboxContractArtifactsParams{
+			ContractID:            sandboxContractID(allocation.GenerationID),
+			ControlManifestDigest: preparedArtifacts.ManifestDigest,
+			OCISpecDigest:         preparedArtifacts.SpecDigest,
+			BundleDigest:          preparedArtifacts.BundleDigest,
+			Now:                   time.Now().UTC(),
 		}); err != nil {
 			if leaseErr := leaseKeeper.err(); leaseErr != nil {
 				return leaseErr

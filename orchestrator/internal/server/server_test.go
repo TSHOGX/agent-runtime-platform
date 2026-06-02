@@ -1604,6 +1604,9 @@ func TestFreshStartStoresGenerationPlanBeforeNetworkPrepare(t *testing.T) {
 	if !rt.projectionVerificationObserved {
 		t.Fatalf("network preparation ran before generation plan projections were verified")
 	}
+	if !rt.runtimeResourceClaimedBeforeNetwork {
+		t.Fatalf("network preparation ran before claiming the runtime resource")
+	}
 }
 
 func TestSendMessageReusesActiveGenerationArtifacts(t *testing.T) {
@@ -5471,10 +5474,11 @@ type recordingRuntime struct {
 
 type planOrderRuntime struct {
 	recordingRuntime
-	store                          *store.Store
-	t                              *testing.T
-	planSeenBeforeNetwork          bool
-	projectionVerificationObserved bool
+	store                               *store.Store
+	t                                   *testing.T
+	planSeenBeforeNetwork               bool
+	projectionVerificationObserved      bool
+	runtimeResourceClaimedBeforeNetwork bool
 }
 
 type blockingPrepareRuntime struct {
@@ -5596,8 +5600,25 @@ func (r *planOrderRuntime) PrepareGenerationNetwork(ctx context.Context, req run
 			return fmt.Errorf("generation plan projection %s digest before network prepare = %s want %s", projection.ProjectionKind, projection.PlanDigest, plan.PlanDigest)
 		}
 	}
+	instance, err := r.store.GetRuntimeResourceInstance(ctx, req.GenerationID)
+	if err != nil {
+		return fmt.Errorf("get runtime resource instance before network prepare: %w", err)
+	}
+	if instance.State != store.RuntimeResourceMaterializing {
+		return fmt.Errorf("runtime resource state before network prepare = %s want %s", instance.State, store.RuntimeResourceMaterializing)
+	}
+	if strings.TrimSpace(instance.WorkerID) == "" || strings.TrimSpace(instance.HostID) == "" {
+		return fmt.Errorf("runtime resource worker lease was not claimed before network prepare")
+	}
+	if instance.LeaseExpiresAt == nil {
+		return fmt.Errorf("runtime resource materialization lease is missing before network prepare")
+	}
+	if instance.IdempotencyToken != "start:"+req.GenerationID {
+		return fmt.Errorf("runtime resource idempotency token before network prepare = %q want %q", instance.IdempotencyToken, "start:"+req.GenerationID)
+	}
 	r.planSeenBeforeNetwork = true
 	r.projectionVerificationObserved = true
+	r.runtimeResourceClaimedBeforeNetwork = true
 	return nil
 }
 
