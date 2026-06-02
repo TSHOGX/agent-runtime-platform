@@ -318,6 +318,15 @@ func TestVerifyGenerationPlanProjectionsMatchesStoredDigests(t *testing.T) {
 	}
 	if _, err := st.VerifyGenerationPlanProjections(ctx, VerifyGenerationPlanProjectionsParams{
 		GenerationID: plan.GenerationID,
+		PlanDigest:   plan.PlanDigest,
+		Expected: []GenerationPlanProjectionExpectation{
+			{ProjectionKind: GenerationPlanProjectionControlManifest, ProjectionVersion: 2, PayloadDigest: "sha256:manifest"},
+		},
+	}); err == nil || !strings.Contains(err.Error(), "control_manifest version mismatch") {
+		t.Fatalf("expected projection version mismatch, got %v", err)
+	}
+	if _, err := st.VerifyGenerationPlanProjections(ctx, VerifyGenerationPlanProjectionsParams{
+		GenerationID: plan.GenerationID,
 		PlanDigest:   "sha256:wrong",
 		Expected:     []GenerationPlanProjectionExpectation{},
 	}); err == nil || !strings.Contains(err.Error(), "generation plan digest mismatch") {

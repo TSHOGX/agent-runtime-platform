@@ -2207,11 +2207,11 @@ func generationPlanPayloadObject(payload []byte) (map[string]any, error) {
 
 func generationPlanProjectionExpectations(artifacts runtime.GenerationArtifacts) []store.GenerationPlanProjectionExpectation {
 	return []store.GenerationPlanProjectionExpectation{
-		{ProjectionKind: store.GenerationPlanProjectionControlManifest, PayloadDigest: projectionPayloadDigest(store.GenerationPlanProjectionControlManifest, artifacts.ManifestDigest)},
-		{ProjectionKind: store.GenerationPlanProjectionControlManifestProjected, PayloadDigest: projectionPayloadDigest(store.GenerationPlanProjectionControlManifestProjected, artifacts.ProjectedManifestDigest)},
-		{ProjectionKind: store.GenerationPlanProjectionOCISpec, PayloadDigest: projectionPayloadDigest(store.GenerationPlanProjectionOCISpec, artifacts.SpecDigest)},
-		{ProjectionKind: store.GenerationPlanProjectionBundle, PayloadDigest: projectionPayloadDigest(store.GenerationPlanProjectionBundle, artifacts.BundleDigest)},
-		{ProjectionKind: store.GenerationPlanProjectionRuntimeConfig, PayloadDigest: projectionPayloadDigest(store.GenerationPlanProjectionRuntimeConfig, artifacts.RuntimeConfigDigest)},
+		{ProjectionKind: store.GenerationPlanProjectionControlManifest, ProjectionVersion: store.GenerationPlanProjectionVersion, PayloadDigest: projectionPayloadDigest(store.GenerationPlanProjectionControlManifest, artifacts.ManifestDigest)},
+		{ProjectionKind: store.GenerationPlanProjectionControlManifestProjected, ProjectionVersion: store.GenerationPlanProjectionVersion, PayloadDigest: projectionPayloadDigest(store.GenerationPlanProjectionControlManifestProjected, artifacts.ProjectedManifestDigest)},
+		{ProjectionKind: store.GenerationPlanProjectionOCISpec, ProjectionVersion: store.GenerationPlanProjectionVersion, PayloadDigest: projectionPayloadDigest(store.GenerationPlanProjectionOCISpec, artifacts.SpecDigest)},
+		{ProjectionKind: store.GenerationPlanProjectionBundle, ProjectionVersion: store.GenerationPlanProjectionVersion, PayloadDigest: projectionPayloadDigest(store.GenerationPlanProjectionBundle, artifacts.BundleDigest)},
+		{ProjectionKind: store.GenerationPlanProjectionRuntimeConfig, ProjectionVersion: store.GenerationPlanProjectionVersion, PayloadDigest: projectionPayloadDigest(store.GenerationPlanProjectionRuntimeConfig, artifacts.RuntimeConfigDigest)},
 	}
 }
 

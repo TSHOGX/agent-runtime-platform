@@ -76,8 +76,9 @@ type VerifyGenerationPlanProjectionsParams struct {
 }
 
 type GenerationPlanProjectionExpectation struct {
-	ProjectionKind string
-	PayloadDigest  string
+	ProjectionKind    string
+	ProjectionVersion int
+	PayloadDigest     string
 }
 
 func GenerationPlanProjectionKinds() []string {
@@ -348,6 +349,19 @@ func (s *Store) VerifyGenerationPlanProjections(ctx context.Context, p VerifyGen
 		record, ok := byKind[kind]
 		if !ok {
 			return true, fmt.Errorf("generation plan projection %s is required", kind)
+		}
+		version := expectation.ProjectionVersion
+		if version == 0 {
+			defaultVersion, ok := GenerationPlanProjectionVersionFor(kind)
+			if ok {
+				version = defaultVersion
+			}
+		}
+		if version <= 0 {
+			return true, fmt.Errorf("generation plan projection %s version is required", kind)
+		}
+		if record.ProjectionVersion != version {
+			return true, fmt.Errorf("generation plan projection %s version mismatch: got %d want %d", kind, version, record.ProjectionVersion)
 		}
 		if record.PayloadDigest != digest {
 			return true, fmt.Errorf("generation plan projection %s digest mismatch: got %s want %s", kind, digest, record.PayloadDigest)

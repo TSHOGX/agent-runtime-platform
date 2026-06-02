@@ -3235,6 +3235,48 @@ VALUES (?, ?, 'allocating', 'owner', ?)`, generationID, session.ID, time.Now().U
 	}
 }
 
+func TestVerifyStoredGenerationPlanProjectionsChecksProjectionVersion(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, _ := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_projection_version", string(sessionstate.Created), time.Now().UTC(), nil)
+	generationID := "gen_projection_version"
+	if _, err := st.DBForTest().ExecContext(ctx, `
+INSERT INTO runtime_generations (generation_id, session_id, status, lease_owner, lease_expires_at)
+VALUES (?, ?, 'allocating', 'owner', ?)`, generationID, session.ID, time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("insert runtime generation: %v", err)
+	}
+	plan, err := st.StoreGenerationPlan(ctx, store.StoreGenerationPlanParams{
+		GenerationID: generationID,
+		Payload:      map[string]any{"generation_id": generationID, "plan_version": 1},
+	})
+	if err != nil {
+		t.Fatalf("store generation plan: %v", err)
+	}
+	artifacts := testGenerationArtifacts()
+	for _, expectation := range generationPlanProjectionExpectations(artifacts) {
+		version := expectation.ProjectionVersion
+		if expectation.ProjectionKind == store.GenerationPlanProjectionOCISpec {
+			version = 2
+		}
+		if _, err := st.StoreGenerationPlanProjection(ctx, store.StoreGenerationPlanProjectionParams{
+			GenerationID:      generationID,
+			PlanDigest:        plan.PlanDigest,
+			ProjectionKind:    expectation.ProjectionKind,
+			ProjectionVersion: version,
+			PayloadDigest:     expectation.PayloadDigest,
+		}); err != nil {
+			t.Fatalf("store projection %s: %v", expectation.ProjectionKind, err)
+		}
+	}
+
+	srv := &Server{store: st}
+	if _, err := srv.verifyStoredGenerationPlanProjections(ctx, generationID, artifacts); err == nil ||
+		!strings.Contains(err.Error(), "oci_spec version mismatch") {
+		t.Fatalf("expected projection version mismatch, got %v", err)
+	}
+}
+
 func TestVerifyStoredGenerationPlanProjectionsSkipsMissingPlan(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
