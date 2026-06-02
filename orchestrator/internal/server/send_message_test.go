@@ -557,3 +557,121 @@ WHERE session_id = ?`, session.ID).Scan(&runtimeEvents, &terminalEvents); err !=
 		t.Fatalf("unexpected restore failure events: runtime=%d terminal=%d", runtimeEvents, terminalEvents)
 	}
 }
+
+func TestSendMessageCheckpointRestoreFailureCanBeRetriedColdOnNextInput(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	session := createServerTestSession(t, ctx, st, dir, "sess_restore_fail_retry", string(sessionstate.RunningIdle), time.Now().UTC(), nil)
+	cfg := testServerConfig(dir)
+	cfg.Harness.Network.CIDRPool = config.CIDRPrefix{Prefix: netip.MustParsePrefix("10.241.0.0/28")}
+	leaseOwner := store.GenerationLeaseOwner(owner.UUID)
+	old, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     leaseOwner,
+		LeaseTTL:  time.Minute,
+		Now:       time.Now().UTC(),
+		Config:    serverTestAllocatorConfig(cfg, "claude_code"),
+	})
+	if err != nil {
+		t.Fatalf("allocate checkpointed generation: %v", err)
+	}
+	if err := st.MarkGenerationResourcesLive(ctx, session.ID, old.GenerationID, old.Owner, time.Now().UTC()); err != nil {
+		t.Fatalf("mark checkpointed generation live: %v", err)
+	}
+	recordServerRuntimeArtifacts(t, ctx, st, old.GenerationID, "restore_manifest_digest", "runsc restore-test")
+	markServerGenerationCheckpointed(t, ctx, st, session.ID, old.GenerationID, time.Now().UTC())
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE sessions
+SET checkpoint_path = ?,
+    restore_ms = 456
+WHERE id = ?`, filepath.Join(dir, "checkpoints", session.ID), session.ID); err != nil {
+		t.Fatalf("seed checkpoint metadata: %v", err)
+	}
+
+	rt := &restoreFailingRuntime{err: errors.New("checkpoint_runsc_version mismatch")}
+	srv := &Server{
+		cfg:     cfg,
+		store:   st,
+		runtime: rt,
+		watcher: newServerTestWatcher(t, filepath.Join(dir, "sessions"), st, events.NewHub()),
+		hub:     events.NewHub(),
+		log:     slog.Default(),
+	}
+	srv.SetOwnerUUID(owner.UUID)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(`{"content":"after restore failure"}`))
+	rec := httptest.NewRecorder()
+	srv.sendMessage(rec, req, session.ID)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d body %s", rec.Code, rec.Body.String())
+	}
+	gotSession, err := st.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("get restore-failed session: %v", err)
+	}
+	if gotSession.Status != string(sessionstate.RunningIdle) || gotSession.ActiveGenerationID != old.GenerationID {
+		t.Fatalf("session should stay retryable on failed checkpoint generation: %+v old=%s", gotSession, old.GenerationID)
+	}
+	var oldStatus, oldNetwork, oldResources string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT g.status, n.allocation_state, r.resource_state
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, old.GenerationID).Scan(&oldStatus, &oldNetwork, &oldResources); err != nil {
+		t.Fatalf("query old generation: %v", err)
+	}
+	if oldStatus != "failed" || oldNetwork != "reclaimable" || oldResources != "reclaimable" {
+		t.Fatalf("generation not reclaimable after restore failure: status=%s network=%s resources=%s", oldStatus, oldNetwork, oldResources)
+	}
+	rt.err = nil
+	req = httptest.NewRequest(http.MethodPost, "/api/sessions/"+session.ID+"/messages", strings.NewReader(`{"content":"retry after restore failure"}`))
+	rec = httptest.NewRecorder()
+	srv.sendMessage(rec, req, session.ID)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected retry status 202, got %d body %s", rec.Code, rec.Body.String())
+	}
+	gotSession, err = st.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("get retried session: %v", err)
+	}
+	if gotSession.ActiveGenerationID == "" || gotSession.ActiveGenerationID == old.GenerationID || gotSession.Status != string(sessionstate.RunningActive) {
+		t.Fatalf("retry should allocate a replacement after explicit failure: %+v old=%s", gotSession, old.GenerationID)
+	}
+	var newStatus, newNetwork, newResources string
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT g.status, n.allocation_state, r.resource_state
+FROM runtime_generations g
+JOIN network_profiles n ON n.generation_id = g.generation_id
+JOIN runtime_generation_resources r ON r.generation_id = g.generation_id
+WHERE g.generation_id = ?`, gotSession.ActiveGenerationID).Scan(&newStatus, &newNetwork, &newResources); err != nil {
+		t.Fatalf("query retry generation: %v", err)
+	}
+	if newStatus != "idle" || newNetwork != "live" || newResources != "live" {
+		t.Fatalf("retry generation not live idle: status=%s network=%s resources=%s", newStatus, newNetwork, newResources)
+	}
+	var queuedTurns int
+	if err := st.DBForTest().QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM turns
+WHERE session_id = ?
+  AND status = 'queued'
+  AND generation_id IS NULL
+  AND content = 'retry after restore failure'`, session.ID).Scan(&queuedTurns); err != nil {
+		t.Fatalf("count turns: %v", err)
+	}
+	if queuedTurns != 1 {
+		t.Fatalf("retry should enqueue exactly one turn, got %d", queuedTurns)
+	}
+	prepareRequests, startRequests := rt.requests()
+	if len(prepareRequests) != 2 || len(startRequests) != 2 {
+		t.Fatalf("runtime calls prepare=%d start=%d", len(prepareRequests), len(startRequests))
+	}
+	if !startRequests[0].RestoreFromCheckpoint || startRequests[0].GenerationID != old.GenerationID {
+		t.Fatalf("first start was not restore: %+v", startRequests[0])
+	}
+	if startRequests[1].RestoreFromCheckpoint || startRequests[1].GenerationID != gotSession.ActiveGenerationID {
+		t.Fatalf("second start was not cold retry generation: %+v", startRequests[1])
+	}
+}
