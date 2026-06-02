@@ -811,12 +811,10 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 		return err
 	}
-	if ensured.RestoreFromCheckpoint {
-		if err := s.verifyGenerationPlanFrozenEvidence(ctx, allocation.GenerationID, generationDetails, preparedArtifacts); err != nil {
-			retireRuntimeResource()
-			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
-			return err
-		}
+	if err := s.verifyGenerationPlanFrozenEvidence(ctx, allocation.GenerationID, generationDetails, preparedArtifacts); err != nil {
+		retireRuntimeResource()
+		s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+		return err
 	}
 	startReq := s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, preparedArtifacts, dataVolumes)
 	startReq.RestoreFromCheckpoint = ensured.RestoreFromCheckpoint
