@@ -49,6 +49,18 @@ type StoreGenerationPlanProjectionParams struct {
 	Now               time.Time
 }
 
+type VerifyGenerationPlanProjectionsParams struct {
+	GenerationID string
+	PlanDigest   string
+	Expected     []GenerationPlanProjectionExpectation
+	RequirePlan  bool
+}
+
+type GenerationPlanProjectionExpectation struct {
+	ProjectionKind string
+	PayloadDigest  string
+}
+
 func GenerationPlanDigest(canonicalPayload []byte) string {
 	return SandboxContractDigest(canonicalPayload)
 }
@@ -255,6 +267,56 @@ ORDER BY projection_kind`, strings.TrimSpace(generationID))
 		records = append(records, record)
 	}
 	return records, rows.Err()
+}
+
+func (s *Store) VerifyGenerationPlanProjections(ctx context.Context, p VerifyGenerationPlanProjectionsParams) (bool, error) {
+	generationID := strings.TrimSpace(p.GenerationID)
+	if generationID == "" {
+		return false, fmt.Errorf("generation id is required")
+	}
+	plan, err := s.GetGenerationPlan(ctx, generationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		if p.RequirePlan {
+			return false, fmt.Errorf("generation plan is required for generation %s", generationID)
+		}
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	expectedPlanDigest := strings.TrimSpace(p.PlanDigest)
+	if expectedPlanDigest != "" && expectedPlanDigest != plan.PlanDigest {
+		return true, fmt.Errorf("generation plan digest mismatch: got %s want %s", expectedPlanDigest, plan.PlanDigest)
+	}
+	records, err := s.ListGenerationPlanProjections(ctx, generationID)
+	if err != nil {
+		return true, err
+	}
+	byKind := map[string]GenerationPlanProjectionRecord{}
+	for _, record := range records {
+		if record.PlanDigest != plan.PlanDigest {
+			return true, fmt.Errorf("generation plan projection %s plan digest mismatch: got %s want %s", record.ProjectionKind, record.PlanDigest, plan.PlanDigest)
+		}
+		byKind[record.ProjectionKind] = record
+	}
+	for _, expectation := range p.Expected {
+		kind := strings.TrimSpace(expectation.ProjectionKind)
+		digest := strings.TrimSpace(expectation.PayloadDigest)
+		if kind == "" {
+			return true, fmt.Errorf("generation plan projection kind is required")
+		}
+		if digest == "" || !strings.HasPrefix(digest, "sha256:") {
+			return true, fmt.Errorf("generation plan projection %s payload digest is required", kind)
+		}
+		record, ok := byKind[kind]
+		if !ok {
+			return true, fmt.Errorf("generation plan projection %s is required", kind)
+		}
+		if record.PayloadDigest != digest {
+			return true, fmt.Errorf("generation plan projection %s digest mismatch: got %s want %s", kind, digest, record.PayloadDigest)
+		}
+	}
+	return true, nil
 }
 
 func getGenerationPlanTx(ctx context.Context, db dbRunner, generationID string) (GenerationPlanRecord, error) {

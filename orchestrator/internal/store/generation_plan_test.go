@@ -235,6 +235,100 @@ func TestStoreGenerationPlanProjectionRejectsPlanDigestMismatch(t *testing.T) {
 	}
 }
 
+func TestVerifyGenerationPlanProjectionsMatchesStoredDigests(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	createStoreSession(t, ctx, st, "sess_verify_projection")
+	createRuntimeGenerationForPlanTest(t, ctx, st, "sess_verify_projection", "gen_verify_projection", "allocating")
+	plan, err := st.StoreGenerationPlan(ctx, StoreGenerationPlanParams{
+		GenerationID: "gen_verify_projection",
+		Payload:      map[string]any{"generation_id": "gen_verify_projection", "plan_version": 1},
+	})
+	if err != nil {
+		t.Fatalf("store plan: %v", err)
+	}
+	for _, projection := range []StoreGenerationPlanProjectionParams{
+		{GenerationID: plan.GenerationID, PlanDigest: plan.PlanDigest, ProjectionKind: "control_manifest", ProjectionVersion: 1, PayloadDigest: "sha256:manifest"},
+		{GenerationID: plan.GenerationID, PlanDigest: plan.PlanDigest, ProjectionKind: "oci_spec", ProjectionVersion: 1, PayloadDigest: "sha256:spec"},
+	} {
+		if _, err := st.StoreGenerationPlanProjection(ctx, projection); err != nil {
+			t.Fatalf("store projection %s: %v", projection.ProjectionKind, err)
+		}
+	}
+
+	verified, err := st.VerifyGenerationPlanProjections(ctx, VerifyGenerationPlanProjectionsParams{
+		GenerationID: plan.GenerationID,
+		PlanDigest:   plan.PlanDigest,
+		Expected: []GenerationPlanProjectionExpectation{
+			{ProjectionKind: "control_manifest", PayloadDigest: "sha256:manifest"},
+			{ProjectionKind: "oci_spec", PayloadDigest: "sha256:spec"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("verify matching projections: %v", err)
+	}
+	if !verified {
+		t.Fatalf("expected verification to report stored plan")
+	}
+
+	if _, err := st.VerifyGenerationPlanProjections(ctx, VerifyGenerationPlanProjectionsParams{
+		GenerationID: plan.GenerationID,
+		PlanDigest:   plan.PlanDigest,
+		Expected: []GenerationPlanProjectionExpectation{
+			{ProjectionKind: "control_manifest", PayloadDigest: "sha256:changed"},
+		},
+	}); err == nil || !strings.Contains(err.Error(), "control_manifest digest mismatch") {
+		t.Fatalf("expected projection digest mismatch, got %v", err)
+	}
+	if _, err := st.VerifyGenerationPlanProjections(ctx, VerifyGenerationPlanProjectionsParams{
+		GenerationID: plan.GenerationID,
+		PlanDigest:   "sha256:wrong",
+		Expected:     []GenerationPlanProjectionExpectation{},
+	}); err == nil || !strings.Contains(err.Error(), "generation plan digest mismatch") {
+		t.Fatalf("expected plan digest mismatch, got %v", err)
+	}
+	if _, err := st.VerifyGenerationPlanProjections(ctx, VerifyGenerationPlanProjectionsParams{
+		GenerationID: plan.GenerationID,
+		Expected: []GenerationPlanProjectionExpectation{
+			{ProjectionKind: "missing", PayloadDigest: "sha256:missing"},
+		},
+	}); err == nil || !strings.Contains(err.Error(), "projection missing is required") {
+		t.Fatalf("expected missing projection error, got %v", err)
+	}
+}
+
+func TestVerifyGenerationPlanProjectionsCanRequirePlan(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	createStoreSession(t, ctx, st, "sess_verify_missing_plan")
+	createRuntimeGenerationForPlanTest(t, ctx, st, "sess_verify_missing_plan", "gen_verify_missing_plan", "allocating")
+
+	verified, err := st.VerifyGenerationPlanProjections(ctx, VerifyGenerationPlanProjectionsParams{
+		GenerationID: "gen_verify_missing_plan",
+		Expected:     []GenerationPlanProjectionExpectation{{ProjectionKind: "control_manifest", PayloadDigest: "sha256:manifest"}},
+	})
+	if err != nil {
+		t.Fatalf("optional missing plan should not fail: %v", err)
+	}
+	if verified {
+		t.Fatalf("optional missing plan should report verified=false")
+	}
+	if _, err := st.VerifyGenerationPlanProjections(ctx, VerifyGenerationPlanProjectionsParams{
+		GenerationID: "gen_verify_missing_plan",
+		RequirePlan:  true,
+	}); err == nil || !strings.Contains(err.Error(), "generation plan is required") {
+		t.Fatalf("expected required missing plan error, got %v", err)
+	}
+}
+
 func createRuntimeGenerationForPlanTest(t *testing.T, ctx context.Context, st *Store, sessionID, generationID, status string) {
 	t.Helper()
 	if _, err := st.db.ExecContext(ctx, `
