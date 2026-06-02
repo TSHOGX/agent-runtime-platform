@@ -2730,25 +2730,12 @@ func parseAllowedEgressRule(value string) (egressRule, error) {
 	return egressRule{Proto: parts[0], Host: parts[1], Port: port}, nil
 }
 
-type shellInputFrame struct {
-	Type    string `json:"type"`
-	Content string `json:"content,omitempty"`
-}
-
 func writeInterrupt(stdin io.Writer, driverID string) error {
-	def, ok := agents.Lookup(driverID)
-	if !ok {
-		return fmt.Errorf("unsupported driver %q", driverID)
-	}
-	if def.Protocol != agents.ProtocolShellPTY {
-		return fmt.Errorf("interrupt not supported for driver %q", driverID)
-	}
-	frame := shellInputFrame{Type: "interrupt"}
-	encoded, err := json.Marshal(frame)
+	payload, err := driveradapter.InterruptPayloadFor(agents.ID(driverID))
 	if err != nil {
-		return fmt.Errorf("encode shell interrupt: %w", err)
+		return err
 	}
-	if _, err := stdin.Write(append(encoded, '\n')); err != nil {
+	if _, err := stdin.Write(payload); err != nil {
 		return err
 	}
 	return nil

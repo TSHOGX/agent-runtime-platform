@@ -2968,8 +2968,9 @@ func (s *Server) interruptSession(w http.ResponseWriter, r *http.Request, sessio
 		writeError(w, http.StatusConflict, "session is not running")
 		return
 	}
-	if session.DriverID != string(agents.Shell) {
-		writeError(w, http.StatusConflict, "interrupt is only supported for shell sessions")
+	driverSpec, ok := agents.DriverSpecFor(session.DriverID)
+	if !ok || !agents.DriverSupportsFeature(driverSpec, agents.FeatureInterrupt) {
+		writeError(w, http.StatusConflict, "interrupt is not supported for this session")
 		return
 	}
 	if err := s.runtime.Interrupt(sessionID); err != nil {
