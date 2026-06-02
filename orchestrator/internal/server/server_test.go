@@ -1586,7 +1586,7 @@ WHERE generation_id = ?`, store.GenerationPlanDigest(canonical), allocation.Gene
 	}
 }
 
-func TestFreshStartStoresGenerationPlanBeforeNetworkPrepare(t *testing.T) {
+func TestFreshStartStoresGenerationPlanBeforeMaterializationAndNetworkPrepare(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	st, owner := openServerOwnedStore(t, ctx, dir)
@@ -1607,6 +1607,15 @@ func TestFreshStartStoresGenerationPlanBeforeNetworkPrepare(t *testing.T) {
 	srv.sendMessage(rec, req, session.ID)
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("expected status 202, got %d body %s", rec.Code, rec.Body.String())
+	}
+	if !rt.planSeenBeforeMaterialize {
+		t.Fatalf("runtime artifact materialization ran before generation plan rows were stored")
+	}
+	if !rt.projectionVerificationBeforeMaterialize {
+		t.Fatalf("runtime artifact materialization ran before generation plan projections were verified")
+	}
+	if !rt.runtimeResourceClaimedBeforeMaterialize {
+		t.Fatalf("runtime artifact materialization ran before claiming the runtime resource")
 	}
 	if !rt.planSeenBeforeNetwork {
 		t.Fatalf("network preparation ran before generation plan rows were stored")
@@ -5518,6 +5527,15 @@ func (instantRuntime) PrepareGeneration(context.Context, runtime.StartRequest) (
 	return testGenerationArtifacts(), nil
 }
 
+func (instantRuntime) RenderGenerationArtifacts(context.Context, runtime.StartRequest) (runtime.GenerationArtifactProjection, error) {
+	atomic.AddInt64(&instantRuntimePrepareCalls, 1)
+	return runtime.GenerationArtifactProjection{Artifacts: testGenerationArtifacts()}, nil
+}
+
+func (instantRuntime) MaterializeGenerationArtifacts(runtime.StartRequest, runtime.GenerationArtifactProjection) error {
+	return nil
+}
+
 func (instantRuntime) PrepareGenerationNetwork(context.Context, runtime.StartRequest) error {
 	return nil
 }
@@ -5546,25 +5564,29 @@ func (instantRuntime) Checkpoint(context.Context, runtime.CheckpointRequest) err
 }
 
 type recordingRuntime struct {
-	mu                sync.Mutex
-	prepareRequests   []runtime.StartRequest
-	networkRequests   []runtime.StartRequest
-	startRequests     []runtime.StartRequest
-	destroyRuntimeIDs []string
-	destroyRuntimeErr error
-	destroyRequests   []store.RuntimeGenerationDetails
-	destroyErr        error
-	checkpointReqs    []runtime.CheckpointRequest
-	checkpointErr     error
+	mu                  sync.Mutex
+	prepareRequests     []runtime.StartRequest
+	materializeRequests []runtime.StartRequest
+	networkRequests     []runtime.StartRequest
+	startRequests       []runtime.StartRequest
+	destroyRuntimeIDs   []string
+	destroyRuntimeErr   error
+	destroyRequests     []store.RuntimeGenerationDetails
+	destroyErr          error
+	checkpointReqs      []runtime.CheckpointRequest
+	checkpointErr       error
 }
 
 type planOrderRuntime struct {
 	recordingRuntime
-	store                               *store.Store
-	t                                   *testing.T
-	planSeenBeforeNetwork               bool
-	projectionVerificationObserved      bool
-	runtimeResourceClaimedBeforeNetwork bool
+	store                                   *store.Store
+	t                                       *testing.T
+	planSeenBeforeNetwork                   bool
+	planSeenBeforeMaterialize               bool
+	projectionVerificationObserved          bool
+	projectionVerificationBeforeMaterialize bool
+	runtimeResourceClaimedBeforeNetwork     bool
+	runtimeResourceClaimedBeforeMaterialize bool
 }
 
 type blockingPrepareRuntime struct {
@@ -5582,17 +5604,22 @@ func newBlockingPrepareRuntime() *blockingPrepareRuntime {
 	}
 }
 
-func (r *blockingPrepareRuntime) PrepareGeneration(ctx context.Context, req runtime.StartRequest) (runtime.GenerationArtifacts, error) {
+func (r *blockingPrepareRuntime) RenderGenerationArtifacts(ctx context.Context, req runtime.StartRequest) (runtime.GenerationArtifactProjection, error) {
 	r.mu.Lock()
 	r.prepareRequests = append(r.prepareRequests, req)
 	r.mu.Unlock()
 	r.startedOnce.Do(func() { close(r.prepareStarted) })
 	select {
 	case <-r.releasePrepare:
-		return testGenerationArtifacts(), nil
+		return runtime.GenerationArtifactProjection{Artifacts: testGenerationArtifacts()}, nil
 	case <-ctx.Done():
-		return runtime.GenerationArtifacts{}, ctx.Err()
+		return runtime.GenerationArtifactProjection{}, ctx.Err()
 	}
+}
+
+func (r *blockingPrepareRuntime) PrepareGeneration(ctx context.Context, req runtime.StartRequest) (runtime.GenerationArtifacts, error) {
+	projection, err := r.RenderGenerationArtifacts(ctx, req)
+	return projection.Artifacts, err
 }
 
 func (r *blockingPrepareRuntime) release() {
@@ -5648,10 +5675,38 @@ func (r *recordingRuntime) PrepareGeneration(_ context.Context, req runtime.Star
 	return testGenerationArtifacts(), nil
 }
 
+func (r *recordingRuntime) RenderGenerationArtifacts(_ context.Context, req runtime.StartRequest) (runtime.GenerationArtifactProjection, error) {
+	r.mu.Lock()
+	r.prepareRequests = append(r.prepareRequests, req)
+	r.mu.Unlock()
+	return runtime.GenerationArtifactProjection{Artifacts: testGenerationArtifacts()}, nil
+}
+
+func (r *recordingRuntime) MaterializeGenerationArtifacts(req runtime.StartRequest, _ runtime.GenerationArtifactProjection) error {
+	r.mu.Lock()
+	r.materializeRequests = append(r.materializeRequests, req)
+	r.mu.Unlock()
+	return nil
+}
+
 func (r *recordingRuntime) PrepareGenerationNetwork(_ context.Context, req runtime.StartRequest) error {
 	r.mu.Lock()
 	r.networkRequests = append(r.networkRequests, req)
 	r.mu.Unlock()
+	return nil
+}
+
+func (r *planOrderRuntime) MaterializeGenerationArtifacts(req runtime.StartRequest, projection runtime.GenerationArtifactProjection) error {
+	r.t.Helper()
+	if err := r.recordingRuntime.MaterializeGenerationArtifacts(req, projection); err != nil {
+		return err
+	}
+	if err := r.requireStoredPlanAndMaterializationClaim(context.Background(), req, "materialize"); err != nil {
+		return err
+	}
+	r.planSeenBeforeMaterialize = true
+	r.projectionVerificationBeforeMaterialize = true
+	r.runtimeResourceClaimedBeforeMaterialize = true
 	return nil
 }
 
@@ -5660,51 +5715,58 @@ func (r *planOrderRuntime) PrepareGenerationNetwork(ctx context.Context, req run
 	if err := r.recordingRuntime.PrepareGenerationNetwork(ctx, req); err != nil {
 		return err
 	}
+	if err := r.requireStoredPlanAndMaterializationClaim(ctx, req, "network prepare"); err != nil {
+		return err
+	}
+	r.planSeenBeforeNetwork = true
+	r.projectionVerificationObserved = true
+	r.runtimeResourceClaimedBeforeNetwork = true
+	return nil
+}
+
+func (r *planOrderRuntime) requireStoredPlanAndMaterializationClaim(ctx context.Context, req runtime.StartRequest, phase string) error {
 	plan, err := r.store.GetGenerationPlan(ctx, req.GenerationID)
 	if err != nil {
-		return fmt.Errorf("get generation plan before network prepare: %w", err)
+		return fmt.Errorf("get generation plan before %s: %w", phase, err)
 	}
 	projections, err := r.store.ListGenerationPlanProjections(ctx, req.GenerationID)
 	if err != nil {
-		return fmt.Errorf("list generation plan projections before network prepare: %w", err)
+		return fmt.Errorf("list generation plan projections before %s: %w", phase, err)
 	}
 	if len(projections) != len(store.GenerationPlanProjectionKinds()) {
-		return fmt.Errorf("generation plan projection count before network prepare = %d want %d", len(projections), len(store.GenerationPlanProjectionKinds()))
+		return fmt.Errorf("generation plan projection count before %s = %d want %d", phase, len(projections), len(store.GenerationPlanProjectionKinds()))
 	}
 	verified, err := r.store.VerifyGenerationPlanProjections(ctx, store.VerifyGenerationPlanProjectionsParams{
 		GenerationID: req.GenerationID,
 		Expected:     generationPlanProjectionExpectations(req.PreparedArtifacts, ""),
 	})
 	if err != nil {
-		return fmt.Errorf("verify generation plan projections before network prepare: %w", err)
+		return fmt.Errorf("verify generation plan projections before %s: %w", phase, err)
 	}
 	if !verified {
-		return fmt.Errorf("generation plan projections were missing before network prepare")
+		return fmt.Errorf("generation plan projections were missing before %s", phase)
 	}
 	for _, projection := range projections {
 		if projection.PlanDigest != plan.PlanDigest {
-			return fmt.Errorf("generation plan projection %s digest before network prepare = %s want %s", projection.ProjectionKind, projection.PlanDigest, plan.PlanDigest)
+			return fmt.Errorf("generation plan projection %s digest before %s = %s want %s", projection.ProjectionKind, phase, projection.PlanDigest, plan.PlanDigest)
 		}
 	}
 	instance, err := r.store.GetRuntimeResourceInstance(ctx, req.GenerationID)
 	if err != nil {
-		return fmt.Errorf("get runtime resource instance before network prepare: %w", err)
+		return fmt.Errorf("get runtime resource instance before %s: %w", phase, err)
 	}
 	if instance.State != store.RuntimeResourceMaterializing {
-		return fmt.Errorf("runtime resource state before network prepare = %s want %s", instance.State, store.RuntimeResourceMaterializing)
+		return fmt.Errorf("runtime resource state before %s = %s want %s", phase, instance.State, store.RuntimeResourceMaterializing)
 	}
 	if strings.TrimSpace(instance.WorkerID) == "" || strings.TrimSpace(instance.HostID) == "" {
-		return fmt.Errorf("runtime resource worker lease was not claimed before network prepare")
+		return fmt.Errorf("runtime resource worker lease was not claimed before %s", phase)
 	}
 	if instance.LeaseExpiresAt == nil {
-		return fmt.Errorf("runtime resource materialization lease is missing before network prepare")
+		return fmt.Errorf("runtime resource materialization lease is missing before %s", phase)
 	}
 	if instance.IdempotencyToken != "start:"+req.GenerationID {
-		return fmt.Errorf("runtime resource idempotency token before network prepare = %q want %q", instance.IdempotencyToken, "start:"+req.GenerationID)
+		return fmt.Errorf("runtime resource idempotency token before %s = %q want %q", phase, instance.IdempotencyToken, "start:"+req.GenerationID)
 	}
-	r.planSeenBeforeNetwork = true
-	r.projectionVerificationObserved = true
-	r.runtimeResourceClaimedBeforeNetwork = true
 	return nil
 }
 
@@ -5857,6 +5919,14 @@ func (r *restoreValidationRuntime) PrepareGeneration(context.Context, runtime.St
 	return testGenerationArtifacts(), nil
 }
 
+func (r *restoreValidationRuntime) RenderGenerationArtifacts(context.Context, runtime.StartRequest) (runtime.GenerationArtifactProjection, error) {
+	return runtime.GenerationArtifactProjection{Artifacts: testGenerationArtifacts()}, nil
+}
+
+func (r *restoreValidationRuntime) MaterializeGenerationArtifacts(runtime.StartRequest, runtime.GenerationArtifactProjection) error {
+	return nil
+}
+
 func (r *restoreValidationRuntime) PrepareGenerationNetwork(context.Context, runtime.StartRequest) error {
 	return nil
 }
@@ -5912,6 +5982,17 @@ func (f failingRuntime) PrepareGeneration(context.Context, runtime.StartRequest)
 		return runtime.GenerationArtifacts{}, f.prepareErr
 	}
 	return testGenerationArtifacts(), nil
+}
+
+func (f failingRuntime) RenderGenerationArtifacts(context.Context, runtime.StartRequest) (runtime.GenerationArtifactProjection, error) {
+	if f.prepareErr != nil {
+		return runtime.GenerationArtifactProjection{}, f.prepareErr
+	}
+	return runtime.GenerationArtifactProjection{Artifacts: testGenerationArtifacts()}, nil
+}
+
+func (f failingRuntime) MaterializeGenerationArtifacts(runtime.StartRequest, runtime.GenerationArtifactProjection) error {
+	return nil
 }
 
 func (f failingRuntime) PrepareGenerationNetwork(context.Context, runtime.StartRequest) error {

@@ -71,7 +71,8 @@ type Server struct {
 
 type runtimeDriver interface {
 	Start(context.Context, runtime.StartRequest, func(runtime.Output)) runtime.Result
-	PrepareGeneration(context.Context, runtime.StartRequest) (runtime.GenerationArtifacts, error)
+	RenderGenerationArtifacts(context.Context, runtime.StartRequest) (runtime.GenerationArtifactProjection, error)
+	MaterializeGenerationArtifacts(runtime.StartRequest, runtime.GenerationArtifactProjection) error
 	PrepareGenerationNetwork(context.Context, runtime.StartRequest) error
 	Destroy(context.Context, string) error
 	DestroyGenerationResources(context.Context, store.RuntimeGenerationDetails) (runtime.GenerationResourceCleanup, error)
@@ -606,6 +607,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 	var runtimeResourceCreated bool
 	var runtimeResourceInstance store.RuntimeResourceInstance
 	sandboxContractDigest := ""
+	var artifactProjection runtime.GenerationArtifactProjection
 	retireRuntimeResource := func() {
 		if !runtimeResourceCreated {
 			return
@@ -623,7 +625,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 	}
 	if ensured.IsNew {
 		renderRequest := s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, runtime.GenerationArtifacts{}, dataVolumes)
-		preparedArtifacts, err = s.runtime.PrepareGeneration(startCtx, renderRequest)
+		artifactProjection, err = s.runtime.RenderGenerationArtifacts(startCtx, renderRequest)
 		if err != nil {
 			if leaseErr := leaseKeeper.err(); leaseErr != nil {
 				return leaseErr
@@ -634,6 +636,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 			return err
 		}
+		preparedArtifacts = artifactProjection.Artifacts
 		if err := leaseKeeper.ensureOwned(); err != nil {
 			return err
 		}
@@ -746,7 +749,20 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			return err
 		}
 		networkDetails := runtimeDetailsWithResourceInstance(generationDetails, runtimeResourceInstance)
-		if err := s.runtime.PrepareGenerationNetwork(startCtx, s.runtimeStartRequest(session, allocation.GenerationID, networkDetails, preparedArtifacts, dataVolumes)); err != nil {
+		materializeRequest := s.runtimeStartRequest(session, allocation.GenerationID, networkDetails, preparedArtifacts, dataVolumes)
+		if err := s.runtime.MaterializeGenerationArtifacts(materializeRequest, artifactProjection); err != nil {
+			if leaseErr := leaseKeeper.err(); leaseErr != nil {
+				return leaseErr
+			}
+			retireRuntimeResource()
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+			return err
+		}
+		if err := leaseKeeper.ensureOwned(); err != nil {
+			retireRuntimeResource()
+			return err
+		}
+		if err := s.runtime.PrepareGenerationNetwork(startCtx, materializeRequest); err != nil {
 			if leaseErr := leaseKeeper.err(); leaseErr != nil {
 				return leaseErr
 			}
