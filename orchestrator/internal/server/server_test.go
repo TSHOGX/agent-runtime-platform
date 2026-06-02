@@ -605,7 +605,7 @@ func TestSandboxContractPayloadRequiresRunscPlatformAndSessionMode(t *testing.T)
 
 	missingPlatform := details
 	missingPlatform.RunscPlatform = ""
-	if _, err := srv.sandboxContractPayload(session, missingPlatform, runtime.GenerationArtifacts{}, "sha256:resource-identity", sessionRuntimeDataVolumes{}); err == nil || !strings.Contains(err.Error(), "runsc platform is required") {
+	if _, err := srv.sandboxContractPayload(session, missingPlatform, runtime.GenerationArtifacts{}, "sha256:resource-identity", sessionRuntimeDataVolumes{}, nil); err == nil || !strings.Contains(err.Error(), "runsc platform is required") {
 		t.Fatalf("expected missing runsc platform error, got %v", err)
 	}
 	if _, err := srv.runtimeResourceInstanceParams(missingPlatform, runtime.GenerationArtifacts{}, "host-a"); err == nil || !strings.Contains(err.Error(), "runsc platform is required") {
@@ -614,13 +614,13 @@ func TestSandboxContractPayloadRequiresRunscPlatformAndSessionMode(t *testing.T)
 
 	missingDriverStateDigest := details
 	missingDriverStateDigest.DriverStateDigest = ""
-	if _, err := srv.sandboxContractPayload(session, missingDriverStateDigest, runtime.GenerationArtifacts{}, "sha256:resource-identity", sessionRuntimeDataVolumes{}); err == nil || !strings.Contains(err.Error(), "initial driver state digest is required") {
+	if _, err := srv.sandboxContractPayload(session, missingDriverStateDigest, runtime.GenerationArtifacts{}, "sha256:resource-identity", sessionRuntimeDataVolumes{}, nil); err == nil || !strings.Contains(err.Error(), "initial driver state digest is required") {
 		t.Fatalf("expected missing driver state digest error, got %v", err)
 	}
 
 	details.DriverStateDigest = "sha256:driver-state"
 	session.Mode = ""
-	if _, err := srv.sandboxContractPayload(session, details, runtime.GenerationArtifacts{}, "sha256:resource-identity", sessionRuntimeDataVolumes{}); err == nil || !strings.Contains(err.Error(), "session mode is required") {
+	if _, err := srv.sandboxContractPayload(session, details, runtime.GenerationArtifacts{}, "sha256:resource-identity", sessionRuntimeDataVolumes{}, nil); err == nil || !strings.Contains(err.Error(), "session mode is required") {
 		t.Fatalf("expected missing session mode error, got %v", err)
 	}
 }
@@ -3242,7 +3242,7 @@ func TestSandboxContractPayloadRecordsPiMaterializedConfig(t *testing.T) {
 			ProvisioningMarkerPath:   filepath.Join(dir, "evidence", "driver-homes", session.ID, "pi.json"),
 			ProvisioningMarkerDigest: "sha256:driver-home-marker",
 		},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("build pi sandbox contract payload: %v", err)
 	}
@@ -3281,6 +3281,107 @@ func TestSandboxContractPayloadRecordsPiMaterializedConfig(t *testing.T) {
 		Now:                    now,
 	}); err != nil {
 		t.Fatalf("store pi sandbox contract: %v", err)
+	}
+}
+
+func TestServerRenderersThreadContentSnapshots(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, owner := openServerOwnedStore(t, ctx, dir)
+	cfg := testServerConfig(dir)
+	now := time.Now().UTC()
+	session := createServerTestSession(t, ctx, st, dir, "sess_content_thread", string(sessionstate.Created), now, nil)
+	allocation, err := st.AllocateGeneration(ctx, store.AllocateGenerationParams{
+		SessionID: session.ID,
+		Owner:     store.GenerationLeaseOwner(owner.UUID),
+		LeaseTTL:  time.Minute,
+		Now:       now,
+		Config:    serverTestAllocatorConfig(cfg, session.DriverID),
+	})
+	if err != nil {
+		t.Fatalf("allocate generation: %v", err)
+	}
+	details, err := st.GetRuntimeGenerationDetails(ctx, session.ID, allocation.GenerationID)
+	if err != nil {
+		t.Fatalf("get generation details: %v", err)
+	}
+	volumes := sessionRuntimeDataVolumes{
+		Workspace: store.SessionWorkspaceVolume{
+			SessionID:                session.ID,
+			HostPath:                 filepath.Join(dir, "volumes", "workspaces", session.ID),
+			LayoutVersion:            store.DataVolumeLayoutVersion,
+			RuntimeIdentityDigest:    "sha256:workspace-identity",
+			ProvisioningMarkerPath:   filepath.Join(dir, "evidence", "workspaces", session.ID+".json"),
+			ProvisioningMarkerDigest: "sha256:workspace-marker",
+		},
+		DriverHome: store.SessionDriverHomeVolume{
+			SessionID:                session.ID,
+			Driver:                   session.DriverID,
+			HostPath:                 filepath.Join(dir, "volumes", "driver-homes", session.ID, session.DriverID),
+			LayoutVersion:            store.DataVolumeLayoutVersion,
+			RuntimeIdentityDigest:    "sha256:driver-home-identity",
+			ProvisioningMarkerPath:   filepath.Join(dir, "evidence", "driver-homes", session.ID, session.DriverID+".json"),
+			ProvisioningMarkerDigest: "sha256:driver-home-marker",
+		},
+	}
+	snapshots := []store.ContentSnapshotRecord{{
+		Kind:                 store.ContentSnapshotKindSkills,
+		Digest:               "sha256:skills",
+		ImmutableHostPath:    filepath.Join(dir, "content", "skills", "sha256-skills"),
+		MountDestination:     store.ContentSnapshotSkillsMount,
+		SourceEvidenceDigest: "sha256:skills-source",
+		RetentionClass:       "generation_plan",
+	}}
+	artifacts := testGenerationArtifacts()
+	srv := &Server{cfg: cfg, store: st}
+
+	req := srv.runtimeStartRequest(session, allocation.GenerationID, details, artifacts, volumes, snapshots)
+	if len(req.ContentSnapshots) != 1 || req.ContentSnapshots[0].Digest != "sha256:skills" {
+		t.Fatalf("runtime start request content snapshots = %+v", req.ContentSnapshots)
+	}
+
+	contractPayload, err := srv.sandboxContractPayload(session, details, artifacts, "sha256:resource-identity", volumes, snapshots)
+	if err != nil {
+		t.Fatalf("render sandbox contract with content snapshot: %v", err)
+	}
+	contractMounts := contractPayload["mount_plan"].(map[string]any)["content_snapshots"].(map[string]any)
+	contractSkills := contractMounts[store.ContentSnapshotKindSkills].(map[string]any)
+	if contractSkills["source"] != snapshots[0].ImmutableHostPath ||
+		contractSkills["destination"] != store.ContentSnapshotSkillsMount ||
+		contractSkills["digest"] != "sha256:skills" ||
+		contractSkills["mode"] != "ro" ||
+		contractSkills["exact"] != true {
+		t.Fatalf("sandbox contract skills snapshot mount = %+v", contractSkills)
+	}
+
+	inputEvidence, err := srv.sandboxContractInputEvidenceFor(session, details.DriverID)
+	if err != nil {
+		t.Fatalf("input evidence: %v", err)
+	}
+	planPayload, err := srv.shadowGenerationPlanPayload(session, details, artifacts, contractPayload, "sha256:resource-identity", volumes, snapshots, inputEvidence)
+	if err != nil {
+		t.Fatalf("render generation plan with content snapshot: %v", err)
+	}
+	if err := generationplan.Validate(generationplan.ValidateParams{Payload: planPayload}); err != nil {
+		t.Fatalf("validate content snapshot plan: %v", err)
+	}
+	planSnapshots := planPayload["content_snapshots"].(map[string]any)
+	planSkills := planSnapshots[store.ContentSnapshotKindSkills].(map[string]any)
+	if planSkills["digest"] != "sha256:skills" ||
+		planSkills["immutable_host_path"] != snapshots[0].ImmutableHostPath ||
+		planSkills["mount_destination"] != store.ContentSnapshotSkillsMount {
+		t.Fatalf("generation plan skills snapshot = %+v", planSkills)
+	}
+	planMounts := planPayload["mounts"].(map[string]any)["content_snapshots"].(map[string]any)
+	planMountSkills := planMounts[store.ContentSnapshotKindSkills].(map[string]any)
+	if planMountSkills["digest"] != "sha256:skills" ||
+		planMountSkills["destination"] != store.ContentSnapshotSkillsMount ||
+		planMountSkills["exact"] != true {
+		t.Fatalf("generation plan skills snapshot mount = %+v", planMountSkills)
+	}
+	workspace := planPayload["data_volumes"].(map[string]any)["workspace"].(map[string]any)
+	if workspace["platform_content_mount_scope"] != "immutable_content_snapshots" {
+		t.Fatalf("workspace platform content scope = %+v", workspace)
 	}
 }
 

@@ -582,6 +582,16 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		}
 		return err
 	}
+	contentSnapshots, err := s.generationContentSnapshots(ctx, session, generationDetails)
+	if err != nil {
+		if leaseErr := leaseKeeper.err(); leaseErr != nil {
+			return leaseErr
+		}
+		if ensured.RestoreFromCheckpoint || ensured.IsNew {
+			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
+		}
+		return err
+	}
 	preparedArtifacts := runtimeArtifactsFromDetails(generationDetails)
 	if !ensured.IsNew {
 		preparedArtifacts, err = s.generationPlanRuntimeArtifacts(ctx, allocation.GenerationID)
@@ -624,7 +634,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		}
 	}
 	if ensured.IsNew {
-		renderRequest := s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, runtime.GenerationArtifacts{}, dataVolumes)
+		renderRequest := s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, runtime.GenerationArtifacts{}, dataVolumes, contentSnapshots)
 		artifactProjection, err = s.runtime.RenderGenerationArtifacts(startCtx, renderRequest)
 		if err != nil {
 			if leaseErr := leaseKeeper.err(); leaseErr != nil {
@@ -656,7 +666,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 			return err
 		}
-		contractPayload, err := s.sandboxContractPayload(session, generationDetails, preparedArtifacts, resourceIdentityDigest, dataVolumes)
+		contractPayload, err := s.sandboxContractPayload(session, generationDetails, preparedArtifacts, resourceIdentityDigest, dataVolumes, contentSnapshots)
 		if err != nil {
 			if leaseErr := leaseKeeper.err(); leaseErr != nil {
 				return leaseErr
@@ -698,7 +708,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		if err := leaseKeeper.ensureOwned(); err != nil {
 			return err
 		}
-		if err := s.storeShadowGenerationPlan(ctx, session, generationDetails, preparedArtifacts, contractPayload, resourceIdentityDigest, dataVolumes, inputEvidence); err != nil {
+		if err := s.storeShadowGenerationPlan(ctx, session, generationDetails, preparedArtifacts, contractPayload, resourceIdentityDigest, dataVolumes, contentSnapshots, inputEvidence); err != nil {
 			if leaseErr := leaseKeeper.err(); leaseErr != nil {
 				return leaseErr
 			}
@@ -749,7 +759,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 			return err
 		}
 		networkDetails := runtimeDetailsWithResourceInstance(generationDetails, runtimeResourceInstance)
-		materializeRequest := s.runtimeStartRequest(session, allocation.GenerationID, networkDetails, preparedArtifacts, dataVolumes)
+		materializeRequest := s.runtimeStartRequest(session, allocation.GenerationID, networkDetails, preparedArtifacts, dataVolumes, contentSnapshots)
 		if err := s.runtime.MaterializeGenerationArtifacts(materializeRequest, artifactProjection); err != nil {
 			if leaseErr := leaseKeeper.err(); leaseErr != nil {
 				return leaseErr
@@ -874,7 +884,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
 		return err
 	}
-	startReq := s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, preparedArtifacts, dataVolumes)
+	startReq := s.runtimeStartRequest(session, allocation.GenerationID, generationDetails, preparedArtifacts, dataVolumes, contentSnapshots)
 	startReq.RestoreFromCheckpoint = ensured.RestoreFromCheckpoint
 	result := s.runtime.Start(startCtx, startReq, nil)
 	if result.Err != nil {
@@ -1408,7 +1418,7 @@ type sessionRuntimeDataVolumes struct {
 	DriverHome store.SessionDriverHomeVolume
 }
 
-func (s *Server) runtimeStartRequest(session store.Session, generationID string, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, volumes sessionRuntimeDataVolumes) runtime.StartRequest {
+func (s *Server) runtimeStartRequest(session store.Session, generationID string, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, volumes sessionRuntimeDataVolumes, contentSnapshots []store.ContentSnapshotRecord) runtime.StartRequest {
 	return runtime.StartRequest{
 		SessionID:         session.ID,
 		GenerationID:      generationID,
@@ -1417,7 +1427,12 @@ func (s *Server) runtimeStartRequest(session store.Session, generationID string,
 		PreparedArtifacts: artifacts,
 		WorkspaceHostPath: volumes.Workspace.HostPath,
 		AgentHomeHostPath: volumes.DriverHome.HostPath,
+		ContentSnapshots:  contentSnapshots,
 	}
+}
+
+func (s *Server) generationContentSnapshots(context.Context, store.Session, store.RuntimeGenerationDetails) ([]store.ContentSnapshotRecord, error) {
+	return nil, nil
 }
 
 func validateDriverStateForRuntimeLaunch(details store.RuntimeGenerationDetails, volumes sessionRuntimeDataVolumes) error {
@@ -1462,7 +1477,7 @@ func sandboxContractID(generationID string) string {
 	return "contract_" + strings.TrimSpace(generationID)
 }
 
-func (s *Server) sandboxContractPayload(session store.Session, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, resourceIdentityDigest string, volumes sessionRuntimeDataVolumes) (map[string]any, error) {
+func (s *Server) sandboxContractPayload(session store.Session, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, resourceIdentityDigest string, volumes sessionRuntimeDataVolumes, contentSnapshots []store.ContentSnapshotRecord) (map[string]any, error) {
 	driverID := strings.TrimSpace(details.DriverID)
 	mode := strings.TrimSpace(session.Mode)
 	if mode == "" {
@@ -1490,8 +1505,9 @@ func (s *Server) sandboxContractPayload(session store.Session, details store.Run
 			Workspace:  volumes.Workspace,
 			DriverHome: volumes.DriverHome,
 		},
-		DriverSpec:   deployment.DriverSpec,
-		ProviderSpec: deployment.ProviderSpec,
+		DriverSpec:       deployment.DriverSpec,
+		ProviderSpec:     deployment.ProviderSpec,
+		ContentSnapshots: contentSnapshots,
 		InputDigests: planprojection.SandboxContractInputDigests{
 			RuntimeConfigDigest: inputDigests.RuntimeConfigDigest,
 			AgentManifestDigest: inputDigests.AgentManifestDigest,
@@ -1523,8 +1539,8 @@ func sandboxContractDigestForPayload(value any) (string, error) {
 	return planprojection.SandboxContractDigestForPayload(value)
 }
 
-func (s *Server) storeShadowGenerationPlan(ctx context.Context, session store.Session, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, sandboxContractPayload map[string]any, resourceIdentityDigest string, volumes sessionRuntimeDataVolumes, inputEvidence sandboxContractInputEvidence) error {
-	payload, err := s.shadowGenerationPlanPayload(session, details, artifacts, sandboxContractPayload, resourceIdentityDigest, volumes, inputEvidence)
+func (s *Server) storeShadowGenerationPlan(ctx context.Context, session store.Session, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, sandboxContractPayload map[string]any, resourceIdentityDigest string, volumes sessionRuntimeDataVolumes, contentSnapshots []store.ContentSnapshotRecord, inputEvidence sandboxContractInputEvidence) error {
+	payload, err := s.shadowGenerationPlanPayload(session, details, artifacts, sandboxContractPayload, resourceIdentityDigest, volumes, contentSnapshots, inputEvidence)
 	if err != nil {
 		return err
 	}
@@ -1548,7 +1564,7 @@ func (s *Server) storeShadowGenerationPlan(ctx context.Context, session store.Se
 	return nil
 }
 
-func (s *Server) shadowGenerationPlanPayload(session store.Session, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, sandboxContractPayload map[string]any, resourceIdentityDigest string, volumes sessionRuntimeDataVolumes, inputEvidence sandboxContractInputEvidence) (map[string]any, error) {
+func (s *Server) shadowGenerationPlanPayload(session store.Session, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, sandboxContractPayload map[string]any, resourceIdentityDigest string, volumes sessionRuntimeDataVolumes, contentSnapshots []store.ContentSnapshotRecord, inputEvidence sandboxContractInputEvidence) (map[string]any, error) {
 	driverID := strings.TrimSpace(details.DriverID)
 	if driverID == "" {
 		return nil, fmt.Errorf("generation plan driver id is required")
@@ -1603,6 +1619,7 @@ func (s *Server) shadowGenerationPlanPayload(session store.Session, details stor
 			PostStartAttempts:       s.cfg.Harness.Probe.PostStartAttempts,
 			PostStartInterval:       s.cfg.Harness.Probe.PostStartInterval.Duration,
 		},
+		ContentSnapshots: contentSnapshots,
 		SourceDigests: generationplan.SourceDigests{
 			RuntimeConfigDigest: inputEvidence.RuntimeConfigDigest,
 			AgentManifestDigest: inputEvidence.AgentManifestDigest,
