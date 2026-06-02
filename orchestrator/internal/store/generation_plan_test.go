@@ -381,6 +381,20 @@ WHERE generation_id = ?
 			},
 			wantError: "generation plan projection control_manifest version = 2, want 1",
 		},
+		{
+			name: "non-canonical materialized path",
+			corrupt: func(ctx context.Context, st *Store, plan GenerationPlanRecord) error {
+				if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE generation_plan_projections
+SET materialized_path = 'relative/manifest.json'
+WHERE generation_id = ?
+  AND projection_kind = ?`, plan.GenerationID, GenerationPlanProjectionControlManifest); err != nil {
+					return err
+				}
+				return nil
+			},
+			wantError: "generation plan projection materialized path must be canonical absolute",
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
