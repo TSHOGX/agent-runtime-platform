@@ -2342,6 +2342,7 @@ func validateRuntimeGenerationDetailsPaths(details RuntimeGenerationDetails) err
 		{"checkpoint path", details.CheckpointPath},
 		{"bridge dir path", details.BridgeDirPath},
 		{"log dir path", details.LogDirPath},
+		{"netns path", details.NetnsPath},
 	}
 	for _, field := range required {
 		if strings.TrimSpace(field.path) == "" {

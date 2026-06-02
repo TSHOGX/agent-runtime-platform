@@ -576,6 +576,12 @@ func TestGetRuntimeGenerationDetailsRejectsCorruptPathEvidence(t *testing.T) {
 			value:     "/usr/local/bin/../bin/runsc-test",
 			want:      "runtime generation checkpoint runsc binary path must be canonical absolute",
 		},
+		{
+			name:      "relative netns path",
+			updateSQL: `UPDATE network_profiles SET netns_path = ? WHERE generation_id = ?`,
+			value:     "netns/harness-gen-1",
+			want:      "runtime generation netns path must be canonical absolute",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
