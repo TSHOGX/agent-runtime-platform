@@ -406,11 +406,14 @@ func ContentSnapshotMountPayload(records []store.ContentSnapshotRecord) (map[str
 		if strings.TrimSpace(record.Digest) == "" || !strings.HasPrefix(strings.TrimSpace(record.Digest), "sha256:") {
 			return nil, fmt.Errorf("content snapshot %s digest is required", kind)
 		}
-		source := strings.TrimSpace(record.ImmutableHostPath)
-		if source == "" || !filepath.IsAbs(source) {
-			return nil, fmt.Errorf("content snapshot %s immutable host path must be absolute", kind)
+		source := record.ImmutableHostPath
+		if strings.TrimSpace(source) != source ||
+			source == "" ||
+			!filepath.IsAbs(source) ||
+			filepath.Clean(source) != source {
+			return nil, fmt.Errorf("content snapshot %s immutable host path must be canonical absolute", kind)
 		}
-		if strings.TrimSpace(record.MountDestination) != destination {
+		if record.MountDestination != destination {
 			return nil, fmt.Errorf("content snapshot %s mount destination must be %s", kind, destination)
 		}
 		if strings.TrimSpace(record.SourceEvidenceDigest) == "" || !strings.HasPrefix(strings.TrimSpace(record.SourceEvidenceDigest), "sha256:") {
@@ -424,7 +427,7 @@ func ContentSnapshotMountPayload(records []store.ContentSnapshotRecord) (map[str
 			"type":                   "bind",
 			"mode":                   "ro",
 			"exact":                  true,
-			"source":                 filepath.Clean(source),
+			"source":                 source,
 			"destination":            destination,
 			"digest":                 strings.TrimSpace(record.Digest),
 			"source_evidence_digest": strings.TrimSpace(record.SourceEvidenceDigest),

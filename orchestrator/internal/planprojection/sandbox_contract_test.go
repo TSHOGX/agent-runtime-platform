@@ -104,6 +104,55 @@ func TestRenderSandboxContractRejectsContentSnapshotMountDestinationDrift(t *tes
 	}
 }
 
+func TestRenderSandboxContractRejectsContentSnapshotCanonicalPathDrift(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		edit func(*store.ContentSnapshotRecord, string)
+		want string
+	}{
+		{
+			name: "unclean source",
+			edit: func(record *store.ContentSnapshotRecord, dir string) {
+				record.ImmutableHostPath = dir + "/content/skills/../skills-current"
+			},
+			want: "content snapshot skills immutable host path must be canonical absolute",
+		},
+		{
+			name: "source whitespace",
+			edit: func(record *store.ContentSnapshotRecord, _ string) {
+				record.ImmutableHostPath += " "
+			},
+			want: "content snapshot skills immutable host path must be canonical absolute",
+		},
+		{
+			name: "destination whitespace",
+			edit: func(record *store.ContentSnapshotRecord, _ string) {
+				record.MountDestination = store.ContentSnapshotSkillsMount + " "
+			},
+			want: "content snapshot skills mount destination must be /harness-skills",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			params := validSandboxContractParams(t, dir)
+			record := store.ContentSnapshotRecord{
+				Kind:                 store.ContentSnapshotKindSkills,
+				Digest:               "sha256:skills",
+				ImmutableHostPath:    filepath.Join(dir, "content", "skills", "sha256-skills"),
+				MountDestination:     store.ContentSnapshotSkillsMount,
+				SourceEvidenceDigest: "sha256:skills-source",
+				RetentionClass:       "generation_plan",
+			}
+			tt.edit(&record, dir)
+			params.ContentSnapshots = []store.ContentSnapshotRecord{record}
+			_, err := RenderSandboxContract(params)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %q, got %v", tt.want, err)
+			}
+		})
+	}
+}
+
 func validSandboxContractParams(t *testing.T, dir string) SandboxContractParams {
 	t.Helper()
 	driver, ok := agents.DriverSpecFor("claude_code")
