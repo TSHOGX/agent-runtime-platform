@@ -719,7 +719,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		if err := leaseKeeper.ensureOwned(); err != nil {
 			return err
 		}
-		if _, err := s.verifyStoredGenerationPlanProjections(ctx, allocation.GenerationID, preparedArtifacts, sandboxContractDigest); err != nil {
+		if _, err := s.verifyStoredGenerationPlanProjections(ctx, generationDetails, preparedArtifacts, sandboxContractDigest); err != nil {
 			if leaseErr := leaseKeeper.err(); leaseErr != nil {
 				return leaseErr
 			}
@@ -869,7 +869,7 @@ func (s *Server) startEnsuredGeneration(ctx context.Context, session store.Sessi
 		return err
 	}
 	if !ensured.IsNew {
-		if _, err := s.verifyStoredGenerationPlanProjections(ctx, allocation.GenerationID, preparedArtifacts, sandboxContractDigest); err != nil {
+		if _, err := s.verifyStoredGenerationPlanProjections(ctx, generationDetails, preparedArtifacts, sandboxContractDigest); err != nil {
 			if ensured.RestoreFromCheckpoint {
 				retireRuntimeResource()
 				s.failGenerationBeforeTurn(session, allocation.GenerationID, allocation.Owner, err, failureMode)
@@ -1709,16 +1709,23 @@ func runtimeArtifactDigests(artifacts runtime.GenerationArtifacts) store.Generat
 	}
 }
 
-func (s *Server) verifyStoredGenerationPlanProjections(ctx context.Context, generationID string, artifacts runtime.GenerationArtifacts, sandboxContractDigest string) (bool, error) {
+func (s *Server) verifyStoredGenerationPlanProjections(ctx context.Context, details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, sandboxContractDigest string) (bool, error) {
 	return s.store.VerifyGenerationPlanProjections(ctx, store.VerifyGenerationPlanProjectionsParams{
-		GenerationID: generationID,
-		Expected:     generationPlanProjectionExpectations(artifacts, sandboxContractDigest),
+		GenerationID: details.GenerationID,
+		Expected:     generationPlanProjectionExpectationsForDetails(details, artifacts, sandboxContractDigest),
 		RequirePlan:  true,
 	})
 }
 
 func generationPlanProjectionExpectations(artifacts runtime.GenerationArtifacts, sandboxContractDigest string) []store.GenerationPlanProjectionExpectation {
+	return generationPlanProjectionExpectationsForDetails(store.RuntimeGenerationDetails{}, artifacts, sandboxContractDigest)
+}
+
+func generationPlanProjectionExpectationsForDetails(details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts, sandboxContractDigest string) []store.GenerationPlanProjectionExpectation {
 	expectations := planprojection.Expectations(artifacts)
+	if strings.TrimSpace(details.GenerationID) != "" {
+		expectations = planprojection.ExpectationsForDetails(details, artifacts)
+	}
 	sandboxContractDigest = strings.TrimSpace(sandboxContractDigest)
 	if sandboxContractDigest == "" {
 		return expectations

@@ -79,6 +79,7 @@ type GenerationPlanProjectionExpectation struct {
 	ProjectionKind    string
 	ProjectionVersion int
 	PayloadDigest     string
+	MaterializedPath  string
 }
 
 func GenerationPlanProjectionKinds() []string {
@@ -372,6 +373,10 @@ func (s *Store) VerifyGenerationPlanProjections(ctx context.Context, p VerifyGen
 		}
 		if record.PayloadDigest != digest {
 			return true, fmt.Errorf("generation plan projection %s digest mismatch: got %s want %s", kind, digest, record.PayloadDigest)
+		}
+		materializedPath := strings.TrimSpace(expectation.MaterializedPath)
+		if materializedPath != "" && record.MaterializedPath != materializedPath {
+			return true, fmt.Errorf("generation plan projection %s materialized path mismatch: got %s want %s", kind, record.MaterializedPath, materializedPath)
 		}
 	}
 	return true, nil

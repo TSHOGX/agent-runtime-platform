@@ -72,6 +72,21 @@ func Expectations(artifacts runtime.GenerationArtifacts) []store.GenerationPlanP
 	}
 }
 
+func ExpectationsForDetails(details store.RuntimeGenerationDetails, artifacts runtime.GenerationArtifacts) []store.GenerationPlanProjectionExpectation {
+	expectations := Expectations(artifacts)
+	for i := range expectations {
+		switch expectations[i].ProjectionKind {
+		case store.GenerationPlanProjectionControlManifest, store.GenerationPlanProjectionControlManifestProjected:
+			expectations[i].MaterializedPath = strings.TrimSpace(details.ControlManifestPath)
+		case store.GenerationPlanProjectionOCISpec:
+			expectations[i].MaterializedPath = strings.TrimSpace(details.SpecPath)
+		case store.GenerationPlanProjectionBundle:
+			expectations[i].MaterializedPath = strings.TrimSpace(details.BundleDirPath)
+		}
+	}
+	return expectations
+}
+
 func DigestMap(artifacts runtime.GenerationArtifacts) map[string]string {
 	out := map[string]string{}
 	for _, expectation := range Expectations(artifacts) {

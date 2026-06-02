@@ -396,8 +396,8 @@ func TestVerifyGenerationPlanProjectionsMatchesStoredDigests(t *testing.T) {
 		t.Fatalf("store plan: %v", err)
 	}
 	for _, projection := range []StoreGenerationPlanProjectionParams{
-		{GenerationID: plan.GenerationID, PlanDigest: plan.PlanDigest, ProjectionKind: GenerationPlanProjectionControlManifest, ProjectionVersion: GenerationPlanProjectionVersion, PayloadDigest: "sha256:manifest"},
-		{GenerationID: plan.GenerationID, PlanDigest: plan.PlanDigest, ProjectionKind: GenerationPlanProjectionOCISpec, ProjectionVersion: GenerationPlanProjectionVersion, PayloadDigest: "sha256:spec"},
+		{GenerationID: plan.GenerationID, PlanDigest: plan.PlanDigest, ProjectionKind: GenerationPlanProjectionControlManifest, ProjectionVersion: GenerationPlanProjectionVersion, PayloadDigest: "sha256:manifest", MaterializedPath: "/var/lib/harness/run/control/gen_verify_projection/session.json"},
+		{GenerationID: plan.GenerationID, PlanDigest: plan.PlanDigest, ProjectionKind: GenerationPlanProjectionOCISpec, ProjectionVersion: GenerationPlanProjectionVersion, PayloadDigest: "sha256:spec", MaterializedPath: "/var/lib/harness/run/runtime/gen_verify_projection/config.json"},
 	} {
 		if _, err := st.StoreGenerationPlanProjection(ctx, projection); err != nil {
 			t.Fatalf("store projection %s: %v", projection.ProjectionKind, err)
@@ -408,8 +408,8 @@ func TestVerifyGenerationPlanProjectionsMatchesStoredDigests(t *testing.T) {
 		GenerationID: plan.GenerationID,
 		PlanDigest:   plan.PlanDigest,
 		Expected: []GenerationPlanProjectionExpectation{
-			{ProjectionKind: GenerationPlanProjectionControlManifest, PayloadDigest: "sha256:manifest"},
-			{ProjectionKind: GenerationPlanProjectionOCISpec, PayloadDigest: "sha256:spec"},
+			{ProjectionKind: GenerationPlanProjectionControlManifest, PayloadDigest: "sha256:manifest", MaterializedPath: "/var/lib/harness/run/control/gen_verify_projection/session.json"},
+			{ProjectionKind: GenerationPlanProjectionOCISpec, PayloadDigest: "sha256:spec", MaterializedPath: "/var/lib/harness/run/runtime/gen_verify_projection/config.json"},
 		},
 	})
 	if err != nil {
@@ -436,6 +436,15 @@ func TestVerifyGenerationPlanProjectionsMatchesStoredDigests(t *testing.T) {
 		},
 	}); err == nil || !strings.Contains(err.Error(), "control_manifest version mismatch") {
 		t.Fatalf("expected projection version mismatch, got %v", err)
+	}
+	if _, err := st.VerifyGenerationPlanProjections(ctx, VerifyGenerationPlanProjectionsParams{
+		GenerationID: plan.GenerationID,
+		PlanDigest:   plan.PlanDigest,
+		Expected: []GenerationPlanProjectionExpectation{
+			{ProjectionKind: GenerationPlanProjectionControlManifest, PayloadDigest: "sha256:manifest", MaterializedPath: "/var/lib/harness/run/control/gen_verify_projection/changed.json"},
+		},
+	}); err == nil || !strings.Contains(err.Error(), "control_manifest materialized path mismatch") {
+		t.Fatalf("expected projection materialized path mismatch, got %v", err)
 	}
 	if _, err := st.VerifyGenerationPlanProjections(ctx, VerifyGenerationPlanProjectionsParams{
 		GenerationID: plan.GenerationID,

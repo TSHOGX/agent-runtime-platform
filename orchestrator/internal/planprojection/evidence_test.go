@@ -66,6 +66,30 @@ func TestExpectationDigestAndVersionMapsUseExpectations(t *testing.T) {
 	}
 }
 
+func TestExpectationsForDetailsIncludesMaterializedPaths(t *testing.T) {
+	details := testRuntimeDetails()
+	expectations := ExpectationsForDetails(details, testArtifacts())
+	byKind := map[string]store.GenerationPlanProjectionExpectation{}
+	for _, expectation := range expectations {
+		byKind[expectation.ProjectionKind] = expectation
+	}
+	if byKind[store.GenerationPlanProjectionControlManifest].MaterializedPath != details.ControlManifestPath {
+		t.Fatalf("control manifest path = %q want %q", byKind[store.GenerationPlanProjectionControlManifest].MaterializedPath, details.ControlManifestPath)
+	}
+	if byKind[store.GenerationPlanProjectionControlManifestProjected].MaterializedPath != details.ControlManifestPath {
+		t.Fatalf("projected control manifest path = %q want %q", byKind[store.GenerationPlanProjectionControlManifestProjected].MaterializedPath, details.ControlManifestPath)
+	}
+	if byKind[store.GenerationPlanProjectionOCISpec].MaterializedPath != details.SpecPath {
+		t.Fatalf("oci spec path = %q want %q", byKind[store.GenerationPlanProjectionOCISpec].MaterializedPath, details.SpecPath)
+	}
+	if byKind[store.GenerationPlanProjectionBundle].MaterializedPath != details.BundleDirPath {
+		t.Fatalf("bundle path = %q want %q", byKind[store.GenerationPlanProjectionBundle].MaterializedPath, details.BundleDirPath)
+	}
+	if byKind[store.GenerationPlanProjectionRuntimeConfig].MaterializedPath != "" {
+		t.Fatalf("runtime config path = %q want empty", byKind[store.GenerationPlanProjectionRuntimeConfig].MaterializedPath)
+	}
+}
+
 func TestPayloadDigestPassesThroughPrefixedDigest(t *testing.T) {
 	if got := PayloadDigest(store.GenerationPlanProjectionBundle, "sha256:bundle"); got != "sha256:bundle" {
 		t.Fatalf("payload digest = %q want sha256:bundle", got)

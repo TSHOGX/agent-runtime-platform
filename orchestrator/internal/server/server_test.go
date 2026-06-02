@@ -3485,13 +3485,20 @@ VALUES (?, ?, 'allocating', 'owner', ?)`, generationID, session.ID, time.Now().U
 		t.Fatalf("store generation plan: %v", err)
 	}
 	artifacts := testGenerationArtifacts()
-	for _, expectation := range planprojection.Expectations(artifacts) {
+	details := store.RuntimeGenerationDetails{
+		GenerationID:        generationID,
+		ControlManifestPath: artifacts.ManifestPath,
+		SpecPath:            artifacts.SpecPath,
+		BundleDirPath:       artifacts.BundleDir,
+	}
+	for _, expectation := range planprojection.ExpectationsForDetails(details, artifacts) {
 		if _, err := st.StoreGenerationPlanProjection(ctx, store.StoreGenerationPlanProjectionParams{
 			GenerationID:      generationID,
 			PlanDigest:        plan.PlanDigest,
 			ProjectionKind:    expectation.ProjectionKind,
 			ProjectionVersion: 1,
 			PayloadDigest:     expectation.PayloadDigest,
+			MaterializedPath:  expectation.MaterializedPath,
 		}); err != nil {
 			t.Fatalf("store projection %s: %v", expectation.ProjectionKind, err)
 		}
@@ -3507,7 +3514,7 @@ VALUES (?, ?, 'allocating', 'owner', ?)`, generationID, session.ID, time.Now().U
 	}
 
 	srv := &Server{store: st}
-	verified, err := srv.verifyStoredGenerationPlanProjections(ctx, generationID, artifacts, "sha256:sandbox-contract")
+	verified, err := srv.verifyStoredGenerationPlanProjections(ctx, details, artifacts, "sha256:sandbox-contract")
 	if err != nil {
 		t.Fatalf("verify matching projections: %v", err)
 	}
@@ -3516,13 +3523,24 @@ VALUES (?, ?, 'allocating', 'owner', ?)`, generationID, session.ID, time.Now().U
 	}
 	mismatch := artifacts
 	mismatch.SpecDigest = "changed_spec_digest"
-	if _, err := srv.verifyStoredGenerationPlanProjections(ctx, generationID, mismatch, "sha256:sandbox-contract"); err == nil ||
+	if _, err := srv.verifyStoredGenerationPlanProjections(ctx, details, mismatch, "sha256:sandbox-contract"); err == nil ||
 		!strings.Contains(err.Error(), "oci_spec digest mismatch") {
 		t.Fatalf("expected projection mismatch, got %v", err)
 	}
-	if _, err := srv.verifyStoredGenerationPlanProjections(ctx, generationID, artifacts, "sha256:changed-contract"); err == nil ||
+	if _, err := srv.verifyStoredGenerationPlanProjections(ctx, details, artifacts, "sha256:changed-contract"); err == nil ||
 		!strings.Contains(err.Error(), "sandbox_contract digest mismatch") {
 		t.Fatalf("expected sandbox contract projection mismatch, got %v", err)
+	}
+	if _, err := st.DBForTest().ExecContext(ctx, `
+UPDATE generation_plan_projections
+SET materialized_path = ?
+WHERE generation_id = ?
+  AND projection_kind = ?`, "/tmp/changed-config.json", generationID, store.GenerationPlanProjectionOCISpec); err != nil {
+		t.Fatalf("corrupt projection path: %v", err)
+	}
+	if _, err := srv.verifyStoredGenerationPlanProjections(ctx, details, artifacts, "sha256:sandbox-contract"); err == nil ||
+		!strings.Contains(err.Error(), "oci_spec materialized path mismatch") {
+		t.Fatalf("expected projection materialized path mismatch, got %v", err)
 	}
 }
 
@@ -3565,7 +3583,7 @@ WHERE generation_id = ?
 	}
 
 	srv := &Server{store: st}
-	if _, err := srv.verifyStoredGenerationPlanProjections(ctx, generationID, artifacts, ""); err == nil ||
+	if _, err := srv.verifyStoredGenerationPlanProjections(ctx, store.RuntimeGenerationDetails{GenerationID: generationID}, artifacts, ""); err == nil ||
 		!strings.Contains(err.Error(), "generation plan projection oci_spec version = 2, want 1") {
 		t.Fatalf("expected projection version mismatch, got %v", err)
 	}
@@ -3596,7 +3614,7 @@ func TestVerifyStoredGenerationPlanProjectionsRequiresPlan(t *testing.T) {
 	dir := t.TempDir()
 	st, _ := openServerOwnedStore(t, ctx, dir)
 	srv := &Server{store: st}
-	_, err := srv.verifyStoredGenerationPlanProjections(ctx, "missing_plan_generation", testGenerationArtifacts(), "")
+	_, err := srv.verifyStoredGenerationPlanProjections(ctx, store.RuntimeGenerationDetails{GenerationID: "missing_plan_generation"}, testGenerationArtifacts(), "")
 	if err == nil || !strings.Contains(err.Error(), "generation plan is required") {
 		t.Fatalf("expected required missing plan error, got %v", err)
 	}
@@ -5924,7 +5942,7 @@ func (r *planOrderRuntime) requireStoredPlanAndMaterializationClaim(ctx context.
 	}
 	verified, err := r.store.VerifyGenerationPlanProjections(ctx, store.VerifyGenerationPlanProjectionsParams{
 		GenerationID: req.GenerationID,
-		Expected:     generationPlanProjectionExpectations(req.PreparedArtifacts, ""),
+		Expected:     generationPlanProjectionExpectationsForDetails(req.Generation, req.PreparedArtifacts, ""),
 	})
 	if err != nil {
 		return fmt.Errorf("verify generation plan projections before %s: %w", phase, err)
@@ -6782,25 +6800,21 @@ WHERE id = ?`, sessionID).Scan(&mode); err != nil {
 	if err != nil {
 		t.Fatalf("store generation plan for %s: %v", generationID, err)
 	}
-	for _, projection := range []struct {
-		kind   string
-		digest string
-	}{
-		{store.GenerationPlanProjectionSandboxContract, "sha256:sandbox-contract"},
-		{store.GenerationPlanProjectionControlManifest, planprojection.PayloadDigest(store.GenerationPlanProjectionControlManifest, artifacts.ManifestDigest)},
-		{store.GenerationPlanProjectionControlManifestProjected, planprojection.PayloadDigest(store.GenerationPlanProjectionControlManifestProjected, artifacts.ProjectedManifestDigest)},
-		{store.GenerationPlanProjectionOCISpec, planprojection.PayloadDigest(store.GenerationPlanProjectionOCISpec, artifacts.SpecDigest)},
-		{store.GenerationPlanProjectionBundle, planprojection.PayloadDigest(store.GenerationPlanProjectionBundle, artifacts.BundleDigest)},
-		{store.GenerationPlanProjectionRuntimeConfig, planprojection.PayloadDigest(store.GenerationPlanProjectionRuntimeConfig, artifacts.RuntimeConfigDigest)},
-	} {
+	projections := append([]store.GenerationPlanProjectionExpectation{{
+		ProjectionKind:    store.GenerationPlanProjectionSandboxContract,
+		ProjectionVersion: store.GenerationPlanProjectionVersion,
+		PayloadDigest:     "sha256:sandbox-contract",
+	}}, planprojection.ExpectationsForDetails(details, artifacts)...)
+	for _, projection := range projections {
 		if _, err := st.StoreGenerationPlanProjection(ctx, store.StoreGenerationPlanProjectionParams{
 			GenerationID:      generationID,
 			PlanDigest:        plan.PlanDigest,
-			ProjectionKind:    projection.kind,
-			ProjectionVersion: store.GenerationPlanProjectionVersion,
-			PayloadDigest:     projection.digest,
+			ProjectionKind:    projection.ProjectionKind,
+			ProjectionVersion: projection.ProjectionVersion,
+			PayloadDigest:     projection.PayloadDigest,
+			MaterializedPath:  projection.MaterializedPath,
 		}); err != nil {
-			t.Fatalf("store generation plan projection %s for %s: %v", projection.kind, generationID, err)
+			t.Fatalf("store generation plan projection %s for %s: %v", projection.ProjectionKind, generationID, err)
 		}
 	}
 	return plan
