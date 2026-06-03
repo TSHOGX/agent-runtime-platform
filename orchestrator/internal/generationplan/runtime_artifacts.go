@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"harness-platform/orchestrator/internal/agents"
 	"harness-platform/orchestrator/internal/runtime"
 )
 
@@ -105,6 +106,27 @@ func RuntimeArtifacts(payload []byte) (runtime.GenerationArtifacts, error) {
 		RunscBinaryDigest:        runscBinaryDigest,
 		MaterializedDriverConfig: materializedDriverConfig,
 	}, nil
+}
+
+func validateRuntimeArtifacts(object map[string]any, driver agents.DriverSpec) error {
+	artifacts, err := requireObject(object, "runtime_artifacts")
+	if err != nil {
+		return err
+	}
+	for _, key := range []string{"control_dir_path", "control_manifest_path", "bundle_dir_path", "spec_path", "bridge_dir_path", "log_dir_path"} {
+		if !isCanonicalAbsolutePath(stringField(artifacts, key)) {
+			return fmt.Errorf("generation plan runtime_artifacts.%s must be canonical absolute", key)
+		}
+	}
+	for _, key := range []string{"control_manifest_digest", "projected_control_manifest_digest", "bundle_digest", "runtime_config_digest", "spec_digest", "resource_identity_digest", "sandbox_contract_payload_digest"} {
+		if !hasString(artifacts, key) {
+			return fmt.Errorf("generation plan runtime_artifacts.%s is required", key)
+		}
+	}
+	if strings.TrimSpace(stringField(artifacts, "sandbox_contract_id")) == "" {
+		return fmt.Errorf("generation plan runtime_artifacts.sandbox_contract_id is required")
+	}
+	return validateDriverConfigMaterializationEvidence(object, artifacts, driver.ID)
 }
 
 func materializedDriverConfigArtifacts(artifacts map[string]any, controlDir string) ([]runtime.DriverConfigMaterialization, error) {
