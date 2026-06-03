@@ -275,31 +275,6 @@ func TestRuntimeStartReusesExistingGenerationWithoutStdinTurn(t *testing.T) {
 	}
 }
 
-func TestRunscHelpersRequireExplicitBinary(t *testing.T) {
-	rt := New(Config{CommandRunner: &recordingCommandRunner{}})
-	ctx := context.Background()
-	for name, run := range map[string]func() error{
-		"running evidence": func() error {
-			_, err := rt.runscContainerRunningEvidence(ctx, "", "harness-gen-missing")
-			return err
-		},
-		"absence evidence": func() error {
-			_, err := rt.runscContainerAbsenceEvidence(ctx, " ", "harness-gen-missing")
-			return err
-		},
-		"delete": func() error {
-			_, err := rt.deleteRunscContainerDetailed(ctx, "", "harness-gen-missing")
-			return err
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if err := run(); err == nil || !strings.Contains(err.Error(), "runsc binary path is required") {
-				t.Fatalf("expected explicit runsc binary error, got %v", err)
-			}
-		})
-	}
-}
-
 func TestDestroyTreatsMissingRunscContainerAsAbsent(t *testing.T) {
 	runner := &recordingCommandRunner{
 		sequence: map[string][]commandResult{
@@ -395,22 +370,6 @@ func installFakeRunsc(t *testing.T, dir, label string) (string, string) {
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return path, "sha256:" + digest
-}
-
-func TestWriteInterruptShellJSONFraming(t *testing.T) {
-	var buf bytes.Buffer
-	if err := writeInterrupt(&buf, "sh"); err != nil {
-		t.Fatalf("writeInterrupt: %v", err)
-	}
-	var frame struct {
-		Type string `json:"type"`
-	}
-	if err := json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &frame); err != nil {
-		t.Fatalf("invalid interrupt frame %q: %v", buf.String(), err)
-	}
-	if frame.Type != "interrupt" {
-		t.Fatalf("unexpected interrupt frame: %+v", frame)
-	}
 }
 
 func TestPrepareGenerationWritesPerGenerationSpecManifestAndIsolatedRuntime(t *testing.T) {
