@@ -948,35 +948,6 @@ func validateRuntimeArtifacts(object map[string]any, driver agents.DriverSpec) e
 	return validateDriverConfigMaterializationEvidence(object, artifacts, driver.ID)
 }
 
-func validateSourceDigests(object map[string]any) error {
-	sourceDigests, err := requireObject(object, "source_digests")
-	if err != nil {
-		return err
-	}
-	for _, key := range []string{"runtime_config_digest", "agent_manifest_digest"} {
-		if !isSha256(stringField(sourceDigests, key)) {
-			return fmt.Errorf("generation plan source_digests.%s is required", key)
-		}
-	}
-	adapterInputDigests, err := requireObject(sourceDigests, "adapter_input_digests")
-	if err != nil {
-		return err
-	}
-	for _, kind := range AdapterInputDigestKinds() {
-		if !isSha256(stringField(adapterInputDigests, kind)) {
-			return fmt.Errorf("generation plan source_digests.adapter_input_digests.%s is required", kind)
-		}
-	}
-	return nil
-}
-
-func validateProjectionDigests(object map[string]any) error {
-	if _, ok := object["projection_digests"]; ok {
-		return fmt.Errorf("generation plan projection_digests must be stored outside the plan")
-	}
-	return nil
-}
-
 func requireObject(object map[string]any, key string) (map[string]any, error) {
 	child, ok := object[key].(map[string]any)
 	if !ok {
