@@ -65,7 +65,7 @@ func (r *Runtime) buildGenerationManifest(req StartRequest, driverSpec agents.Dr
 		SessionID:                req.SessionID,
 		GenerationID:             details.GenerationID,
 		SandboxContractVersion:   strings.TrimSpace(details.SandboxContractVersion),
-		CreatedAt:                time.Now().UTC().Format(time.RFC3339Nano),
+		CreatedAt:                controlManifestCreatedAt(details),
 		AttemptID:                "attempt-0",
 		NetworkProfileID:         details.NetworkProfileID,
 		AgentRuntimeProfileID:    details.AgentRuntimeProfileID,
@@ -91,6 +91,13 @@ func (r *Runtime) buildGenerationManifest(req StartRequest, driverSpec agents.Dr
 	}
 	applyDriverControlManifestFields(&manifest, driverRuntimeFields)
 	return manifest, nil
+}
+
+func controlManifestCreatedAt(details store.RuntimeGenerationDetails) string {
+	if createdAt := strings.TrimSpace(details.RuntimeResourceCreatedAt); createdAt != "" {
+		return createdAt
+	}
+	return time.Now().UTC().Format(time.RFC3339Nano)
 }
 
 func applyDriverControlManifestFields(manifest *controlManifest, fields map[string]any) {

@@ -63,6 +63,7 @@ type GenerationAllocation struct {
 type RuntimeGenerationDetails struct {
 	SessionID                       string
 	GenerationID                    string
+	RuntimeResourceCreatedAt        string
 	NetworkProfileID                string
 	AgentRuntimeProfileID           string
 	RunscPlatform                   string
@@ -583,6 +584,7 @@ func (s *Store) GetRuntimeGenerationDetails(ctx context.Context, sessionID, gene
 SELECT
   g.session_id,
   g.generation_id,
+  r.created_at,
   g.network_profile_id,
   g.agent_runtime_profile_id,
   COALESCE(g.runsc_platform, ''),
@@ -670,6 +672,7 @@ WHERE g.session_id = ?
 	if err := row.Scan(
 		&details.SessionID,
 		&details.GenerationID,
+		&details.RuntimeResourceCreatedAt,
 		&details.NetworkProfileID,
 		&details.AgentRuntimeProfileID,
 		&details.RunscPlatform,

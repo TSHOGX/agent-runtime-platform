@@ -603,6 +603,7 @@ func testGenerationDetails(dir, generationID string) store.RuntimeGenerationDeta
 	return store.RuntimeGenerationDetails{
 		SessionID:                  "sess_1",
 		GenerationID:               generationID,
+		RuntimeResourceCreatedAt:   "2026-05-25T00:00:00Z",
 		NetworkProfileID:           "net_" + generationID,
 		AgentRuntimeProfileID:      "arp_" + generationID,
 		RunscPlatform:              "systrap",

@@ -69,6 +69,14 @@ func TestRenderGenerationArtifactProjectionIsPure(t *testing.T) {
 	if len(projection.DriverConfig.Entries) != 2 || len(artifacts.MaterializedDriverConfig) != 2 {
 		t.Fatalf("unexpected driver config projection: projection=%+v artifacts=%+v", projection.DriverConfig, artifacts.MaterializedDriverConfig)
 	}
+	secondProjection, err := rt.RenderGenerationArtifacts(context.Background(), req)
+	if err != nil {
+		t.Fatalf("render generation artifact projection again: %v", err)
+	}
+	if secondProjection.Artifacts.ManifestDigest != artifacts.ManifestDigest ||
+		secondProjection.Artifacts.ProjectedManifestDigest != artifacts.ProjectedManifestDigest {
+		t.Fatalf("control manifest digests changed across renders: first=%+v second=%+v", artifacts, secondProjection.Artifacts)
+	}
 	assertGenerationFilesystemMissing(t, generationFilesystemPaths(details))
 	for _, entry := range projection.DriverConfig.Entries {
 		if _, err := os.Stat(entry.HostSourcePath); !os.IsNotExist(err) {
