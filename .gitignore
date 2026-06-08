@@ -19,6 +19,7 @@ schema-pack/
 .scratch/
 
 # 通用
+AGENTS.md
 .DS_Store
 node_modules/
 dist/
